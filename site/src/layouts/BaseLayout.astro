@@ -1,0 +1,96 @@
+---
+import type { Locale } from "../i18n/messages";
+import { messages } from "../i18n/messages";
+
+interface Props {
+  locale: Locale;
+}
+
+const { locale } = Astro.props;
+const m = messages[locale];
+const canonicalPath = locale === "zh-CN" ? "/" : "/en/";
+const canonical = new URL(canonicalPath, Astro.site);
+const socialImage = new URL("/favicon.svg", Astro.site);
+---
+
+<!doctype html>
+<html lang={locale}>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="generator" content={Astro.generator} />
+    <meta name="theme-color" content="#e66a3f" />
+    <meta name="description" content={m.meta.description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={m.meta.title} />
+    <meta property="og:description" content={m.meta.description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={socialImage} />
+    <meta property="og:locale" content={locale === "zh-CN" ? "zh_CN" : "en_US"} />
+    <meta name="twitter:card" content="summary" />
+    <link rel="canonical" href={canonical} />
+    <link rel="alternate" hreflang="zh-CN" href={new URL("/", Astro.site)} />
+    <link rel="alternate" hreflang="en" href={new URL("/en/", Astro.site)} />
+    <link rel="alternate" hreflang="x-default" href={new URL("/", Astro.site)} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link
+      rel="stylesheet"
+      href="https://style.moesegfault.dev/v0.1.1/css/all.css"
+      integrity="sha384-sAbt4aFsZmeAtLPp+2KJShrwxa3361+DAzHTcDNGRVCNw+KNoYQH0JIIpdTddTjh"
+      crossorigin="anonymous"
+    />
+    <script is:inline>
+      (() => {
+        const saved = localStorage.getItem("xmlsquish-theme");
+        if (saved === "light" || saved === "dark" || saved === "auto") {
+          document.documentElement.dataset.moeTheme = saved;
+        }
+      })();
+    </script>
+    <title>{m.meta.title}</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">{locale === "zh-CN" ? "跳到主要内容" : "Skip to content"}</a>
+    <slot />
+  </body>
+</html>
+
+<style is:global>
+  @layer xmlsquish {
+    :root {
+      --xs-line: color-mix(in srgb, var(--moe-border) 72%, transparent);
+      --xs-glow: color-mix(in srgb, var(--moe-accent) 22%, transparent);
+      --xs-code: color-mix(in srgb, var(--moe-color-brown-900) 94%, var(--moe-accent));
+      --xs-code-text: var(--moe-color-cream-200);
+      --xs-max: 73.75rem;
+    }
+
+    :root[data-moe-theme="dark"] {
+      --xs-code: color-mix(in srgb, var(--moe-color-brown-900) 82%, black);
+    }
+
+    body {
+      overflow-x: hidden;
+    }
+
+    button,
+    a {
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .skip-link {
+      position: fixed;
+      z-index: 100;
+      inset: var(--moe-space-3) auto auto var(--moe-space-3);
+      padding: var(--moe-space-2) var(--moe-space-3);
+      border-radius: var(--moe-radius-sm);
+      color: var(--moe-on-accent);
+      background: var(--moe-accent-strong);
+      transform: translateY(-180%);
+    }
+
+    .skip-link:focus {
+      transform: translateY(0);
+    }
+  }
+</style>

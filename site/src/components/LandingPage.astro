@@ -1,0 +1,644 @@
+---
+import ThemeControl from "./ThemeControl";
+import type { Locale } from "../i18n/messages";
+import { messages } from "../i18n/messages";
+
+interface Props {
+  locale: Locale;
+}
+
+const { locale } = Astro.props;
+const m = messages[locale];
+const languageHref = locale === "zh-CN" ? "/en/" : "/";
+const repoUrl = "https://github.com/kleedaisuki/prompt-squish";
+---
+
+<header class="site-header">
+  <div class="moe-container header-inner">
+    <a class="moe-brand-mark" href={locale === "zh-CN" ? "/" : "/en/"} aria-label="xmlsquish">
+      <img class="brand-icon" src="/favicon.svg" alt="" width="44" height="44" />
+      <span class="moe-brand-mark__text">
+        <span class="moe-brand-mark__title">xmlsquish</span>
+        <span class="moe-brand-mark__tagline">less whitespace, same prompt</span>
+      </span>
+    </a>
+    <nav class="header-nav" aria-label={locale === "zh-CN" ? "主要导航" : "Main navigation"}>
+      <a href="#how">{m.nav.how}</a>
+      <a href="#cli">{m.nav.cli}</a>
+      <a href="#stats">{m.nav.stats}</a>
+      <a href={repoUrl}>{m.nav.github}<span aria-hidden="true"> ↗</span></a>
+    </nav>
+    <div class="header-actions">
+      <a class="language-link" href={languageHref} lang={locale === "zh-CN" ? "en" : "zh-CN"} hreflang={locale === "zh-CN" ? "en" : "zh-CN"}>
+        {m.nav.language}
+      </a>
+      <ThemeControl client:load labels={m.theme} />
+    </div>
+  </div>
+</header>
+
+<main id="main">
+  <section class="hero moe-container" aria-labelledby="hero-title">
+    <div class="hero-copy">
+      <span class="moe-badge"><span aria-hidden="true">✦</span>{m.hero.badge}</span>
+      <h1 id="hero-title">{m.hero.title}</h1>
+      <p class="hero-lead">{m.hero.lead}</p>
+      <div class="moe-cluster hero-actions">
+        <a class="moe-button" href="#cli">{m.hero.primary}<span aria-hidden="true">↓</span></a>
+        <a class="moe-button" data-variant="secondary" href="#how">{m.hero.secondary}</a>
+      </div>
+      <p class="hero-footnote"><span aria-hidden="true">✓</span>{m.hero.footnote}</p>
+      <p class="hero-warning"><span aria-hidden="true">!</span>{m.hero.warning}</p>
+    </div>
+
+    <figure class="transform-card moe-card">
+      <div class="window-bar" aria-hidden="true">
+        <span></span><span></span><span></span>
+        <code>prompt.xml → prompt.o.xml</code>
+      </div>
+      <div class="transform-block">
+        <span class="transform-label">INPUT</span>
+        <pre><code>{m.transform.before}</code></pre>
+      </div>
+      <div class="squish-divider" aria-hidden="true">
+        <span></span><b>−25%</b><span></span>
+      </div>
+      <div class="transform-block transform-output">
+        <span class="transform-label">OUTPUT</span>
+        <pre><code>{m.transform.after}</code></pre>
+      </div>
+      <figcaption>{m.transform.caption}</figcaption>
+    </figure>
+  </section>
+
+  <section id="how" class="section moe-container" aria-labelledby="principles-title">
+    <div class="section-heading">
+      <p class="eyebrow">{m.principles.eyebrow}</p>
+      <h2 id="principles-title">{m.principles.title}</h2>
+      <p>{m.principles.intro}</p>
+    </div>
+    <div class="feature-grid">
+      {m.principles.items.map((item, index) => (
+        <article class="feature-card moe-card">
+          <div class="feature-number" aria-hidden="true">0{index + 1}</div>
+          <p class="moe-card__eyebrow">{item.eyebrow}</p>
+          <h3>{item.title}</h3>
+          <p>{item.body}</p>
+        </article>
+      ))}
+    </div>
+  </section>
+
+  <section class="section fsm-section" aria-labelledby="fsm-title">
+    <div class="moe-container fsm-layout">
+      <div class="fsm-copy">
+        <p class="eyebrow">{m.fsm.eyebrow}</p>
+        <h2 id="fsm-title">{m.fsm.title}</h2>
+        <p>{m.fsm.intro}</p>
+        <div class="moe-notice" data-tone="warning">
+          <strong>{m.fsm.transition}</strong>
+        </div>
+      </div>
+      <ol class="state-list">
+        {m.fsm.states.map((state, index) => (
+          <li>
+            <span class="state-node" aria-hidden="true">{index + 1}</span>
+            <div>
+              <div class="state-title"><code>{state.code}</code><strong>{state.name}</strong></div>
+              <p>{state.body}</p>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </div>
+  </section>
+
+  <section id="cli" class="section moe-container" aria-labelledby="cli-title">
+    <div class="cli-card">
+      <div class="cli-copy">
+        <p class="eyebrow">{m.cli.eyebrow}</p>
+        <h2 id="cli-title">{m.cli.title}</h2>
+        <p>{m.cli.intro}</p>
+        <p class="cli-note"><span aria-hidden="true">⌁</span>{m.cli.note}</p>
+      </div>
+      <div class="terminal" aria-label={locale === "zh-CN" ? "命令行示例" : "Command-line example"}>
+        <div class="terminal-title"><span>xmlsquish — zsh</span><span aria-hidden="true">•••</span></div>
+        <pre><code><span class="prompt">$</span> {m.cli.install}
+
+<span class="prompt">$</span> {m.cli.run}
+<span class="terminal-ok">✓ 12 {locale === "zh-CN" ? "个文件已完成" : "files processed"}</span></code></pre>
+      </div>
+    </div>
+  </section>
+
+  <section id="stats" class="section moe-container" aria-labelledby="stats-title">
+    <div class="section-heading stats-heading">
+      <p class="eyebrow">{m.stats.eyebrow}</p>
+      <h2 id="stats-title">{m.stats.title}</h2>
+      <p>{m.stats.intro}</p>
+    </div>
+    <div class="stats-panel moe-card">
+      <div class="stats-grid">
+        {m.stats.labels.map((label, index) => (
+          <div class:list={["stat", index === 7 && "stat-featured"]}>
+            <span>{label}</span>
+            <strong>{m.stats.values[index]}</strong>
+          </div>
+        ))}
+      </div>
+      <p class="stats-note"><span aria-hidden="true">ⓘ</span>{m.stats.note}</p>
+    </div>
+  </section>
+
+  <section class="closing moe-container">
+    <img src="/favicon.svg" alt="" width="72" height="72" loading="lazy" />
+    <h2>{m.footer.tagline}</h2>
+    <a class="moe-button" href={repoUrl}>{m.footer.source}<span aria-hidden="true">↗</span></a>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="moe-container footer-inner">
+    <span><strong>xmlsquish</strong> · Rust 2024</span>
+    <a href="https://style.moesegfault.dev/">{m.footer.style}<span aria-hidden="true"> ✦</span></a>
+  </div>
+</footer>
+
+<style>
+  .site-header {
+    position: sticky;
+    z-index: 20;
+    top: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--moe-border) 70%, transparent);
+    background: color-mix(in srgb, var(--moe-background) 82%, transparent);
+    backdrop-filter: blur(18px) saturate(1.3);
+  }
+
+  .header-inner {
+    display: grid;
+    min-height: 4.75rem;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: var(--moe-space-5);
+  }
+
+  .brand-icon {
+    width: 2.75rem;
+    border-radius: 0.85rem;
+    box-shadow: 0 8px 20px var(--xs-glow);
+  }
+
+  .header-nav {
+    display: flex;
+    align-items: center;
+    gap: var(--moe-space-5);
+  }
+
+  .header-nav a,
+  .language-link {
+    color: var(--moe-text-soft);
+    font-size: var(--moe-font-size-sm);
+    font-weight: 700;
+    text-decoration: none;
+  }
+
+  .header-nav a:hover,
+  .language-link:hover {
+    color: var(--moe-accent-strong);
+  }
+
+  .header-actions {
+    display: flex;
+    justify-content: end;
+    align-items: center;
+    gap: var(--moe-space-3);
+  }
+
+  .hero {
+    display: grid;
+    min-height: calc(100vh - 4.75rem);
+    grid-template-columns: minmax(0, 1.04fr) minmax(26rem, .96fr);
+    align-items: center;
+    gap: clamp(2.5rem, 7vw, 7rem);
+    padding-block: clamp(4rem, 10vw, 8.5rem);
+  }
+
+  .hero h1 {
+    max-width: 13ch;
+    margin: var(--moe-space-5) 0;
+    font-size: clamp(3rem, 7vw, 5.8rem);
+    letter-spacing: -.055em;
+    line-height: .98;
+    overflow-wrap: anywhere;
+  }
+
+  .hero-lead {
+    max-width: 40rem;
+    color: var(--moe-text-soft);
+    font-size: clamp(1.08rem, 1.7vw, 1.3rem);
+  }
+
+  .hero-actions {
+    margin-top: var(--moe-space-5);
+  }
+
+  .hero-footnote {
+    display: flex;
+    gap: var(--moe-space-2);
+    margin: var(--moe-space-4) 0 0;
+    color: var(--moe-text-soft);
+    font-size: var(--moe-font-size-sm);
+  }
+
+  .hero-footnote span {
+    color: var(--moe-success);
+    font-weight: 900;
+  }
+
+  .hero-warning {
+    display: flex;
+    max-width: 43rem;
+    gap: var(--moe-space-2);
+    margin: var(--moe-space-3) 0 0;
+    color: var(--moe-text-soft);
+    font-size: var(--moe-font-size-xs);
+  }
+
+  .hero-warning span {
+    display: grid;
+    width: 1.2rem;
+    height: 1.2rem;
+    flex: 0 0 auto;
+    place-items: center;
+    border-radius: 50%;
+    color: var(--moe-on-accent);
+    background: var(--moe-accent-strong);
+    font-weight: 900;
+  }
+
+  .transform-card {
+    position: relative;
+    overflow: visible;
+    transform: rotate(1.1deg);
+  }
+
+  .transform-card::before {
+    content: "";
+    position: absolute;
+    z-index: -1;
+    inset: 9% -7%;
+    border-radius: 50%;
+    background: var(--xs-glow);
+    filter: blur(48px);
+  }
+
+  .window-bar {
+    display: flex;
+    align-items: center;
+    gap: .42rem;
+    padding: var(--moe-space-3) var(--moe-space-4);
+    border-bottom: 1px solid var(--xs-line);
+  }
+
+  .window-bar span {
+    width: .68rem;
+    aspect-ratio: 1;
+    border-radius: 50%;
+    background: var(--moe-border);
+  }
+
+  .window-bar span:first-child { background: var(--moe-danger); }
+  .window-bar span:nth-child(2) { background: var(--moe-color-gold); }
+  .window-bar span:nth-child(3) { background: var(--moe-success); }
+
+  .window-bar code {
+    margin-inline-start: auto;
+    color: var(--moe-text-soft);
+    font-size: var(--moe-font-size-xs);
+  }
+
+  .transform-block {
+    padding: var(--moe-space-5);
+  }
+
+  .transform-label {
+    color: var(--moe-text-soft);
+    font-family: var(--moe-font-family-mono);
+    font-size: var(--moe-font-size-xs);
+    font-weight: 700;
+    letter-spacing: .14em;
+  }
+
+  .transform-block pre {
+    overflow-x: auto;
+    margin: var(--moe-space-3) 0 0;
+    color: var(--moe-text-soft);
+    font-family: var(--moe-font-family-mono);
+    font-size: clamp(.73rem, 1.35vw, .9rem);
+    line-height: 1.65;
+    white-space: pre-wrap;
+  }
+
+  .transform-output {
+    border-radius: 0 0 var(--moe-radius-lg) var(--moe-radius-lg);
+    background: var(--moe-accent-wash);
+  }
+
+  .transform-output pre { color: var(--moe-heading); }
+
+  .squish-divider {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: var(--moe-space-3);
+    padding-inline: var(--moe-space-5);
+  }
+
+  .squish-divider span { height: 1px; background: var(--xs-line); }
+  .squish-divider b { color: var(--moe-accent-strong); font-size: var(--moe-font-size-sm); }
+
+  .transform-card figcaption {
+    position: absolute;
+    right: 1rem;
+    bottom: -3.5rem;
+    max-width: 27rem;
+    color: var(--moe-text-soft);
+    font-size: var(--moe-font-size-xs);
+    text-align: right;
+  }
+
+  .section {
+    padding-block: clamp(5rem, 10vw, 8rem);
+    scroll-margin-top: 5rem;
+  }
+
+  .section-heading {
+    max-width: 47rem;
+    margin: 0 auto var(--moe-space-7);
+    text-align: center;
+  }
+
+  .eyebrow {
+    margin-bottom: var(--moe-space-2);
+    color: var(--moe-accent-strong);
+    font-size: var(--moe-font-size-xs);
+    font-weight: 800;
+    letter-spacing: .17em;
+    text-transform: uppercase;
+  }
+
+  .section-heading h2,
+  .fsm-copy h2,
+  .cli-copy h2,
+  .closing h2 {
+    margin-bottom: var(--moe-space-3);
+    font-size: clamp(2.25rem, 5vw, 3.7rem);
+    letter-spacing: -.035em;
+  }
+
+  .section-heading > p:last-child,
+  .fsm-copy > p:not(.eyebrow),
+  .cli-copy > p:not(.eyebrow) {
+    color: var(--moe-text-soft);
+    font-size: var(--moe-font-size-lg);
+  }
+
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--moe-space-5);
+  }
+
+  .feature-card {
+    position: relative;
+    min-height: 19rem;
+    padding: var(--moe-space-6);
+  }
+
+  .feature-number {
+    margin-bottom: var(--moe-space-6);
+    color: var(--moe-border);
+    font-family: var(--moe-font-family-display);
+    font-size: 3rem;
+    font-weight: 800;
+    line-height: 1;
+  }
+
+  .feature-card h3 { margin-bottom: var(--moe-space-3); font-size: var(--moe-font-size-xl); }
+  .feature-card > p:last-child { margin: 0; color: var(--moe-text-soft); }
+
+  .fsm-section {
+    border-block: 1px solid var(--xs-line);
+    background: color-mix(in srgb, var(--moe-surface-muted) 58%, transparent);
+  }
+
+  .fsm-layout {
+    display: grid;
+    grid-template-columns: minmax(0, .9fr) minmax(28rem, 1.1fr);
+    align-items: center;
+    gap: clamp(3rem, 8vw, 8rem);
+  }
+
+  .fsm-copy .moe-notice { margin-top: var(--moe-space-5); }
+
+  .state-list {
+    position: relative;
+    display: grid;
+    gap: var(--moe-space-3);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .state-list::before {
+    content: "";
+    position: absolute;
+    top: 2.5rem;
+    bottom: 2.5rem;
+    left: 1.5rem;
+    width: 2px;
+    background: linear-gradient(var(--moe-accent), var(--moe-color-gold));
+  }
+
+  .state-list li {
+    position: relative;
+    display: grid;
+    grid-template-columns: 3rem 1fr;
+    gap: var(--moe-space-4);
+    align-items: start;
+    padding: var(--moe-space-4);
+    border: 1px solid var(--xs-line);
+    border-radius: var(--moe-radius-md);
+    background: var(--moe-surface-strong);
+  }
+
+  .state-node {
+    z-index: 1;
+    display: grid;
+    width: 3rem;
+    aspect-ratio: 1;
+    place-items: center;
+    border-radius: 50%;
+    color: var(--moe-on-accent);
+    background: var(--moe-accent-strong);
+    font-weight: 900;
+  }
+
+  .state-title { display: flex; flex-wrap: wrap; gap: var(--moe-space-3); align-items: baseline; }
+  .state-title code { color: var(--moe-accent-strong); font-family: var(--moe-font-family-mono); font-weight: 800; }
+  .state-list p { margin: var(--moe-space-1) 0 0; color: var(--moe-text-soft); }
+
+  .cli-card {
+    display: grid;
+    overflow: hidden;
+    grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr);
+    border: 1px solid var(--moe-border);
+    border-radius: var(--moe-radius-lg);
+    box-shadow: var(--moe-shadow-md);
+  }
+
+  .cli-copy {
+    padding: clamp(2rem, 5vw, 4rem);
+    background: var(--moe-surface-strong);
+  }
+
+  .cli-note {
+    display: flex;
+    gap: var(--moe-space-2);
+    margin: var(--moe-space-5) 0 0 !important;
+    font-size: var(--moe-font-size-sm) !important;
+  }
+
+  .cli-note span { color: var(--moe-accent); font-size: 1.4em; }
+
+  .terminal {
+    min-width: 0;
+    padding: var(--moe-space-5);
+    color: var(--xs-code-text);
+    background: var(--xs-code);
+    font-family: var(--moe-font-family-mono);
+  }
+
+  .terminal-title {
+    display: flex;
+    justify-content: space-between;
+    padding-bottom: var(--moe-space-4);
+    border-bottom: 1px solid color-mix(in srgb, var(--moe-color-cream-400) 16%, transparent);
+    color: var(--moe-color-brown-100);
+    font-size: var(--moe-font-size-xs);
+  }
+
+  .terminal pre { overflow-x: auto; margin: var(--moe-space-6) 0; line-height: 1.8; }
+  .terminal .prompt { color: var(--moe-color-gold); user-select: none; }
+  .terminal-ok { color: color-mix(in srgb, var(--moe-success) 76%, white); }
+
+  .stats-heading { margin-bottom: var(--moe-space-6); }
+  .stats-panel { max-width: 62rem; margin-inline: auto; }
+  .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); }
+
+  .stat {
+    display: flex;
+    min-height: 9rem;
+    flex-direction: column;
+    justify-content: center;
+    gap: var(--moe-space-2);
+    padding: var(--moe-space-5);
+    border-right: 1px solid var(--xs-line);
+    border-bottom: 1px solid var(--xs-line);
+  }
+
+  .stat:nth-child(4n) { border-right: 0; }
+  .stat:nth-child(n+9) { border-bottom: 0; }
+  .stat span { color: var(--moe-text-soft); font-size: var(--moe-font-size-sm); }
+  .stat strong { color: var(--moe-heading); font-family: var(--moe-font-family-display); font-size: clamp(1.45rem, 3vw, 2rem); }
+  .stat-featured { background: var(--moe-accent-wash); }
+  .stat-featured strong { color: var(--moe-accent-strong); }
+
+  .stats-note {
+    display: flex;
+    gap: var(--moe-space-2);
+    margin: 0;
+    padding: var(--moe-space-3) var(--moe-space-5);
+    border-top: 1px solid var(--xs-line);
+    color: var(--moe-text-soft);
+    font-size: var(--moe-font-size-xs);
+  }
+
+  .closing {
+    display: grid;
+    justify-items: center;
+    padding-block: clamp(4rem, 9vw, 7rem);
+    text-align: center;
+  }
+
+  .closing img { filter: drop-shadow(0 12px 18px var(--xs-glow)); }
+  .closing h2 { max-width: 18ch; margin: var(--moe-space-5) 0; }
+
+  .site-footer { border-top: 1px solid var(--xs-line); }
+  .footer-inner { display: flex; justify-content: space-between; gap: var(--moe-space-4); padding-block: var(--moe-space-5); color: var(--moe-text-soft); font-size: var(--moe-font-size-sm); }
+  .footer-inner a { color: inherit; text-decoration: none; }
+
+  :global(.theme-control) {
+    display: flex;
+    padding: .2rem;
+    border: 1px solid var(--moe-border);
+    border-radius: var(--moe-radius-pill);
+    background: var(--moe-surface-strong);
+  }
+
+  :global(.theme-control__option) {
+    display: grid;
+    width: 2rem;
+    min-height: 2rem;
+    place-items: center;
+    border: 0;
+    border-radius: 50%;
+    color: var(--moe-text-soft);
+    background: transparent;
+    cursor: pointer;
+  }
+
+  :global(.theme-control__option[aria-pressed="true"]) {
+    color: var(--moe-on-accent);
+    background: var(--moe-accent-strong);
+  }
+
+  @media (max-width: 900px) {
+    .header-inner { grid-template-columns: minmax(0, 1fr) auto; }
+    .header-nav { display: none; }
+    .hero { min-height: auto; grid-template-columns: minmax(0, 1fr); }
+    .hero-copy { max-width: 45rem; }
+    .transform-card { width: min(100%, 40rem); margin-inline: auto; transform: none; }
+    .feature-grid { grid-template-columns: 1fr; }
+    .feature-card { min-height: auto; }
+    .feature-number { margin-bottom: var(--moe-space-4); }
+    .fsm-layout { grid-template-columns: 1fr; }
+    .cli-card { grid-template-columns: 1fr; }
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+    .stat:nth-child(odd) { border-right: 1px solid var(--xs-line); }
+    .stat:nth-child(even) { border-right: 0; }
+    .stat:nth-child(n+9) { border-bottom: 0; }
+  }
+
+  @media (max-width: 560px) {
+    .header-inner { --moe-container-gutter: var(--moe-space-3); }
+    .moe-brand-mark__text { display: none; }
+    .language-link { font-size: var(--moe-font-size-xs); }
+    :global(.theme-control__option) { width: 1.75rem; min-height: 1.75rem; }
+    .hero { padding-top: var(--moe-space-7); }
+    .hero-copy { min-width: 0; }
+    .hero h1 { width: 100%; max-width: 100%; font-size: clamp(2.7rem, 13.5vw, 3.45rem); overflow-wrap: anywhere; word-break: break-all; white-space: normal; text-wrap: pretty; }
+    .window-bar code { overflow: hidden; max-width: 13rem; text-overflow: ellipsis; white-space: nowrap; }
+    .transform-block { padding: var(--moe-space-4); }
+    .transform-card figcaption { position: static; padding: var(--moe-space-3) var(--moe-space-4); text-align: left; }
+    .fsm-layout { --moe-container-gutter: var(--moe-space-4); }
+    .state-list li { grid-template-columns: 2.5rem 1fr; padding: var(--moe-space-3); }
+    .state-node { width: 2.5rem; }
+    .state-list::before { left: 1.25rem; }
+    .terminal { padding: var(--moe-space-4); font-size: .78rem; }
+    .stats-grid { grid-template-columns: 1fr; }
+    .stat, .stat:nth-child(n) { min-height: 7rem; border-right: 0; border-bottom: 1px solid var(--xs-line); }
+    .stat:last-child { border-bottom: 0; }
+    .footer-inner { flex-direction: column; align-items: center; text-align: center; }
+  }
+</style>
