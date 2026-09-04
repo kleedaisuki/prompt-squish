@@ -9,6 +9,10 @@ pub trait FileStore {
     /// Writes a completed document. Production adapters may implement this as
     /// an atomic replace to avoid exposing a partial output file.
     fn write(&self, path: &Path, contents: &str) -> Result<(), FileFailure>;
+
+    /// Discards adapter state reserved for a future write when processing stops
+    /// after a successful read. Stateless stores need no special handling.
+    fn discard_pending_write(&self, _path: &Path) {}
 }
 
 /// Primary text-transformation port, normally backed by the FSM in the core crate.

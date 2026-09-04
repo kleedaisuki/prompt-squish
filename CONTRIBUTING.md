@@ -4,7 +4,7 @@
 
 ## 开发环境
 
-- Rust 1.85 或更高版本；仓库 `rust-toolchain.toml` 会安装项目固定的工具链、`rustfmt` 与 Clippy。
+- Rust 1.88 或更高版本；CI 会验证最低支持 Rust 版本（Minimum Supported Rust Version, MSRV），仓库 `rust-toolchain.toml` 声明日常开发使用的 stable 工具链、`rustfmt` 与 Clippy。
 - Node.js 22.12 或更高版本；CI 使用 Node.js 24。
 - npm；站点依赖由 `site/package-lock.json` 锁定。
 

@@ -55,35 +55,41 @@ where
             .files
             .read(input_path)
             .map_err(|error| (ProcessingStage::Read, error))?;
-        let squished = self
-            .squasher
-            .squish(&input)
-            .map_err(|error| (ProcessingStage::Squish, error))?;
-        let input_tokens = self
-            .tokens
-            .count(&input)
-            .map_err(|error| (ProcessingStage::CountInputTokens, error))?;
-        let output_tokens = self
-            .tokens
-            .count(&squished.text)
-            .map_err(|error| (ProcessingStage::CountOutputTokens, error))?;
         let output_path = output_path_for(input_path);
+        let result = (|| {
+            let squished = self
+                .squasher
+                .squish(&input)
+                .map_err(|error| (ProcessingStage::Squish, error))?;
+            let input_tokens = self
+                .tokens
+                .count(&input)
+                .map_err(|error| (ProcessingStage::CountInputTokens, error))?;
+            let output_tokens = self
+                .tokens
+                .count(&squished.text)
+                .map_err(|error| (ProcessingStage::CountOutputTokens, error))?;
 
-        self.files
-            .write(&output_path, &squished.text)
-            .map_err(|error| (ProcessingStage::Write, error))?;
+            self.files
+                .write(&output_path, &squished.text)
+                .map_err(|error| (ProcessingStage::Write, error))?;
 
-        Ok(FileReport {
-            input_path: input_path.to_path_buf(),
-            output_path,
-            input_tokens,
-            output_tokens,
-            input_characters: char_count(&input),
-            output_characters: char_count(&squished.text),
-            recognized_whitespace: squished.recognized_whitespace,
-            removed_whitespace: squished.removed_whitespace,
-            inserted_whitespace: squished.inserted_whitespace,
-        })
+            Ok(FileReport {
+                input_path: input_path.to_path_buf(),
+                output_path: output_path.clone(),
+                input_tokens,
+                output_tokens,
+                input_characters: char_count(&input),
+                output_characters: char_count(&squished.text),
+                recognized_whitespace: squished.recognized_whitespace,
+                removed_whitespace: squished.removed_whitespace,
+                inserted_whitespace: squished.inserted_whitespace,
+            })
+        })();
+        if result.is_err() {
+            self.files.discard_pending_write(&output_path);
+        }
+        result
     }
 }
 

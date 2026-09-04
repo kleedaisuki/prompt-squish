@@ -31,7 +31,7 @@ xmlsquish 将普通字符数据中的 XML 空白规范化，并保证任意两�
 
 ## 安装与构建
 
-项目使用 [Rust 2024 Edition](https://doc.rust-lang.org/edition-guide/editions/creating-a-new-project.html)，最低 Rust 版本为 1.85。仓库的 `rust-toolchain.toml` 声明使用 stable 工具链以及 `rustfmt`、Clippy 组件。
+项目使用 [Rust 2024 Edition](https://doc.rust-lang.org/edition-guide/editions/creating-a-new-project.html)，经过持续验证的最低 Rust 版本（Minimum Supported Rust Version, MSRV）为 1.88。仓库的 `rust-toolchain.toml` 声明使用 stable 工具链以及 `rustfmt`、Clippy 组件。
 
 ```bash
 # 从当前 checkout 安装命令行程序

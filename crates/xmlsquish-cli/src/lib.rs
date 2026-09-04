@@ -171,6 +171,13 @@ impl FileStore for NativeFiles {
         atomic_write(path, has_bom, contents)
             .map_err(|error| FileFailure::new(format!("{}: {error}", path.display())))
     }
+
+    fn discard_pending_write(&self, path: &Path) {
+        self.output_boms
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(path);
+    }
 }
 
 fn atomic_write(path: &Path, has_bom: bool, contents: &str) -> io::Result<()> {
