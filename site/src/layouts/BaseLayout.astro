@@ -10,7 +10,10 @@ const { locale } = Astro.props;
 const m = messages[locale];
 const canonicalPath = locale === "zh-CN" ? "/" : "/en/";
 const canonical = new URL(canonicalPath, Astro.site);
-const socialImage = new URL("/favicon.svg", Astro.site);
+const socialImage = new URL("/social-card.png", Astro.site);
+const socialImageAlt = locale === "zh-CN"
+  ? "xmlsquish：压紧 XML 提示词空白，并提供可核验统计"
+  : "xmlsquish: compact XML prompt whitespace with verifiable statistics";
 ---
 
 <!doctype html>
@@ -26,8 +29,12 @@ const socialImage = new URL("/favicon.svg", Astro.site);
     <meta property="og:description" content={m.meta.description} />
     <meta property="og:url" content={canonical} />
     <meta property="og:image" content={socialImage} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content={socialImageAlt} />
     <meta property="og:locale" content={locale === "zh-CN" ? "zh_CN" : "en_US"} />
-    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:image" content={socialImage} />
     <link rel="canonical" href={canonical} />
     <link rel="alternate" hreflang="zh-CN" href={new URL("/", Astro.site)} />
     <link rel="alternate" hreflang="en" href={new URL("/en/", Astro.site)} />

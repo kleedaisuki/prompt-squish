@@ -13,7 +13,7 @@ type Messages = {
   fsm: { eyebrow: string; title: string; intro: string; states: State[]; transition: string };
   cli: { eyebrow: string; title: string; intro: string; install: string; run: string; note: string };
   stats: { eyebrow: string; title: string; intro: string; labels: string[]; values: string[]; note: string };
-  footer: { tagline: string; source: string; style: string };
+  footer: { tagline: string; source: string; style: string; license: string; notices: string };
   theme: { label: string; auto: string; light: string; dark: string };
 };
 
@@ -75,7 +75,13 @@ const zh = {
     values: ["o200k_base", "1", "12", "9", "18", "15", "6", "4", "1", "25.00%"],
     note: "示例数据仅用于展示统计界面；实际数值由你的文件决定。",
   },
-  footer: { tagline: "让 XML 对人友好，对 Agent 也克制。", source: "查看源码", style: "Built with MoeSegfault Style" },
+  footer: {
+    tagline: "让 XML 对人友好，对 Agent 也克制。",
+    source: "查看源码",
+    style: "Built with MoeSegfault Style",
+    license: "许可",
+    notices: "第三方声明",
+  },
   theme: { label: "外观", auto: "跟随系统", light: "浅色", dark: "深色" },
 } satisfies Messages;
 
@@ -137,7 +143,13 @@ const en: Messages = {
     values: ["o200k_base", "1", "12", "9", "18", "15", "6", "4", "1", "25.00%"],
     note: "Illustrative values only; actual results depend on your files.",
   },
-  footer: { tagline: "Friendly to authors. Frugal for agents.", source: "View source", style: "Built with MoeSegfault Style" },
+  footer: {
+    tagline: "Friendly to authors. Frugal for agents.",
+    source: "View source",
+    style: "Built with MoeSegfault Style",
+    license: "License",
+    notices: "Third-party notices",
+  },
   theme: { label: "Theme", auto: "System", light: "Light", dark: "Dark" },
 };
 

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-labelledby="title description">
+  <title id="title">xmlsquish</title>
+  <desc id="description">Warm editorial xmlsquish social card with an XML mark and golden sparkle.</desc>
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="1200" y2="630" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fffdf8"/>
+      <stop offset="1" stop-color="#ffe8d2"/>
+    </linearGradient>
+    <linearGradient id="coral" x1="120" y1="125" x2="430" y2="505" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff9a78"/>
+      <stop offset="1" stop-color="#bd4525"/>
+    </linearGradient>
+    <filter id="shadow" x="40" y="45" width="490" height="500" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="24" stdDeviation="26" flood-color="#9e4e25" flood-opacity=".24"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="630" rx="42" fill="url(#paper)"/>
+  <circle cx="1090" cy="92" r="150" fill="#ffb55e" opacity=".1"/>
+  <circle cx="1015" cy="555" r="230" fill="#f27a50" opacity=".08"/>
+  <g filter="url(#shadow)">
+    <rect x="105" y="125" width="330" height="380" rx="92" fill="url(#coral)"/>
+    <path d="M224 238 158 315l66 77M316 238l66 77-66 77M300 205l-62 220" fill="none" stroke="#fff6ea" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M399 112c5 32 16 43 48 48-32 5-43 16-48 48-5-32-16-43-48-48 32-5 43-16 48-48Z" fill="#ffca78" stroke="#fff1b8" stroke-width="7"/>
+  </g>
+  <text x="520" y="270" fill="#26110b" font-family="Georgia, 'Noto Serif SC', serif" font-size="92" font-weight="700" letter-spacing="-4">xmlsquish</text>
+  <text x="525" y="342" fill="#805648" font-family="'Noto Sans SC', system-ui, sans-serif" font-size="34">Less whitespace. Clear accounting.</text>
+  <rect x="522" y="390" width="445" height="66" rx="33" fill="#ffe1cc"/>
+  <text x="555" y="434" fill="#bd4525" font-family="'Cascadia Mono', monospace" font-size="26" font-weight="700">Rust 2024 · hand-rolled FSM</text>
+</svg>
