@@ -1,0 +1,24 @@
+[package]
+name = "xmlsquish-cli"
+description = "Command-line interface for xmlsquish"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "xmlsquish"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+glob.workspace = true
+tempfile.workspace = true
+tiktoken-rs.workspace = true
+walkdir.workspace = true
+xmlsquish-app = { path = "../xmlsquish-app" }
+xmlsquish-core = { path = "../xmlsquish-core" }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "xmlsquish-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The XML-aware whitespace squishing engine for xmlsquish"
+
+[lib]
+path = "src/lib.rs"
