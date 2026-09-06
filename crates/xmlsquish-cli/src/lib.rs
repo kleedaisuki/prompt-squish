@@ -1,7 +1,10 @@
+mod console;
+mod diagnostics;
 mod paths;
 mod pipeline;
 
 use clap::{CommandFactory, Parser};
+use console::{ColorMode, section, styled};
 use std::ffi::OsString;
 #[cfg(test)]
 use std::fs;
@@ -23,6 +26,9 @@ const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
                   Directories are searched recursively, ignoring *.i.xml and *.o.xml."
 )]
 pub struct Args {
+    /// Color output: auto detects each terminal / 颜色模式，auto 按终端能力决定
+    #[arg(long, value_enum, default_value = "auto")]
+    color: ColorMode,
     /// Compile only to *.i.xml / 仅生成中间表示
     #[arg(short = 'I', conflicts_with = "optimized")]
     intermediate: bool,
@@ -40,42 +46,90 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let args = match Args::try_parse_from(args) {
+    let args = args.into_iter().map(Into::into).collect::<Vec<OsString>>();
+    let stream = ColorMode::from_args(&args).stream(Vec::<u8>::new());
+    let color = stream.current_choice() != anstream::ColorChoice::Never;
+    execute(args, stdout, stderr, color, color)
+}
+
+/// Native terminal entry point; injected `run` writers have no TTY capability.
+/// 原生终端入口；run 的注入 writer 不宣称自己具有终端能力。
+pub fn run_stdio<I, T>(args: I) -> i32
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let args = args.into_iter().map(Into::into).collect::<Vec<OsString>>();
+    let color = ColorMode::from_args(&args);
+    let mut stdout = color.stream(io::stdout()).lock();
+    let mut stderr = color.stream(io::stderr()).lock();
+    let out_color = stdout.current_choice() != anstream::ColorChoice::Never;
+    let err_color = stderr.current_choice() != anstream::ColorChoice::Never;
+    execute(args, &mut stdout, &mut stderr, out_color, err_color)
+}
+
+fn execute(
+    args: Vec<OsString>,
+    mut stdout: &mut dyn Write,
+    mut stderr: &mut dyn Write,
+    out_color: bool,
+    err_color: bool,
+) -> i32 {
+    let args = match Args::try_parse_from(&args) {
         Ok(args) => args,
         Err(error) => {
             let code = if error.use_stderr() { 2 } else { 0 };
-            let _ = if error.use_stderr() {
-                write!(stderr, "{error}")
+            if error.use_stderr() {
+                // Re-render only the failed parse with escaped argument values.
+                // 仅为错误展示重放已失败的参数解析；不改变实际处理的路径或参数。
+                let display_args = args
+                    .iter()
+                    .map(|arg| OsString::from(diagnostics::safe_text(&arg.to_string_lossy())));
+                let message = Args::try_parse_from(display_args)
+                    .err()
+                    .filter(|error| error.use_stderr())
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| {
+                        format!("error: {}", diagnostics::safe_text(&error.to_string()))
+                    });
+                console::clap_text(&mut stderr, &message, err_color);
             } else {
-                write!(stdout, "{error}")
-            };
+                console::clap_text(&mut stdout, &error.to_string(), out_color);
+            }
             return code;
         }
     };
 
     if args.paths.is_empty() {
         let mut command = Args::command();
-        let mut help = Vec::new();
-        let _ = command.write_long_help(&mut help);
-        let _ = stdout.write_all(&help);
-        let _ = writeln!(stdout);
+        console::clap_text(
+            &mut stdout,
+            &command.render_long_help().to_string(),
+            out_color,
+        );
         return 0;
     }
 
     let discovery = paths::discover(&args.paths);
     for error in &discovery.errors {
-        let _ = writeln!(stderr, "discovery: {error}");
+        let _ = diagnostics::Diagnostic::discovery(error.clone()).render(&mut stderr, err_color);
+        let _ = writeln!(stderr);
     }
 
-    let report = pipeline::run(&discovery.files, args.intermediate, stdout);
+    let report =
+        pipeline::run_with_color(&discovery.files, args.intermediate, &mut stdout, out_color);
+    let _ = stdout.flush();
     for failure in &report.failures {
-        let _ = writeln!(stderr, "{failure}");
+        let _ = failure.render(&mut stderr, err_color);
+        let _ = writeln!(stderr);
     }
-    print_report(
-        stdout,
+    let _ = stderr.flush();
+    print_report_colored(
+        &mut stdout,
         discovery.files.len(),
         discovery.errors.len(),
         &report,
+        out_color,
     );
 
     if discovery.errors.is_empty() && report.failures.is_empty() {
@@ -85,40 +139,122 @@ where
     }
 }
 
+#[cfg(test)]
 fn print_report(
     out: &mut dyn Write,
     discovered: usize,
     discovery_failures: usize,
     report: &pipeline::Report,
 ) {
-    let stats = report.stats;
+    print_report_colored(out, discovered, discovery_failures, report, false);
+}
+
+fn print_report_colored(
+    out: &mut dyn Write,
+    discovered: usize,
+    discovery_failures: usize,
+    report: &pipeline::Report,
+    color: bool,
+) {
+    let stats = &report.stats;
     let failures = discovery_failures.saturating_add(report.failures.len());
+    section(out, "Summary", color);
+    let _ = writeln!(out, "Processed files: {discovered}");
+    let _ = writeln!(
+        out,
+        "{}",
+        styled(
+            &format!("Succeeded: {}", stats.processed_files),
+            "32",
+            color
+        )
+    );
+    let _ = writeln!(
+        out,
+        "{}",
+        styled(
+            &format!("Failed: {failures}"),
+            if failures == 0 { "2" } else { "1;31" },
+            color
+        )
+    );
+    let _ = writeln!(out, "Discovery errors: {discovery_failures}");
+    section(out, "Prompt size", color);
     let _ = writeln!(out, "Encoding: o200k_base");
     let _ = writeln!(
         out,
-        "Measurements: original source -> selected output; whitespace: IR optimization only"
+        "Measurements: successful artifacts only; UTF-8 text bytes exclude BOM"
     );
-    let _ = writeln!(out, "Processed files: {discovered}");
-    let _ = writeln!(out, "Succeeded: {}", stats.processed_files);
-    let _ = writeln!(out, "Failed: {failures}");
-    let _ = writeln!(out, "Discovery errors: {discovery_failures}");
-    let _ = writeln!(out, "Input tokens: {}", stats.input_tokens);
-    let _ = writeln!(out, "Output tokens: {}", stats.output_tokens);
-    let _ = writeln!(out, "Input characters: {}", stats.input_characters);
-    let _ = writeln!(out, "Output characters: {}", stats.output_characters);
     let _ = writeln!(
         out,
-        "Recognized whitespace: {}",
-        stats.recognized_whitespace
+        "{}",
+        styled("Stage                Tokens    UTF-8 bytes", "1", color)
     );
-    let _ = writeln!(out, "Removed whitespace: {}", stats.removed_whitespace);
-    let _ = writeln!(out, "Inserted whitespace: {}", stats.inserted_whitespace);
-    if stats.input_tokens == 0 {
-        let _ = writeln!(out, "Token compression rate: N/A");
+    print_size(out, "Primary source", stats.source);
+    print_size(out, "Compiled IR", stats.ir);
+    print_size(out, "Final prompt", stats.final_prompt);
+    let _ = writeln!(out, "Final prompt tokens: {}", stats.final_prompt.tokens);
+    let _ = writeln!(
+        out,
+        "Final prompt UTF-8 bytes: {}",
+        stats.final_prompt.bytes
+    );
+    let _ = writeln!(out, "Input characters: {}", stats.source.characters);
+    let _ = writeln!(out, "Output characters: {}", stats.final_prompt.characters);
+    section(out, "Dependencies", color);
+    let _ = writeln!(
+        out,
+        "Primary source: each successful input counted once; dependencies excluded"
+    );
+    let _ = writeln!(out, "Dependency loads: {}", stats.dependency_loads);
+    let _ = writeln!(
+        out,
+        "Unique dependency files: {}",
+        stats.dependency_paths.len()
+    );
+    let _ = writeln!(
+        out,
+        "Dependency UTF-8 bytes read: {} (repeated loads counted)",
+        stats.dependency_bytes
+    );
+    if stats.source.tokens == 0 {
+        let _ = writeln!(out, "Assembly token ratio (IR / source): N/A");
     } else {
-        let rate = 100.0 * (stats.input_tokens as f64 - stats.output_tokens as f64)
-            / stats.input_tokens as f64;
-        let _ = writeln!(out, "Token compression rate: {rate:.2}%");
+        let ratio = stats.ir.tokens as f64 / stats.source.tokens as f64;
+        let _ = writeln!(out, "Assembly token ratio (IR / source): {ratio:.2}x");
+    }
+    section(out, "Optimization", color);
+    if stats.processed_files == 0 {
+        let _ = writeln!(out, "Optimization: N/A (no successful files)");
+        return;
+    }
+    if report.stage == pipeline::OutputStage::Intermediate {
+        let _ = writeln!(
+            out,
+            "Optimization: not run (-I); final prompt is compiled IR"
+        );
+        return;
+    }
+    let _ = writeln!(out, "Optimization baseline: compiled IR -> final prompt");
+    print_optimization(out, "tokens", stats.ir.tokens, stats.final_prompt.tokens);
+    print_optimization(out, "UTF-8 bytes", stats.ir.bytes, stats.final_prompt.bytes);
+}
+
+fn print_size(out: &mut dyn Write, name: &str, size: pipeline::Size) {
+    let _ = writeln!(out, "{name:<18} {:>8} {:>13}", size.tokens, size.bytes);
+}
+
+fn print_optimization(out: &mut dyn Write, unit: &str, before: u64, after: u64) {
+    if after > before {
+        let _ = writeln!(out, "Optimization {unit} added: {}", after - before);
+    } else {
+        let _ = writeln!(out, "Optimization {unit} saved: {}", before - after);
+    }
+    if before == 0 || after > before {
+        let _ = writeln!(out, "Optimization {unit} savings: N/A");
+    } else {
+        let percent = 100.0 * (before - after) as f64 / before as f64;
+        let _ = writeln!(out, "Optimization {unit} savings: {percent:.2}%");
     }
 }
 
@@ -428,6 +564,138 @@ mod pipeline_tests {
             );
             assert!(!dir.path().join("a.o.xml").exists());
         }
+    }
+
+    #[test]
+    fn assembly_growth_is_not_reported_as_negative_compression() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("a.xml");
+        let dependency = format!(
+            "<part>{}</part>",
+            "a long repeated passage with many tokens. ".repeat(100)
+        );
+        fs::write(dir.path().join("part.xml"), &dependency).unwrap();
+        let source =
+            r#"<r><xmlsquish:mount path="part.xml"/><xmlsquish:mount path="part.xml"/></r>"#;
+        fs::write(&input, source).unwrap();
+        let (code, out, err) = invoke(&input, Some("-O"));
+        assert_eq!(code, 0, "{err}");
+        let source_tokens = O200kTokens.count(source).unwrap();
+        let final_text = fs::read_to_string(dir.path().join("a.o.xml")).unwrap();
+        assert!(O200kTokens.count(&final_text).unwrap() > 10 * source_tokens);
+        assert!(out.contains("Assembly token ratio (IR / source):"), "{out}");
+        assert!(
+            !out.contains("compression rate") && !out.contains("-900%"),
+            "{out}"
+        );
+        assert!(out.contains("Dependency loads: 2"), "{out}");
+        assert!(out.contains("Unique dependency files: 1"), "{out}");
+        assert!(
+            out.contains(&format!(
+                "Dependency UTF-8 bytes read: {}",
+                dependency.len() * 2
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!("Final prompt UTF-8 bytes: {}", final_text.len())),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn actual_optimization_token_growth_is_reported_as_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("a.xml");
+        let source = "<r></r>";
+        fs::write(&input, source).unwrap();
+        let (code, out, err) = invoke(&input, None);
+        assert_eq!(code, 0, "{err}");
+        let final_text = fs::read_to_string(dir.path().join("a.o.xml")).unwrap();
+        let before = O200kTokens.count(source).unwrap();
+        let after = O200kTokens.count(&final_text).unwrap();
+        assert!(
+            after > before,
+            "fixture must increase tokens: {before} -> {after}"
+        );
+        assert!(
+            out.contains(&format!("Optimization tokens added: {}", after - before)),
+            "{out}"
+        );
+        assert!(out.contains("Optimization tokens savings: N/A"), "{out}");
+    }
+
+    #[test]
+    fn intermediate_report_does_not_claim_optimization() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("a.xml");
+        fs::write(&input, "<r>    untouched    </r>").unwrap();
+        let (code, out, err) = invoke(&input, Some("-I"));
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("Optimization: not run (-I)"), "{out}");
+        assert!(!out.contains("Optimization tokens saved"), "{out}");
+    }
+
+    #[test]
+    fn zero_denominators_and_no_successes_are_explicit() {
+        let mut out = Vec::new();
+        print_report(&mut out, 0, 0, &pipeline::Report::default());
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("Assembly token ratio (IR / source): N/A"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Optimization: N/A (no successful files)"),
+            "{out}"
+        );
+        let mut out = Vec::new();
+        print_optimization(&mut out, "tokens", 0, 0);
+        print_optimization(&mut out, "UTF-8 bytes", 0, 1);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("Optimization tokens savings: N/A"), "{out}");
+        assert!(out.contains("Optimization UTF-8 bytes added: 1"), "{out}");
+        assert!(!out.contains("NaN") && !out.contains("inf"), "{out}");
+    }
+
+    #[test]
+    fn failed_artifacts_do_not_contribute_stage_or_dependency_metrics() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad.xml");
+        let good = dir.path().join("good.xml");
+        fs::write(dir.path().join("part.xml"), "<part/>").unwrap();
+        fs::write(&bad, r#"<r><xmlsquish:mount path="part.xml"/></r>"#).unwrap();
+        fs::create_dir(dir.path().join("bad.o.xml")).unwrap();
+        let source = "<good/>";
+        fs::write(&good, source).unwrap();
+        let report = pipeline::run(&[bad, good], false, &mut Vec::new());
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.stats.processed_files, 1);
+        assert_eq!(
+            report.stats.source.tokens,
+            O200kTokens.count(source).unwrap()
+        );
+        assert_eq!(report.stats.source.bytes, source.len() as u64);
+        assert_eq!(report.stats.final_prompt.bytes, source.len() as u64);
+        assert_eq!(report.stats.dependency_loads, 0);
+        assert_eq!(report.stats.dependency_bytes, 0);
+        assert!(report.stats.dependency_paths.is_empty());
+    }
+
+    #[test]
+    fn stage_byte_counts_measure_utf8_text_without_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("a.xml");
+        let source = "<r>萌</r>";
+        let mut bytes = UTF8_BOM.to_vec();
+        bytes.extend_from_slice(source.as_bytes());
+        fs::write(&input, bytes).unwrap();
+        let report = pipeline::run(&[input], true, &mut Vec::new());
+        assert!(report.failures.is_empty());
+        assert_eq!(report.stats.source.bytes, source.len() as u64);
+        assert_eq!(report.stats.ir.bytes, source.len() as u64);
+        assert_eq!(report.stats.final_prompt.bytes, source.len() as u64);
+        assert!(report.stats.source.bytes > report.stats.source.characters);
     }
 
     #[test]

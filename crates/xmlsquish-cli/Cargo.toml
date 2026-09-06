@@ -12,6 +12,7 @@ name = "xmlsquish"
 path = "src/main.rs"
 
 [dependencies]
+anstream = "1.0"
 clap.workspace = true
 glob.workspace = true
 tempfile.workspace = true
