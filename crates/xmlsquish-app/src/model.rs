@@ -63,7 +63,8 @@ impl BatchStats {
         self.compression_ratio().map(|ratio| ratio * 100.0)
     }
 
-    pub(crate) fn include(&mut self, report: &FileReport) {
+    /// Includes a successfully persisted file / 汇总成功写入的文件。
+    pub fn include(&mut self, report: &FileReport) {
         self.processed_files = self.processed_files.saturating_add(1);
         self.input_tokens = self.input_tokens.saturating_add(report.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(report.output_tokens);

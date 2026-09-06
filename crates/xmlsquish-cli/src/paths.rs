@@ -158,6 +158,7 @@ pub fn is_input_xml(path: &Path) -> bool {
     };
     os_ends_with_ascii_case_insensitive(name, b".xml")
         && !os_ends_with_ascii_case_insensitive(name, b".o.xml")
+        && !os_ends_with_ascii_case_insensitive(name, b".i.xml")
 }
 
 #[cfg(unix)]
@@ -227,6 +228,7 @@ mod tests {
     fn recognizes_inputs_and_output_names_case_insensitively() {
         assert!(is_input_xml(Path::new("one.XML")));
         assert!(!is_input_xml(Path::new("one.O.XML")));
+        assert!(!is_input_xml(Path::new("one.I.XML")));
         assert!(!is_input_xml(Path::new("one.txt")));
     }
 
@@ -238,6 +240,7 @@ mod tests {
         fs::write(temp.path().join("nested/a.XML"), "<a/>").unwrap();
         fs::write(temp.path().join("nested/a.o.xml"), "ignored").unwrap();
         fs::write(temp.path().join("ignored.txt"), "ignored").unwrap();
+        fs::write(temp.path().join("nested/a.i.xml"), "ignored").unwrap();
 
         let result = discover(&[temp.path().to_path_buf()]);
         assert!(result.errors.is_empty(), "{:?}", result.errors);

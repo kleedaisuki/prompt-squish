@@ -1,18 +1,15 @@
 mod paths;
+mod pipeline;
 
 use clap::{CommandFactory, Parser};
-use std::collections::HashMap;
 use std::ffi::OsString;
+#[cfg(test)]
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use tempfile::NamedTempFile;
 use tiktoken_rs::o200k_base_singleton;
-use xmlsquish_app::{
-    BatchProcessor, FileFailure, FileStore, ProcessingStage, Squasher, SquishResult, TokenCounter,
-    output_path_for,
-};
+use xmlsquish_app::{FileFailure, Squasher, SquishResult, TokenCounter};
 
 const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 
@@ -20,13 +17,20 @@ const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 #[command(
     name = "xmlsquish",
     version,
-    about = "Compress XML prompt whitespace without changing markup",
-    long_about = "Compress XML prompt whitespace using a lexical finite-state machine.\n\
-                  Files are written beside their inputs as *.o.xml; directories are searched recursively."
+    about = "Compile XML prompt macros and compress whitespace",
+    long_about = "Compile XML macros to *.i.xml, then compress whitespace to *.o.xml.\n\
+                  Use -I to retain only the intermediate stage; -O is the default.\n\
+                  Directories are searched recursively, ignoring *.i.xml and *.o.xml."
 )]
 pub struct Args {
+    /// Compile only to *.i.xml / 仅生成中间表示
+    #[arg(short = 'I', conflicts_with = "optimized")]
+    intermediate: bool,
+    /// Compile and optimize to *.o.xml (default) / 编译并压缩
+    #[arg(short = 'O')]
+    optimized: bool,
     /// Input XML files, directories, or glob patterns
-    #[arg(value_name = "PATH", allow_hyphen_values = true)]
+    #[arg(value_name = "PATH")]
     paths: Vec<PathBuf>,
 }
 
@@ -63,17 +67,9 @@ where
         let _ = writeln!(stderr, "discovery: {error}");
     }
 
-    let processor = BatchProcessor::new(NativeFiles::default(), CoreSquasher, O200kTokens);
-    let report = processor.run(&discovery.files);
-
+    let report = pipeline::run(&discovery.files, args.intermediate, stdout);
     for failure in &report.failures {
-        let _ = writeln!(
-            stderr,
-            "{} [{}]: {}",
-            failure.path.display(),
-            stage_name(failure.stage),
-            failure.error
-        );
+        let _ = writeln!(stderr, "{failure}");
     }
     print_report(
         stdout,
@@ -89,25 +85,19 @@ where
     }
 }
 
-fn stage_name(stage: ProcessingStage) -> &'static str {
-    match stage {
-        ProcessingStage::Read => "read",
-        ProcessingStage::Squish => "squish",
-        ProcessingStage::CountInputTokens => "input tokens",
-        ProcessingStage::CountOutputTokens => "output tokens",
-        ProcessingStage::Write => "write",
-    }
-}
-
 fn print_report(
     out: &mut dyn Write,
     discovered: usize,
     discovery_failures: usize,
-    report: &xmlsquish_app::BatchReport,
+    report: &pipeline::Report,
 ) {
     let stats = report.stats;
     let failures = discovery_failures.saturating_add(report.failures.len());
     let _ = writeln!(out, "Encoding: o200k_base");
+    let _ = writeln!(
+        out,
+        "Measurements: original source -> selected output; whitespace: IR optimization only"
+    );
     let _ = writeln!(out, "Processed files: {discovered}");
     let _ = writeln!(out, "Succeeded: {}", stats.processed_files);
     let _ = writeln!(out, "Failed: {failures}");
@@ -129,54 +119,6 @@ fn print_report(
         let rate = 100.0 * (stats.input_tokens as f64 - stats.output_tokens as f64)
             / stats.input_tokens as f64;
         let _ = writeln!(out, "Token compression rate: {rate:.2}%");
-    }
-}
-
-#[derive(Default)]
-struct NativeFiles {
-    /// `FileStore` intentionally exposes text, so remember the encoding envelope
-    /// between read(input) and write(output). BatchProcessor calls these in order.
-    output_boms: Mutex<HashMap<PathBuf, bool>>,
-}
-
-impl FileStore for NativeFiles {
-    fn read(&self, path: &Path) -> Result<String, FileFailure> {
-        let bytes = fs::read(path)
-            .map_err(|error| FileFailure::new(format!("{}: {error}", path.display())))?;
-        let (has_bom, xml) = match bytes.strip_prefix(UTF8_BOM) {
-            Some(xml) => (true, xml),
-            None => (false, bytes.as_slice()),
-        };
-        let text = std::str::from_utf8(xml).map_err(|error| {
-            FileFailure::new(format!(
-                "{} is not valid UTF-8 (byte {}): {error}",
-                path.display(),
-                error.valid_up_to()
-            ))
-        })?;
-        self.output_boms
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(output_path_for(path), has_bom);
-        Ok(text.to_owned())
-    }
-
-    fn write(&self, path: &Path, contents: &str) -> Result<(), FileFailure> {
-        let has_bom = self
-            .output_boms
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(path)
-            .unwrap_or(false);
-        atomic_write(path, has_bom, contents)
-            .map_err(|error| FileFailure::new(format!("{}: {error}", path.display())))
-    }
-
-    fn discard_pending_write(&self, path: &Path) {
-        self.output_boms
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(path);
     }
 }
 
@@ -306,5 +248,217 @@ mod tests {
             0
         );
         assert_eq!(fs::read_to_string(output).unwrap(), "<a/>");
+    }
+}
+
+#[cfg(test)]
+mod pipeline_tests {
+    use super::*;
+
+    fn invoke(path: &Path, flag: Option<&str>) -> (i32, String, String) {
+        let mut args = vec![OsString::from("xmlsquish")];
+        if let Some(flag) = flag {
+            args.push(flag.into());
+        }
+        args.push(path.as_os_str().to_owned());
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = run(args, &mut out, &mut err);
+        (
+            code,
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        )
+    }
+
+    #[test]
+    fn intermediate_then_default_output_and_scoped_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("a.xml");
+        let source = "<?xml version=\"1.0\"?><a><!--gone--><xmlsquish:let x=\"hello\"/><xmlsquish:log msg=\"$x\"/>  text  </a>";
+        fs::write(&input, source).unwrap();
+        fs::write(dir.path().join("orphan.i.xml"), "untouched").unwrap();
+        let (code, out, err) = invoke(dir.path(), Some("-I"));
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("a.xml:1: hello"), "{out}");
+        let ir = fs::read_to_string(dir.path().join("a.i.xml")).unwrap();
+        assert!(!ir.contains("xmlsquish") && !ir.contains("gone"));
+        assert!(ir.contains("  text  "));
+        assert!(!dir.path().join("a.o.xml").exists());
+        let (code, out, err) = invoke(dir.path(), None);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("Processed files: 1"), "{out}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.o.xml")).unwrap(),
+            "<a> text </a>"
+        );
+        assert!(!dir.path().join("a.i.xml").exists());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("orphan.i.xml")).unwrap(),
+            "untouched"
+        );
+        assert_eq!(fs::read_to_string(input).unwrap(), source);
+    }
+
+    #[test]
+    fn compile_failure_preserves_previous_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("a.xml");
+        fs::write(&input, "<a><xmlsquish:log msg=\"$missing\"/></a>").unwrap();
+        fs::write(dir.path().join("a.i.xml"), "old ir").unwrap();
+        fs::write(dir.path().join("a.o.xml"), "old output").unwrap();
+        let (code, _, err) = invoke(&input, Some("-O"));
+        assert_eq!(code, 1);
+        assert!(err.contains("undefined"), "{err}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.i.xml")).unwrap(),
+            "old ir"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.o.xml")).unwrap(),
+            "old output"
+        );
+    }
+
+    #[test]
+    fn output_failure_retains_compiled_intermediate() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("a.xml");
+        fs::write(&input, "<a>  x  </a>").unwrap();
+        fs::create_dir(dir.path().join("a.o.xml")).unwrap();
+        let (code, _, err) = invoke(&input, None);
+        assert_eq!(code, 1);
+        assert!(err.contains("write output"), "{err}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.i.xml")).unwrap(),
+            "<a>  x  </a>"
+        );
+    }
+
+    #[test]
+    fn intermediate_preserves_bom_and_explicit_artifacts_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("a.xml");
+        let mut source = UTF8_BOM.to_vec();
+        source.extend_from_slice(b"<a/>");
+        fs::write(&input, source).unwrap();
+        assert_eq!(invoke(&input, Some("-I")).0, 0);
+        let ir = dir.path().join("a.i.xml");
+        assert!(fs::read(&ir).unwrap().starts_with(UTF8_BOM));
+        let (code, out, err) = invoke(&ir, Some("-O"));
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("Processed files: 0"), "{out}");
+        assert!(!dir.path().join("a.i.o.xml").exists());
+    }
+
+    #[test]
+    fn loads_relative_dependencies_with_independent_frames_and_boms() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("parts")).unwrap();
+        let input = dir.path().join("a.xml");
+        fs::write(&input, "<root><xmlsquish:let x=\"parent\"/><xmlsquish:mount path=\"parts/mount.xml\"/><xmlsquish:import path=\"parts/import.xml\"/></root>").unwrap();
+        let mut mounted = UTF8_BOM.to_vec();
+        mounted.extend_from_slice(
+            b"<mounted><xmlsquish:let x=\"child\"/><xmlsquish:log msg=\"$x\"/></mounted>",
+        );
+        fs::write(dir.path().join("parts/mount.xml"), mounted).unwrap();
+        fs::write(
+            dir.path().join("parts/import.xml"),
+            "<discard><child/></discard>",
+        )
+        .unwrap();
+        let (code, out, err) = invoke(&input, Some("-I"));
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("mount.xml:1: child"), "{out}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.i.xml")).unwrap(),
+            "<root><mounted></mounted><child/></root>"
+        );
+    }
+
+    #[test]
+    fn set_assigns_existing_locals_in_branch_and_attribute_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("a.xml");
+        fs::write(&input, r#"<r><xmlsquish:let result="" next=""/><xmlsquish:if lhs="yes" rhs="yes"><xmlsquish:set result="OK" next="$result"/></xmlsquish:if><xmlsquish:log msg="$result/$next"/></r>"#).unwrap();
+        for flag in ["-I", "-O"] {
+            let (code, out, err) = invoke(&input, Some(flag));
+            assert_eq!(code, 0, "{err}");
+            assert!(out.contains("a.xml:1: OK/OK"), "{out}");
+            let suffix = if flag == "-I" { "a.i.xml" } else { "a.o.xml" };
+            assert_eq!(
+                fs::read_to_string(dir.path().join(suffix)).unwrap(),
+                if flag == "-I" { "<r></r>" } else { "<r> </r>" }
+            );
+        }
+    }
+
+    #[test]
+    fn undeclared_set_preserves_existing_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("a.xml");
+        fs::write(&input, r#"<r><xmlsquish:set missing="value"/></r>"#).unwrap();
+        let output = dir.path().join("a.o.xml");
+        fs::write(&output, "previous output").unwrap();
+        let (code, _, err) = invoke(&input, Some("-O"));
+        assert_eq!(code, 1);
+        assert!(
+            err.contains("undefined") && err.contains("missing"),
+            "{err}"
+        );
+        assert_eq!(fs::read_to_string(output).unwrap(), "previous output");
+        assert!(!dir.path().join("a.i.xml").exists());
+    }
+
+    #[test]
+    fn included_file_cannot_set_parent_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("a.xml");
+        fs::write(
+            dir.path().join("child.xml"),
+            r#"<child><xmlsquish:set result="child"/></child>"#,
+        )
+        .unwrap();
+        for operation in ["mount", "import"] {
+            fs::write(&input, format!(r#"<r><xmlsquish:let result="parent"/><xmlsquish:{operation} path="child.xml"/></r>"#)).unwrap();
+            let (code, _, err) = invoke(&input, Some("-O"));
+            assert_eq!(code, 1);
+            assert!(
+                err.contains("undefined") && err.contains("result") && err.contains("child.xml"),
+                "{err}"
+            );
+            assert!(!dir.path().join("a.o.xml").exists());
+        }
+    }
+
+    #[test]
+    fn stage_options_are_mutually_exclusive() {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(
+            run(["xmlsquish", "-I", "-O", "x.xml"], &mut out, &mut err),
+            2
+        );
+    }
+
+    #[test]
+    fn files_have_independent_locals_but_share_compilation_time() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a", "b"] {
+            fs::write(
+                dir.path().join(format!("{name}.xml")),
+                "<r><xmlsquish:let x=\"same\"/><xmlsquish:log msg=\"$sys:time\"/></r>",
+            )
+            .unwrap();
+        }
+        let (code, out, err) = invoke(dir.path(), None);
+        assert_eq!(code, 0, "{err}");
+        let a = out
+            .lines()
+            .find_map(|line| line.strip_prefix("a.xml:1: "))
+            .unwrap();
+        let b = out
+            .lines()
+            .find_map(|line| line.strip_prefix("b.xml:1: "))
+            .unwrap();
+        assert_eq!(a, b);
     }
 }
