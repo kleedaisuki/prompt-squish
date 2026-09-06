@@ -1,8 +1,10 @@
-//! XML-aware whitespace normalization for `xmlsquish`.
+//! XML semantic compilation and whitespace normalization for `xmlsquish`.
+//! XML 语义编译与空白规范化。
 //!
-//! This crate deliberately implements a lexical finite-state machine instead of
-//! parsing XML into a tree. Markup is copied byte-for-byte; only XML whitespace
-//! between lexical atoms is normalized.
+//! [`Compiler`] resolves compile-time syntax before the independent [`squish`]
+//! lexical finite-state machine. `squish` copies markup byte-for-byte and only
+//! normalizes XML whitespace between lexical atoms; it does not parse a tree.
+//! 编译器先消除编译期语法；独立的 squish 状态机保持原有词法契约，不构建树。
 
 use std::error::Error;
 use std::fmt;
@@ -590,3 +592,6 @@ mod tests {
         );
     }
 }
+
+mod compiler;
+pub use compiler::{CompileError, CompileLog, CompileResult, Compiler};
