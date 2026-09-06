@@ -19,7 +19,7 @@ npm ci
 
 ## 先理解边界
 
-提交编译器、FSM 或统计变更前，请阅读 [ADR 0001](docs/adr/0001-lexical-canonicalization-and-layering.md) 与 [ADR 0002](docs/adr/0002-semantic-compilation.md)。以下词法契约只约束 `squish` 阶段；编译阶段会先消除宏、注释和元信息：
+提交编译器、FSM 或统计变更前，请阅读 [ADR 0001](docs/adr/0001-lexical-canonicalization-and-layering.md)、[ADR 0002](docs/adr/0002-semantic-compilation.md) 与 [ADR 0003](docs/adr/0003-metadata-inheritance-and-stage-metrics.md)。以下词法契约只约束 `squish` 阶段；编译阶段会先消除宏、注释和元信息：
 
 - xmlsquish 是提示词词法规范化器，不承诺 XML Infoset 等价，也不尊重 `xml:space`。
 - XML 空白严格是 U+0020、U+0009、U+000D、U+000A。
@@ -68,6 +68,14 @@ cargo run -p xmlsquish-cli -- path/to/prompt.xml "prompts/**/*.xml"
 覆盖按顺序执行、独立文件环境、重复与未定义变量、惰性条件分支、只在编译语法展开变量、递归引用与循环诊断、物理文件行号，以及 `-I` / `-O` 的覆盖与失败清理边界。保留旧 `squish` 与批处理 API 回归测试。
 
 Cover ordered execution, isolated file frames, duplicate and undefined variables, lazy conditions, compile-syntax-only expansion, recursive includes and cycles, physical source lines, and stage-specific overwrite/failure cleanup. Keep the existing lexical and batch API regression tests.
+
+元数据测试须区分物理 `file` 与继承 `meta`，验证每条引用边省略 `openat` 均为 `self`、连续显式 `parent` 覆盖和兄弟隔离。`ifr` 要覆盖锚点与非法模式，`insert` 要覆盖 XML 转义及不递归执行。统计测试需用真实文件展开和分词增长验证 IR 基线，不以负数截断冒充节省。
+
+Distinguish physical `file` from inheritable `meta`; test per-edge default `self`, consecutive explicit `parent` overlays, and sibling isolation. Cover regex anchors and errors, escaped nonrecursive insertion, and actual include/tokenizer growth when checking IR-based metrics. Never disguise growth by clamping negative savings.
+
+诊断与颜色测试必须覆盖纯文本/彩色内容一致、输出重定向、环境偏好与显式覆盖、源码快照和控制字符转义。环境变量用子进程隔离，不在并发测试中修改进程级环境。原始源码与诊断展示分离，不为美化输出而修改输入，也不臆造核心未提供的列号。
+
+Test plain/color equivalence, redirection, environment preferences and explicit overrides, source snapshots, and control-character escaping. Set environment variables on child processes, not globally in concurrent tests. Keep source data separate from presentation; do not alter inputs or fabricate source columns for prettier diagnostics.
 
 ### FSM 测试要求
 

@@ -4,6 +4,8 @@
 - 日期 / Date：2026-09-06
 - 范围 / Scope：CLI 新流程；保留 ADR 0001 的底层 `squish` 契约。New CLI pipeline; the low-level `squish` contract in ADR 0001 remains unchanged.
 
+> 后续修订 / Revision：处理指令字段已从 `file` 迁到 `meta`，并支持逐边 `openat` 继承、`ifr`、`insert` 与分阶段统计。以下相关段落记录初版决策，当前规则以 [ADR 0003](0003-metadata-inheritance-and-stage-metrics.md) 为准。PI fields have moved to `meta`; ADR 0003 supersedes the initial namespace and report rules below.
+
 ## 决策 / Decision
 
 ```text
