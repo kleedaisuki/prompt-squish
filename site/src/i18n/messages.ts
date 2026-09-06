@@ -20,16 +20,16 @@ type Messages = {
 const zh = {
   meta: {
     title: "xmlsquish — 为 Agent 压紧 XML 提示词",
-    description: "用 Rust 有限状态机移除 XML 提示词的无效空白，并保留恰好一个安全分隔空格。",
+    description: "先编译 XML 提示词宏，再用 Rust 有限状态机压缩布局空白。",
   },
   nav: { how: "原理", cli: "命令行", stats: "统计", github: "GitHub", language: "English" },
   hero: {
-    badge: "Rust 2024 · 手写 FSM",
+    badge: "Rust 2024 · 语义编译 + FSM",
     title: "可读地写，紧凑地喂给 Agent。",
     lead: "xmlsquish 递归处理 XML 提示词，压缩布局空白，并在标签与标签、标签与单词、单词与标签之间保留且只保留一个空格。",
     primary: "查看命令行用法",
     secondary: "理解状态机",
-    footnote: "输入保持不变；结果写入同名 .o.xml 文件。",
+    footnote: "输入保持不变；-I 生成 .i.xml，默认 -O 生成 .o.xml。",
     warning: "它不是保持 XML 语义的通用压缩器：会改写普通字符数据中的空白，可能改变混合内容，且不遵守 xml:space=\"preserve\"。请只处理已确认空白是布局噪声的提示词。",
   },
   transform: {
@@ -40,9 +40,9 @@ const zh = {
   principles: {
     eyebrow: "做得少，做得准",
     title: "为提示词管线而设计",
-    intro: "这是面向提示词的词法规范化器，而非 XML 信息集压缩器：它规范化普通字符数据的 XML 空白，不构造 DOM。",
+    intro: "先消除编译期宏、注释与元信息，再规范化普通字符数据的空白；它不是 XML 信息集压缩器。",
     items: [
-      { eyebrow: "确定性", title: "单遍扫描", body: "有限状态机逐字符推进；相同输入始终产生相同输出，不依赖格式化器的偏好。" },
+      { eyebrow: "确定性", title: "单遍扫描", body: "空白压缩逐字符推进；宏编译在一次运行中共享系统与环境快照，不改写普通内容中的变量。" },
       { eyebrow: "批处理", title: "路径、目录与通配符", body: "一次接收多个路径；目录递归发现 *.xml，通配符匹配你的现有工作流。" },
       { eyebrow: "可追踪", title: "输入从不覆盖", body: "每份结果写到对应的 *.o.xml，原始提示词仍是可读、可审阅的事实来源。" },
     ],
@@ -65,7 +65,7 @@ const zh = {
     intro: "传入任意数量的文件、目录或通配符。没有参数时，xmlsquish 会打印帮助信息。",
     install: "cargo install --path crates/xmlsquish-cli --locked",
     run: "xmlsquish ./prompts \"templates/*.xml\"",
-    note: "目录会递归查找 *.xml；每个输入在相同目录生成对应的 *.o.xml。",
+    note: "目录递归查找 *.xml，跳过 *.i.xml 与 *.o.xml。-I 只编译；默认 -O 压缩并清理对应中间文件。",
   },
   stats: {
     eyebrow: "每次运行都有账",
@@ -88,16 +88,16 @@ const zh = {
 const en: Messages = {
   meta: {
     title: "xmlsquish — Compact XML prompts for agents",
-    description: "A Rust finite-state machine that removes meaningless XML prompt whitespace while preserving exactly one safe separator.",
+    description: "Compile XML prompt macros, then compact layout whitespace with a Rust finite-state machine.",
   },
   nav: { how: "How it works", cli: "CLI", stats: "Stats", github: "GitHub", language: "中文" },
   hero: {
-    badge: "Rust 2024 · hand-rolled FSM",
+    badge: "Rust 2024 · compiler + FSM",
     title: "Write for humans. Feed agents less.",
     lead: "xmlsquish recursively processes XML prompts, collapsing layout whitespace while keeping exactly one space between tag/tag, tag/word, and word/tag boundaries.",
     primary: "See the CLI",
     secondary: "Explore the FSM",
-    footnote: "Inputs stay untouched; results are written beside them as .o.xml files.",
+    footnote: "Sources stay untouched; -I writes .i.xml, while default -O writes .o.xml.",
     warning: "This is not a semantics-preserving XML minifier. It rewrites ordinary character-data whitespace, may change mixed-content meaning, and does not honor xml:space=\"preserve\". Use it only where that whitespace is known layout noise.",
   },
   transform: {
@@ -108,9 +108,9 @@ const en: Messages = {
   principles: {
     eyebrow: "Do less, precisely",
     title: "Made for prompt pipelines",
-    intro: "This is a prompt-oriented lexical canonicalizer, not an XML Infoset minifier: it normalizes XML whitespace in ordinary character data without building a DOM.",
+    intro: "Compile away macros, comments, and metadata before normalizing ordinary text whitespace. This is not an XML Infoset minifier.",
     items: [
-      { eyebrow: "Deterministic", title: "One-pass scanning", body: "A finite-state machine advances character by character. Equal inputs produce equal outputs, without formatter preferences." },
+      { eyebrow: "Deterministic", title: "One-pass scanning", body: "The squasher advances character by character. Compilation shares system/environment snapshots within a run and leaves payload variables literal." },
       { eyebrow: "Batch-ready", title: "Paths, folders, and globs", body: "Pass many paths at once. Directories discover *.xml recursively; globs fit into existing workflows." },
       { eyebrow: "Traceable", title: "Inputs are never replaced", body: "Each result lands in a matching *.o.xml file, leaving readable source prompts as the reviewable source of truth." },
     ],
@@ -133,7 +133,7 @@ const en: Messages = {
     intro: "Pass any number of files, directories, or globs. With no arguments, xmlsquish prints its help.",
     install: "cargo install --path crates/xmlsquish-cli --locked",
     run: "xmlsquish ./prompts \"templates/*.xml\"",
-    note: "Directories are searched recursively for *.xml; every input creates a matching *.o.xml beside it.",
+    note: "Directories recursively find *.xml, skipping *.i.xml and *.o.xml. -I compiles only; default -O compresses and cleans its intermediate.",
   },
   stats: {
     eyebrow: "Account for every run",
