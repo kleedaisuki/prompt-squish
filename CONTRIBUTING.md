@@ -1,6 +1,6 @@
 # 为 xmlsquish 贡献
 
-感谢你来改善 xmlsquish！这里的首要目标是让词法契约保持简单、可复现、可审阅，而不是逐渐把扫描器变成一个不完整的 XML 解析器。
+感谢你来改善 xmlsquish！这里的首要目标是让编译语义和词法契约保持独立、简单、可审阅，而不是逐渐把空白扫描器变成一个不完整的 XML 解析器。
 
 ## 开发环境
 
@@ -19,7 +19,7 @@ npm ci
 
 ## 先理解边界
 
-提交 FSM 或统计变更前，请阅读 [ADR 0001](docs/adr/0001-lexical-canonicalization-and-layering.md)。尤其要保留以下契约：
+提交编译器、FSM 或统计变更前，请阅读 [ADR 0001](docs/adr/0001-lexical-canonicalization-and-layering.md) 与 [ADR 0002](docs/adr/0002-semantic-compilation.md)。以下词法契约只约束 `squish` 阶段；编译阶段会先消除宏、注释和元信息：
 
 - xmlsquish 是提示词词法规范化器，不承诺 XML Infoset 等价，也不尊重 `xml:space`。
 - XML 空白严格是 U+0020、U+0009、U+000D、U+000A。
@@ -39,12 +39,12 @@ xmlsquish-cli --|
 
 | 需求 | 应修改的位置 |
 | --- | --- |
-| 扫描状态、atom、空白统计 | `crates/xmlsquish-core` |
+| 编译语义、文件环境、扫描状态、atom、空白统计 | `crates/xmlsquish-core` |
 | 批处理政策、端口、汇总模型 | `crates/xmlsquish-app` |
 | 参数、路径发现、编码、文件 I/O、Tokenizer、终端输出 | `crates/xmlsquish-cli` |
 | 文案、样式、国际化、Pages | `site`、`.github/workflows` |
 
-CLI 是组合根（composition root）：它分别把 core FSM 与文件/Tokenizer 适配器接到 app 端口。不要让 app 依赖具体适配器，也不要让 core 依赖 app、文件系统、命令行或具体 Tokenizer。不要在 TypeScript 中复制 FSM；未来的浏览器演示应复用 Rust core（例如 WebAssembly, WASM）。避免顺手重构与目标无关的模块。
+CLI 是组合根（composition root）：它组合编译器、文件/Tokenizer 适配器与 app 报告模型。不要让 app 依赖具体适配器，也不要让 core 依赖 app、命令行或具体 Tokenizer。编译器通过注入的加载函数读取引用文件；默认快照读取系统环境，文件标识会使用规范路径以检测循环。不要在 TypeScript 中复制 FSM；未来的浏览器演示应复用 Rust core（例如 WebAssembly, WASM）。避免顺手重构与目标无关的模块。
 
 ## Rust 工作流
 
@@ -61,7 +61,13 @@ cargo build --workspace --release --locked
 cargo run -p xmlsquish-cli -- path/to/prompt.xml "prompts/**/*.xml"
 ```
 
-测试只写入临时目录；不要把本地生成的 `*.o.xml` 当作无说明的源码改动提交。
+测试只写入临时目录；不要提交本地生成的 `*.i.xml` / `*.o.xml`。
+
+### 编译器测试要求 / Compiler test requirements
+
+覆盖按顺序执行、独立文件环境、重复与未定义变量、惰性条件分支、只在编译语法展开变量、递归引用与循环诊断、物理文件行号，以及 `-I` / `-O` 的覆盖与失败清理边界。保留旧 `squish` 与批处理 API 回归测试。
+
+Cover ordered execution, isolated file frames, duplicate and undefined variables, lazy conditions, compile-syntax-only expansion, recursive includes and cycles, physical source lines, and stage-specific overwrite/failure cleanup. Keep the existing lexical and batch API regression tests.
 
 ### FSM 测试要求
 

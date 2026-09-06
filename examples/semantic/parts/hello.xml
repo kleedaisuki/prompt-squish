@@ -1,0 +1,6 @@
+<?xmlsquish author="klee"?>
+<greeting>
+    <xmlsquish:let msg="Hello from an independent file frame!"/>
+    <xmlsquish:log msg="$msg"/>
+    Hello World!
+</greeting>

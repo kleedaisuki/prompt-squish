@@ -1,0 +1,6 @@
+<fragment>
+    <xmlsquish:let msg="Imported children; the fragment wrapper is removed."/>
+    <xmlsquish:log msg="$msg"/>
+    <task>Summarize the supplied material.</task>
+    <format>Use clear, concise language.</format>
+</fragment>

@@ -3,6 +3,8 @@
 - 状态：已接受
 - 日期：2026-09-05
 
+> 2026-09-06 更新：本记录继续定义底层 `squish` API。CLI 已新增前置语义编译阶段，见 [ADR 0002](0002-semantic-compilation.md)。The low-level `squish` contract remains; ADR 0002 adds semantic compilation before CLI squashing.
+
 ## 背景
 
 XML 提示词通常保留缩进与换行以方便人类维护，但这些布局字符也会进入模型上下文。项目需要在不引入完整 XML 解析器的前提下，以可预测、可测试的方式压紧这类文档。

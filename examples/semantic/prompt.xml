@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xmlsquish version="adaptive" warnings="strict"?>
+<?xmlsquish author="klee" date="$sys:time" license="GPL-3.0-or-later"?>
+<?xmlsquish ?>
+<prompt>
+    <!-- 编译期变量只用于宏。 Compile-time variables are only expanded in macros. -->
+    <xmlsquish:let msg="Hello World!" dir="parts"/>
+    <xmlsquish:log msg="$msg"/>
+    <xmlsquish:mount path="$dir/hello.xml"/>
+    <xmlsquish:let result="Unknown"/>
+    <xmlsquish:if lhs="$sys:platform" rhs="win32">
+        <xmlsquish:set result="Windows"/>
+    </xmlsquish:if>
+    <xmlsquish:ifn lhs="$sys:platform" rhs="win32">
+        <xmlsquish:set result="Non-Windows"/>
+    </xmlsquish:ifn>
+    <xmlsquish:log msg="$result"/>
+    <xmlsquish:import path="$dir/another.xml"/>
+    <xmlsquish:if lhs="$file:name" rhs="prompt.xml">
+        <Persona scope="global">You are a helpful assistant.</Persona>
+    </xmlsquish:if>
+    <literal value="$msg">$msg stays literal here.</literal>
+</prompt>
