@@ -70,10 +70,10 @@ const zh = {
   stats: {
     eyebrow: "每次运行都有账",
     title: "看见真正省下的内容",
-    intro: "完成后汇总文件、token、字符与空白，让压缩效果可验证而非凭感觉。",
-    labels: ["Tokenizer 编码", "处理文件数", "输入 token", "输出 token", "输入字符", "输出字符", "识别到的空白", "移除的空白", "插入的空白", "Token 压缩率"],
-    values: ["o200k_base", "1", "12", "9", "18", "15", "6", "4", "1", "25.00%"],
-    note: "示例数据仅用于展示统计界面；实际数值由你的文件决定。",
+    intro: "分开观察源文件、编译结果与最终提示词：展开了多少内容，空白优化实际节省多少 Token。",
+    labels: ["Tokenizer 编码", "成功文件数", "主源文件 Token", "编译结果 Token", "最终提示词 Token", "最终 UTF-8 字节", "依赖加载次数", "组装倍率", "优化节省 Token", "相对 IR 的节省率"],
+    values: ["o200k_base", "1", "12", "12", "9", "15", "0", "1.00×", "3", "25.00%"],
+    note: "示例不含外部引用。增长会显示 added，-I 显示未优化；Token 大小不代表质量或实际账单。",
   },
   footer: {
     tagline: "让 XML 对人友好，对 Agent 也克制。",
@@ -138,10 +138,10 @@ const en: Messages = {
   stats: {
     eyebrow: "Account for every run",
     title: "See what you actually saved",
-    intro: "A summary covers files, tokens, characters, and whitespace, so compression stays measurable rather than anecdotal.",
-    labels: ["Tokenizer encoding", "Files processed", "Input tokens", "Output tokens", "Input characters", "Output characters", "Recognized whitespace", "Removed whitespace", "Inserted whitespace", "Token compression rate"],
-    values: ["o200k_base", "1", "12", "9", "18", "15", "6", "4", "1", "25.00%"],
-    note: "Illustrative values only; actual results depend on your files.",
+    intro: "Separate source, compiled IR, and final prompt sizes: see assembly growth and the tokens actually saved by whitespace optimization.",
+    labels: ["Tokenizer encoding", "Successful files", "Primary source tokens", "Compiled IR tokens", "Final prompt tokens", "Final UTF-8 bytes", "Dependency loads", "Assembly ratio", "Tokens saved", "Savings against IR"],
+    values: ["o200k_base", "1", "12", "12", "9", "15", "0", "1.00×", "3", "25.00%"],
+    note: "This example has no includes. Growth is reported as added; -I skips optimization. Token size is not quality or actual billing.",
   },
   footer: {
     tagline: "Friendly to authors. Frugal for agents.",
