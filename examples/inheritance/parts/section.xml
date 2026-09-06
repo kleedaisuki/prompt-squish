@@ -1,0 +1,7 @@
+<?xmlsquish author="section-author" section="methods"?>
+<section>
+    <author><xmlsquish:insert get="meta:author"/></author>
+    <source><xmlsquish:insert get="file:name"/></source>
+    <xmlsquish:import path="leaf.xml" openat="parent"/>
+    <xmlsquish:mount path="leaf.xml"/>
+</section>

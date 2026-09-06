@@ -3,7 +3,16 @@
 //!
 //! `version="adaptive"` selects the current language; `warnings="strict"` is
 //! the only diagnostic policy (errors are never recovered). Both are also file
-//! metadata. Other values are rejected rather than silently approximated.
+//! metadata in the `meta` namespace. Physical name/path/dir stay in `file`.
+//! `openat="parent"` overlays parent effective metadata on that child. Every include
+//! edge defaults to `self`; inheritance requires an explicit parent edge each time.
+//! 元数据属于 meta，物理文件信息属于 file；每条引入边独立指定 parent，省略默认为 self。
+//! mount's optional `rename` expands in the caller and changes only the root name.
+//! mount 可选 rename 在调用方展开，仅改根名，保留属性、子树及物理文件身份。
+//! Regex `pattern` and insert `get` are typed literal parameters, not interpolated.
+//! `ifr` searches (use anchors for full matches); insert escapes XML text and accepts
+//! an unprefixed variable name such as `meta:author`, never a dollar expression.
+//! pattern 为字面正则，get 为不带美元符号的变量名；insert 输出转义后的 XML 文本。
 //! 当前只支持 adaptive 语言与 strict 诊断策略，二者同时可作为文件元数据读取。
 //!
 //! Definitions and `set` assignments execute left-to-right. Assignment requires
@@ -27,6 +36,7 @@ use quick_xml::{
     Reader,
     events::{BytesStart, Event},
 };
+use regex::RegexBuilder;
 use std::{
     collections::HashMap,
     error::Error,
@@ -103,7 +113,13 @@ impl Compiler {
         mut loader: impl FnMut(&Path) -> Result<String, String>,
     ) -> Result<CompileResult, CompileError> {
         let mut state = RunState::default();
-        let output = self.file(path, source, &mut loader, &mut state, false)?;
+        let output = self.file(
+            path,
+            source,
+            &mut loader,
+            &mut state,
+            IncludeContext::default(),
+        )?;
         Ok(CompileResult {
             output,
             logs: state.logs,
@@ -115,8 +131,11 @@ impl Compiler {
         source: &str,
         loader: &mut impl FnMut(&Path) -> Result<String, String>,
         state: &mut RunState,
-        children_only: bool,
+        context: IncludeContext,
     ) -> Result<String, CompileError> {
+        // A BOM is a file envelope, not part of a mounted subtree or tag name.
+        // BOM 属于文件编码外壳，不能成为挂载子树或根名称区间的一部分。
+        let source = source.strip_prefix('\u{feff}').unwrap_or(source);
         // Resolve real-file aliases to detect symlink cycles; virtual loaders fall back
         // to lexical normalization. 真实路径用于检测符号链接循环，虚拟加载器退回词法路径。
         let identity = path.canonicalize().unwrap_or_else(|_| normalize(path));
@@ -131,10 +150,13 @@ impl Compiler {
         if state.paths.len() > 1 {
             nodes.retain(|n| !matches!(n.kind, Kind::Raw(_)));
         }
+        if let Some(rename) = &context.rename {
+            rename_root(&mut nodes, rename);
+        }
         let mut frame = Frame {
             path,
             locals: HashMap::new(),
-            metadata: HashMap::from([
+            physical: HashMap::from([
                 (
                     "name".into(),
                     path.file_name()
@@ -151,8 +173,10 @@ impl Compiler {
                         .into_owned(),
                 ),
             ]),
+            metadata: HashMap::new(),
+            inherited: context.metadata,
         };
-        let result = self.render(&nodes, &mut frame, loader, state, children_only);
+        let result = self.render(&nodes, &mut frame, loader, state, context.children_only);
         state.paths.pop();
         result
     }
@@ -233,19 +257,30 @@ impl Compiler {
             "let" | "set" => &[],
             "log" => &["msg"],
             "if" | "ifn" => &["lhs", "rhs"],
-            "mount" | "import" => &["path"],
+            "mount" => &["path", "openat", "rename"],
+            "import" => &["path", "openat"],
+            "ifr" => &["str", "pattern"],
+            "insert" => &["get"],
             _ => return Err(fail(&format!("unknown macro '{name}'"))),
         };
         if !matches!(macro_name, "let" | "set")
-            && (attrs.len() != allowed.len()
+            && (allowed
+                .iter()
+                .filter(|key| !matches!(**key, "openat" | "rename"))
+                .any(|key| !attrs.iter().any(|(name, _)| name == key))
                 || attrs.iter().any(|(k, _)| !allowed.contains(&k.as_str())))
         {
             return Err(fail(&format!(
                 "{name} requires attributes {}",
-                allowed.join(", ")
+                allowed
+                    .iter()
+                    .copied()
+                    .filter(|key| !matches!(*key, "openat" | "rename"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )));
         }
-        if !matches!(macro_name, "if" | "ifn")
+        if !matches!(macro_name, "if" | "ifn" | "ifr")
             && children
                 .iter()
                 .any(|n| !matches!(&n.kind, Kind::Raw(s) if s.trim().is_empty()))
@@ -262,7 +297,14 @@ impl Compiler {
         }
         let values = attrs
             .iter()
-            .map(|(k, v)| Ok((k.clone(), self.expand(v, frame, node.line)?)))
+            .map(|(k, v)| {
+                let value = if (macro_name == "ifr" && k == "pattern") || macro_name == "insert" {
+                    v.clone()
+                } else {
+                    self.expand(v, frame, node.line)?
+                };
+                Ok((k.clone(), value))
+            })
             .collect::<Result<HashMap<_, _>, CompileError>>()?;
         match macro_name {
             "log" => state.logs.push(CompileLog {
@@ -275,7 +317,53 @@ impl Compiler {
                     out.push_str(&self.render(children, frame, loader, state, false)?);
                 }
             }
+            "ifr" => {
+                let regex = RegexBuilder::new(&values["pattern"])
+                    .size_limit(10 * 1024 * 1024)
+                    .dfa_size_limit(2 * 1024 * 1024)
+                    .build()
+                    .map_err(|e| fail(&format!("invalid regex: {e}")))?;
+                if regex.is_match(&values["str"]) {
+                    out.push_str(&self.render(children, frame, loader, state, false)?);
+                }
+            }
+            "insert" => {
+                let value = self.lookup(&values["get"], frame, node.line)?;
+                if !value.chars().all(is_xml_char) {
+                    return Err(fail(
+                        "insert value contains a character forbidden by XML 1.0",
+                    ));
+                }
+                out.push_str(
+                    &value
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;"),
+                );
+            }
             "mount" | "import" => {
+                let rename = values.get("rename").cloned();
+                if let Some(name) = &rename
+                    && !valid_root_name(name)
+                {
+                    return Err(fail(&format!(
+                        "invalid mount rename '{name}': expected an ordinary XML QName"
+                    )));
+                }
+                let inherit = match values.get("openat").map(String::as_str) {
+                    None | Some("self") => false,
+                    Some("parent") => true,
+                    Some(other) => {
+                        return Err(fail(&format!(
+                            "invalid openat '{other}': expected self or parent"
+                        )));
+                    }
+                };
+                let metadata = if inherit {
+                    frame.effective_metadata()
+                } else {
+                    HashMap::new()
+                };
                 let path = normalize(
                     &frame
                         .path
@@ -285,7 +373,17 @@ impl Compiler {
                 );
                 let source = loader(&path)
                     .map_err(|e| fail(&format!("cannot load {}: {e}", path.display())))?;
-                out.push_str(&self.file(&path, &source, loader, state, macro_name == "import")?);
+                out.push_str(&self.file(
+                    &path,
+                    &source,
+                    loader,
+                    state,
+                    IncludeContext {
+                        children_only: macro_name == "import",
+                        metadata,
+                        rename,
+                    },
+                )?);
             }
             _ => unreachable!(),
         }
@@ -333,14 +431,15 @@ impl Compiler {
                 ));
             }
             let value = self.expand(value, frame, line)?;
+            let effective = frame.inherited.get(name).unwrap_or(&value);
             if metadata
-                && ((name == "version" && value != "adaptive")
-                    || (name == "warnings" && value != "strict"))
+                && ((name == "version" && effective != "adaptive")
+                    || (name == "warnings" && effective != "strict"))
             {
                 return Err(error(
                     frame.path,
                     line,
-                    &format!("unsupported {name} mode '{value}'"),
+                    &format!("unsupported {name} mode '{effective}'"),
                 ));
             }
             let map = if metadata {
@@ -358,6 +457,26 @@ impl Compiler {
             map.insert(name.clone(), value);
         }
         Ok(())
+    }
+    fn lookup<'a>(
+        &'a self,
+        name: &str,
+        frame: &'a Frame<'_>,
+        line: usize,
+    ) -> Result<&'a str, CompileError> {
+        if !valid_name(name) {
+            return Err(error(frame.path, line, "invalid variable reference"));
+        }
+        match name.split_once(':') {
+            None => frame.locals.get(name),
+            Some(("file", key)) => frame.physical.get(key),
+            Some(("meta", key)) => frame.inherited.get(key).or_else(|| frame.metadata.get(key)),
+            Some(("sys", key)) => self.sys.get(key),
+            Some(("env", key)) => self.env.get(&env_key(key)),
+            _ => None,
+        }
+        .map(String::as_str)
+        .ok_or_else(|| error(frame.path, line, &format!("undefined variable '${name}'")))
     }
     fn expand(&self, value: &str, frame: &Frame<'_>, line: usize) -> Result<String, CompileError> {
         let mut out = String::new();
@@ -377,20 +496,16 @@ impl Compiler {
             if !valid_name(name) {
                 return Err(error(frame.path, line, "invalid variable reference"));
             }
-            let value = match name.split_once(':') {
-                None => frame.locals.get(name),
-                Some(("file", key)) => frame.metadata.get(key),
-                Some(("sys", key)) => self.sys.get(key),
-                Some(("env", key)) => self.env.get(&env_key(key)),
-                _ => None,
-            }
-            .ok_or_else(|| error(frame.path, line, &format!("undefined variable '${name}'")))?;
+            let value = self.lookup(name, frame, line)?;
             out.push_str(value);
             rest = &rest[end..];
         }
         out.push_str(rest);
         Ok(out)
     }
+}
+fn is_xml_char(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
 }
 fn env_key(name: &str) -> String {
     if cfg!(windows) {
@@ -434,7 +549,73 @@ struct RunState {
 struct Frame<'a> {
     path: &'a Path,
     locals: HashMap<String, String>,
+    physical: HashMap<String, String>,
     metadata: HashMap<String, String>,
+    inherited: HashMap<String, String>,
+}
+impl Frame<'_> {
+    fn effective_metadata(&self) -> HashMap<String, String> {
+        let mut metadata = self.metadata.clone();
+        metadata.extend(self.inherited.clone());
+        metadata
+    }
+}
+#[derive(Default)]
+struct IncludeContext {
+    children_only: bool,
+    metadata: HashMap<String, String>,
+    rename: Option<String>,
+}
+
+/// Replace only name spans, never serialize attributes or rewrite descendants.
+/// 仅替换已解析根的名称区间，不重新序列化属性，也不改写后代。
+fn rename_root(nodes: &mut [Node], replacement: &str) {
+    for node in nodes {
+        if let Kind::Element {
+            name, open, close, ..
+        } = &mut node.kind
+        {
+            open.replace_range(1..1 + name.len(), replacement);
+            if !close.is_empty() {
+                close.replace_range(2..2 + name.len(), replacement);
+            }
+            *name = replacement.into();
+            return;
+        }
+    }
+}
+
+fn valid_root_name(name: &str) -> bool {
+    let mut parts = name.split(':');
+    let first = parts.next().unwrap_or_default();
+    if !valid_ncname(first) {
+        return false;
+    }
+    match parts.next() {
+        None => true,
+        Some(local) => {
+            !matches!(first, "xmlsquish" | "xmlns") && valid_ncname(local) && parts.next().is_none()
+        }
+    }
+}
+
+fn valid_ncname(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(is_name_start)
+        && chars.all(|c| {
+            is_name_start(c)
+                || matches!(c, '-' | '.' | '0'..='9' | '\u{b7}' | '\u{300}'..='\u{36f}' | '\u{203f}'..='\u{2040}')
+        })
+}
+
+// XML 1.0 Fifth Edition NameStartChar, excluding colon for NCName.
+// XML 1.0 第五版名称首字符；NCName 不允许冒号。
+fn is_name_start(c: char) -> bool {
+    matches!(c, 'A'..='Z' | '_' | 'a'..='z' | '\u{c0}'..='\u{d6}'
+        | '\u{d8}'..='\u{f6}' | '\u{f8}'..='\u{2ff}' | '\u{370}'..='\u{37d}'
+        | '\u{37f}'..='\u{1fff}' | '\u{200c}'..='\u{200d}' | '\u{2070}'..='\u{218f}'
+        | '\u{2c00}'..='\u{2fef}' | '\u{3001}'..='\u{d7ff}' | '\u{f900}'..='\u{fdcf}'
+        | '\u{fdf0}'..='\u{fffd}' | '\u{10000}'..='\u{effff}')
 }
 struct Node {
     line: usize,
@@ -615,7 +796,7 @@ mod tests {
                 .contains("duplicate")
         );
         assert!(
-            compile("<?xmlsquish name='other'?><r/>")
+            compile("<?xmlsquish name='other'?><?xmlsquish name='again'?><r/>")
                 .unwrap_err()
                 .message
                 .contains("duplicate")
@@ -679,7 +860,7 @@ mod tests {
     #[test]
     fn snapshot_and_metadata_expansion() {
         let c = Compiler::new();
-        let s = "<?xmlsquish date='$sys:time'?><r><xmlsquish:log msg='$file:date'/><xmlsquish:log msg='$$literal'/></r>";
+        let s = "<?xmlsquish date='$sys:time'?><r><xmlsquish:log msg='$meta:date'/><xmlsquish:log msg='$$literal'/></r>";
         let a = c
             .compile(Path::new("p.xml"), s, |_| unreachable!())
             .unwrap();
@@ -725,7 +906,7 @@ mod tests {
     }
     #[test]
     fn pragma_modes_are_explicit_and_fake_targets_do_not_execute() {
-        let r = compile("<?xmlsquish version='adaptive' warnings='strict'?><?xmlsquish-other invalid='$missing'?><r><xmlsquish:log msg='$file:version/$file:warnings'/></r>").unwrap();
+        let r = compile("<?xmlsquish version='adaptive' warnings='strict'?><?xmlsquish-other invalid='$missing'?><r><xmlsquish:log msg='$meta:version/$meta:warnings'/></r>").unwrap();
         assert_eq!(r.logs[0].message, "adaptive/strict");
         for attr in ["version='future'", "warnings='ignore'"] {
             assert!(
@@ -844,5 +1025,213 @@ mod tests {
         } else {
             assert!(result.is_err());
         }
+    }
+    #[test]
+    fn metadata_and_physical_file_namespaces_are_separate() {
+        let r=compile("<?xmlsquish name='logical' author='klee'?><r><xmlsquish:log msg='$file:name/$meta:name/$meta:author'/></r>").unwrap();
+        assert_eq!(r.logs[0].message, "prompt.xml/logical/klee");
+        assert!(
+            compile("<?xmlsquish author='klee'?><r><xmlsquish:log msg='$file:author'/></r>")
+                .is_err()
+        );
+    }
+    #[test]
+    fn inherited_metadata_wins_but_local_duplicate_definitions_still_fail() {
+        let parent = "<?xmlsquish owner='parent' warnings='strict'?><r><xmlsquish:mount path='child.xml' openat='parent'/></r>";
+        let child = "<?xmlsquish owner='child' warnings='ignored' seen='$meta:owner' local='childonly'?><c><xmlsquish:log msg='$meta:owner/$meta:seen/$meta:local/$file:name'/></c>";
+        let r = Compiler::new()
+            .compile(Path::new("parent.xml"), parent, |_| Ok(child.into()))
+            .unwrap();
+        assert_eq!(r.logs[0].message, "parent/parent/childonly/child.xml");
+        let child = "<?xmlsquish owner='child'?><?xmlsquish owner='again'?><c/>";
+        assert!(
+            Compiler::new()
+                .compile(Path::new("parent.xml"), parent, |_| Ok(child.into()))
+                .unwrap_err()
+                .message
+                .contains("duplicate")
+        );
+    }
+    #[test]
+    fn inheritance_is_per_edge_and_sibling_local() {
+        let parent = "<?xmlsquish owner='parent'?><r><xmlsquish:import path='sub/child.xml' openat='parent'/><xmlsquish:mount path='sibling.xml'/></r>";
+        let r=Compiler::new().compile(Path::new("base/parent.xml"),parent, |path| {
+            let source=match path.to_str().unwrap().replace('\\', "/").as_str() {
+                "base/sub/child.xml" => "<?xmlsquish owner='child'?><c><xmlsquish:mount path='grand.xml'/><xmlsquish:mount path='grand.xml' openat='parent'/><xmlsquish:mount path='grand.xml' openat='self'/></c>",
+                "base/sub/grand.xml" => "<?xmlsquish owner='grand'?><g><xmlsquish:log msg='$meta:owner/$file:name'/></g>",
+                "base/sibling.xml" => "<?xmlsquish owner='sibling'?><s><xmlsquish:log msg='$meta:owner'/></s>",
+                other=>panic!("unexpected path {other}"),
+            }; Ok(source.into())
+        }).unwrap();
+        assert_eq!(
+            r.logs
+                .iter()
+                .map(|l| l.message.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "grand/grand.xml",
+                "parent/grand.xml",
+                "grand/grand.xml",
+                "sibling"
+            ]
+        );
+        assert_eq!(r.output, "<r><g></g><g></g><g></g><s></s></r>");
+    }
+    #[test]
+    fn regex_search_anchors_errors_and_lazy_children() {
+        let r=compile("<r><xmlsquish:let value='abc123'/><xmlsquish:ifr str='$value' pattern='[0-9]+$'><yes/></xmlsquish:ifr><xmlsquish:ifr str='$value' pattern='^[0-9]+$'><xmlsquish:mount path='$missing'/></xmlsquish:ifr></r>").unwrap();
+        assert_eq!(r.output, "<r><yes/></r>");
+        let e = compile("<r>\n<xmlsquish:ifr str='a' pattern='['/></r>").unwrap_err();
+        assert_eq!(e.line, 2);
+        assert!(e.message.contains("invalid regex"));
+        assert!(compile("<r><xmlsquish:ifr str='x'/></r>").is_err());
+        assert!(
+            compile("<r><xmlsquish:mount path='a.xml' openat='bad'/></r>")
+                .unwrap_err()
+                .message
+                .contains("openat")
+        );
+    }
+    #[test]
+    fn insert_outputs_escaped_nonrecursive_text_and_requires_a_reference() {
+        let r=compile("<?xmlsquish text='&lt;xmlsquish:log msg=&quot;hello&quot;/&gt;&amp;'?><r><xmlsquish:let x='$$missing'/><xmlsquish:insert get='meta:text'/><xmlsquish:insert get='x'/></r>").unwrap();
+        assert_eq!(
+            r.output,
+            "<r>&lt;xmlsquish:log msg=\"hello\"/&gt;&amp;$missing</r>"
+        );
+        assert!(r.logs.is_empty());
+        for get in ["missing", "$x", "meta:absent"] {
+            assert!(compile(&format!("<r><xmlsquish:insert get='{get}'/></r>")).is_err());
+        }
+        let c = Compiler {
+            sys: HashMap::new(),
+            env: HashMap::from([(env_key("INVALID"), "\0".into())]),
+        };
+        assert!(
+            c.compile(
+                Path::new("p.xml"),
+                "<r><xmlsquish:insert get='env:INVALID'/></r>",
+                |_| unreachable!()
+            )
+            .unwrap_err()
+            .message
+            .contains("XML 1.0")
+        );
+    }
+    #[test]
+    fn missing_include_path_diagnostic_does_not_require_optional_openat() {
+        for macro_name in ["mount", "import"] {
+            let e = compile(&format!("<r><xmlsquish:{macro_name}/></r>")).unwrap_err();
+            assert_eq!(
+                e.message,
+                format!("xmlsquish:{macro_name} requires attributes path")
+            );
+        }
+    }
+
+    #[test]
+    fn mount_rename_changes_only_root_name_spans() {
+        let child = "<?xmlsquish author='child'?><old  a = 'old' >old<old/>\n<xmlsquish:log msg='$file:name'/></old >";
+        let r = Compiler::new().compile(
+            Path::new("main.xml"),
+            "<r><xmlsquish:mount path='child.xml' rename='Persona'/><xmlsquish:mount path='child.xml'/></r>",
+            |_| Ok(child.into()),
+        ).unwrap();
+        assert_eq!(
+            r.output,
+            "<r><Persona  a = 'old' >old<old/>\n</Persona ><old  a = 'old' >old<old/>\n</old ></r>"
+        );
+        assert_eq!(
+            r.logs
+                .iter()
+                .map(|l| l.message.as_str())
+                .collect::<Vec<_>>(),
+            ["child.xml", "child.xml"]
+        );
+    }
+
+    #[test]
+    fn mount_rename_supports_empty_unicode_and_qualified_roots() {
+        for replacement in ["New", "角色", "p:New", "e\u{301}"] {
+            let r = Compiler::new()
+                .compile(
+                    Path::new("main.xml"),
+                    &format!("<r><xmlsquish:mount path='child.xml' rename='{replacement}'/></r>"),
+                    |_| Ok("<旧 xmlns:p='urn:test' a=\"旧\" />".into()),
+                )
+                .unwrap();
+            assert_eq!(
+                r.output,
+                format!("<r><{replacement} xmlns:p='urn:test' a=\"旧\" /></r>")
+            );
+        }
+    }
+
+    #[test]
+    fn mount_rename_accepts_bom_from_public_api_loaders() {
+        for child in ["\u{feff}<旧/>", "\u{feff}<旧></旧>"] {
+            let r = Compiler::new()
+                .compile(
+                    Path::new("main.xml"),
+                    "\u{feff}<r><xmlsquish:mount path='child.xml' rename='New'/></r>",
+                    |_| Ok(child.into()),
+                )
+                .unwrap();
+            assert!(matches!(
+                r.output.as_str(),
+                "<r><New/></r>" | "<r><New></New></r>"
+            ));
+        }
+    }
+
+    #[test]
+    fn mount_rename_uses_caller_variables_with_parent_metadata_and_nested_mounts() {
+        let r = Compiler::new().compile(
+            Path::new("main.xml"),
+            "<?xmlsquish tag='Outer' author='parent'?><r><xmlsquish:mount path='child.xml' rename='$meta:tag' openat='parent'/></r>",
+            |path| match path.to_str().unwrap() {
+                "child.xml" => Ok("<?xmlsquish tag='Ignored' author='child'?><old><xmlsquish:let tag='Inner'/><xmlsquish:insert get='meta:author'/><xmlsquish:mount path='leaf.xml' rename='$tag'/></old>".into()),
+                "leaf.xml" => Ok("<leaf/>".into()),
+                _ => unreachable!(),
+            },
+        ).unwrap();
+        assert_eq!(r.output, "<r><Outer>parent<Inner/></Outer></r>");
+    }
+
+    #[test]
+    fn invalid_rename_is_source_located_and_never_loads_a_file() {
+        for name in [
+            "",
+            "1root",
+            "bad name",
+            "a/b",
+            "a&gt;b",
+            ":a",
+            "a:",
+            "a:b:c",
+            "xmlsquish:let",
+            "xmlns:tag",
+            "\u{300}a",
+            "\u{f0000}",
+        ] {
+            let e = Compiler::new()
+                .compile(
+                    Path::new("main.xml"),
+                    &format!("<r>\n<xmlsquish:mount path='child.xml' rename='{name}'/></r>"),
+                    |_| panic!("invalid name must fail before loading"),
+                )
+                .unwrap_err();
+            assert_eq!(e.path, Path::new("main.xml"));
+            assert_eq!(e.line, 2);
+            assert!(e.message.contains("rename"), "{e}");
+        }
+        assert!(compile("<r><xmlsquish:import path='child.xml' rename='New'/></r>").is_err());
+        assert!(
+            compile("<r><xmlsquish:mount path='child.xml' rename='$missing'/></r>")
+                .unwrap_err()
+                .message
+                .contains("undefined")
+        );
+        assert_eq!(compile("<r><xmlsquish:if lhs='a' rhs='b'><xmlsquish:mount path='missing.xml' rename='bad name'/></xmlsquish:if></r>").unwrap().output, "<r></r>");
     }
 }

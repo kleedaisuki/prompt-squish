@@ -1,0 +1,5 @@
+<?xmlsquish author="leaf-author"?>
+<leaf>
+    <author><xmlsquish:insert get="meta:author"/></author>
+    <source><xmlsquish:insert get="file:name"/></source>
+</leaf>
