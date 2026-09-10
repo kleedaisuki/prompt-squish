@@ -1,0 +1,5 @@
+<tasks>
+  <xmlsquish:ifr str="$file:name" pattern="^tasks\.xml$">
+    <task>Explain the trade-offs.</task>
+  </xmlsquish:ifr>
+</tasks>

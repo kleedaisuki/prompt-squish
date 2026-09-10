@@ -1,0 +1,6 @@
+<?xmlsquish audience="everyone"?>
+<role>
+  <xmlsquish:let voice="clear &amp; kind"/>
+  <audience><xmlsquish:insert get="meta:audience"/></audience>
+  <voice><xmlsquish:insert get="voice"/></voice>
+</role>

@@ -1,0 +1,39 @@
+{
+  "files": {
+    "persona.xml": "<?xmlsquish audience=\"everyone\"?>\n<role>\n  <xmlsquish:let voice=\"clear &amp; kind\"/>\n  <audience><xmlsquish:insert get=\"meta:audience\"/></audience>\n  <voice><xmlsquish:insert get=\"voice\"/></voice>\n</role>\n",
+    "tasks.xml": "<tasks>\n  <xmlsquish:ifr str=\"$file:name\" pattern=\"^tasks\\.xml$\">\n    <task>Explain the trade-offs.</task>\n  </xmlsquish:ifr>\n</tasks>\n"
+  },
+  "scenarios": {
+    "parent": {
+      "source": "<?xmlsquish audience=\"researchers\"?>\n<prompt>\n  <xmlsquish:mount path=\"persona.xml\" openat=\"parent\" rename=\"Persona\"/>\n  <xmlsquish:import path=\"tasks.xml\"/>\n</prompt>\n",
+      "intermediate": "\n<prompt>\n  <Persona>\n  \n  <audience>researchers</audience>\n  <voice>clear &amp; kind</voice>\n</Persona>\n  \n  \n    <task>Explain the trade-offs.</task>\n  \n\n</prompt>\n",
+      "output": "<prompt> <Persona> <audience> researchers </audience> <voice> clear &amp; kind </voice> </Persona> <task> Explain the trade-offs. </task> </prompt>",
+      "metrics": {
+        "sourceTokens": 52,
+        "irTokens": 51,
+        "finalTokens": 43,
+        "finalBytes": 147,
+        "dependencyLoads": 2,
+        "uniqueDeps": 2,
+        "tokensSaved": 8,
+        "savingsPercent": 15.69
+      }
+    },
+    "self": {
+      "source": "<?xmlsquish audience=\"researchers\"?>\n<prompt>\n  <xmlsquish:mount path=\"persona.xml\" openat=\"self\" rename=\"Persona\"/>\n  <xmlsquish:import path=\"tasks.xml\"/>\n</prompt>\n",
+      "intermediate": "\n<prompt>\n  <Persona>\n  \n  <audience>everyone</audience>\n  <voice>clear &amp; kind</voice>\n</Persona>\n  \n  \n    <task>Explain the trade-offs.</task>\n  \n\n</prompt>\n",
+      "output": "<prompt> <Persona> <audience> everyone </audience> <voice> clear &amp; kind </voice> </Persona> <task> Explain the trade-offs. </task> </prompt>",
+      "metrics": {
+        "sourceTokens": 52,
+        "irTokens": 50,
+        "finalTokens": 43,
+        "finalBytes": 144,
+        "dependencyLoads": 2,
+        "uniqueDeps": 2,
+        "tokensSaved": 7,
+        "savingsPercent": 14
+      }
+    }
+  },
+  "diagnostic": "error[compile]: undefined variable '$voice'\n --> broken.xml:2\n   |\n 2 |   <xmlsquish:insert get=\"voice\"/>\n note: while compiling agent.xml"
+}

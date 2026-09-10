@@ -1,151 +1,446 @@
 export const locales = ["zh-CN", "en"] as const;
 export type Locale = (typeof locales)[number];
 
-type Feature = { title: string; body: string; eyebrow: string };
-type State = { code: string; name: string; body: string };
-
+type Capability = { title: string; body: string; code: string };
+type FrameField = { name: string; title: string; body: string; sample: string };
 type Messages = {
   meta: { title: string; description: string };
-  nav: { how: string; cli: string; stats: string; github: string; language: string };
-  hero: { badge: string; title: string; lead: string; primary: string; secondary: string; footnote: string; warning: string };
-  transform: { before: string; after: string; caption: string };
-  principles: { eyebrow: string; title: string; intro: string; items: Feature[] };
-  fsm: { eyebrow: string; title: string; intro: string; states: State[]; transition: string };
-  cli: { eyebrow: string; title: string; intro: string; install: string; run: string; note: string };
-  stats: { eyebrow: string; title: string; intro: string; labels: string[]; values: string[]; note: string };
-  footer: { tagline: string; source: string; style: string; license: string; notices: string };
+  nav: {
+    build: string;
+    model: string;
+    cli: string;
+    github: string;
+    language: string;
+    label: string;
+  };
+  hero: {
+    badge: string;
+    title: string;
+    accent: string;
+    lead: string;
+    primary: string;
+    secondary: string;
+    footnote: string;
+    source: string;
+    compile: string;
+    artifact: string;
+    caption: string;
+  };
+  journey: {
+    steps: { label: string; title: string; body: string }[];
+    note: string;
+  };
+  build: {
+    eyebrow: string;
+    title: string;
+    intro: string;
+    label: string;
+    parent: string;
+    self: string;
+    proof: string;
+    resultParent: string;
+    resultSelf: string;
+    tabLabel: string;
+    noScript: string;
+    source: string;
+    intermediate: string;
+    output: string;
+    copy: string;
+    copied: string;
+    copyFailed: string;
+  };
+  model: {
+    eyebrow: string;
+    title: string;
+    intro: string;
+    parent: string;
+    child: string;
+    inherited: string;
+    physical: string;
+    note: string;
+    fields: FrameField[];
+  };
+  capabilities: { eyebrow: string; title: string; items: Capability[] };
+  cli: {
+    eyebrow: string;
+    title: string;
+    intro: string;
+    install: string;
+    inspect: string;
+    optimize: string;
+    color: string;
+    note: string;
+    diagnosticTitle: string;
+    diagnosticBody: string;
+  };
+  stats: {
+    eyebrow: string;
+    title: string;
+    intro: string;
+    source: string;
+    ir: string;
+    final: string;
+    saved: string;
+    dependencies: string;
+    files: string;
+    note: string;
+  };
+  limits: {
+    title: string;
+    body: string;
+    details: string;
+    engine: string;
+    engineBody: string;
+    docs: string;
+  };
+  footer: {
+    tagline: string;
+    source: string;
+    style: string;
+    license: string;
+    notices: string;
+  };
   theme: { label: string; auto: string; light: string; dark: string };
 };
 
-const zh = {
+const zh: Messages = {
   meta: {
-    title: "xmlsquish — 为 Agent 压紧 XML 提示词",
-    description: "先编译 XML 提示词宏，再用 Rust 有限状态机压缩布局空白。",
+    title: "xmlsquish — XML 提示词构建系统",
+    description:
+      "把提示词组织成多文件源码，通过宏、独立文件环境与显式元数据继承，构建可检查的中间表示和紧凑的最终产物。",
   },
-  nav: { how: "原理", cli: "命令行", stats: "统计", github: "GitHub", language: "English" },
+  nav: {
+    build: "看一次构建",
+    model: "环境与继承",
+    cli: "开始使用",
+    github: "GitHub",
+    language: "English",
+    label: "主要导航",
+  },
   hero: {
-    badge: "Rust 2024 · 语义编译 + FSM",
-    title: "可读地写，紧凑地喂给 Agent。",
-    lead: "xmlsquish 递归处理 XML 提示词，压缩布局空白，并在标签与标签、标签与单词、单词与标签之间保留且只保留一个空格。",
-    primary: "查看命令行用法",
-    secondary: "理解状态机",
-    footnote: "输入保持不变；-I 生成 .i.xml，默认 -O 生成 .o.xml。",
-    warning: "它不是保持 XML 语义的通用压缩器：会改写普通字符数据中的空白，可能改变混合内容，且不遵守 xml:space=\"preserve\"。请只处理已确认空白是布局噪声的提示词。",
+    badge: "XML PROMPT BUILD SYSTEM",
+    title: "提示词，也值得",
+    accent: "好好构建。",
+    lead: "拆成文件，组合内容，显式传递上下文。xmlsquish 把可维护的 XML 源码，构建成给 Agent 的最终提示词。压紧空白，只是最后一步。",
+    primary: "看一次真实构建",
+    secondary: "安装 CLI",
+    footnote: "Rust 2024 · 源文件不改写 · 编译产物可检查",
+    source: "组织源码",
+    compile: "解析与组合",
+    artifact: "交付产物",
+    caption: "3 份源码 → 1 份提示词。不是把一段 XML 的换行删掉。",
   },
-  transform: {
-    before: "<role>\n  You are a careful agent.\n</role>\n<task>\n  Summarize this.\n</task>",
-    after: "<role> You are a careful agent. </role> <task> Summarize this. </task>",
-    caption: "回车、换行、制表符与空格归并为词法单元边界上的一个空格。",
+  journey: {
+    steps: [
+      {
+        label: "01 / AUTHOR",
+        title: "按职责拆分",
+        body: "Persona、任务与规则各自维护；用 mount / import 组合，而不是复制粘贴。",
+      },
+      {
+        label: "02 / COMPILE",
+        title: "展开成可检查的 XML",
+        body: "执行条件与宏、合并元数据。-I 停在中间表示（Intermediate Representation, IR）。",
+      },
+      {
+        label: "03 / DELIVER",
+        title: "再生成紧凑产物",
+        body: "默认 -O 规范化空白，写出 .o.xml；成功后清理对应 .i.xml。",
+      },
+    ],
+    note: "SOURCE → SEMANTICS → ARTIFACT",
   },
-  principles: {
-    eyebrow: "做得少，做得准",
-    title: "为提示词管线而设计",
-    intro: "先消除编译期宏、注释与元信息，再规范化普通字符数据的空白；它不是 XML 信息集压缩器。",
+  build: {
+    eyebrow: "SHOW, DON'T JUST MINIFY",
+    title: "从三个文件，看懂一次构建。",
+    intro:
+      "打开源码，再看展开结果：根变成 Persona，父方 audience 覆盖子默认值，任务脱离包装接入。点击 .i.xml / .o.xml 查看展开和最终结果。",
+    label: "这条 mount 边的元数据策略",
+    parent: "parent · 父方优先",
+    self: "self · 子方独立",
+    proof:
+      "由仓库 Rust CLI 预编译并校验的示例；切换展示已有结果，不在浏览器里运行编译器。",
+    resultParent: "meta:audience = researchers，来自父文件。",
+    resultSelf: "meta:audience = everyone，来自子文件。",
+    tabLabel: "示例源码与构建产物",
+    noScript: "未启用 JavaScript：以下完整列出两种策略的源码与结果。",
+    source: "源码",
+    intermediate: "展开结果 · -I",
+    output: "最终产物 · -O",
+    copy: "复制代码",
+    copied: "已复制",
+    copyFailed: "无法复制，请选中文本",
+  },
+  model: {
+    eyebrow: "EXPLICIT CONTEXT. LOCAL STATE.",
+    title: "传递上下文，不泄漏局部变量。",
+    intro:
+      "每个物理文件拥有独立文件环境（File Frame）。可继承的 meta 与物理身份 file 分开，复用同一份内容也不会混淆它来自哪里。",
+    parent: "父文件 / agent.xml",
+    child: "子文件 / persona.xml",
+    inherited: "父字段覆盖子默认值",
+    physical: "物理身份始终不变",
+    note: "openat 按每条引用边独立决定。省略始终是 self；只有连续显式 parent 边才继续传递合并后的 meta。相对路径仍从当前物理文件解析。",
+    fields: [
+      {
+        name: "locals",
+        title: "局部变量",
+        body: "let 声明，set 更新。条件共享当前文件环境；引用文件不继承或导出这些变量。",
+        sample: "let voice → set voice",
+      },
+      {
+        name: "file",
+        title: "物理身份",
+        body: "name / path / dir 只描述当前物理文件，不能被继承元数据覆盖。",
+        sample: "$file:name = persona.xml",
+      },
+      {
+        name: "meta",
+        title: "可组合的元数据",
+        body: "处理指令（Processing Instruction, PI）定义字段；parent 新增缺失字段、覆盖同名字段。",
+        sample: "$meta:audience = researchers",
+      },
+      {
+        name: "sys / env",
+        title: "运行内快照",
+        body: "系统与环境变量只读，一次编译共享快照；这不是跨运行结果不变的承诺。",
+        sample: "$sys:platform · $env:NAME",
+      },
+    ],
+  },
+  capabilities: {
+    eyebrow: "SMALL LANGUAGE. USEFUL BOUNDARIES.",
+    title: "组合、选择、输出，各司其职。",
     items: [
-      { eyebrow: "确定性", title: "单遍扫描", body: "空白压缩逐字符推进；宏编译在一次运行中共享系统与环境快照，不改写普通内容中的变量。" },
-      { eyebrow: "批处理", title: "路径、目录与通配符", body: "一次接收多个路径；目录递归发现 *.xml，通配符匹配你的现有工作流。" },
-      { eyebrow: "可追踪", title: "输入从不覆盖", body: "每份结果写到对应的 *.o.xml，原始提示词仍是可读、可审阅的事实来源。" },
+      {
+        title: "带根挂载，也能只取内容",
+        body: "mount 保留根，rename 仅重命名接入根；import 去掉根包装，接入其中内容。属性与子树不会被全局文本替换。",
+        code: '<xmlsquish:mount path="persona.xml"\n  rename="Persona"/>\n<xmlsquish:import path="tasks.xml"/>',
+      },
+      {
+        title: "在编译时做选择",
+        body: "if / ifn 比较字符串；ifr 执行正则表达式（regular expression）匹配：str 展开变量，pattern 保持原样。未选分支不加载文件，不执行内部宏。",
+        code: '<xmlsquish:ifr str="$file:name"\n  pattern="^tasks\\.xml$">\n  <task>Explain the trade-offs.</task>\n</xmlsquish:ifr>',
+      },
+      {
+        title: "只有显式 insert 才输出变量",
+        body: "普通文本里的 $name 保持字面值。insert 将变量作为转义后的 XML 文本输出，不重新解析为标签、变量或宏。",
+        code: '<xmlsquish:let text="A &amp; B"/>\n<answer><xmlsquish:insert get="text"/></answer>\n<!-- result: <answer>A &amp; B</answer> -->',
+      },
     ],
-  },
-  fsm: {
-    eyebrow: "机制，而非魔法",
-    title: "先形成 atom，再统一发射",
-    intro: "扫描器把普通字符数据形成 Word atom，把完整 markup 形成 Markup atom；连续空白延迟为候选分隔符，再由相邻 atom 统一决定输出。",
-    states: [
-      { code: "DATA", name: "字符数据", body: "形成 Word atom，并暂存 XML S 空白游程。" },
-      { code: "TAG", name: "标签", body: "属性引号中的 > 不会提前结束标签。" },
-      { code: "COMMENT / CDATA / PI", name: "定界结构", body: "识别各自的结束序列，内部字节原样保留。" },
-      { code: "DOCTYPE", name: "文档类型", body: "跟踪引号、注释、PI 与内部子集方括号深度。" },
-    ],
-    transition: "边界规则：TAG ↔ TAG、TAG ↔ WORD 以及 WORD ↔ TAG，均输出恰好一个空格。",
   },
   cli: {
-    eyebrow: "零仪式批处理",
-    title: "把路径交给它",
-    intro: "传入任意数量的文件、目录或通配符。没有参数时，xmlsquish 会打印帮助信息。",
-    install: "cargo install --path crates/xmlsquish-cli --locked",
-    run: "xmlsquish ./prompts \"templates/*.xml\"",
-    note: "目录递归查找 *.xml，跳过 *.i.xml 与 *.o.xml。-I 只编译；默认 -O 压缩并清理对应中间文件。",
+    eyebrow: "FROM SOURCE TO YOUR WORKFLOW",
+    title: "检查展开结果，再交给 Agent。",
+    intro:
+      "接收文件、目录或 glob。发现阶段跳过 .i.xml / .o.xml，原子替换产物；一个文件失败，不阻止其他独立输入。",
+    install: "从仓库安装",
+    inspect: "只编译，保留中间表示",
+    optimize: "编译并压紧，清理对应中间文件",
+    color: "纯文本诊断，也适合 CI",
+    note: "目录递归发现；源文件保持不变。示例路径对应本仓库 examples/site-demo。",
+    diagnosticTitle: "错误回到源码，而不是一串重复路径。",
+    diagnosticBody:
+      "下面是独立错误用例的真实诊断，显示文件、行号和源码快照；支持 --color auto / always / never。没有精确列号，就不虚构插入符位置。",
   },
   stats: {
-    eyebrow: "每次运行都有账",
-    title: "看见真正省下的内容",
-    intro: "分开观察源文件、编译结果与最终提示词：展开了多少内容，空白优化实际节省多少 Token。",
-    labels: ["Tokenizer 编码", "成功文件数", "主源文件 Token", "编译结果 Token", "最终提示词 Token", "最终 UTF-8 字节", "依赖加载次数", "组装倍率", "优化节省 Token", "相对 IR 的节省率"],
-    values: ["o200k_base", "1", "12", "12", "9", "15", "0", "1.00×", "3", "25.00%"],
-    note: "示例不含外部引用。增长会显示 added，-I 显示未优化；Token 大小不代表质量或实际账单。",
+    eyebrow: "MEASURE THE RIGHT TRANSFORMATION",
+    title: "先分清展开，再谈节省。",
+    intro:
+      "这是上方 parent 示例的真实结果。主文件只是入口，IR 才包含全部组装内容；空白优化以 IR 为基线，不输出误导的负“压缩率”。",
+    source: "主源文件",
+    ir: "已组装 IR",
+    final: "最终提示词",
+    saved: "空白优化节省",
+    dependencies: "引用加载",
+    files: "个不同文件",
+    note: "固定 o200k_base；字节数不含 BOM。增长显示 added，-I 显示未优化。Token 大小不等于模型质量、实际账单或推理速度。",
+  },
+  limits: {
+    title: "有边界，才可依赖。",
+    body: '仅编译可信源：宏可以读取本地文件与环境变量。安全 insert 防止值变成 XML 或宏，不防提示词注入（prompt injection）。-O 会改变普通文本空白，不遵守 xml:space="preserve"。',
+    details: "底层仍是那个严谨的空白状态机",
+    engine: "语义编译在前，FSM 在后。",
+    engineBody:
+      "有限状态机（Finite-State Machine, FSM）仅规范化 XML S 空白，保留剩余 markup 内部字节。它是构建流水线的最后一层，不是整个产品。底层 squish API 仍保留独立词法契约。",
+    docs: "阅读完整语义与边界",
   },
   footer: {
-    tagline: "让 XML 对人友好，对 Agent 也克制。",
-    source: "查看源码",
+    tagline: "让提示词可维护，让产物可交付。",
+    source: "查看源码与示例",
     style: "Built with MoeSegfault Style",
     license: "许可",
     notices: "第三方声明",
   },
   theme: { label: "外观", auto: "跟随系统", light: "浅色", dark: "深色" },
-} satisfies Messages;
+};
 
 const en: Messages = {
   meta: {
-    title: "xmlsquish — Compact XML prompts for agents",
-    description: "Compile XML prompt macros, then compact layout whitespace with a Rust finite-state machine.",
+    title: "xmlsquish — A build system for XML prompts",
+    description:
+      "Compose multi-file XML prompts with macros, isolated file frames, and explicit metadata inheritance. Inspect the expanded IR, then ship a compact artifact.",
   },
-  nav: { how: "How it works", cli: "CLI", stats: "Stats", github: "GitHub", language: "中文" },
+  nav: {
+    build: "See a build",
+    model: "Frames & context",
+    cli: "Get started",
+    github: "GitHub",
+    language: "中文",
+    label: "Main navigation",
+  },
   hero: {
-    badge: "Rust 2024 · compiler + FSM",
-    title: "Write for humans. Feed agents less.",
-    lead: "xmlsquish recursively processes XML prompts, collapsing layout whitespace while keeping exactly one space between tag/tag, tag/word, and word/tag boundaries.",
-    primary: "See the CLI",
-    secondary: "Explore the FSM",
-    footnote: "Sources stay untouched; -I writes .i.xml, while default -O writes .o.xml.",
-    warning: "This is not a semantics-preserving XML minifier. It rewrites ordinary character-data whitespace, may change mixed-content meaning, and does not honor xml:space=\"preserve\". Use it only where that whitespace is known layout noise.",
+    badge: "XML PROMPT BUILD SYSTEM",
+    title: "Your prompts deserve",
+    accent: "a proper build.",
+    lead: "Split files. Compose content. Pass context explicitly. xmlsquish turns maintainable XML source into a finished prompt for your agent. Compacting whitespace is only the last step.",
+    primary: "See a real build",
+    secondary: "Install the CLI",
+    footnote: "Rust 2024 · Sources stay untouched · Inspectable artifacts",
+    source: "Author sources",
+    compile: "Resolve & compose",
+    artifact: "Deliver artifacts",
+    caption: "3 source files → 1 prompt. More than XML with fewer line breaks.",
   },
-  transform: {
-    before: "<role>\n  You are a careful agent.\n</role>\n<task>\n  Summarize this.\n</task>",
-    after: "<role> You are a careful agent. </role> <task> Summarize this. </task>",
-    caption: "Carriage returns, newlines, tabs, and spaces collapse to one separator at lexical-unit boundaries.",
+  journey: {
+    steps: [
+      {
+        label: "01 / AUTHOR",
+        title: "Split by responsibility",
+        body: "Maintain personas, tasks, and rules separately. Compose with mount / import instead of copy-paste.",
+      },
+      {
+        label: "02 / COMPILE",
+        title: "Inspect expanded XML",
+        body: "Evaluate macros and conditions, merge metadata. -I stops at the intermediate representation (IR).",
+      },
+      {
+        label: "03 / DELIVER",
+        title: "Ship a compact artifact",
+        body: "Default -O normalizes whitespace and writes .o.xml, removing its matching .i.xml after success.",
+      },
+    ],
+    note: "SOURCE → SEMANTICS → ARTIFACT",
   },
-  principles: {
-    eyebrow: "Do less, precisely",
-    title: "Made for prompt pipelines",
-    intro: "Compile away macros, comments, and metadata before normalizing ordinary text whitespace. This is not an XML Infoset minifier.",
+  build: {
+    eyebrow: "SHOW, DON'T JUST MINIFY",
+    title: "Three files. One understandable build.",
+    intro:
+      "Read the sources, then inspect the expansion: a root becomes Persona, the parent's audience replaces a child default, and a task is imported without its wrapper. Select .i.xml / .o.xml to see the results.",
+    label: "Metadata policy on this mount edge",
+    parent: "parent · parent wins",
+    self: "self · child stays local",
+    proof:
+      "Precompiled and verified with the repository's Rust CLI. Controls switch recorded results; no compiler runs in your browser.",
+    resultParent: "meta:audience = researchers, from the parent.",
+    resultSelf: "meta:audience = everyone, from the child.",
+    tabLabel: "Example sources and build artifacts",
+    noScript:
+      "JavaScript is disabled: both policies and all sources and outputs are shown below.",
+    source: "Source",
+    intermediate: "Expanded · -I",
+    output: "Final · -O",
+    copy: "Copy code",
+    copied: "Copied",
+    copyFailed: "Copy unavailable; select the text",
+  },
+  model: {
+    eyebrow: "EXPLICIT CONTEXT. LOCAL STATE.",
+    title: "Pass context. Keep locals local.",
+    intro:
+      "Every physical file owns a File Frame. Inheritable meta is separate from physical file identity, so reusing content never obscures where it came from.",
+    parent: "Parent / agent.xml",
+    child: "Child / persona.xml",
+    inherited: "Parent field overrides the child default",
+    physical: "Physical identity never changes",
+    note: "openat is a per-edge decision. Omission always means self; only consecutive explicit parent edges propagate merged meta. Relative paths still resolve from the physical source file.",
+    fields: [
+      {
+        name: "locals",
+        title: "Local variables",
+        body: "Declare with let, update with set. Conditions share the current frame; includes neither inherit nor export locals.",
+        sample: "let voice → set voice",
+      },
+      {
+        name: "file",
+        title: "Physical identity",
+        body: "name / path / dir describe the physical source. Inherited metadata cannot overwrite them.",
+        sample: "$file:name = persona.xml",
+      },
+      {
+        name: "meta",
+        title: "Composable metadata",
+        body: "Processing instructions define fields. parent adds absent fields and wins same-name collisions.",
+        sample: "$meta:audience = researchers",
+      },
+      {
+        name: "sys / env",
+        title: "Per-run snapshots",
+        body: "System and environment values are read-only snapshots shared within a compilation, not a promise of identical output across runs.",
+        sample: "$sys:platform · $env:NAME",
+      },
+    ],
+  },
+  capabilities: {
+    eyebrow: "SMALL LANGUAGE. USEFUL BOUNDARIES.",
+    title: "Compose. Select. Emit. Explicitly.",
     items: [
-      { eyebrow: "Deterministic", title: "One-pass scanning", body: "The squasher advances character by character. Compilation shares system/environment snapshots within a run and leaves payload variables literal." },
-      { eyebrow: "Batch-ready", title: "Paths, folders, and globs", body: "Pass many paths at once. Directories discover *.xml recursively; globs fit into existing workflows." },
-      { eyebrow: "Traceable", title: "Inputs are never replaced", body: "Each result lands in a matching *.o.xml file, leaving readable source prompts as the reviewable source of truth." },
+      {
+        title: "Keep the root. Or just its contents.",
+        body: "mount retains the root; rename changes only that root's name. import inserts its contents without the wrapper. No global replacement of attributes or descendants.",
+        code: zh.capabilities.items[0].code,
+      },
+      {
+        title: "Make choices at compile time.",
+        body: "if / ifn compare strings. ifr matches a regular expression: str expands variables, pattern stays literal. Unselected branches load no files and execute no inner macros.",
+        code: zh.capabilities.items[1].code,
+      },
+      {
+        title: "Only insert emits a variable.",
+        body: "Ordinary $name text stays literal. insert writes XML-escaped variable text, never reinterpreting it as markup, a reference, or a macro.",
+        code: zh.capabilities.items[2].code,
+      },
     ],
-  },
-  fsm: {
-    eyebrow: "Mechanism, not magic",
-    title: "Form atoms, then emit once",
-    intro: "The scanner forms Word atoms from ordinary character data and complete Markup atoms from structures. It defers whitespace runs, then one emitter joins adjacent atoms.",
-    states: [
-      { code: "DATA", name: "Character data", body: "Form Word atoms and defer XML S whitespace runs." },
-      { code: "TAG", name: "Tag", body: "A > inside a quoted attribute does not end the tag." },
-      { code: "COMMENT / CDATA / PI", name: "Delimited structures", body: "Recognize each terminator and preserve interior bytes verbatim." },
-      { code: "DOCTYPE", name: "Document type", body: "Track quotes, comments, PIs, and internal-subset bracket depth." },
-    ],
-    transition: "Boundary rule: TAG ↔ TAG, TAG ↔ WORD, and WORD ↔ TAG all emit exactly one space.",
   },
   cli: {
-    eyebrow: "Zero-ceremony batching",
-    title: "Give it paths",
-    intro: "Pass any number of files, directories, or globs. With no arguments, xmlsquish prints its help.",
-    install: "cargo install --path crates/xmlsquish-cli --locked",
-    run: "xmlsquish ./prompts \"templates/*.xml\"",
-    note: "Directories recursively find *.xml, skipping *.i.xml and *.o.xml. -I compiles only; default -O compresses and cleans its intermediate.",
+    eyebrow: "FROM SOURCE TO YOUR WORKFLOW",
+    title: "Inspect the expansion. Then feed your agent.",
+    intro:
+      "Accept files, directories, or globs. Discovery skips .i.xml / .o.xml, output replacement is atomic, and one failed file does not stop independent inputs.",
+    install: "Install from a repository checkout",
+    inspect: "Compile only; keep the intermediate",
+    optimize: "Compile, compact, and clean its intermediate",
+    color: "Plain diagnostics, ready for CI",
+    note: "Directories are recursive; sources stay untouched. These paths use examples/site-demo in this repository.",
+    diagnosticTitle: "Errors point to source, not a pile of repeated paths.",
+    diagnosticBody:
+      "This separate failing example shows the physical file, line, and original source snapshot. Choose --color auto / always / never; no caret is invented when a column isn't known.",
   },
   stats: {
-    eyebrow: "Account for every run",
-    title: "See what you actually saved",
-    intro: "Separate source, compiled IR, and final prompt sizes: see assembly growth and the tokens actually saved by whitespace optimization.",
-    labels: ["Tokenizer encoding", "Successful files", "Primary source tokens", "Compiled IR tokens", "Final prompt tokens", "Final UTF-8 bytes", "Dependency loads", "Assembly ratio", "Tokens saved", "Savings against IR"],
-    values: ["o200k_base", "1", "12", "12", "9", "15", "0", "1.00×", "3", "25.00%"],
-    note: "This example has no includes. Growth is reported as added; -I skips optimization. Token size is not quality or actual billing.",
+    eyebrow: "MEASURE THE RIGHT TRANSFORMATION",
+    title: "Assembly growth is not failed compression.",
+    intro:
+      "Actual numbers from the parent example above. The primary file is just an entry point; IR contains the assembled content. Whitespace savings use IR as their baseline.",
+    source: "Primary source",
+    ir: "Assembled IR",
+    final: "Final prompt",
+    saved: "Saved by whitespace optimization",
+    dependencies: "Dependency loads",
+    files: "unique files",
+    note: "Fixed o200k_base; bytes exclude BOM. Growth is reported as added; -I skips optimization. Token size is not model quality, actual billing, or inference speed.",
+  },
+  limits: {
+    title: "Clear boundaries. Fewer surprises.",
+    body: 'Compile trusted sources only: macros can access local files and environment values. Safe insert prevents XML/macro interpretation, not prompt injection. -O changes ordinary text whitespace and does not honor xml:space="preserve".',
+    details: "Under the hood: the same careful whitespace engine",
+    engine: "Semantic compilation first. FSM second.",
+    engineBody:
+      "The finite-state machine (FSM) normalizes XML S whitespace and preserves remaining markup interiors. It is the final layer of the pipeline, not the whole product. The low-level squish API keeps its independent lexical contract.",
+    docs: "Read the full semantics and boundaries",
   },
   footer: {
-    tagline: "Friendly to authors. Frugal for agents.",
-    source: "View source",
+    tagline: "Maintainable sources. Deliverable prompts.",
+    source: "Explore the source & examples",
     style: "Built with MoeSegfault Style",
     license: "License",
     notices: "Third-party notices",

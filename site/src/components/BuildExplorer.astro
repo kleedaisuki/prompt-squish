@@ -1,0 +1,424 @@
+---
+import { Code } from "astro:components";
+import { messages, type Locale } from "../i18n/messages";
+import demo from "../data/build-demo.json";
+
+interface Props {
+  locale: Locale;
+}
+const { locale } = Astro.props;
+const m = messages[locale].build;
+const modes = ["parent", "self"] as const;
+const tabs = [
+  { stage: "source", name: "agent.xml", label: m.source },
+  { stage: "persona", name: "persona.xml", label: m.source },
+  { stage: "tasks", name: "tasks.xml", label: m.source },
+  { stage: "intermediate", name: "agent.i.xml", label: m.intermediate },
+  { stage: "output", name: "agent.o.xml", label: m.output },
+] as const;
+const prefix = `build-explorer-${locale}`;
+function source(
+  mode: (typeof modes)[number],
+  stage: (typeof tabs)[number]["stage"],
+) {
+  if (stage === "persona") return demo.files["persona.xml"];
+  if (stage === "tasks") return demo.files["tasks.xml"];
+  return demo.scenarios[mode][stage];
+}
+---
+
+<build-explorer data-build-explorer data-copy-success={m.copied} data-copy-failure={m.copyFailed}>
+  <div class="explorer-heading">
+    <span class="edge-label">{m.label}</span>
+    <div class="mode-controls" data-enhancement hidden role="group" aria-label={m.label}>
+      {modes.map((mode) => <button type="button" data-mode={mode} aria-pressed={mode === 'parent'}>
+        <span class="mode-dot" aria-hidden="true"></span>{m[mode]}
+      </button>)}
+    </div>
+  </div>
+  <p class="fallback-note" data-fallback>{m.noScript}</p>
+  <div class="result-line" aria-live="polite" aria-atomic="true">
+    <p data-mode-result="parent">{m.resultParent}</p>
+    <p data-mode-result="self">{m.resultSelf}</p>
+  </div>
+  <div class="workspace-controls" data-enhancement hidden>
+    <div class="file-tabs" role="tablist" aria-label={m.tabLabel}>
+      {tabs.map((tab, index) => <button type="button" role="tab" id={`${prefix}-tab-${tab.stage}`}
+        data-example-tab={tab.stage} aria-selected={index === 0} tabindex={index === 0 ? 0 : -1}
+        aria-controls={`${prefix}-parent-${tab.stage}`}>{tab.name}</button>)}
+    </div>
+    <button class="copy-button" type="button" data-copy>{m.copy}<span aria-hidden="true"> ↗</span></button>
+  </div>
+  <span class="copy-status" data-copy-status role="status" aria-live="polite" aria-atomic="true"></span>
+  <div class="code-workspace">
+    {modes.map((mode) => tabs.map((tab) => <section class:list={['code-panel', { 'output-panel': tab.stage === 'output' }]}
+      id={`${prefix}-${mode}-${tab.stage}`} data-code-panel data-stage={tab.stage} data-scenario={mode}
+      data-source={source(mode, tab.stage)}>
+      <header class="code-heading">
+        <h3>{tab.name} <span class="fallback-mode">/ {mode}</span></h3>
+        <span class="stage-label">{tab.label}</span>
+      </header>
+      <Code code={source(mode, tab.stage)} lang="xml" theme="rose-pine" />
+    </section>))}
+  </div>
+  <p class="build-proof"><span aria-hidden="true">✓</span>{m.proof}</p>
+</build-explorer>
+
+<script>
+  class BuildExplorer extends HTMLElement {
+    connectedCallback() {
+      if (this.dataset.ready) return;
+      const tabs = Array.from(
+        this.querySelectorAll<HTMLButtonElement>("[data-example-tab]"),
+      );
+      const modes = Array.from(
+        this.querySelectorAll<HTMLButtonElement>("[data-mode]"),
+      );
+      const panels = Array.from(
+        this.querySelectorAll<HTMLElement>("[data-code-panel]"),
+      );
+      const status = this.querySelector<HTMLElement>("[data-copy-status]");
+      let scenario = "parent";
+      let stage = "source";
+      let revision = 0;
+      const update = () => {
+        revision += 1;
+        if (status) status.textContent = "";
+        for (const panel of panels) {
+          panel.hidden =
+            panel.dataset.scenario !== scenario || panel.dataset.stage !== stage;
+          panel.setAttribute("role", "tabpanel");
+          panel.tabIndex = 0;
+          const tab = tabs.find(
+            (item) => item.dataset.exampleTab === panel.dataset.stage,
+          );
+          if (tab) panel.setAttribute("aria-labelledby", tab.id);
+        }
+        for (const tab of tabs) {
+          const selected = tab.dataset.exampleTab === stage;
+          tab.setAttribute("aria-selected", String(selected));
+          tab.tabIndex = selected ? 0 : -1;
+          const panel = panels.find(
+            (item) =>
+              item.dataset.scenario === scenario &&
+              item.dataset.stage === tab.dataset.exampleTab,
+          );
+          if (panel) tab.setAttribute("aria-controls", panel.id);
+        }
+        for (const mode of modes)
+          mode.setAttribute(
+            "aria-pressed",
+            String(mode.dataset.mode === scenario),
+          );
+        for (const result of this.querySelectorAll<HTMLElement>(
+          "[data-mode-result]",
+        ))
+          result.hidden = result.dataset.modeResult !== scenario;
+      };
+      tabs.forEach((tab, index) => {
+        tab.addEventListener("click", () => {
+          stage = tab.dataset.exampleTab!;
+          update();
+        });
+        tab.addEventListener("keydown", (event) => {
+          let next: number;
+          if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+          else if (event.key === "ArrowLeft")
+            next = (index + tabs.length - 1) % tabs.length;
+          else if (event.key === "Home") next = 0;
+          else if (event.key === "End") next = tabs.length - 1;
+          else return;
+          event.preventDefault();
+          stage = tabs[next].dataset.exampleTab!;
+          update();
+          tabs[next].focus();
+        });
+      });
+      modes.forEach((mode) =>
+        mode.addEventListener("click", () => {
+          scenario = mode.dataset.mode!;
+          update();
+        }),
+      );
+      this.querySelector<HTMLButtonElement>("[data-copy]")?.addEventListener(
+        "click",
+        async () => {
+          const panel = panels.find((item) => !item.hidden);
+          if (!panel || !status) return;
+          const copiedRevision = revision;
+          status.textContent = "";
+          try {
+            // Copy the recorded bytes, not syntax-highlighter DOM / 复制原始记录，不读取高亮 DOM。
+            await navigator.clipboard.writeText(panel.dataset.source ?? "");
+            if (revision === copiedRevision)
+              status.textContent = this.dataset.copySuccess ?? "";
+          } catch {
+            if (revision === copiedRevision)
+              status.textContent = this.dataset.copyFailure ?? "";
+          }
+        },
+      );
+      update();
+      this.dataset.ready = "true";
+      this.querySelectorAll<HTMLElement>("[data-enhancement]").forEach(
+        (control) => {
+          control.hidden = false;
+        },
+      );
+      this.querySelector<HTMLElement>("[data-fallback]")?.setAttribute(
+        "hidden",
+        "",
+      );
+    }
+  }
+  if (!customElements.get("build-explorer"))
+    customElements.define("build-explorer", BuildExplorer);
+</script>
+
+<style>
+  build-explorer {
+    display: block;
+    min-width: 0;
+    padding: 1.35rem;
+    border: 1px solid var(--moe-border, #e4cbbb);
+    border-radius: 1.4rem;
+    background: var(--moe-surface-strong, #fff4e8);
+    color: var(--moe-text, #48372f);
+    box-shadow: 0 18px 45px #5432210a;
+  }
+  build-explorer :global([hidden]) {
+    display: none !important;
+  }
+  .explorer-heading {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+  }
+  .edge-label {
+    font-size: 0.8rem;
+    font-weight: 650;
+    color: var(--moe-text-soft, #705346);
+  }
+  .mode-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    padding: 0.3rem;
+    background: var(--moe-surface-muted, #f1e1d5);
+    border-radius: 0.8rem;
+  }
+  button {
+    font: inherit;
+    cursor: pointer;
+  }
+  .mode-controls button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.55rem 0.8rem;
+    border: 1px solid transparent;
+    border-radius: 0.55rem;
+    background: transparent;
+    color: var(--moe-text-soft, #694e40);
+    font-size: 0.78rem;
+  }
+  .mode-controls button[aria-pressed="true"] {
+    background: var(--moe-accent-wash, #fffaf4);
+    border-color: var(--moe-accent, #dca993);
+    color: var(--moe-accent-strong, #8d3e2c);
+    box-shadow: 0 2px 6px #7443310a;
+  }
+  .mode-dot {
+    width: 0.4rem;
+    height: 0.4rem;
+    background: #ac8e7e;
+    border-radius: 50%;
+  }
+  [aria-pressed="true"] .mode-dot {
+    background: #c96246;
+  }
+  .result-line {
+    margin: 1rem 0;
+    font-size: 0.85rem;
+    color: var(--moe-accent-strong, #835240);
+  }
+  .result-line p {
+    margin: 0.3rem 0;
+  }
+  .fallback-note {
+    font-size: 0.85rem;
+  }
+  .workspace-controls {
+    display: flex;
+    align-items: stretch;
+    gap: 0.7rem;
+    min-width: 0;
+    padding-bottom: 0.7rem;
+  }
+  .file-tabs {
+    display: flex;
+    flex: 1;
+    gap: 0.15rem;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+  .file-tabs button {
+    flex: 0 0 auto;
+    border: 1px solid transparent;
+    border-radius: 0.55rem;
+    padding: 0.65rem 0.7rem;
+    background: transparent;
+    color: var(--moe-text-soft, #786051);
+    font-family: ui-monospace, monospace;
+    font-size: 0.77rem;
+  }
+  .file-tabs button[aria-selected="true"] {
+    color: var(--moe-accent-strong, #8e3d29);
+    background: var(--moe-accent-wash, #f4d8c8);
+    border-color: var(--moe-accent, #e4b7a0);
+  }
+  .copy-button {
+    flex-shrink: 0;
+    align-self: center;
+    padding: 0.55rem 0.7rem;
+    border: 1px solid var(--moe-border, #dcc0ad);
+    border-radius: 0.5rem;
+    background: var(--moe-surface-strong, #fffaf4);
+    color: var(--moe-text-soft, #6b4c3c);
+    font-size: 0.75rem;
+  }
+  button:hover {
+    filter: brightness(0.96);
+  }
+  button:focus-visible,
+  .code-panel:focus-visible {
+    outline: 2px solid #b65438;
+    outline-offset: 3px;
+  }
+  .copy-status {
+    display: block;
+    min-height: 0;
+    font-size: 0.75rem;
+    color: var(--moe-accent-strong, #835240);
+    text-align: right;
+  }
+  .copy-status:not(:empty) {
+    padding: 0 0 0.6rem;
+  }
+  .code-workspace {
+    min-width: 0;
+  }
+  .code-panel {
+    margin: 0 0 1rem;
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid #594339;
+    border-radius: 0.85rem;
+    background: #2c2320;
+    color: #f5e9db;
+  }
+  [data-ready] .code-panel {
+    margin-bottom: 0;
+    min-height: 19rem;
+  }
+  .code-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding: 0.85rem 1rem;
+    border-bottom: 1px solid #594339;
+    background: #362a25;
+  }
+  .code-heading h3 {
+    margin: 0;
+    font-family: ui-monospace, monospace;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: #f0d7c3;
+  }
+  .fallback-mode {
+    color: #baa08d;
+  }
+  [data-ready] .fallback-mode {
+    display: none;
+  }
+  .stage-label {
+    color: #cdb49f;
+    font-size: 0.7rem;
+    text-align: right;
+  }
+  .code-panel :global(pre) {
+    margin: 0;
+    padding: 1.35rem 1rem 1.7rem;
+    max-width: 100%;
+    min-width: 0;
+    overflow-x: auto;
+    background: #2c2320 !important;
+    font-size: 0.8rem;
+    line-height: 1.9;
+    tab-size: 2;
+    scrollbar-width: thin;
+  }
+  .code-panel :global(code) {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  }
+  .output-panel :global(pre) {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .build-proof {
+    display: flex;
+    gap: 0.55rem;
+    margin: 1rem 0 0;
+    max-width: 75ch;
+    font-size: 0.73rem;
+    line-height: 1.7;
+    color: var(--moe-text-soft, #7e6556);
+  }
+  .build-proof span {
+    color: #a1543a;
+  }
+  @media (max-width: 600px) {
+    build-explorer {
+      padding: 0.8rem;
+      border-radius: 1rem;
+    }
+    .explorer-heading {
+      gap: 0.65rem;
+    }
+    .mode-controls {
+      width: 100%;
+    }
+    .mode-controls button {
+      flex: 1;
+      justify-content: center;
+      padding-inline: 0.4rem;
+    }
+    .workspace-controls {
+      flex-wrap: wrap;
+      gap: 0.4rem;
+    }
+    .file-tabs {
+      flex-basis: 100%;
+    }
+    .copy-button {
+      margin-left: auto;
+    }
+    .code-panel :global(pre) {
+      font-size: 0.72rem;
+      padding: 1rem 0.75rem;
+    }
+    [data-ready] .code-panel {
+      min-height: 17rem;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    button {
+      transition: none;
+    }
+  }
+</style>

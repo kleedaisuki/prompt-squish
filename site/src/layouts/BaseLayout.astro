@@ -12,8 +12,8 @@ const canonicalPath = locale === "zh-CN" ? "/" : "/en/";
 const canonical = new URL(canonicalPath, Astro.site);
 const socialImage = new URL("/social-card.png", Astro.site);
 const socialImageAlt = locale === "zh-CN"
-  ? "xmlsquish：压紧 XML 提示词空白，并提供可核验统计"
-  : "xmlsquish: compact XML prompt whitespace with verifiable statistics";
+  ? "xmlsquish：组织多文件 XML 源码，构建可检查的提示词产物"
+  : "xmlsquish: compose multi-file XML sources into inspectable prompt artifacts";
 ---
 
 <!doctype html>
@@ -48,10 +48,12 @@ const socialImageAlt = locale === "zh-CN"
     />
     <script is:inline>
       (() => {
-        const saved = localStorage.getItem("xmlsquish-theme");
-        if (saved === "light" || saved === "dark" || saved === "auto") {
-          document.documentElement.dataset.moeTheme = saved;
-        }
+        try {
+          const saved = localStorage.getItem("xmlsquish-theme");
+          if (saved === "light" || saved === "dark" || saved === "auto") {
+            document.documentElement.dataset.moeTheme = saved;
+          }
+        } catch { /* Storage may be unavailable; the system theme still works. */ }
       })();
     </script>
     <title>{m.meta.title}</title>
@@ -77,7 +79,7 @@ const socialImageAlt = locale === "zh-CN"
     }
 
     body {
-      overflow-x: hidden;
+      margin: 0;
     }
 
     button,

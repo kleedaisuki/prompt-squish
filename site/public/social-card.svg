@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-labelledby="title description">
   <title id="title">xmlsquish</title>
-  <desc id="description">Warm editorial xmlsquish social card with an XML mark and golden sparkle.</desc>
+  <desc id="description">xmlsquish: a build system for XML prompts. Source, compose, build.</desc>
   <defs>
     <linearGradient id="paper" x1="0" y1="0" x2="1200" y2="630" gradientUnits="userSpaceOnUse">
       <stop stop-color="#fffdf8"/>
@@ -23,7 +23,7 @@
     <path d="M399 112c5 32 16 43 48 48-32 5-43 16-48 48-5-32-16-43-48-48 32-5 43-16 48-48Z" fill="#ffca78" stroke="#fff1b8" stroke-width="7"/>
   </g>
   <text x="520" y="270" fill="#26110b" font-family="Georgia, 'Noto Serif SC', serif" font-size="92" font-weight="700" letter-spacing="-4">xmlsquish</text>
-  <text x="525" y="342" fill="#805648" font-family="'Noto Sans SC', system-ui, sans-serif" font-size="34">Less whitespace. Clear accounting.</text>
-  <rect x="522" y="390" width="445" height="66" rx="33" fill="#ffe1cc"/>
-  <text x="555" y="434" fill="#bd4525" font-family="'Cascadia Mono', monospace" font-size="26" font-weight="700">Rust 2024 · hand-rolled FSM</text>
+  <text x="525" y="342" fill="#805648" font-family="'Noto Sans SC', system-ui, sans-serif" font-size="34">Source. Compose. Build.</text>
+  <rect x="522" y="390" width="520" height="66" rx="33" fill="#ffe1cc"/>
+  <text x="555" y="434" fill="#bd4525" font-family="'Cascadia Mono', monospace" font-size="26" font-weight="700">XML prompt build system</text>
 </svg>

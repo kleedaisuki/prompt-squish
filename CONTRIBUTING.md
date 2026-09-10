@@ -106,9 +106,18 @@ npm run check
 npm run build
 # 或一次执行全部站点检查
 npm run test
+npm run demo:check
+npx playwright install chromium
+npm run test:browser
 ```
 
 静态产物位于 `site/dist`，不要提交。简体中文 `/` 与英文 `/en/` 必须保持功能和信息对等；新增用户可见文案时同时更新两种语言。继续使用锁定版本且带 SRI 的 [MoeSegfault Style](https://github.com/kleedaisuki/moesegfault-style)，并检查键盘焦点、明暗主题、窄屏和减少动态效果（reduced motion）。
+
+浏览器回归测试与页面相邻，位于 `site/src/components/LandingPage.test.mjs`，不要另建集中测试目录。Browser regressions stay beside the page component.
+
+网页示例与统计来自 `examples/site-demo`，必须由真实 CLI 验证。`site/src/data/build-demo.json` 是有意提交的展示夹具（fixture），不是手写的性能数字；使用 `npm run demo:generate` 更新，并通过 `demo:check` 核验。`test:browser` 在临时本地 HTTP 服务上检查构建后的页面；设置可选的 `UI_SCREENSHOT_DIR` 可保存视觉检查截图，不要将截图或浏览器缓存提交到仓库。
+
+Site examples and measurements must be verified with the actual CLI. The checked-in `build-demo.json` is an intentional presentation fixture, refreshed by `demo:generate` and checked by `demo:check`, not hand-authored benchmark data. Browser tests serve built pages on a temporary local HTTP server. Optional `UI_SCREENSHOT_DIR` saves visual QA captures; screenshots and browser caches are not source artifacts.
 
 修改 `.github/workflows/pages.yml` 时遵循 [Astro GitHub Pages 指南](https://docs.astro.build/en/guides/deploy/github/)与 [GitHub 自定义工作流文档](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)，不要把密钥或账户相关 DNS 值写入仓库。
 

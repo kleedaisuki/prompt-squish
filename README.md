@@ -222,9 +222,14 @@ npm run dev       # 本地开发服务器
 npm run check     # Astro / TypeScript 检查
 npm run build     # 静态产物：site/dist
 npm run test      # check + build
+npm run demo:check # 使用真实 Rust CLI 校验网页展示结果
+npx playwright install chromium
+npm run test:browser # 双语、主题、移动端、键盘及无 JS 回归
 ```
 
 网站采用固定版本 [MoeSegfault Style](https://github.com/kleedaisuki/moesegfault-style) CSS（含子资源完整性校验，即 Subresource Integrity, SRI），并使用继承该视觉语言的项目 SVG 图标。
+
+首页以多文件提示词构建为主线；`examples/site-demo` 是构建浏览器与统计的共同来源。`site/scripts/build-demo.mjs` 在临时目录用 Rust CLI 生成两种 `openat` 场景及错误诊断，再写入受版本控制的展示数据。网页仅切换预编译结果，不在 JavaScript 中重写或模拟编译器。修改示例后运行 `npm run demo:generate`，再用 `demo:check` 检查漂移。
 
 ### GitHub Pages 首次启用
 
@@ -292,10 +297,15 @@ cargo test --all-features --locked
 cd site
 npm ci
 npm run test
+npm run demo:check
+npx playwright install chromium
+npm run test:browser
 ```
 
 The repository is one Cargo package, `xmlsquish`, with library and binary targets. Ordinary modules separate semantic compilation, lexical squashing, and CLI concerns; the CLI owns the only batch pipeline. The unused application package and its adapter traits have been removed. See [ADR 0004](docs/adr/0004-single-package.md) for the package-name migration and rationale.
 
 The bilingual Astro/TypeScript/React site targets <https://xmlsquish.moesegfault.dev>. GitHub Pages must use **GitHub Actions** as its source; DNS must point the `xmlsquish` CNAME at the repository owner's actual `<username>.github.io`, then the custom domain and HTTPS should be confirmed in Pages settings.
+
+The homepage demonstrates a multi-file prompt build, using `examples/site-demo` as the source of its precompiled explorer and metrics. `demo:generate` runs the real Rust CLI in temporary directories to refresh the checked-in data; `demo:check` detects drift. No compiler is simulated in browser JavaScript. Browser regression tests cover both locales, themes, narrow screens, keyboard controls, exact code copying, and no-JavaScript fallback.
 
 Licensed under [`GPL-3.0-or-later`](LICENSE). The site uses [MoeSegfault Style](https://github.com/kleedaisuki/moesegfault-style), and its project SVG adapts that established visual motif.

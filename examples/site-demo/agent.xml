@@ -1,0 +1,5 @@
+<?xmlsquish audience="researchers"?>
+<prompt>
+  <xmlsquish:mount path="persona.xml" openat="parent" rename="Persona"/>
+  <xmlsquish:import path="tasks.xml"/>
+</prompt>

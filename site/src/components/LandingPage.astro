@@ -1,650 +1,1204 @@
 ---
+import { Code } from "astro:components";
 import ThemeControl from "./ThemeControl";
+import BuildExplorer from "./BuildExplorer.astro";
 import type { Locale } from "../i18n/messages";
 import { messages } from "../i18n/messages";
+import demo from "../data/build-demo.json";
 
 interface Props {
   locale: Locale;
 }
-
 const { locale } = Astro.props;
 const m = messages[locale];
 const languageHref = locale === "zh-CN" ? "/en/" : "/";
-const repoUrl = "https://github.com/kleedaisuki/prompt-squish";
+const repo = "https://github.com/kleedaisuki/prompt-squish";
+const metrics = demo.scenarios.parent.metrics;
+const [diagnosticHeadline, ...diagnosticLines] = demo.diagnostic.split("\n");
+const diagnosticRest = "\n" + diagnosticLines.join("\n");
+const heroCode =
+  '<xmlsquish:mount path="persona.xml"\n  openat="parent" rename="Persona"/>\n<xmlsquish:import path="tasks.xml"/>';
+const commands = [
+  {
+    title: m.cli.install,
+    code: "cargo install --path . --locked",
+  },
+  { title: m.cli.inspect, code: "xmlsquish -I examples/site-demo/agent.xml" },
+  { title: m.cli.optimize, code: "xmlsquish -O examples/site-demo/agent.xml" },
+  {
+    title: m.cli.color,
+    code: "xmlsquish --color never examples/site-demo/agent.xml",
+  },
+];
+const stages = [
+  { label: m.stats.source, value: metrics.sourceTokens, file: "agent.xml" },
+  { label: m.stats.ir, value: metrics.irTokens, file: "agent.i.xml" },
+  { label: m.stats.final, value: metrics.finalTokens, file: "agent.o.xml" },
+];
 ---
 
 <header class="site-header">
-  <div class="moe-container header-inner">
-    <a class="moe-brand-mark" href={locale === "zh-CN" ? "/" : "/en/"} aria-label="xmlsquish">
-      <img class="brand-icon" src="/favicon.svg" alt="" width="44" height="44" />
-      <span class="moe-brand-mark__text">
-        <span class="moe-brand-mark__title">xmlsquish</span>
-        <span class="moe-brand-mark__tagline">prompt whitespace, squished</span>
-      </span>
+  <div class="page-width header-inner">
+    <a class="brand" href={locale === "zh-CN" ? "/" : "/en/"} aria-label="xmlsquish">
+      <img src="/favicon.svg" alt="" width="38" height="38" />
+      <span><strong>xmlsquish</strong><small>source. compose. build.</small></span>
     </a>
-    <nav class="header-nav" aria-label={locale === "zh-CN" ? "主要导航" : "Main navigation"}>
-      <a href="#how">{m.nav.how}</a>
+    <nav class="header-nav" aria-label={m.nav.label}>
+      <a href="#build">{m.nav.build}</a>
+      <a href="#model">{m.nav.model}</a>
       <a href="#cli">{m.nav.cli}</a>
-      <a href="#stats">{m.nav.stats}</a>
-      <a href={repoUrl}>{m.nav.github}<span aria-hidden="true"> ↗</span></a>
     </nav>
     <div class="header-actions">
-      <a class="language-link" href={languageHref} lang={locale === "zh-CN" ? "en" : "zh-CN"} hreflang={locale === "zh-CN" ? "en" : "zh-CN"}>
-        {m.nav.language}
-      </a>
+      <a class="language-link" href={languageHref} lang={locale === "zh-CN" ? "en" : "zh-CN"} hreflang={locale === "zh-CN" ? "en" : "zh-CN"}>{m.nav.language}</a>
       <ThemeControl client:load labels={m.theme} />
+      <a class="github-link" href={repo} aria-label="GitHub"><svg viewBox="0 0 24 24" width="21" height="21" fill="currentColor" aria-hidden="true"><path d="M12 .8a11.4 11.4 0 0 0-3.6 22.2c.6.1.8-.3.8-.6v-2.1c-3.3.7-4-1.4-4-1.4-.5-1.4-1.3-1.8-1.3-1.8-1.1-.8.1-.8.1-.8 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.4-1.3-5.4-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0C17.3 4.7 18.3 5 18.3 5c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.8 5.4-5.4 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A11.4 11.4 0 0 0 12 .8Z"/></svg></a>
     </div>
   </div>
 </header>
 
 <main id="main">
-  <section class="hero moe-container" aria-labelledby="hero-title">
+  <section class="hero page-width" aria-labelledby="hero-title">
     <div class="hero-copy">
-      <span class="moe-badge"><span aria-hidden="true">✦</span>{m.hero.badge}</span>
-      <h1 id="hero-title">{m.hero.title}</h1>
+      <p class="eyebrow"><span class="spark" aria-hidden="true">✦</span> {m.hero.badge}</p>
+      <h1 id="hero-title">{m.hero.title}<em>{m.hero.accent}</em></h1>
       <p class="hero-lead">{m.hero.lead}</p>
-      <div class="moe-cluster hero-actions">
-        <a class="moe-button" href="#cli">{m.hero.primary}<span aria-hidden="true">↓</span></a>
-        <a class="moe-button" data-variant="secondary" href="#how">{m.hero.secondary}</a>
+      <div class="hero-actions">
+        <a class="action primary" href="#build">{m.hero.primary}<span aria-hidden="true">↗</span></a>
+        <a class="action secondary" href="#cli">{m.hero.secondary}<span aria-hidden="true">↓</span></a>
       </div>
-      <p class="hero-footnote"><span aria-hidden="true">✓</span>{m.hero.footnote}</p>
-      <p class="hero-warning"><span aria-hidden="true">!</span>{m.hero.warning}</p>
+      <p class="hero-footnote">{m.hero.footnote}</p>
     </div>
-
-    <figure class="transform-card moe-card">
-      <div class="window-bar" aria-hidden="true">
-        <span></span><span></span><span></span>
-        <code>prompt.xml → prompt.o.xml</code>
+    <figure class="build-graph" aria-label={m.hero.caption}>
+      <div class="graph-toolbar"><span class="graph-dot" aria-hidden="true"></span><code>build / agent.xml</code><span class="graph-status">XML → XML</span></div>
+      <div class="graph-sources">
+        <div class="graph-label"><span>01</span>{m.hero.source}</div>
+        <div class="entry-file"><span class="file-symbol" aria-hidden="true">&lt;/&gt;</span><strong>agent.xml</strong><code>meta:audience</code></div>
+        <div class="file-branches">
+          <div><span aria-hidden="true">├─</span><code>persona.xml</code><small>mount + rename</small></div>
+          <div><span aria-hidden="true">└─</span><code>tasks.xml</code><small>import + ifr</small></div>
+        </div>
       </div>
-      <div class="transform-block">
-        <span class="transform-label">INPUT</span>
-        <pre><code>{m.transform.before}</code></pre>
+      <div class="graph-compiler">
+        <div class="graph-label"><span>02</span>{m.hero.compile}</div>
+        <Code code={heroCode} lang="xml" theme="rose-pine" />
       </div>
-      <div class="squish-divider" aria-hidden="true">
-        <span></span><b>−25%</b><span></span>
+      <div class="graph-artifacts">
+        <div class="graph-label"><span>03</span>{m.hero.artifact}</div>
+        <div class="artifact-path"><code>agent.i.xml</code><span aria-hidden="true">→</span><code class="final-artifact">agent.o.xml <span aria-hidden="true">✓</span></code></div>
       </div>
-      <div class="transform-block transform-output">
-        <span class="transform-label">OUTPUT</span>
-        <pre><code>{m.transform.after}</code></pre>
-      </div>
-      <figcaption>{m.transform.caption}</figcaption>
+      <figcaption>{m.hero.caption}</figcaption>
     </figure>
   </section>
 
-  <section id="how" class="section moe-container" aria-labelledby="principles-title">
-    <div class="section-heading">
-      <p class="eyebrow">{m.principles.eyebrow}</p>
-      <h2 id="principles-title">{m.principles.title}</h2>
-      <p>{m.principles.intro}</p>
-    </div>
-    <div class="feature-grid">
-      {m.principles.items.map((item, index) => (
-        <article class="feature-card moe-card">
-          <div class="feature-number" aria-hidden="true">0{index + 1}</div>
-          <p class="moe-card__eyebrow">{item.eyebrow}</p>
-          <h3>{item.title}</h3>
-          <p>{item.body}</p>
-        </article>
-      ))}
-    </div>
+  <section id="how" class="journey-band" aria-label={m.journey.note}>
+    <ol class="journey page-width">
+      {m.journey.steps.map((step) => <li><span class="eyebrow">{step.label}</span><h2>{step.title}</h2><p>{step.body}</p></li>)}
+    </ol>
   </section>
 
-  <section class="section fsm-section" aria-labelledby="fsm-title">
-    <div class="moe-container fsm-layout">
-      <div class="fsm-copy">
-        <p class="eyebrow">{m.fsm.eyebrow}</p>
-        <h2 id="fsm-title">{m.fsm.title}</h2>
-        <p>{m.fsm.intro}</p>
-        <div class="moe-notice" data-tone="warning">
-          <strong>{m.fsm.transition}</strong>
-        </div>
-      </div>
-      <ol class="state-list">
-        {m.fsm.states.map((state, index) => (
-          <li>
-            <span class="state-node" aria-hidden="true">{index + 1}</span>
-            <div>
-              <div class="state-title"><code>{state.code}</code><strong>{state.name}</strong></div>
-              <p>{state.body}</p>
-            </div>
-          </li>
-        ))}
-      </ol>
-    </div>
+  <section id="build" class="section page-width" aria-labelledby="build-title">
+    <div id="principles-title" class="section-heading"><p class="eyebrow">{m.build.eyebrow}</p><h2 id="build-title">{m.build.title}</h2><p>{m.build.intro}</p></div>
+    <BuildExplorer locale={locale} />
+    <a class="text-link example-link" href={`${repo}/tree/main/examples/site-demo`}>{m.footer.source}<span aria-hidden="true"> ↗</span></a>
   </section>
 
-  <section id="cli" class="section moe-container" aria-labelledby="cli-title">
-    <div class="cli-card">
-      <div class="cli-copy">
-        <p class="eyebrow">{m.cli.eyebrow}</p>
-        <h2 id="cli-title">{m.cli.title}</h2>
-        <p>{m.cli.intro}</p>
-        <p class="cli-note"><span aria-hidden="true">⌁</span>{m.cli.note}</p>
+  <section id="model" class="section model-section" aria-labelledby="model-title">
+    <div class="page-width">
+      <div class="section-heading"><p class="eyebrow">{m.model.eyebrow}</p><h2 id="model-title">{m.model.title}</h2><p>{m.model.intro}</p></div>
+      <div class="inheritance-map">
+        <div class="frame-node parent-frame"><div class="frame-head"><span class="tiny-square" aria-hidden="true"></span>{m.model.parent}</div><dl><div><dt>meta:audience</dt><dd>researchers</dd></div><div><dt>file:name</dt><dd>agent.xml</dd></div></dl></div>
+        <div class="inheritance-edge"><code>openat="parent"</code><span aria-hidden="true">⟶</span><small>{m.model.inherited}</small></div>
+        <div class="frame-node child-frame"><div class="frame-head"><span class="tiny-square" aria-hidden="true"></span>{m.model.child}</div><dl><div><dt>meta:audience</dt><dd><del>everyone</del><strong>researchers</strong></dd></div><div><dt>file:name</dt><dd>persona.xml <span aria-label={m.model.physical}>⌁</span></dd></div></dl></div>
       </div>
-      <div class="terminal" aria-label={locale === "zh-CN" ? "命令行示例" : "Command-line example"}>
-        <div class="terminal-title"><span>xmlsquish — zsh</span><span aria-hidden="true">•••</span></div>
-        <pre><code><span class="prompt">$</span> {m.cli.install}
-
-<span class="prompt">$</span> {m.cli.run}
-<span class="terminal-ok">✓ 12 {locale === "zh-CN" ? "个文件已完成" : "files processed"}</span></code></pre>
+      <p class="inheritance-note"><span aria-hidden="true">↳</span>{m.model.note}</p>
+      <div class="frame-grid">
+        {m.model.fields.map((field) => <article class="frame-field"><code class="namespace">{field.name}</code><h3>{field.title}</h3><p>{field.body}</p><code class="field-sample">{field.sample}</code></article>)}
       </div>
     </div>
   </section>
 
-  <section id="stats" class="section moe-container" aria-labelledby="stats-title">
-    <div class="section-heading stats-heading">
-      <p class="eyebrow">{m.stats.eyebrow}</p>
-      <h2 id="stats-title">{m.stats.title}</h2>
-      <p>{m.stats.intro}</p>
-    </div>
-    <div class="stats-panel moe-card">
-      <div class="stats-grid">
-        {m.stats.labels.map((label, index) => (
-          <div class:list={["stat", index === 7 && "stat-featured"]}>
-            <span>{label}</span>
-            <strong>{m.stats.values[index]}</strong>
-          </div>
-        ))}
-      </div>
-      <p class="stats-note"><span aria-hidden="true">ⓘ</span>{m.stats.note}</p>
+  <section class="section page-width" aria-labelledby="capabilities-title">
+    <div class="section-heading"><p class="eyebrow">{m.capabilities.eyebrow}</p><h2 id="capabilities-title">{m.capabilities.title}</h2></div>
+    <div class="capabilities">
+      {m.capabilities.items.map((item, index) => <article class="capability"><div class="capability-copy"><span class="capability-index">0{index + 1}</span><h3>{item.title}</h3><p>{item.body}</p></div><div class="capability-code"><Code code={item.code} lang="xml" theme="rose-pine" /></div></article>)}
     </div>
   </section>
 
-  <section class="closing moe-container">
-    <img src="/favicon.svg" alt="" width="72" height="72" loading="lazy" />
-    <h2>{m.footer.tagline}</h2>
-    <a class="moe-button" href={repoUrl}>{m.footer.source}<span aria-hidden="true">↗</span></a>
+  <section id="cli" class="section cli-section" aria-labelledby="cli-title">
+    <div class="page-width">
+      <div class="cli-layout">
+        <div class="cli-copy"><p class="eyebrow">{m.cli.eyebrow}</p><h2 id="cli-title">{m.cli.title}</h2><p>{m.cli.intro}</p><p class="small-note">{m.cli.note}</p><a class="text-link" href={`${repo}#安装与构建`}>{m.hero.secondary} ↗</a></div>
+        <div class="command-terminal"><div class="terminal-title"><span class="graph-dot" aria-hidden="true"></span><code>terminal / xmlsquish</code></div>{commands.map((command) => <div class="command"><p># {command.title}</p><pre><code><span aria-hidden="true">$ </span>{command.code}</code></pre></div>)}</div>
+      </div>
+      <div class="diagnostic-layout"><div><h3>{m.cli.diagnosticTitle}</h3><p>{m.cli.diagnosticBody}</p></div><pre class="diagnostic"><code><span>{diagnosticHeadline}</span>{diagnosticRest}</code></pre></div>
+    </div>
   </section>
+
+  <section id="stats" class="section page-width" aria-labelledby="stats-title">
+    <div class="section-heading"><p class="eyebrow">{m.stats.eyebrow}</p><h2 id="stats-title">{m.stats.title}</h2><p>{m.stats.intro}</p></div>
+    <div class="metrics-stages">{stages.map((stage, index) => <div class:list={["metric-stage", index === 2 && "metric-final"]}><span>{stage.label}</span><strong>{stage.value}<small>tokens</small></strong><code>{stage.file}</code></div>)}</div>
+    <div class="metrics-details"><div><strong>{metrics.tokensSaved} <small>tokens / {metrics.savingsPercent}%</small></strong><span>{m.stats.saved}</span></div><div><strong>{metrics.dependencyLoads}<small> / {metrics.uniqueDeps} {m.stats.files}</small></strong><span>{m.stats.dependencies}</span></div><div><strong>{metrics.finalBytes}<small> UTF-8 bytes</small></strong><span>agent.o.xml</span></div></div>
+    <p class="metrics-note">{m.stats.note}</p>
+  </section>
+
+  <section class="boundaries page-width" aria-labelledby="boundaries-title">
+    <div><p class="eyebrow">THE FINE PRINT, UP FRONT.</p><h2 id="boundaries-title">{m.limits.title}</h2><p>{m.limits.body}</p><a class="text-link" href={`${repo}/blob/main/docs/adr/0003-metadata-inheritance-and-stage-metrics.md`}>{m.limits.docs} ↗</a></div>
+    <details class="engine-details"><summary>{m.limits.details}<span aria-hidden="true">+</span></summary><div><h3 id="fsm-title">{m.limits.engine}</h3><p>{m.limits.engineBody}</p><code>XML → compile → IR → squish → output</code><a class="text-link" href={`${repo}/blob/main/docs/adr/0001-lexical-canonicalization-and-layering.md`}>FSM / ADR 0001 ↗</a></div></details>
+  </section>
+
+  <section class="closing page-width"><img src="/favicon.svg" alt="" width="58" height="58" loading="lazy"/><h2>{m.footer.tagline}</h2><a class="action primary" href={repo}>{m.footer.source}<span aria-hidden="true">↗</span></a></section>
 </main>
-
-<footer class="site-footer">
-  <div class="moe-container footer-inner">
-    <span><strong>xmlsquish</strong> · Rust 2024</span>
-    <div class="footer-links">
-      <a href="https://style.moesegfault.dev/">{m.footer.style}<span aria-hidden="true"> ✦</span></a>
-      <a href="/LICENSE.txt">{m.footer.license}</a>
-      <a href="/THIRD_PARTY_NOTICES.txt">{m.footer.notices}</a>
-    </div>
-  </div>
-</footer>
+<footer class="site-footer"><div class="page-width footer-inner"><span><strong>xmlsquish</strong> · source. compose. build.</span><div><a href="https://style.moesegfault.dev/">{m.footer.style} ✦</a><a href="/LICENSE.txt">{m.footer.license}</a><a href="/THIRD_PARTY_NOTICES.txt">{m.footer.notices}</a></div></div></footer>
 
 <style>
+  .page-width {
+    width: min(100% - 3rem, 76rem);
+    margin-inline: auto;
+  }
   .site-header {
     position: sticky;
     z-index: 20;
     top: 0;
-    border-bottom: 1px solid color-mix(in srgb, var(--moe-border) 70%, transparent);
-    background: color-mix(in srgb, var(--moe-background) 82%, transparent);
-    backdrop-filter: blur(18px) saturate(1.3);
+    border-bottom: 1px solid var(--xs-line);
+    background: color-mix(
+      in srgb,
+      var(--moe-background, #fff9f0) 92%,
+      transparent
+    );
+    backdrop-filter: blur(16px);
   }
-
   .header-inner {
-    display: grid;
-    min-height: 4.75rem;
-    grid-template-columns: 1fr auto 1fr;
-    align-items: center;
-    gap: var(--moe-space-5);
-  }
-
-  .brand-icon {
-    width: 2.75rem;
-    border-radius: 0.85rem;
-    box-shadow: 0 8px 20px var(--xs-glow);
-  }
-
-  .header-nav {
+    min-height: 5rem;
     display: flex;
     align-items: center;
-    gap: var(--moe-space-5);
+    justify-content: space-between;
+    gap: 1.5rem;
   }
-
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    color: var(--moe-heading);
+    text-decoration: none;
+    flex-shrink: 0;
+  }
+  .brand span {
+    display: grid;
+    gap: 0.1rem;
+  }
+  .brand strong {
+    font-size: 1.25rem;
+    letter-spacing: -0.04em;
+  }
+  .brand small {
+    font: 0.62rem var(--moe-font-family-mono, monospace);
+    color: var(--moe-text-soft);
+  }
+  .header-nav,
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 1.65rem;
+  }
+  .header-actions {
+    gap: 1rem;
+  }
   .header-nav a,
   .language-link {
     color: var(--moe-text-soft);
-    font-size: var(--moe-font-size-sm);
-    font-weight: 700;
     text-decoration: none;
+    font-size: 0.83rem;
+    font-weight: 650;
   }
-
   .header-nav a:hover,
   .language-link:hover {
     color: var(--moe-accent-strong);
   }
-
-  .header-actions {
+  .github-link {
+    color: var(--moe-heading);
     display: flex;
-    justify-content: end;
-    align-items: center;
-    gap: var(--moe-space-3);
   }
-
   .hero {
     display: grid;
-    min-height: calc(100vh - 4.75rem);
-    grid-template-columns: minmax(0, 1.04fr) minmax(26rem, .96fr);
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     align-items: center;
-    gap: clamp(2.5rem, 7vw, 7rem);
-    padding-block: clamp(4rem, 10vw, 8.5rem);
+    gap: clamp(2.5rem, 6vw, 6rem);
+    padding-block: clamp(4.8rem, 8vw, 8rem) 6rem;
   }
-
-  .hero h1 {
-    max-width: 13ch;
-    margin: var(--moe-space-5) 0;
-    font-size: clamp(3rem, 7vw, 5.8rem);
-    letter-spacing: -.055em;
-    line-height: .98;
-    overflow-wrap: anywhere;
-  }
-
-  .hero-lead {
-    max-width: 40rem;
-    color: var(--moe-text-soft);
-    font-size: clamp(1.08rem, 1.7vw, 1.3rem);
-  }
-
-  .hero-actions {
-    margin-top: var(--moe-space-5);
-  }
-
-  .hero-footnote {
-    display: flex;
-    gap: var(--moe-space-2);
-    margin: var(--moe-space-4) 0 0;
-    color: var(--moe-text-soft);
-    font-size: var(--moe-font-size-sm);
-  }
-
-  .hero-footnote span {
-    color: var(--moe-success);
-    font-weight: 900;
-  }
-
-  .hero-warning {
-    display: flex;
-    max-width: 43rem;
-    gap: var(--moe-space-2);
-    margin: var(--moe-space-3) 0 0;
-    color: var(--moe-text-soft);
-    font-size: var(--moe-font-size-xs);
-  }
-
-  .hero-warning span {
-    display: grid;
-    width: 1.2rem;
-    height: 1.2rem;
-    flex: 0 0 auto;
-    place-items: center;
-    border-radius: 50%;
-    color: var(--moe-on-accent);
-    background: var(--moe-accent-strong);
-    font-weight: 900;
-  }
-
-  .transform-card {
-    position: relative;
-    overflow: visible;
-    transform: rotate(1.1deg);
-  }
-
-  .transform-card::before {
-    content: "";
-    position: absolute;
-    z-index: -1;
-    inset: 9% -7%;
-    border-radius: 50%;
-    background: var(--xs-glow);
-    filter: blur(48px);
-  }
-
-  .window-bar {
-    display: flex;
-    align-items: center;
-    gap: .42rem;
-    padding: var(--moe-space-3) var(--moe-space-4);
-    border-bottom: 1px solid var(--xs-line);
-  }
-
-  .window-bar span {
-    width: .68rem;
-    aspect-ratio: 1;
-    border-radius: 50%;
-    background: var(--moe-border);
-  }
-
-  .window-bar span:first-child { background: var(--moe-danger); }
-  .window-bar span:nth-child(2) { background: var(--moe-color-gold); }
-  .window-bar span:nth-child(3) { background: var(--moe-success); }
-
-  .window-bar code {
-    margin-inline-start: auto;
-    color: var(--moe-text-soft);
-    font-size: var(--moe-font-size-xs);
-  }
-
-  .transform-block {
-    padding: var(--moe-space-5);
-  }
-
-  .transform-label {
-    color: var(--moe-text-soft);
-    font-family: var(--moe-font-family-mono);
-    font-size: var(--moe-font-size-xs);
-    font-weight: 700;
-    letter-spacing: .14em;
-  }
-
-  .transform-block pre {
-    overflow-x: auto;
-    margin: var(--moe-space-3) 0 0;
-    color: var(--moe-text-soft);
-    font-family: var(--moe-font-family-mono);
-    font-size: clamp(.73rem, 1.35vw, .9rem);
-    line-height: 1.65;
-    white-space: pre-wrap;
-  }
-
-  .transform-output {
-    border-radius: 0 0 var(--moe-radius-lg) var(--moe-radius-lg);
-    background: var(--moe-accent-wash);
-  }
-
-  .transform-output pre { color: var(--moe-heading); }
-
-  .squish-divider {
-    display: grid;
-    grid-template-columns: 1fr auto 1fr;
-    align-items: center;
-    gap: var(--moe-space-3);
-    padding-inline: var(--moe-space-5);
-  }
-
-  .squish-divider span { height: 1px; background: var(--xs-line); }
-  .squish-divider b { color: var(--moe-accent-strong); font-size: var(--moe-font-size-sm); }
-
-  .transform-card figcaption {
-    position: absolute;
-    right: 1rem;
-    bottom: -3.5rem;
-    max-width: 27rem;
-    color: var(--moe-text-soft);
-    font-size: var(--moe-font-size-xs);
-    text-align: right;
-  }
-
-  .section {
-    padding-block: clamp(5rem, 10vw, 8rem);
-    scroll-margin-top: 5rem;
-  }
-
-  .section-heading {
-    max-width: 47rem;
-    margin: 0 auto var(--moe-space-7);
-    text-align: center;
-  }
-
   .eyebrow {
-    margin-bottom: var(--moe-space-2);
+    font: 700 0.69rem var(--moe-font-family-mono, monospace);
+    letter-spacing: 0.12em;
     color: var(--moe-accent-strong);
-    font-size: var(--moe-font-size-xs);
+    margin: 0 0 1.2rem;
+  }
+  .spark {
+    margin-right: 0.35rem;
+    font-size: 1.3rem;
+  }
+  .hero h1 {
+    margin: 1.5rem 0;
+    font-size: clamp(3rem, 5.4vw, 5.05rem);
+    letter-spacing: -0.065em;
+    line-height: 1.1;
     font-weight: 800;
-    letter-spacing: .17em;
-    text-transform: uppercase;
   }
-
-  .section-heading h2,
-  .fsm-copy h2,
-  .cli-copy h2,
-  .closing h2 {
-    margin-bottom: var(--moe-space-3);
-    font-size: clamp(2.25rem, 5vw, 3.7rem);
-    letter-spacing: -.035em;
+  .hero h1 em {
+    display: block;
+    color: var(--moe-accent-strong);
+    font-style: normal;
   }
-
-  .section-heading > p:last-child,
-  .fsm-copy > p:not(.eyebrow),
-  .cli-copy > p:not(.eyebrow) {
+  .hero-lead {
     color: var(--moe-text-soft);
-    font-size: var(--moe-font-size-lg);
+    font-size: 1.06rem;
+    line-height: 1.85;
+    max-width: 34rem;
   }
-
-  .feature-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: var(--moe-space-5);
+  .hero-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.85rem;
+    margin-top: 1.9rem;
   }
-
-  .feature-card {
-    position: relative;
-    min-height: 19rem;
-    padding: var(--moe-space-6);
-  }
-
-  .feature-number {
-    margin-bottom: var(--moe-space-6);
-    color: var(--moe-border);
-    font-family: var(--moe-font-family-display);
-    font-size: 3rem;
-    font-weight: 800;
-    line-height: 1;
-  }
-
-  .feature-card h3 { margin-bottom: var(--moe-space-3); font-size: var(--moe-font-size-xl); }
-  .feature-card > p:last-child { margin: 0; color: var(--moe-text-soft); }
-
-  .fsm-section {
-    border-block: 1px solid var(--xs-line);
-    background: color-mix(in srgb, var(--moe-surface-muted) 58%, transparent);
-  }
-
-  .fsm-layout {
-    display: grid;
-    grid-template-columns: minmax(0, .9fr) minmax(28rem, 1.1fr);
+  .action {
+    display: inline-flex;
+    gap: 1.35rem;
     align-items: center;
-    gap: clamp(3rem, 8vw, 8rem);
+    justify-content: center;
+    min-height: 3rem;
+    padding: 0.75rem 1.15rem;
+    border-radius: 0.6rem;
+    font-size: 0.9rem;
+    font-weight: 750;
+    text-decoration: none;
+    transition: transform 0.15s;
   }
-
-  .fsm-copy .moe-notice { margin-top: var(--moe-space-5); }
-
-  .state-list {
+  .action:hover {
+    transform: translateY(-2px);
+  }
+  .action.primary {
+    background: var(--moe-accent-strong, #b44727);
+    color: var(--moe-on-accent, #fffaf3);
+    box-shadow: 0 5px 15px var(--xs-glow);
+  }
+  .action.secondary {
+    color: var(--moe-heading);
+    border: 1px solid var(--moe-border);
+    background: var(--moe-surface-strong);
+  }
+  .hero-footnote {
+    margin: 1.25rem 0 0;
+    font-size: 0.71rem;
+    color: var(--moe-text-soft);
+  }
+  .build-graph {
     position: relative;
-    display: grid;
-    gap: var(--moe-space-3);
     margin: 0;
-    padding: 0;
-    list-style: none;
+    border: 1px solid var(--moe-border);
+    border-radius: 1rem;
+    background: var(--moe-surface-strong);
+    box-shadow:
+      0 18px 60px color-mix(in srgb, var(--moe-accent) 10%, transparent),
+      0 2px 4px #33130008;
   }
-
-  .state-list::before {
+  .build-graph:before {
     content: "";
     position: absolute;
-    top: 2.5rem;
-    bottom: 2.5rem;
-    left: 1.5rem;
-    width: 2px;
-    background: linear-gradient(var(--moe-accent), var(--moe-color-gold));
-  }
-
-  .state-list li {
-    position: relative;
-    display: grid;
-    grid-template-columns: 3rem 1fr;
-    gap: var(--moe-space-4);
-    align-items: start;
-    padding: var(--moe-space-4);
+    inset: -1rem 1.5rem 1.5rem -1rem;
     border: 1px solid var(--xs-line);
-    border-radius: var(--moe-radius-md);
-    background: var(--moe-surface-strong);
+    border-radius: 1rem;
+    z-index: -1;
+    transform: rotate(-3deg);
   }
-
-  .state-node {
-    z-index: 1;
-    display: grid;
-    width: 3rem;
-    aspect-ratio: 1;
-    place-items: center;
-    border-radius: 50%;
-    color: var(--moe-on-accent);
-    background: var(--moe-accent-strong);
-    font-weight: 900;
-  }
-
-  .state-title { display: flex; flex-wrap: wrap; gap: var(--moe-space-3); align-items: baseline; }
-  .state-title code { color: var(--moe-accent-strong); font-family: var(--moe-font-family-mono); font-weight: 800; }
-  .state-list p { margin: var(--moe-space-1) 0 0; color: var(--moe-text-soft); }
-
-  .cli-card {
-    display: grid;
-    overflow: hidden;
-    grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr);
-    border: 1px solid var(--moe-border);
-    border-radius: var(--moe-radius-lg);
-    box-shadow: var(--moe-shadow-md);
-  }
-
-  .cli-copy {
-    padding: clamp(2rem, 5vw, 4rem);
-    background: var(--moe-surface-strong);
-  }
-
-  .cli-note {
-    display: flex;
-    gap: var(--moe-space-2);
-    margin: var(--moe-space-5) 0 0 !important;
-    font-size: var(--moe-font-size-sm) !important;
-  }
-
-  .cli-note span { color: var(--moe-accent); font-size: 1.4em; }
-
-  .terminal {
-    min-width: 0;
-    padding: var(--moe-space-5);
-    color: var(--xs-code-text);
-    background: var(--xs-code);
-    font-family: var(--moe-font-family-mono);
-  }
-
+  .graph-toolbar,
   .terminal-title {
     display: flex;
-    justify-content: space-between;
-    padding-bottom: var(--moe-space-4);
-    border-bottom: 1px solid color-mix(in srgb, var(--moe-color-cream-400) 16%, transparent);
-    color: var(--moe-color-brown-100);
-    font-size: var(--moe-font-size-xs);
-  }
-
-  .terminal pre { overflow-x: auto; margin: var(--moe-space-6) 0; line-height: 1.8; }
-  .terminal .prompt { color: var(--moe-color-gold); user-select: none; }
-  .terminal-ok { color: color-mix(in srgb, var(--moe-success) 76%, white); }
-
-  .stats-heading { margin-bottom: var(--moe-space-6); }
-  .stats-panel { max-width: 62rem; margin-inline: auto; }
-  .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); }
-
-  .stat {
-    display: flex;
-    min-height: 9rem;
-    flex-direction: column;
-    justify-content: center;
-    gap: var(--moe-space-2);
-    padding: var(--moe-space-5);
-    border-right: 1px solid var(--xs-line);
+    gap: 0.6rem;
+    align-items: center;
+    padding: 0.9rem 1.3rem;
+    font-size: 0.73rem;
     border-bottom: 1px solid var(--xs-line);
   }
-
-  .stat:nth-child(4n) { border-right: 0; }
-  .stat:nth-child(n+9) { border-bottom: 0; }
-  .stat span { color: var(--moe-text-soft); font-size: var(--moe-font-size-sm); }
-  .stat strong { color: var(--moe-heading); font-family: var(--moe-font-family-display); font-size: clamp(1.45rem, 3vw, 2rem); }
-  .stat-featured { background: var(--moe-accent-wash); }
-  .stat-featured strong { color: var(--moe-accent-strong); }
-
-  .stats-note {
-    display: flex;
-    gap: var(--moe-space-2);
-    margin: 0;
-    padding: var(--moe-space-3) var(--moe-space-5);
-    border-top: 1px solid var(--xs-line);
-    color: var(--moe-text-soft);
-    font-size: var(--moe-font-size-xs);
+  .graph-dot {
+    height: 0.5rem;
+    width: 0.5rem;
+    border-radius: 50%;
+    background: var(--moe-accent);
   }
-
-  .closing {
+  .graph-status {
+    margin-left: auto;
+    font: 0.63rem var(--moe-font-family-mono, monospace);
+    color: var(--moe-text-soft);
+  }
+  .graph-sources {
+    padding: 1.15rem 1.4rem;
+  }
+  .graph-label {
+    display: flex;
+    gap: 0.6rem;
+    align-items: center;
+    font: 650 0.7rem var(--moe-font-family-mono, monospace);
+    color: var(--moe-text-soft);
+    margin-bottom: 0.8rem;
+  }
+  .graph-label > span {
+    color: var(--moe-accent-strong);
+    font-size: 0.6rem;
+  }
+  .entry-file {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    padding: 0.7rem 0.85rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--xs-line);
+  }
+  .entry-file strong {
+    font: 700 0.86rem var(--moe-font-family-mono, monospace);
+  }
+  .entry-file > code {
+    margin-left: auto;
+    font-size: 0.61rem;
+    color: var(--moe-accent-strong);
+  }
+  .file-symbol {
+    color: var(--moe-accent-strong);
+    font: 0.8rem var(--moe-font-family-mono, monospace);
+  }
+  .file-branches {
+    margin: 0.55rem 0 0 0.8rem;
+    display: grid;
+    gap: 0.4rem;
+  }
+  .file-branches > div {
+    display: flex;
+    gap: 0.65rem;
+    align-items: center;
+  }
+  .file-branches > div > span {
+    color: var(--moe-border);
+  }
+  .file-branches code {
+    font-size: 0.8rem;
+  }
+  .file-branches small {
+    margin-left: auto;
+    color: var(--moe-text-soft);
+    font: 0.61rem var(--moe-font-family-mono, monospace);
+  }
+  .graph-compiler {
+    padding: 1.05rem 1.4rem 1.25rem;
+    background: #241d25;
+  }
+  .graph-compiler .graph-label {
+    color: #b8a6ae;
+  }
+  .graph-compiler .graph-label > span {
+    color: #eda98b;
+  }
+  .graph-compiler :global(pre) {
+    padding: 0;
+    margin: 0;
+    background: transparent !important;
+    font-size: 0.78rem;
+    line-height: 1.8;
+    overflow-x: auto;
+  }
+  .graph-artifacts {
+    padding: 1rem 1.4rem;
+  }
+  .artifact-path {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+  }
+  .artifact-path > code {
+    font-size: 0.79rem;
+  }
+  .artifact-path > span {
+    color: var(--moe-text-soft);
+  }
+  .final-artifact {
+    padding: 0.5rem 0.65rem;
+    border: 1px solid color-mix(in srgb, var(--moe-accent) 38%, transparent);
+    background: var(--moe-accent-wash);
+    border-radius: 0.4rem;
+  }
+  .final-artifact span {
+    color: var(--moe-accent-strong);
+    margin-left: 0.45rem;
+  }
+  .build-graph figcaption {
+    border-top: 1px solid var(--xs-line);
+    padding: 0.8rem 1.4rem;
+    color: var(--moe-text-soft);
+    font-size: 0.67rem;
+    line-height: 1.6;
+  }
+  .journey-band {
+    border-block: 1px solid var(--xs-line);
+    background: color-mix(in srgb, var(--moe-surface-muted) 48%, transparent);
+  }
+  .journey {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    padding-block: 2.2rem;
+    padding-left: 0;
+    list-style: none;
+    gap: 2.3rem;
+  }
+  .journey li {
+    padding-right: 2rem;
+    border-right: 1px solid var(--xs-line);
+  }
+  .journey li:last-child {
+    border: 0;
+    padding: 0;
+  }
+  .journey .eyebrow {
+    font-size: 0.6rem;
+  }
+  .journey h2 {
+    margin: 0.65rem 0;
+    font-size: 1.2rem;
+    letter-spacing: -0.025em;
+  }
+  .journey p {
+    font-size: 0.85rem;
+    color: var(--moe-text-soft);
+    margin: 0;
+    line-height: 1.7;
+  }
+  .section {
+    padding-block: clamp(4.5rem, 8vw, 7.5rem);
+    scroll-margin-top: 4rem;
+  }
+  .section-heading {
+    max-width: 47rem;
+    margin-bottom: 2.6rem;
+  }
+  .section-heading h2,
+  .cli-copy h2 {
+    font-size: clamp(2rem, 3.5vw, 3.1rem);
+    line-height: 1.22;
+    letter-spacing: -0.045em;
+    margin: 0.7rem 0 1.2rem;
+  }
+  .section-heading > p:last-child,
+  .cli-copy > p:not(.eyebrow) {
+    color: var(--moe-text-soft);
+    line-height: 1.85;
+    font-size: 0.98rem;
+  }
+  .text-link {
+    color: var(--moe-accent-strong);
+    font-size: 0.86rem;
+    font-weight: 700;
+    text-underline-offset: 0.25em;
+  }
+  .example-link {
+    display: inline-block;
+    margin-top: 1.3rem;
+  }
+  .model-section {
+    background: color-mix(in srgb, var(--moe-surface-muted) 50%, transparent);
+    border-block: 1px solid var(--xs-line);
+  }
+  .inheritance-map {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 12rem minmax(0, 1fr);
+    align-items: center;
+  }
+  .frame-node {
+    background: var(--moe-surface-strong);
+    border: 1px solid var(--moe-border);
+    border-radius: 0.7rem;
+    overflow: hidden;
+  }
+  .frame-head {
+    padding: 0.85rem 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    border-bottom: 1px solid var(--xs-line);
+    font: 0.76rem var(--moe-font-family-mono, monospace);
+  }
+  .tiny-square {
+    width: 0.4rem;
+    height: 0.4rem;
+    background: var(--moe-accent);
+  }
+  .frame-node dl {
+    margin: 0;
+    padding: 1.05rem 1rem;
+    display: grid;
+    gap: 0.9rem;
+  }
+  .frame-node dl > div {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  .frame-node dt {
+    font: 0.7rem var(--moe-font-family-mono, monospace);
+    color: var(--moe-text-soft);
+  }
+  .frame-node dd {
+    margin: 0;
+    display: flex;
+    gap: 0.6rem;
+    font: 0.76rem var(--moe-font-family-mono, monospace);
+  }
+  .frame-node del {
+    color: var(--moe-text-soft);
+    opacity: 0.75;
+  }
+  .frame-node dd strong {
+    color: var(--moe-accent-strong);
+    font-weight: 700;
+  }
+  .child-frame {
+    border-color: color-mix(in srgb, var(--moe-accent) 65%, var(--moe-border));
+  }
+  .inheritance-edge {
     display: grid;
     justify-items: center;
-    padding-block: clamp(4rem, 9vw, 7rem);
+    gap: 0.15rem;
+  }
+  .inheritance-edge code {
+    font-size: 0.67rem;
+    color: var(--moe-accent-strong);
+  }
+  .inheritance-edge > span {
+    font-size: 3rem;
+    color: var(--moe-accent-strong);
+    line-height: 1;
+  }
+  .inheritance-edge small {
+    font-size: 0.6rem;
+    color: var(--moe-text-soft);
     text-align: center;
   }
-
-  .closing img { filter: drop-shadow(0 12px 18px var(--xs-glow)); }
-  .closing h2 { max-width: 18ch; margin: var(--moe-space-5) 0; }
-
-  .site-footer { border-top: 1px solid var(--xs-line); }
-  .footer-inner { display: flex; justify-content: space-between; gap: var(--moe-space-4); padding-block: var(--moe-space-5); color: var(--moe-text-soft); font-size: var(--moe-font-size-sm); }
-  .footer-inner a { color: inherit; text-decoration: none; }
-  .footer-links { display: flex; flex-wrap: wrap; justify-content: end; gap: var(--moe-space-4); }
-
+  .inheritance-note {
+    display: flex;
+    gap: 0.65rem;
+    margin: 1.2rem 0 2.2rem;
+    max-width: 62rem;
+    color: var(--moe-text-soft);
+    font-size: 0.82rem;
+    line-height: 1.8;
+  }
+  .inheritance-note > span {
+    color: var(--moe-accent-strong);
+    font-size: 1.2rem;
+  }
+  .frame-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 1.6rem;
+  }
+  .frame-field {
+    border-top: 1px solid var(--moe-border);
+    padding-top: 1.3rem;
+  }
+  .namespace {
+    color: var(--moe-accent-strong);
+    font: 700 0.8rem var(--moe-font-family-mono, monospace);
+  }
+  .frame-field h3 {
+    font-size: 1.04rem;
+    margin: 0.8rem 0 0.6rem;
+  }
+  .frame-field p {
+    color: var(--moe-text-soft);
+    font-size: 0.82rem;
+    line-height: 1.8;
+    margin: 0 0 1rem;
+  }
+  .field-sample {
+    font-size: 0.62rem;
+    overflow-wrap: anywhere;
+  }
+  .capabilities {
+    display: grid;
+    gap: 1.2rem;
+  }
+  .capability {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    border: 1px solid var(--xs-line);
+    border-radius: 0.8rem;
+    overflow: hidden;
+  }
+  .capability-copy {
+    padding: 1.65rem 2rem;
+  }
+  .capability-index {
+    font: 0.7rem var(--moe-font-family-mono, monospace);
+    color: var(--moe-accent-strong);
+  }
+  .capability h3 {
+    font-size: 1.2rem;
+    margin: 0.7rem 0;
+  }
+  .capability p {
+    font-size: 0.9rem;
+    color: var(--moe-text-soft);
+    line-height: 1.8;
+    margin: 0;
+  }
+  .capability-code {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    background: #241d25;
+    padding: 1.6rem 1.8rem;
+  }
+  .capability-code :global(pre) {
+    padding: 0;
+    margin: 0;
+    background: transparent !important;
+    font-size: 0.79rem;
+    line-height: 1.8;
+    overflow: auto;
+    max-width: 100%;
+  }
+  .cli-section {
+    background: color-mix(in srgb, var(--moe-surface-muted) 38%, transparent);
+    border-block: 1px solid var(--xs-line);
+  }
+  .cli-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+    gap: 4rem;
+    align-items: center;
+  }
+  .cli-copy .small-note {
+    font-size: 0.8rem !important;
+    margin-block: 1.4rem;
+  }
+  .command-terminal {
+    overflow: hidden;
+    border-radius: 0.8rem;
+    color: #e8dcd7;
+    background: #241d25;
+  }
+  .terminal-title {
+    color: #c4b3ba;
+    border-color: #49373f;
+  }
+  .command {
+    padding: 0.95rem 1.4rem;
+  }
+  .command p {
+    margin: 0 0 0.4rem;
+    color: #bdafb5;
+    font-size: 0.68rem;
+  }
+  .command pre {
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    overflow-x: auto;
+    line-height: 1.8;
+    font-size: 0.77rem;
+  }
+  .command code > span {
+    color: #edaa86;
+  }
+  .command:last-child {
+    padding-bottom: 1.5rem;
+  }
+  .diagnostic-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+    gap: 4rem;
+    align-items: center;
+    margin-top: 2.8rem;
+    padding-top: 2.3rem;
+    border-top: 1px solid var(--xs-line);
+  }
+  .diagnostic-layout h3 {
+    font-size: 1.1rem;
+    margin: 0 0 0.8rem;
+  }
+  .diagnostic-layout p {
+    color: var(--moe-text-soft);
+    font-size: 0.86rem;
+    line-height: 1.8;
+    margin: 0;
+  }
+  .diagnostic {
+    background: var(--moe-surface-strong);
+    border: 1px solid var(--xs-line);
+    border-radius: 0.7rem;
+    font-size: 0.77rem;
+    line-height: 1.8;
+    padding: 1.15rem 1.4rem;
+    margin: 0;
+    overflow-x: auto;
+  }
+  .diagnostic span {
+    color: var(--moe-danger, #b94037);
+    font-weight: 700;
+  }
+  .diagnostic b {
+    color: var(--moe-accent-strong);
+  }
+  .diagnostic i {
+    color: var(--moe-text-soft);
+    font-style: normal;
+  }
+  .metrics-stages {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1rem;
+  }
+  .metric-stage {
+    display: grid;
+    padding: 1.5rem 1.7rem;
+    border: 1px solid var(--moe-border);
+    border-radius: 0.7rem;
+    gap: 0.7rem;
+  }
+  .metric-stage > span {
+    color: var(--moe-text-soft);
+    font-size: 0.82rem;
+  }
+  .metric-stage > strong {
+    font-size: 3.3rem;
+    line-height: 1;
+    letter-spacing: -0.055em;
+  }
+  .metric-stage small {
+    font: 0.72rem var(--moe-font-family-mono, monospace);
+    letter-spacing: 0;
+    margin-left: 0.6rem;
+    color: var(--moe-text-soft);
+  }
+  .metric-stage > code {
+    font-size: 0.7rem;
+    color: var(--moe-text-soft);
+  }
+  .metric-final {
+    background: var(--moe-accent-wash);
+    border-color: var(--moe-accent);
+  }
+  .metric-final > strong {
+    color: var(--moe-accent-strong);
+  }
+  .metrics-details {
+    display: grid;
+    grid-template-columns: 1.3fr 1fr 1fr;
+    gap: 2rem;
+    padding: 1.7rem 0.3rem;
+  }
+  .metrics-details > div {
+    display: grid;
+    gap: 0.4rem;
+  }
+  .metrics-details strong {
+    font-size: 1.35rem;
+  }
+  .metrics-details small {
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: var(--moe-text-soft);
+  }
+  .metrics-details span {
+    color: var(--moe-text-soft);
+    font-size: 0.77rem;
+  }
+  .metrics-note {
+    margin: 0;
+    color: var(--moe-text-soft);
+    font-size: 0.75rem;
+    line-height: 1.8;
+  }
+  .boundaries {
+    border-top: 1px solid var(--xs-line);
+    padding-block: 3rem;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 3.5rem;
+  }
+  .boundaries h2 {
+    font-size: 1.5rem;
+    margin: 0.5rem 0 1rem;
+  }
+  .boundaries p {
+    font-size: 0.83rem;
+    line-height: 1.85;
+    color: var(--moe-text-soft);
+  }
+  .boundaries .eyebrow {
+    font-size: 0.6rem;
+  }
+  .engine-details {
+    border: 1px solid var(--moe-border);
+    border-radius: 0.6rem;
+    align-self: start;
+  }
+  .engine-details summary {
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1.25rem;
+    font-size: 0.84rem;
+    font-weight: 700;
+    list-style: none;
+  }
+  .engine-details summary::-webkit-details-marker {
+    display: none;
+  }
+  .engine-details summary > span {
+    color: var(--moe-accent-strong);
+  }
+  .engine-details[open] summary > span {
+    transform: rotate(45deg);
+  }
+  .engine-details > div {
+    border-top: 1px solid var(--xs-line);
+    padding: 1.3rem;
+  }
+  .engine-details h3 {
+    font-size: 0.9rem;
+  }
+  .engine-details code {
+    display: block;
+    font-size: 0.64rem;
+    overflow-wrap: anywhere;
+    margin: 1rem 0;
+  }
+  .closing {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    padding-block: 3.5rem 4.5rem;
+  }
+  .closing h2 {
+    font-size: clamp(1.3rem, 2.2vw, 2rem);
+    letter-spacing: -0.04em;
+    margin: 0;
+  }
+  .closing .action {
+    margin-left: auto;
+    flex-shrink: 0;
+  }
+  .site-footer {
+    border-top: 1px solid var(--xs-line);
+  }
+  .footer-inner {
+    display: flex;
+    justify-content: space-between;
+    gap: 1.5rem;
+    padding-block: 1.5rem;
+    color: var(--moe-text-soft);
+    font-size: 0.7rem;
+  }
+  .footer-inner > div {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+  }
+  .footer-inner a {
+    color: inherit;
+    text-decoration: none;
+  }
   :global(.theme-control) {
     display: flex;
-    padding: .2rem;
+    padding: 0.2rem;
     border: 1px solid var(--moe-border);
-    border-radius: var(--moe-radius-pill);
+    border-radius: 2rem;
     background: var(--moe-surface-strong);
   }
-
   :global(.theme-control__option) {
     display: grid;
-    width: 2rem;
-    min-height: 2rem;
     place-items: center;
+    width: 1.7rem;
+    height: 1.7rem;
+    padding: 0;
     border: 0;
     border-radius: 50%;
+    cursor: pointer;
     color: var(--moe-text-soft);
     background: transparent;
-    cursor: pointer;
   }
-
   :global(.theme-control__option[aria-pressed="true"]) {
-    color: var(--moe-on-accent);
     background: var(--moe-accent-strong);
+    color: var(--moe-on-accent);
   }
-
-  @media (max-width: 900px) {
-    .header-inner { grid-template-columns: minmax(0, 1fr) auto; }
-    .header-nav { display: none; }
-    .hero { min-height: auto; grid-template-columns: minmax(0, 1fr); }
-    .hero-copy { max-width: 45rem; }
-    .transform-card { width: min(100%, 40rem); margin-inline: auto; transform: none; }
-    .feature-grid { grid-template-columns: 1fr; }
-    .feature-card { min-height: auto; }
-    .feature-number { margin-bottom: var(--moe-space-4); }
-    .fsm-layout { grid-template-columns: 1fr; }
-    .cli-card { grid-template-columns: 1fr; }
-    .stats-grid { grid-template-columns: repeat(2, 1fr); }
-    .stat:nth-child(odd) { border-right: 1px solid var(--xs-line); }
-    .stat:nth-child(even) { border-right: 0; }
-    .stat:nth-child(n+9) { border-bottom: 0; }
+  a:focus-visible,
+  summary:focus-visible,
+  :global(button:focus-visible) {
+    outline: 3px solid var(--moe-accent-strong);
+    outline-offset: 4px;
   }
-
-  @media (max-width: 560px) {
-    .header-inner { --moe-container-gutter: var(--moe-space-3); }
-    .moe-brand-mark__text { display: none; }
-    .language-link { font-size: var(--moe-font-size-xs); }
-    :global(.theme-control__option) { width: 1.75rem; min-height: 1.75rem; }
-    .hero { padding-top: var(--moe-space-7); }
-    .hero-copy { min-width: 0; }
-    .hero h1 { width: 100%; max-width: 100%; font-size: clamp(2.7rem, 13.5vw, 3.45rem); overflow-wrap: anywhere; word-break: break-all; white-space: normal; text-wrap: pretty; }
-    .window-bar code { overflow: hidden; max-width: 13rem; text-overflow: ellipsis; white-space: nowrap; }
-    .transform-block { padding: var(--moe-space-4); }
-    .transform-card figcaption { position: static; padding: var(--moe-space-3) var(--moe-space-4); text-align: left; }
-    .fsm-layout { --moe-container-gutter: var(--moe-space-4); }
-    .state-list li { grid-template-columns: 2.5rem 1fr; padding: var(--moe-space-3); }
-    .state-node { width: 2.5rem; }
-    .state-list::before { left: 1.25rem; }
-    .terminal { padding: var(--moe-space-4); font-size: .78rem; }
-    .stats-grid { grid-template-columns: 1fr; }
-    .stat, .stat:nth-child(n) { min-height: 7rem; border-right: 0; border-bottom: 1px solid var(--xs-line); }
-    .stat:last-child { border-bottom: 0; }
-    .footer-inner { flex-direction: column; align-items: center; text-align: center; }
-    .footer-links { justify-content: center; }
+  @media (max-width: 1050px) {
+    .header-nav {
+      gap: 1rem;
+    }
+    .hero {
+      gap: 2.5rem;
+    }
+    .frame-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .inheritance-map {
+      grid-template-columns: minmax(0, 1fr) 10rem minmax(0, 1fr);
+    }
+    .frame-node dl > div {
+      flex-direction: column;
+    }
+    .cli-layout,
+    .diagnostic-layout {
+      gap: 2rem;
+    }
+  }
+  @media (max-width: 800px) {
+    .header-nav {
+      display: none;
+    }
+    .hero {
+      grid-template-columns: 1fr;
+      padding-block: 3.5rem;
+    }
+    .hero-copy {
+      max-width: 38rem;
+    }
+    .hero h1 {
+      font-size: clamp(3rem, 8vw, 4.3rem);
+    }
+    .build-graph {
+      width: 100%;
+      max-width: 40rem;
+      margin-inline: auto;
+    }
+    .journey {
+      gap: 1.3rem;
+    }
+    .journey li {
+      padding-right: 1rem;
+    }
+    .journey h2 {
+      font-size: 1.03rem;
+    }
+    .journey p {
+      font-size: 0.77rem;
+    }
+    .inheritance-map {
+      grid-template-columns: 1fr;
+      max-width: 35rem;
+      margin-inline: auto;
+    }
+    .inheritance-edge {
+      padding-block: 0.8rem;
+    }
+    .inheritance-edge > span {
+      transform: rotate(90deg);
+      font-size: 2.5rem;
+    }
+    .inheritance-edge small {
+      display: none;
+    }
+    .frame-node dl > div {
+      flex-direction: row;
+    }
+    .capability {
+      grid-template-columns: 1fr;
+    }
+    .cli-layout,
+    .diagnostic-layout {
+      grid-template-columns: 1fr;
+    }
+    .cli-copy {
+      max-width: 37rem;
+    }
+    .boundaries {
+      grid-template-columns: 1fr;
+      gap: 1.8rem;
+    }
+    .closing {
+      flex-wrap: wrap;
+    }
+    .closing .action {
+      margin-left: 0;
+    }
+    .footer-inner {
+      flex-direction: column;
+    }
+  }
+  @media (max-width: 520px) {
+    .page-width {
+      width: calc(100% - 2rem);
+    }
+    .header-inner {
+      min-height: 4.2rem;
+      gap: 0.6rem;
+    }
+    .brand strong {
+      font-size: 1.1rem;
+    }
+    .brand small {
+      display: none;
+    }
+    .brand img {
+      width: 32px;
+      height: 32px;
+    }
+    .header-actions {
+      gap: 0.6rem;
+    }
+    .github-link {
+      display: none;
+    }
+    .language-link {
+      font-size: 0.73rem;
+    }
+    .hero {
+      padding-block: 3rem;
+    }
+    .hero h1 {
+      font-size: 2.95rem;
+      letter-spacing: -0.065em;
+    }
+    .hero-lead {
+      font-size: 0.96rem;
+    }
+    .hero-footnote {
+      font-size: 0.65rem;
+    }
+    .hero-actions {
+      gap: 0.6rem;
+    }
+    .action {
+      font-size: 0.8rem;
+      padding-inline: 0.9rem;
+      gap: 0.85rem;
+    }
+    .build-graph:before {
+      display: none;
+    }
+    .graph-sources,
+    .graph-compiler,
+    .graph-artifacts {
+      padding-inline: 1rem;
+    }
+    .graph-compiler :global(pre) {
+      font-size: 0.65rem;
+    }
+    .entry-file > code {
+      font-size: 0.55rem;
+    }
+    .file-branches small {
+      font-size: 0.55rem;
+    }
+    .build-graph figcaption {
+      padding-inline: 1rem;
+    }
+    .journey {
+      grid-template-columns: 1fr;
+      gap: 1.2rem;
+    }
+    .journey li {
+      border: 0;
+      padding: 0 0 1rem;
+      border-bottom: 1px solid var(--xs-line);
+    }
+    .journey h2 {
+      font-size: 1.14rem;
+    }
+    .journey p {
+      font-size: 0.85rem;
+    }
+    .section {
+      padding-block: 3.5rem;
+    }
+    .section-heading h2,
+    .cli-copy h2 {
+      font-size: 2rem;
+    }
+    .section-heading {
+      margin-bottom: 1.7rem;
+    }
+    .frame-grid {
+      gap: 1rem;
+    }
+    .frame-field p {
+      font-size: 0.78rem;
+    }
+    .field-sample {
+      font-size: 0.58rem;
+    }
+    .capability-copy {
+      padding: 1.35rem;
+    }
+    .capability-code {
+      padding: 1.2rem;
+    }
+    .capability-code :global(pre) {
+      font-size: 0.69rem;
+    }
+    .metrics-stages {
+      gap: 0.5rem;
+    }
+    .metric-stage {
+      padding: 1rem 0.7rem;
+    }
+    .metric-stage > strong {
+      font-size: 2.5rem;
+    }
+    .metric-stage > strong small {
+      display: block;
+      margin: 0.4rem 0 0;
+      font-size: 0.62rem;
+    }
+    .metric-stage > span {
+      font-size: 0.64rem;
+    }
+    .metric-stage > code {
+      font-size: 0.58rem;
+    }
+    .metrics-details {
+      grid-template-columns: 1fr;
+      gap: 1rem;
+      padding-block: 1.4rem;
+    }
+    .metrics-details > div {
+      display: flex;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+    .metrics-details strong {
+      font-size: 1.15rem;
+    }
+    .closing {
+      gap: 1rem;
+      padding-block: 2rem 3rem;
+    }
+    .closing img {
+      width: 42px;
+      height: 42px;
+    }
+    .closing h2 {
+      font-size: 1.2rem;
+    }
+    .command-terminal .command {
+      padding-inline: 1rem;
+    }
+    .diagnostic {
+      font-size: 0.67rem;
+      padding-inline: 0.9rem;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .action {
+      transition: none;
+    }
+    .action:hover {
+      transform: none;
+    }
   }
 </style>
