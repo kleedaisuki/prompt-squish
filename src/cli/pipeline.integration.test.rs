@@ -6,7 +6,7 @@ use std::path::Path;
 fn invoke(path: &Path, stage: &str) -> (i32, String, String) {
     let mut out = Vec::new();
     let mut err = Vec::new();
-    let code = xmlsquish_cli::run(
+    let code = xmlsquish::cli::run(
         [
             OsString::from("xmlsquish"),
             OsString::from(stage),
@@ -29,15 +29,15 @@ fn documented_inheritance_example_compiles_in_both_stages() {
     let files = [
         (
             "prompt.xml",
-            include_str!("../../../examples/inheritance/prompt.xml"),
+            include_str!("../../examples/inheritance/prompt.xml"),
         ),
         (
             "parts/section.xml",
-            include_str!("../../../examples/inheritance/parts/section.xml"),
+            include_str!("../../examples/inheritance/parts/section.xml"),
         ),
         (
             "parts/leaf.xml",
-            include_str!("../../../examples/inheritance/parts/leaf.xml"),
+            include_str!("../../examples/inheritance/parts/leaf.xml"),
         ),
     ];
     for (name, source) in files {

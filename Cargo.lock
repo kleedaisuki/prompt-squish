@@ -451,27 +451,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "xmlsquish-app"
-version = "0.1.0"
-
-[[package]]
-name = "xmlsquish-cli"
+name = "xmlsquish"
 version = "0.1.0"
 dependencies = [
  "anstream",
  "clap",
  "glob",
+ "quick-xml",
+ "regex",
  "tempfile",
  "tiktoken-rs",
  "walkdir",
- "xmlsquish-app",
- "xmlsquish-core",
-]
-
-[[package]]
-name = "xmlsquish-core"
-version = "0.1.0"
-dependencies = [
- "quick-xml",
- "regex",
 ]

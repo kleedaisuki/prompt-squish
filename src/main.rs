@@ -1,6 +1,6 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let code = xmlsquish_cli::run_stdio(std::env::args_os());
+    let code = xmlsquish::cli::run_stdio(std::env::args_os());
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }

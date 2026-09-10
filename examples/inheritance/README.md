@@ -3,8 +3,8 @@
 从仓库根目录运行 / Run from the repository root:
 
 ```sh
-cargo run -p xmlsquish-cli -- -I examples/inheritance/prompt.xml
-cargo run -p xmlsquish-cli -- -O examples/inheritance/prompt.xml
+cargo run -- -I examples/inheritance/prompt.xml
+cargo run -- -O examples/inheritance/prompt.xml
 ```
 
 `file:name` 始终是实际源文件名；`meta:author` 则可继承。父文件通过 `openat="parent"` 加载 `section.xml` 时，`klee` 覆盖 `section-author`，并通过同样显式写 `openat="parent"` 的后续 `import` 继续覆盖 `leaf-author`。省略参数始终等于 `self`，不沿用上一次引用边的模式。

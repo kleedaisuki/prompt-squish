@@ -5,8 +5,8 @@ use std::io::Write;
 use anstream::{AutoStream, ColorChoice, stream::RawStream};
 use clap::ValueEnum;
 
-pub(crate) use crate::diagnostics::painted as styled;
-use crate::diagnostics::safe_text;
+pub(crate) use super::diagnostics::painted as styled;
+use super::diagnostics::safe_text;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub(crate) enum ColorMode {
@@ -79,25 +79,5 @@ pub(crate) fn clap_text(out: &mut dyn Write, text: &str, color: bool) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn color_preparse_respects_argument_boundary_and_forms() {
-        for (args, expected) in [
-            (
-                vec!["xmlsquish", "--color=always", "--help"],
-                ColorMode::Always,
-            ),
-            (
-                vec!["xmlsquish", "--color", "never", "--bad"],
-                ColorMode::Never,
-            ),
-            (vec!["xmlsquish", "--", "--color=always"], ColorMode::Auto),
-            (vec!["xmlsquish", "--color=invalid"], ColorMode::Auto),
-        ] {
-            let args = args.into_iter().map(OsString::from).collect::<Vec<_>>();
-            assert_eq!(ColorMode::from_args(&args), expected);
-        }
-    }
-}
+#[path = "console.test.rs"]
+mod tests;

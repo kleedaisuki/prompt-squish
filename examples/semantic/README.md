@@ -3,8 +3,8 @@
 从仓库根目录运行 / Run from the repository root:
 
 ```sh
-cargo run -p xmlsquish-cli -- -I examples/semantic/prompt.xml
-cargo run -p xmlsquish-cli -- -O examples/semantic/prompt.xml
+cargo run -- -I examples/semantic/prompt.xml
+cargo run -- -O examples/semantic/prompt.xml
 ```
 
 `-I` 生成保留普通文本布局的 `prompt.i.xml`；`-O` 生成压缩后的 `prompt.o.xml` 并删除对应中间文件。源文件不修改。日志包含所属物理文件名及行号。

@@ -1,46 +1,53 @@
-//! XML semantic compilation and whitespace normalization for `xmlsquish`.
-//! XML 语义编译与空白规范化。
-//!
-//! [`Compiler`] resolves compile-time syntax before the independent [`squish`]
-//! lexical finite-state machine. `squish` copies markup byte-for-byte and only
-//! normalizes XML whitespace between lexical atoms; it does not parse a tree.
-//! 编译器先消除编译期语法；独立的 squish 状态机保持原有词法契约，不构建树。
+//! Lexical XML whitespace normalization without tree allocation.
+//! 不构建树的 XML 词法空白规范化；保留标记字节。
 
 use std::error::Error;
 use std::fmt;
 
 /// Statistics for whitespace handled by [`squish`].
+/// 空白转换统计，计数单位为 Unicode 标量值。
 ///
 /// All counters are Unicode scalar-value counts. XML whitespace is ASCII, so
 /// every recognized input whitespace character is also exactly one byte.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WhitespaceStats {
     /// XML whitespace characters found anywhere in the input.
+    /// 输入中所有 XML 空白字符数。
     pub recognized: usize,
     /// Excess input whitespace characters eliminated from the character count.
+    /// 从字符总数中移除的多余输入空白。
     ///
     /// A one-character separator such as a tab is canonicalized to a space but
     /// is not counted as removed because its position is reused.
     pub removed: usize,
     /// ASCII spaces added where adjacent atoms had no input separator to reuse.
+    /// 相邻原子没有可复用分隔符时补入的 ASCII 空格数。
     pub inserted: usize,
 }
 
-/// Successful squishing result.
+/// Successful squishing result. / 成功的空白转换结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SquishOutput {
+    /// Normalized text. / 规范化后的文本。
     pub output: String,
+    /// Whitespace accounting for this transformation. / 本次转换的空白统计。
     pub stats: WhitespaceStats,
 }
 
 /// The kind of markup construct which reached end-of-input before closing.
+/// 到达输入结尾时尚未闭合的标记类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SquishErrorKind {
+    /// Element tag / 元素标签。
     Tag,
+    /// XML comment / XML 注释。
     Comment,
+    /// CDATA section / CDATA 节。
     Cdata,
+    /// Processing instruction / 处理指令。
     ProcessingInstruction,
+    /// Document type declaration / 文档类型声明。
     Doctype,
 }
 
@@ -56,12 +63,13 @@ impl SquishErrorKind {
     }
 }
 
-/// A lexical error found while scanning markup.
+/// A lexical error found while scanning markup. / 扫描标记时发现的词法错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SquishError {
-    /// The unterminated construct.
+    /// The unterminated construct. / 未闭合的标记类型。
     pub kind: SquishErrorKind,
     /// Byte offset of the construct's opening `<` in the original input.
+    /// 起始 `<` 在原输入中的字节偏移。
     pub offset: usize,
 }
 
@@ -79,6 +87,7 @@ impl fmt::Display for SquishError {
 impl Error for SquishError {}
 
 /// Normalize XML whitespace between lexical atoms.
+/// 规范化词法原子之间的 XML 空白；标记字节不变，首尾空白移除。
 ///
 /// An atom is either a maximal run of non-XML-whitespace text or one complete
 /// markup construct. Markup bytes (including whitespace inside markup) are
@@ -326,272 +335,5 @@ fn scan_doctype(bytes: &[u8], start: usize) -> Result<usize, SquishError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn ok(input: &str) -> SquishOutput {
-        squish(input).expect("input should be lexically complete")
-    }
-
-    #[test]
-    fn empty_and_whitespace_only_inputs_become_empty() {
-        assert_eq!(
-            ok(""),
-            SquishOutput {
-                output: String::new(),
-                stats: WhitespaceStats::default()
-            }
-        );
-        assert_eq!(
-            ok(" \t\r\n"),
-            SquishOutput {
-                output: String::new(),
-                stats: WhitespaceStats {
-                    recognized: 4,
-                    removed: 4,
-                    inserted: 0
-                },
-            }
-        );
-    }
-
-    #[test]
-    fn joins_every_atom_pair_with_one_ascii_space() {
-        let result = ok(" \n<root>\t hello\r\nworld </root>  ");
-        assert_eq!(result.output, "<root> hello world </root>");
-        assert_eq!(
-            result.stats,
-            WhitespaceStats {
-                recognized: 9,
-                removed: 6,
-                inserted: 0
-            }
-        );
-    }
-
-    #[test]
-    fn adjacent_markup_and_text_are_still_separated() {
-        let result = ok("<a><b>x</b></a>");
-        assert_eq!(result.output, "<a> <b> x </b> </a>");
-        assert_eq!(
-            result.stats,
-            WhitespaceStats {
-                recognized: 0,
-                removed: 0,
-                inserted: 4
-            }
-        );
-    }
-
-    #[test]
-    fn preserves_markup_interior_byte_for_byte() {
-        let input = "<node  a = \"x > y\"\n b='z'>value</node   >";
-        assert_eq!(
-            ok(input).output,
-            "<node  a = \"x > y\"\n b='z'> value </node   >"
-        );
-    }
-
-    #[test]
-    fn recognizes_only_xml_s_as_whitespace() {
-        let result = ok("a\u{00a0}b\u{2003}c d");
-        assert_eq!(result.output, "a\u{00a0}b\u{2003}c d");
-        assert_eq!(
-            result.stats,
-            WhitespaceStats {
-                recognized: 1,
-                removed: 0,
-                inserted: 0
-            }
-        );
-    }
-
-    #[test]
-    fn copies_comments_cdata_and_processing_instructions_as_atoms() {
-        let input = "<!-- a > b --> <![CDATA[ <x>  ]]><?pi a > b?>";
-        let result = ok(input);
-        assert_eq!(
-            result.output,
-            "<!-- a > b --> <![CDATA[ <x>  ]]> <?pi a > b?>"
-        );
-        assert_eq!(
-            result.stats,
-            WhitespaceStats {
-                recognized: input
-                    .as_bytes()
-                    .iter()
-                    .filter(|&&byte| is_xml_space(byte))
-                    .count(),
-                removed: 0,
-                inserted: 1
-            }
-        );
-    }
-
-    #[test]
-    fn doctype_handles_quotes_subset_depth_comments_and_pi() {
-        let input = "<!DOCTYPE root [\n<!ENTITY gt '>'>\n<!-- ] > -->\n<?inside ] ?>\n<!ELEMENT root (#PCDATA)>\n]>\n<root>x</root>";
-        let result = ok(input);
-        let split = input.find("\n<root>").unwrap();
-        assert_eq!(
-            result.output,
-            format!("{} <root> x </root>", &input[..split])
-        );
-        assert_eq!(
-            result.stats.recognized,
-            input
-                .as_bytes()
-                .iter()
-                .filter(|&&byte| is_xml_space(byte))
-                .count()
-        );
-        assert_eq!(result.stats.removed, 0);
-        assert_eq!(result.stats.inserted, 2);
-    }
-
-    #[test]
-    fn doctype_keyword_requires_a_boundary() {
-        assert_eq!(ok("<!DOCTYPEfoo>bar").output, "<!DOCTYPEfoo> bar");
-        assert_eq!(ok("<!DOCTYPE><r/>").output, "<!DOCTYPE> <r/>");
-        assert_eq!(
-            squish("<!DOCTYPE"),
-            Err(SquishError {
-                kind: SquishErrorKind::Doctype,
-                offset: 0
-            })
-        );
-    }
-
-    #[test]
-    fn unicode_text_is_sliced_on_utf8_boundaries_and_stats_are_char_counts() {
-        let input = "  猫\t娘 <萌>✨</萌> ";
-        let result = ok(input);
-        assert_eq!(result.output, "猫 娘 <萌> ✨ </萌>");
-        assert_eq!(
-            result.stats,
-            WhitespaceStats {
-                recognized: 5,
-                removed: 3,
-                inserted: 2
-            }
-        );
-        assert_eq!(
-            result.output.chars().count(),
-            input.chars().count() - result.stats.removed + result.stats.inserted
-        );
-    }
-
-    #[test]
-    fn reports_each_unterminated_top_level_construct_at_its_byte_offset() {
-        let cases = [
-            ("猫 <!--no", SquishErrorKind::Comment, 4),
-            ("x <![CDATA[no", SquishErrorKind::Cdata, 2),
-            ("x <?no", SquishErrorKind::ProcessingInstruction, 2),
-            ("x <!DOCTYPE root [", SquishErrorKind::Doctype, 2),
-            ("x <tag attr='>'", SquishErrorKind::Tag, 2),
-        ];
-        for (input, kind, offset) in cases {
-            assert_eq!(
-                squish(input),
-                Err(SquishError { kind, offset }),
-                "{input:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn reports_unterminated_nested_doctype_construct_at_nested_offset() {
-        let comment = "<!DOCTYPE r [<!-- nope";
-        assert_eq!(
-            squish(comment),
-            Err(SquishError {
-                kind: SquishErrorKind::Comment,
-                offset: 13
-            })
-        );
-        let pi = "<!DOCTYPE r [<?nope";
-        assert_eq!(
-            squish(pi),
-            Err(SquishError {
-                kind: SquishErrorKind::ProcessingInstruction,
-                offset: 13
-            })
-        );
-    }
-
-    #[test]
-    fn output_character_accounting_identity_always_holds_for_successes() {
-        for input in [
-            "",
-            " ",
-            "abc",
-            "a b",
-            "<a/>",
-            "<a>x</a>",
-            "\n<a  x=' '>\t猫\r</a>\n",
-        ] {
-            let result = ok(input);
-            assert_eq!(
-                result.output.chars().count(),
-                input.chars().count() - result.stats.removed + result.stats.inserted,
-                "{input:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn distinguishes_reused_removed_and_inserted_whitespace() {
-        assert_eq!(
-            ok("a b").stats,
-            WhitespaceStats {
-                recognized: 1,
-                removed: 0,
-                inserted: 0
-            }
-        );
-        let tab = ok("a\tb");
-        assert_eq!(tab.output, "a b");
-        assert_eq!(
-            tab.stats,
-            WhitespaceStats {
-                recognized: 1,
-                removed: 0,
-                inserted: 0
-            }
-        );
-        assert_eq!(
-            ok("a  b").stats,
-            WhitespaceStats {
-                recognized: 2,
-                removed: 1,
-                inserted: 0
-            }
-        );
-        assert_eq!(
-            ok("<a><b>").stats,
-            WhitespaceStats {
-                recognized: 0,
-                removed: 0,
-                inserted: 1
-            }
-        );
-    }
-
-    #[test]
-    fn protected_markup_whitespace_is_recognized_but_not_removed() {
-        let input = "<a  x=' \t'>";
-        let result = ok(input);
-        assert_eq!(result.output, input);
-        assert_eq!(
-            result.stats,
-            WhitespaceStats {
-                recognized: 4,
-                removed: 0,
-                inserted: 0
-            }
-        );
-    }
-}
-
-mod compiler;
-pub use compiler::{CompileError, CompileLog, CompileResult, Compiler};
+#[path = "squish.test.rs"]
+mod tests;

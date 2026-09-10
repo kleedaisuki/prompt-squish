@@ -3,6 +3,8 @@
 - 状态：已接受
 - 日期：2026-09-05
 
+> 2026-09-11 更新：三 package 分层已由 [ADR 0004](0004-single-package.md) 替代；下文的词法契约继续有效。The three-package architecture is superseded by ADR 0004; lexical behavior remains unchanged.
+
 > 2026-09-06 更新：本记录继续定义底层 `squish` API。CLI 已新增前置语义编译阶段，见 [ADR 0002](0002-semantic-compilation.md)。The low-level `squish` contract remains; ADR 0002 adds semantic compilation before CLI squashing.
 
 ## 背景

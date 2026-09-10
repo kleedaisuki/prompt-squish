@@ -11,7 +11,7 @@
 ```bash
 git clone https://github.com/kleedaisuki/prompt-squish.git xmlsquish
 cd xmlsquish
-cargo build --workspace --locked
+cargo build --locked
 
 cd site
 npm ci
@@ -19,7 +19,7 @@ npm ci
 
 ## 先理解边界
 
-提交编译器、FSM 或统计变更前，请阅读 [ADR 0001](docs/adr/0001-lexical-canonicalization-and-layering.md)、[ADR 0002](docs/adr/0002-semantic-compilation.md) 与 [ADR 0003](docs/adr/0003-metadata-inheritance-and-stage-metrics.md)。以下词法契约只约束 `squish` 阶段；编译阶段会先消除宏、注释和元信息：
+提交编译器、FSM 或统计变更前，请阅读 [ADR 0001](docs/adr/0001-lexical-canonicalization-and-layering.md)、[ADR 0002](docs/adr/0002-semantic-compilation.md)、[ADR 0003](docs/adr/0003-metadata-inheritance-and-stage-metrics.md) 与 [ADR 0004](docs/adr/0004-single-package.md)。以下词法契约只约束 `squish` 阶段；编译阶段会先消除宏、注释和元信息：
 
 - xmlsquish 是提示词词法规范化器，不承诺 XML Infoset 等价，也不尊重 `xml:space`。
 - XML 空白严格是 U+0020、U+0009、U+000D、U+000A。
@@ -32,42 +32,47 @@ npm ci
 ## 分层与改动位置
 
 ```text
-                 -> xmlsquish-app  (ports / use cases)
-xmlsquish-cli --|
-                 -> xmlsquish-core (pure FSM / domain)
+main → cli → compiler / squish
+           → files / paths / diagnostics / console
 ```
 
 | 需求 | 应修改的位置 |
 | --- | --- |
-| 编译语义、文件环境、扫描状态、atom、空白统计 | `crates/xmlsquish-core` |
-| 批处理政策、端口、汇总模型 | `crates/xmlsquish-app` |
-| 参数、路径发现、编码、文件 I/O、Tokenizer、终端输出 | `crates/xmlsquish-cli` |
+| 编译语义、文件环境与引用加载 | `src/compiler.rs` |
+| 扫描状态、atom 与空白统计 | `src/squish.rs` |
+| 参数与终端汇总 | `src/cli/mod.rs` |
+| 两阶段批处理与阶段统计 | `src/cli/pipeline.rs` |
+| UTF-8/BOM 与原子写入 | `src/cli/files.rs` |
+| 文件发现、诊断与颜色 | `src/cli/paths.rs`、`diagnostics.rs`、`console.rs` |
+| 模块及真实二进制回归 | 相邻 `*.test.rs`；CLI 进程测试在 `src/cli/` |
 | 文案、样式、国际化、Pages | `site`、`.github/workflows` |
 
-CLI 是组合根（composition root）：它组合编译器、文件/Tokenizer 适配器与 app 报告模型。不要让 app 依赖具体适配器，也不要让 core 依赖 app、命令行或具体 Tokenizer。编译器通过注入的加载函数读取引用文件；默认快照读取系统环境，文件标识会使用规范路径以检测循环。不要在 TypeScript 中复制 FSM；未来的浏览器演示应复用 Rust core（例如 WebAssembly, WASM）。避免顺手重构与目标无关的模块。
+只有一个 `xmlsquish` package，按职责划分普通模块，不为单一实现新增 ports、适配器或重复结果模型。CLI 直接调用编译器与纯词法 FSM；编译器和 FSM 不依赖 CLI。编译器保留注入加载函数这一实际测试边界，默认快照读取系统环境，文件标识使用规范路径检测循环。不要在 TypeScript 中复制编译器；网页示例由真实 Rust CLI 生成。只有出现独立发布、平台隔离或多个真实消费者的需求时，才重新评估 package 拆分。
+
+One package has library and binary targets, not multiple independently versioned packages. Keep internal modules private, call concrete implementations directly, and retain the compiler loader seam for deterministic tests. Do not add traits solely to imitate architectural layers.
 
 ## Rust 工作流
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-features --locked
-cargo build --workspace --release --locked
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-features --locked
+cargo build --release --locked
 ```
 
 开发时可直接运行：
 
 ```bash
-cargo run -p xmlsquish-cli -- path/to/prompt.xml "prompts/**/*.xml"
+cargo run -- path/to/prompt.xml "prompts/**/*.xml"
 ```
 
 测试只写入临时目录；不要提交本地生成的 `*.i.xml` / `*.o.xml`。
 
 ### 编译器测试要求 / Compiler test requirements
 
-覆盖按顺序执行、独立文件环境、重复与未定义变量、惰性条件分支、只在编译语法展开变量、递归引用与循环诊断、物理文件行号，以及 `-I` / `-O` 的覆盖与失败清理边界。保留旧 `squish` 与批处理 API 回归测试。
+覆盖按顺序执行、独立文件环境、重复与未定义变量、惰性条件分支、只在编译语法展开变量、递归引用与循环诊断、物理文件行号，以及 `-I` / `-O` 的覆盖与失败清理边界。保留 `squish` 库契约与真实两阶段 CLI 回归测试；不要恢复已删除的旧批处理框架。
 
-Cover ordered execution, isolated file frames, duplicate and undefined variables, lazy conditions, compile-syntax-only expansion, recursive includes and cycles, physical source lines, and stage-specific overwrite/failure cleanup. Keep the existing lexical and batch API regression tests.
+Cover ordered execution, isolated file frames, duplicate and undefined variables, lazy conditions, compile-syntax-only expansion, recursive includes and cycles, physical source lines, and stage-specific overwrite/failure cleanup. Keep lexical API and real two-stage CLI regression tests; do not restore the removed batch abstraction.
 
 元数据测试须区分物理 `file` 与继承 `meta`，验证每条引用边省略 `openat` 均为 `self`、连续显式 `parent` 覆盖和兄弟隔离。`ifr` 要覆盖锚点与非法模式，`insert` 要覆盖 XML 转义及不递归执行。统计测试需用真实文件展开和分词增长验证 IR 基线，不以负数截断冒充节省。
 

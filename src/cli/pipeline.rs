@@ -4,11 +4,12 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use xmlsquish_app::{Squasher, TokenCounter, output_path_for};
-use xmlsquish_core::Compiler;
+use crate::Compiler;
+use tiktoken_rs::o200k_base_singleton;
 
-use crate::diagnostics::{Diagnostic, Stage, painted, safe_text};
-use crate::{CoreSquasher, O200kTokens, UTF8_BOM, atomic_write};
+use super::diagnostics::{Diagnostic, Stage, painted, safe_text};
+use super::files::{atomic_write, read_xml};
+use super::paths::{intermediate_path, output_path_for};
 
 /// Text metrics exclude the encoding envelope (BOM) / 文本统计不包含 BOM。
 #[derive(Clone, Copy, Default)]
@@ -21,7 +22,8 @@ pub(crate) struct Size {
 impl Size {
     fn measure(text: &str) -> Result<Self, String> {
         Ok(Self {
-            tokens: O200kTokens.count(text).map_err(|error| error.to_string())?,
+            tokens: u64::try_from(o200k_base_singleton().encode_ordinary(text).len())
+                .map_err(|_| "token count exceeds u64".to_owned())?,
             bytes: text.len() as u64,
             characters: text.chars().count() as u64,
         })
@@ -72,13 +74,13 @@ pub(crate) struct Report {
 }
 
 #[cfg(test)]
-pub(crate) fn run(paths: &[PathBuf], intermediate: bool, logs: &mut dyn Write) -> Report {
-    run_with_color(paths, intermediate, logs, false)
+pub(crate) fn run(paths: &[PathBuf], stage: OutputStage, logs: &mut dyn Write) -> Report {
+    run_with_color(paths, stage, logs, false)
 }
 
 pub(crate) fn run_with_color(
     paths: &[PathBuf],
-    intermediate: bool,
+    stage: OutputStage,
     logs: &mut dyn Write,
     color: bool,
 ) -> Report {
@@ -86,15 +88,11 @@ pub(crate) fn run_with_color(
     // 整次调用共享系统和环境快照；每个源文件仍有独立词法环境。
     let compiler = Compiler::new();
     let mut report = Report {
-        stage: if intermediate {
-            OutputStage::Intermediate
-        } else {
-            OutputStage::Optimized
-        },
+        stage,
         ..Report::default()
     };
     for path in paths {
-        match process_one(&compiler, path, intermediate, logs, color) {
+        match process_one(&compiler, path, stage, logs, color) {
             Ok(file) => report.stats.include(file),
             Err(error) => report.failures.push(*error),
         }
@@ -102,24 +100,10 @@ pub(crate) fn run_with_color(
     report
 }
 
-fn read_xml(path: &Path) -> Result<(String, bool), String> {
-    let bytes = fs::read(path).map_err(|error| error.to_string())?;
-    let (bytes, bom) = match bytes.strip_prefix(UTF8_BOM) {
-        Some(text) => (text, true),
-        None => (bytes.as_slice(), false),
-    };
-    let text = std::str::from_utf8(bytes).map_err(|error| format!("not valid UTF-8: {error}"))?;
-    Ok((text.to_owned(), bom))
-}
-
-fn intermediate_path(input: &Path) -> PathBuf {
-    input.with_extension("i.xml")
-}
-
 fn process_one(
     compiler: &Compiler,
     path: &Path,
-    intermediate: bool,
+    stage: OutputStage,
     logs: &mut dyn Write,
     color: bool,
 ) -> Result<Stats, Box<Diagnostic>> {
@@ -165,16 +149,15 @@ fn process_one(
         .map_err(|error| Diagnostic::new(Stage::Measure, path, error))?;
     atomic_write(&ir_path, bom, &compiled.output)
         .map_err(|error| Diagnostic::new(Stage::WriteIntermediate, &ir_path, error))?;
-    if intermediate {
+    if stage == OutputStage::Intermediate {
         stats.final_prompt = stats.ir;
     } else {
-        let squished = CoreSquasher
-            .squish(&compiled.output)
+        let squished = crate::squish(&compiled.output)
             .map_err(|error| Diagnostic::new(Stage::Squish, &ir_path, error))?;
-        stats.final_prompt = Size::measure(&squished.text)
+        stats.final_prompt = Size::measure(&squished.output)
             .map_err(|error| Diagnostic::new(Stage::Measure, &ir_path, error))?;
         let output_path = output_path_for(path);
-        atomic_write(&output_path, bom, &squished.text)
+        atomic_write(&output_path, bom, &squished.output)
             .map_err(|error| Diagnostic::new(Stage::WriteOutput, &output_path, error))?;
         // Only discard this input's IR after its final output is persisted.
         // 仅在最终文件成功持久化后删除本输入的中间产物。
@@ -186,29 +169,5 @@ fn process_one(
 }
 
 #[cfg(test)]
-mod diagnostic_tests {
-    use super::*;
-
-    #[test]
-    fn included_error_uses_loaded_snapshot_even_when_file_changes() {
-        let dir = tempfile::tempdir().unwrap();
-        let primary = dir.path().join("main.xml");
-        let child = dir.path().join("child.xml");
-        fs::write(&primary, r#"<r><xmlsquish:mount path="child.xml"/></r>"#).unwrap();
-        fs::write(&child, "<r>\n<xmlsquish:log msg=\"$missing\"/>\n</r>").unwrap();
-        let report = run(&[primary], false, &mut Vec::new());
-        assert_eq!(report.failures.len(), 1);
-        fs::write(&child, "replaced after compilation").unwrap();
-        let mut output = Vec::new();
-        report.failures[0].render(&mut output, false).unwrap();
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("child.xml:2"), "{output}");
-        assert!(
-            output.contains("2 | <xmlsquish:log msg=\"$missing\"/>"),
-            "{output}"
-        );
-        assert!(output.contains("note: while compiling"), "{output}");
-        assert!(!output.contains("replaced after compilation"));
-        assert!(!output.contains("[compile] error"));
-    }
-}
+#[path = "pipeline.test.rs"]
+mod diagnostic_tests;

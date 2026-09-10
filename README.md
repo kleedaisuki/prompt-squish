@@ -25,7 +25,7 @@ xmlsquish 先进行语义编译（semantic compilation），消除宏、注释�
 <role> You are a careful agent. </role> <task> Summarize this. </task>
 ```
 
-根据 [XML 1.0 `S` 产生式](https://www.w3.org/TR/xml/#sec-common-syn)，只有空格、`\t`、`\r`、`\n` 被识别为空白。压缩阶段保留 markup 内部字节；编译阶段已经消除注释、宏及元信息。底层 `xmlsquish_core::squish` 仍保留原有纯词法契约。
+根据 [XML 1.0 `S` 产生式](https://www.w3.org/TR/xml/#sec-common-syn)，只有空格、`\t`、`\r`、`\n` 被识别为空白。压缩阶段保留 markup 内部字节；编译阶段已经消除注释、宏及元信息。底层 `xmlsquish::squish` 仍保留原有纯词法契约。
 
 转换不覆盖输入。`prompt.xml` 的结果写到同目录的 `prompt.o.xml`。
 
@@ -35,10 +35,10 @@ xmlsquish 先进行语义编译（semantic compilation），消除宏、注释�
 
 ```bash
 # 从当前 checkout 安装命令行程序
-cargo install --path crates/xmlsquish-cli --locked
+cargo install --path . --locked
 
 # 或只在仓库中构建
-cargo build --workspace --release --locked
+cargo build --release --locked
 ./target/release/xmlsquish --help
 ```
 
@@ -196,16 +196,20 @@ xmlsquish --color always -I prompts/main.xml
 ## 仓库结构
 
 ```text
-crates/
-  xmlsquish-core/  # 领域算法：语义编译、FSM、错误、空白账本
-  xmlsquish-app/   # 应用用例：批处理、报告、端口 traits
-  xmlsquish-cli/   # 适配器：CLI、发现、I/O、tiktoken、展示
+Cargo.toml        # 单一 xmlsquish package：库 + 命令行程序
+src/
+  lib.rs          # 编译与压缩的库入口
+  main.rs         # 薄进程入口
+  compiler.rs     # 语义编译与文件环境
+  squish.rs       # 纯词法 FSM、错误与空白统计
+  cli/            # 唯一批处理流水线、文件 I/O、发现与终端展示
+  *.test.rs       # 与模块相邻的测试；CLI 进程测试同样就近放置
 site/              # Astro + TypeScript + React GitHub Pages
 docs/adr/          # 架构决策记录
 .github/workflows/ # Rust/Site CI 与 Pages 发布
 ```
 
-`xmlsquish-cli` 是组合根，同时依赖 `xmlsquish-app` 的用例/端口与 `xmlsquish-core` 的编译器和纯 FSM；app 和 core 彼此不依赖。网站不复制 Rust FSM。
+`xmlsquish` 使用 Cargo 标准的单 package 布局，库和二进制各为一个编译目标；职责通过模块而非内部 path dependencies 划分。CLI 直接调用编译器、压缩器和 tokenizer，不维护另一套抽象批处理框架；文件编码与原子写入集中在 `cli::files`。网站不复制 Rust FSM。设计理由与包名迁移见 [ADR 0004](docs/adr/0004-single-package.md)。
 
 ## 网站与本地开发
 
@@ -250,7 +254,7 @@ xmlsquish is a Rust 2024 semantic compiler and hand-written finite-state lexical
 ### Install and run
 
 ```bash
-cargo install --path crates/xmlsquish-cli --locked
+cargo install --path . --locked
 xmlsquish prompts/system.xml prompts/shared "templates/**/*.xml"
 ```
 
@@ -276,19 +280,21 @@ Expansion is restricted to macro parameters and xmlsquish metadata. Ordinary XML
 
 Only the four XML `S` characters—space, tab, carriage return, and line feed—are canonicalized. Markup interiors are preserved. Input must be strict UTF-8; an optional UTF-8 BOM is excluded from all measurements and preserved on output.
 
-The report uses fixed `o200k_base` tokenization and BOM-free UTF-8 text bytes. It separates primary sources, compiled IR, and final prompts, showing assembly expansion separately from actual IR-to-final token savings or increases. `-I` explicitly skips optimization; empty baselines have no percentage. Dependency loads, unique dependency files, and bytes read reveal the cost of repeated includes. Only successful outputs contribute to size and dependency totals. These are text-size measurements, not estimates of API billing, model quality, or inference speed. The existing `xmlsquish_core::squish` API retains the pure lexical contract in [ADR 0001](docs/adr/0001-lexical-canonicalization-and-layering.md).
+The report uses fixed `o200k_base` tokenization and BOM-free UTF-8 text bytes. It separates primary sources, compiled IR, and final prompts, showing assembly expansion separately from actual IR-to-final token savings or increases. `-I` explicitly skips optimization; empty baselines have no percentage. Dependency loads, unique dependency files, and bytes read reveal the cost of repeated includes. Only successful outputs contribute to size and dependency totals. These are text-size measurements, not estimates of API billing, model quality, or inference speed. The `xmlsquish::squish` API retains the pure lexical contract in [ADR 0001](docs/adr/0001-lexical-canonicalization-and-layering.md).
 
 ### Develop
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-features --locked
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-features --locked
 
 cd site
 npm ci
 npm run test
 ```
+
+The repository is one Cargo package, `xmlsquish`, with library and binary targets. Ordinary modules separate semantic compilation, lexical squashing, and CLI concerns; the CLI owns the only batch pipeline. The unused application package and its adapter traits have been removed. See [ADR 0004](docs/adr/0004-single-package.md) for the package-name migration and rationale.
 
 The bilingual Astro/TypeScript/React site targets <https://xmlsquish.moesegfault.dev>. GitHub Pages must use **GitHub Actions** as its source; DNS must point the `xmlsquish` CNAME at the repository owner's actual `<username>.github.io`, then the custom domain and HTTPS should be confirmed in Pages settings.
 
