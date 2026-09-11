@@ -17,7 +17,7 @@ const metrics = demo.scenarios.parent.metrics;
 const [diagnosticHeadline, ...diagnosticLines] = demo.diagnostic.split("\n");
 const diagnosticRest = "\n" + diagnosticLines.join("\n");
 const heroCode =
-  '<xmlsquish:mount path="persona.xml"\n  openat="parent" rename="Persona"/>\n<xmlsquish:import path="tasks.xml"/>';
+  '<xs:mount src="persona.xml">\n  <xs:arg name="audience" value="researchers"/>\n</xs:mount>\n<xs:call ref="demo:task"/>';
 const commands = [
   {
     title: m.cli.install,
@@ -31,9 +31,9 @@ const commands = [
   },
 ];
 const stages = [
-  { label: m.stats.source, value: metrics.sourceTokens, file: "agent.xml" },
-  { label: m.stats.ir, value: metrics.irTokens, file: "agent.i.xml" },
-  { label: m.stats.final, value: metrics.finalTokens, file: "agent.o.xml" },
+  { label: m.stats.source, value: metrics.sourceTokens, unit: "tokens", file: "agent.xml" },
+  { label: m.stats.ir, value: metrics.irBytes, unit: "UTF-8 bytes", file: "agent.i.xml" },
+  { label: m.stats.final, value: metrics.finalTokens, unit: "tokens", file: "agent.o.xml" },
 ];
 ---
 
@@ -72,10 +72,10 @@ const stages = [
       <div class="graph-toolbar"><span class="graph-dot" aria-hidden="true"></span><code>build / agent.xml</code><span class="graph-status">XML → XML</span></div>
       <div class="graph-sources">
         <div class="graph-label"><span>01</span>{m.hero.source}</div>
-        <div class="entry-file"><span class="file-symbol" aria-hidden="true">&lt;/&gt;</span><strong>agent.xml</strong><code>meta:audience</code></div>
+        <div class="entry-file"><span class="file-symbol" aria-hidden="true">&lt;/&gt;</span><strong>agent.xml</strong><code>xs:arg</code></div>
         <div class="file-branches">
-          <div><span aria-hidden="true">├─</span><code>persona.xml</code><small>mount + rename</small></div>
-          <div><span aria-hidden="true">└─</span><code>tasks.xml</code><small>import + ifr</small></div>
+          <div><span aria-hidden="true">├─</span><code>persona.xml</code><small>mount + arg</small></div>
+          <div><span aria-hidden="true">└─</span><code>tasks.xml</code><small>import + call</small></div>
         </div>
       </div>
       <div class="graph-compiler">
@@ -106,9 +106,9 @@ const stages = [
     <div class="page-width">
       <div class="section-heading"><p class="eyebrow">{m.model.eyebrow}</p><h2 id="model-title">{m.model.title}</h2><p>{m.model.intro}</p></div>
       <div class="inheritance-map">
-        <div class="frame-node parent-frame"><div class="frame-head"><span class="tiny-square" aria-hidden="true"></span>{m.model.parent}</div><dl><div><dt>meta:audience</dt><dd>researchers</dd></div><div><dt>file:name</dt><dd>agent.xml</dd></div></dl></div>
-        <div class="inheritance-edge"><code>openat="parent"</code><span aria-hidden="true">⟶</span><small>{m.model.inherited}</small></div>
-        <div class="frame-node child-frame"><div class="frame-head"><span class="tiny-square" aria-hidden="true"></span>{m.model.child}</div><dl><div><dt>meta:audience</dt><dd><del>everyone</del><strong>researchers</strong></dd></div><div><dt>file:name</dt><dd>persona.xml <span aria-label={m.model.physical}>⌁</span></dd></div></dl></div>
+        <div class="frame-node parent-frame"><div class="frame-head"><span class="tiny-square" aria-hidden="true"></span>{m.model.parent}</div><dl><div><dt>xs:arg value</dt><dd>researchers</dd></div><div><dt>file.name</dt><dd>agent.xml</dd></div></dl></div>
+        <div class="inheritance-edge"><code>xs:arg</code><span aria-hidden="true">⟶</span><small>{m.model.inherited}</small></div>
+        <div class="frame-node child-frame"><div class="frame-head"><span class="tiny-square" aria-hidden="true"></span>{m.model.child}</div><dl><div><dt>arg.audience</dt><dd><strong>researchers</strong></dd></div><div><dt>file.name</dt><dd>persona.xml <span aria-label={m.model.physical}>⌁</span></dd></div></dl></div>
       </div>
       <p class="inheritance-note"><span aria-hidden="true">↳</span>{m.model.note}</p>
       <div class="frame-grid">
@@ -136,14 +136,14 @@ const stages = [
 
   <section id="stats" class="section page-width" aria-labelledby="stats-title">
     <div class="section-heading"><p class="eyebrow">{m.stats.eyebrow}</p><h2 id="stats-title">{m.stats.title}</h2><p>{m.stats.intro}</p></div>
-    <div class="metrics-stages">{stages.map((stage, index) => <div class:list={["metric-stage", index === 2 && "metric-final"]}><span>{stage.label}</span><strong>{stage.value}<small>tokens</small></strong><code>{stage.file}</code></div>)}</div>
-    <div class="metrics-details"><div><strong>{metrics.tokensSaved} <small>tokens / {metrics.savingsPercent}%</small></strong><span>{m.stats.saved}</span></div><div><strong>{metrics.dependencyLoads}<small> / {metrics.uniqueDeps} {m.stats.files}</small></strong><span>{m.stats.dependencies}</span></div><div><strong>{metrics.finalBytes}<small> UTF-8 bytes</small></strong><span>agent.o.xml</span></div></div>
+    <div class="metrics-stages">{stages.map((stage, index) => <div class:list={["metric-stage", index === 2 && "metric-final"]}><span>{stage.label}</span><strong>{stage.value}<small>{stage.unit}</small></strong><code>{stage.file}</code></div>)}</div>
+    <div class="metrics-details"><div><strong>{metrics.dependencyLoads}<small> / {metrics.uniqueDeps} {m.stats.files}</small></strong><span>{m.stats.dependencies}</span></div><div><strong>{metrics.finalBytes}<small> UTF-8 bytes</small></strong><span>agent.o.xml</span></div></div>
     <p class="metrics-note">{m.stats.note}</p>
   </section>
 
   <section class="boundaries page-width" aria-labelledby="boundaries-title">
-    <div><p class="eyebrow">THE FINE PRINT, UP FRONT.</p><h2 id="boundaries-title">{m.limits.title}</h2><p>{m.limits.body}</p><a class="text-link" href={`${repo}/blob/main/docs/adr/0003-metadata-inheritance-and-stage-metrics.md`}>{m.limits.docs} ↗</a></div>
-    <details class="engine-details"><summary>{m.limits.details}<span aria-hidden="true">+</span></summary><div><h3 id="fsm-title">{m.limits.engine}</h3><p>{m.limits.engineBody}</p><code>XML → compile → IR → squish → output</code><a class="text-link" href={`${repo}/blob/main/docs/adr/0001-lexical-canonicalization-and-layering.md`}>FSM / ADR 0001 ↗</a></div></details>
+    <div><p class="eyebrow">THE FINE PRINT, UP FRONT.</p><h2 id="boundaries-title">{m.limits.title}</h2><p>{m.limits.body}</p><a class="text-link" href={`${repo}/blob/main/docs/dsl.md`}>{m.limits.docs} ↗</a></div>
+    <details class="engine-details"><summary>{m.limits.details}<span aria-hidden="true">+</span></summary><div><h3 id="fsm-title">{m.limits.engine}</h3><p>{m.limits.engineBody}</p><code>XML → compile → expand → IR → lower → squish → output</code><a class="text-link" href={`${repo}/blob/main/docs/dsl.md`}>DSL specification ↗</a></div></details>
   </section>
 
   <section class="closing page-width"><img src="/favicon.svg" alt="" width="58" height="58" loading="lazy"/><h2>{m.footer.tagline}</h2><a class="action primary" href={repo}>{m.footer.source}<span aria-hidden="true">↗</span></a></section>

@@ -1,5 +1,3 @@
-<tasks>
-  <xmlsquish:ifr str="$file:name" pattern="^tasks\.xml$">
-    <task>Explain the trade-offs.</task>
-  </xmlsquish:ifr>
-</tasks>
+<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:demo="https://example.com/macros/demo">
+  <xs:macro name="demo:task"><xs:ifr get="file.name" pattern="^tasks\.xml$"><task>Explain the trade-offs.</task></xs:ifr></xs:macro>
+</xs:module>

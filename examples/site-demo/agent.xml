@@ -1,5 +1,7 @@
-<?xmlsquish audience="researchers"?>
-<prompt>
-  <xmlsquish:mount path="persona.xml" openat="parent" rename="Persona"/>
-  <xmlsquish:import path="tasks.xml"/>
-</prompt>
+<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:demo="https://example.com/macros/demo">
+  <xs:import src="tasks.xml"/>
+  <prompt>
+    <xs:mount src="persona.xml"><xs:arg name="audience" value="researchers"/></xs:mount>
+    <xs:call ref="demo:task"/>
+  </prompt>
+</xs:module>

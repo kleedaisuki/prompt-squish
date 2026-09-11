@@ -55,7 +55,7 @@ function source(
       id={`${prefix}-${mode}-${tab.stage}`} data-code-panel data-stage={tab.stage} data-scenario={mode}
       data-source={source(mode, tab.stage)}>
       <header class="code-heading">
-        <h3>{tab.name} <span class="fallback-mode">/ {mode}</span></h3>
+        <h3>{tab.name} <span class="fallback-mode">/ {m[mode]}</span></h3>
         <span class="stage-label">{tab.label}</span>
       </header>
       <Code code={source(mode, tab.stage)} lang="xml" theme="rose-pine" />

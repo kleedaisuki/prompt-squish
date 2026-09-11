@@ -53,7 +53,7 @@ after(async () => {
 });
 
 for (const locale of ["zh", "en"]) {
-  test(`${locale}: tabs, metadata policy, exact copy, and keyboard navigation`, async () => {
+  test(`${locale}: tabs, explicit arguments, exact copy, and keyboard navigation`, async () => {
     const page = await browser.newPage();
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));

@@ -1,6 +1,7 @@
-<?xmlsquish audience="everyone"?>
-<role>
-  <xmlsquish:let voice="clear &amp; kind"/>
-  <audience><xmlsquish:insert get="meta:audience"/></audience>
-  <voice><xmlsquish:insert get="voice"/></voice>
-</role>
+<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns">
+  <xs:param name="audience"/>
+  <Persona>
+    <audience><xs:insert get="arg.audience"/></audience>
+    <voice>clear &amp; kind</voice>
+  </Persona>
+</xs:module>

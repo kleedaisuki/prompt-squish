@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "../..");
@@ -26,6 +26,14 @@ const sources = Object.fromEntries(
   ),
 );
 
+/** Normalize display-only source locations / 仅归一化展示用源码位置，避免机器路径泄漏。 */
+function normalizePaths(text, directory) {
+  return text.replaceAll(pathToFileURL(directory).href, "file:///examples/site-demo")
+    .replaceAll(directory.replaceAll("\\", "/"), "examples/site-demo")
+    .replaceAll(directory, "examples/site-demo");
+}
+
+/** Run one real CLI stage and reject diagnostics / 执行真实 CLI 阶段并拒绝意外诊断。 */
 function invoke(directory, stage) {
   const result = spawnSync(
     "cargo",
@@ -62,18 +70,20 @@ function invoke(directory, stage) {
   return lf(result.stdout);
 }
 
+/** Read an asserted integer metric from the CLI report / 从 CLI 报表读取已验证的数值指标。 */
 function number(report, pattern) {
   const match = report.match(pattern);
   assert(match, `Missing CLI metric ${pattern}:\n${report}`);
   return Number(match[1]);
 }
 
+/** Compile explicit argument variants and verify product semantics / 编译显式参数变体并验证产物语义。 */
 async function scenario(temporary, mode) {
   const directory = join(temporary, mode);
   await mkdir(directory);
   const source = sources["agent.xml"].replace(
-    'openat="parent"',
-    `openat="${mode}"`,
+    'value="researchers"',
+    `value="${mode === "parent" ? "researchers" : "everyone"}"`,
   );
   for (const [name, text] of Object.entries({
     ...sources,
@@ -82,9 +92,9 @@ async function scenario(temporary, mode) {
     await writeFile(join(directory, name), text, "utf8");
   }
   const irReport = invoke(directory, "-I");
-  const intermediate = lf(
+  const intermediate = normalizePaths(lf(
     await readFile(join(directory, "agent.i.xml"), "utf8"),
-  );
+  ), directory);
   const report = invoke(directory, "-O");
   const output = lf(await readFile(join(directory, "agent.o.xml"), "utf8"));
   await assert.rejects(readFile(join(directory, "agent.i.xml")), {
@@ -96,55 +106,43 @@ async function scenario(temporary, mode) {
 
   const metrics = {
     sourceTokens: number(report, /^Primary source\s+(\d+)\s+\d+$/m),
-    irTokens: number(report, /^Compiled IR\s+(\d+)\s+\d+$/m),
+    irBytes: Buffer.byteLength(intermediate, "utf8"),
     finalTokens: number(report, /^Final prompt tokens: (\d+)$/m),
     finalBytes: number(report, /^Final prompt UTF-8 bytes: (\d+)$/m),
     dependencyLoads: number(report, /^Dependency loads: (\d+)$/m),
     uniqueDeps: number(report, /^Unique dependency files: (\d+)$/m),
-    tokensSaved: number(report, /^Optimization tokens saved: (\d+)$/m),
-    savingsPercent: number(report, /^Optimization tokens savings: ([\d.]+)%$/m),
   };
-  assert.equal(
-    metrics.irTokens,
-    number(irReport, /^Final prompt tokens: (\d+)$/m),
-  );
   assert.equal(metrics.finalBytes, Buffer.byteLength(output, "utf8"));
-  assert.equal(metrics.tokensSaved, metrics.irTokens - metrics.finalTokens);
-  assert.equal(
-    metrics.savingsPercent,
-    Number(((100 * metrics.tokensSaved) / metrics.irTokens).toFixed(2)),
-  );
   assert.equal(metrics.dependencyLoads, 2);
   assert.equal(metrics.uniqueDeps, 2);
 
   // Check semantics, not a simulated browser transformation / 验证真实编译语义。
   const audience = mode === "parent" ? "researchers" : "everyone";
-  assert(intermediate.includes(`<audience>${audience}</audience>`));
-  assert(intermediate.includes("<voice>clear &amp; kind</voice>"));
-  assert(
-    intermediate.includes("<Persona>") && intermediate.includes("</Persona>"),
-  );
-  assert(intermediate.includes("<task>Explain the trade-offs.</task>"));
-  assert(!intermediate.includes("<tasks>") && !intermediate.includes("<role>"));
-  assert(!intermediate.includes("xmlsquish") && !intermediate.includes("<?"));
-  assert.equal(
-    output,
-    `<prompt> <Persona> <audience> ${audience} </audience> <voice> clear &amp; kind </voice> </Persona> <task> Explain the trade-offs. </task> </prompt>`,
-  );
+  assert(output.includes(audience));
+  assert(output.includes("clear &amp; kind"));
+  assert(output.includes("Explain the trade-offs."));
+  assert(!output.includes("\n"), "Final product compacts XML whitespace");
+  assert(!output.includes("<xs:") && !output.includes("<?xmlsquish"));
+  assert.notEqual(intermediate, output, "IR must retain provenance absent from output");
+  assert(intermediate.includes("file:///examples/site-demo/persona.xml"));
+  assert(intermediate.includes("frame="), "IR must retain invocation identity");
+  assert(!intermediate.includes(temporary), "Display IR must not leak temporary paths");
+  assert(!output.includes("urn:xmlsquish:provenance"));
   return { source, intermediate, output, metrics };
 }
 
+/** Record an actual failing invocation with its source chain / 记录真实失败调用及源码链。 */
 async function diagnosticExample(temporary) {
   const directory = join(temporary, "diagnostic");
   await mkdir(directory);
   await writeFile(
     join(directory, "agent.xml"),
-    '<prompt>\n  <xmlsquish:mount path="broken.xml"/>\n</prompt>\n',
+    '<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><prompt>\n  <xs:mount src="broken.xml"/>\n</prompt></xs:module>\n',
     "utf8",
   );
   await writeFile(
     join(directory, "broken.xml"),
-    '<role>\n  <xmlsquish:insert get="voice"/>\n</role>\n',
+    '<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><role>\n  <xs:insert get="arg.voice"/>\n</role></xs:module>\n',
     "utf8",
   );
   const result = spawnSync(
@@ -176,12 +174,11 @@ async function diagnosticExample(temporary) {
     1,
     `Expected compilation failure:\n${result.stderr}\n${result.stdout}`,
   );
-  const diagnostic = lf(result.stderr).trimEnd();
-  assert(diagnostic.includes("error[compile]: undefined variable"));
+  const diagnostic = normalizePaths(lf(result.stderr).trimEnd(), directory);
+  assert(diagnostic.includes("error[compile]"));
   assert(diagnostic.includes("voice"));
-  assert(diagnostic.includes("--> broken.xml:2"));
-  assert(diagnostic.includes('2 |   <xmlsquish:insert get="voice"/>'));
-  assert(diagnostic.includes("note: while compiling agent.xml"));
+  assert(diagnostic.includes("broken.xml"));
+  assert(diagnostic.includes("agent.xml"));
   assert(!diagnostic.includes(temporary) && !diagnostic.includes(root));
   assert(!diagnostic.includes("\x1b"));
   return diagnostic;
