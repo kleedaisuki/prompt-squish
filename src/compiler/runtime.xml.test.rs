@@ -6,7 +6,7 @@ use std::path::Path;
 fn compile(body: &str) -> Result<CompileResult, CompileError> {
     Compiler::default().compile(
         Path::new("boundaries.xml"),
-        &format!(r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:macro">{body}</xs:module>"#),
+        &crate::compiler::tests::module(body),
         |_| Err("unexpected dependency".into()),
     )
 }
@@ -32,21 +32,21 @@ fn ordinary_comments_and_processing_instructions_are_data() {
 
 #[test]
 fn callee_cannot_observe_caller_capture_implicitly() {
-    let error = compile(r#"<xs:macro name="m:read"><xs:insert get="match.x"/></xs:macro><root><xs:ifr str="x" pattern="(?&lt;x&gt;x)"><xs:call ref="m:read"/></xs:ifr></root>"#).unwrap_err();
+    let error = compile(r#"<xs:macro name="m:read"><xs:insert get="match.x"/></xs:macro><root><xs:ifr str="x" pattern="(?&lt;x&gt;x)"><xs:expand ref="m:read"/></xs:ifr></root>"#).unwrap_err();
     assert!(error.message.contains("match.x"), "{error}");
 }
 
 #[test]
 fn scalar_argument_rejects_comment_and_pi_nodes() {
     for body in ["<!--not text-->", "<?user not-text?>", "<element/>"] {
-        let error = compile(&format!(r#"<xs:macro name="m:text"><xs:param name="x"/><xs:insert get="arg.x"/></xs:macro><root><xs:call ref="m:text"><xs:arg name="x">{body}</xs:arg></xs:call></root>"#)).unwrap_err();
+        let error = compile(&format!(r#"<xs:macro name="m:text"><xs:param name="x"/><xs:insert get="arg.x"/></xs:macro><root><xs:expand ref="m:text"><xs:arg name="x">{body}</xs:arg></xs:expand></root>"#)).unwrap_err();
         assert!(error.message.contains("non-text"), "{error}");
     }
 }
 
 #[test]
 fn fill_output_erases_both_caller_and_callee_namespaces() {
-    let result = compile(r#"<xs:macro name="m:panel"><panel xmlns="urn:panel"><xs:slot name="body"/></panel></xs:macro><root><xs:call ref="m:panel"><xs:fill name="body"><item/></xs:fill></xs:call></root>"#).unwrap();
+    let result = compile(r#"<xs:macro name="m:panel"><panel xmlns="urn:panel"><xs:slot name="body"/></panel></xs:macro><root><xs:expand ref="m:panel"><xs:fill name="body"><item/></xs:fill></xs:expand></root>"#).unwrap();
     let parsed = roxmltree::Document::parse(&result.output).unwrap();
     let item = parsed
         .descendants()
@@ -61,12 +61,20 @@ fn scalar_insertion_is_not_reparsed_as_control_markup() {
     let mut options = CompileOptions::default();
     options
         .args
-        .insert("payload".into(), "<xs:call ref=\"m:evil\"/>&".into());
-    let result = Compiler::with_options(options).compile(Path::new("in.xml"), r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><xs:param name="payload"/><root><xs:insert get="arg.payload"/></root></xs:module>"#, |_| unreachable!()).unwrap();
+        .insert("payload".into(), "<xs:expand ref=\"m:evil\"/>&".into());
+    let result = Compiler::with_options(options)
+        .compile(
+            Path::new("in.xml"),
+            &crate::compiler::tests::module(
+                r#"<xs:param name="payload"/><root><xs:insert get="arg.payload"/></root>"#,
+            ),
+            |_| unreachable!(),
+        )
+        .unwrap();
     let parsed = roxmltree::Document::parse(&result.output).unwrap();
     assert_eq!(
         parsed.root_element().text(),
-        Some("<xs:call ref=\"m:evil\"/>&")
+        Some("<xs:expand ref=\"m:evil\"/>&")
     );
     assert_eq!(
         parsed
@@ -82,7 +90,13 @@ fn scalar_insertion_is_not_reparsed_as_control_markup() {
 fn xml_invalid_entry_argument_fails_instead_of_emitting_invalid_output() {
     let mut options = CompileOptions::default();
     options.args.insert("payload".into(), "\u{0}".into());
-    let result = Compiler::with_options(options).compile(Path::new("in.xml"), r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><xs:param name="payload"/><root><xs:insert get="arg.payload"/></root></xs:module>"#, |_| unreachable!());
+    let result = Compiler::with_options(options).compile(
+        Path::new("in.xml"),
+        &crate::compiler::tests::module(
+            r#"<xs:param name="payload"/><root><xs:insert get="arg.payload"/></root>"#,
+        ),
+        |_| unreachable!(),
+    );
     assert!(result.is_err());
 }
 

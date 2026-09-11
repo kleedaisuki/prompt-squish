@@ -1,7 +1,9 @@
-<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns">
-  <xs:param name="audience"/>
-  <Persona>
-    <audience><xs:insert get="arg.audience"/></audience>
-    <voice>clear &amp; kind</voice>
-  </Persona>
+<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:demo="https://example.com/macros/demo">
+  <xs:macro name="demo:persona">
+    <xs:param name="audience"/>
+    <Persona>
+      <audience><xs:insert get="arg.audience"/></audience>
+      <voice>clear &amp; kind</voice>
+    </Persona>
+  </xs:macro>
 </xs:module>

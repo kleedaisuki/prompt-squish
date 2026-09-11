@@ -1,4 +1,6 @@
-<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns">
-  <xs:param name="audience"/>
-  <Audience><xs:insert get="arg.audience"/></Audience>
+<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:p="https://example.com/macros/sections">
+  <xs:macro name="p:leaf">
+    <xs:param name="audience"/>
+    <Audience><xs:insert get="arg.audience"/></Audience>
+  </xs:macro>
 </xs:module>

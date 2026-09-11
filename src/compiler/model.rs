@@ -125,8 +125,9 @@ pub(super) enum Value {
 /// Statically resolved invocation target. / 静态调用目标。
 #[derive(Debug)]
 pub(super) enum Target {
-    Source(PathBuf),
     Named(Name),
+    /// Frozen definition index after whole-program linking. / 全程序链接后的冻结定义索引。
+    Linked(usize),
 }
 /// Caller-evaluated scalar argument. / 在调用者求值的标量实参。
 #[derive(Debug)]
@@ -155,8 +156,8 @@ pub(super) struct MacroDef {
     pub id: usize,
     /// Immutable definition-site span. / 不可变定义位置区间。
     pub loc: Loc,
-    /// Expanded symbol; None denotes source main. / 扩展符号；None 表示源码 main。
-    pub name: Option<Name>,
+    /// Explicit expanded macro symbol. / 显式宏扩展符号。
+    pub name: Name,
     /// Required scalar parameter names. / 必需标量参数名。
     pub params: Vec<String>,
     /// Slot signature: true means required. / Slot 签名：true 表示必需。
@@ -169,9 +170,9 @@ pub(super) struct MacroDef {
 pub(super) struct Unit {
     /// Normalized logical loader path. / 规范化逻辑加载路径。
     pub path: PathBuf,
-    /// Implicit main definition ID. / 隐式 main 定义 ID。
-    pub main: usize,
-    /// Main followed by named definitions in ID order. / main 与命名定义，按 ID 排序。
+    /// Optional explicit entry symbol and declaration origin. / 可选显式入口符号及声明来源。
+    pub entry: Option<(Name, Loc)>,
+    /// Explicit named definitions in ID order. / 按 ID 排序的显式命名定义。
     pub macros: Vec<MacroDef>,
     /// Static source edges with diagnostic origins. / 带诊断来源的静态源码边。
     pub references: Vec<(PathBuf, Loc)>,
@@ -183,10 +184,10 @@ pub(super) struct Program {
     pub defs: Vec<MacroDef>,
     /// Global expanded-name symbol table. / 全局扩展名符号表。
     pub symbols: BTreeMap<Name, usize>,
-    /// Interned source identity to main definition. / 驻留源码身份到 main 定义。
-    pub mains: BTreeMap<PathBuf, usize>,
-    /// Entry main definition ID. / 入口 main 定义 ID。
+    /// Explicit root entry definition ID. / 显式根入口定义 ID。
     pub root: usize,
+    /// Root module entry declaration, distinct from the macro definition. / 根模块入口声明，与宏定义位置分离。
+    pub entry_loc: Loc,
 }
 /// Normalize lexically without filesystem canonicalization or symlink folding.
 /// 仅词法规范化，不访问文件系统或折叠符号链接。

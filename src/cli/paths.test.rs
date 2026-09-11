@@ -156,10 +156,10 @@ fn symlink_root_keeps_logical_definition_base_and_distinct_identity() {
     fs::create_dir(&logical).unwrap();
     let source = physical.join("main.xml");
     let alias = logical.join("alias.xml");
-    fs::write(&source, r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><r><xs:insert get="file.name"/><xs:mount src="child.xml"/><xs:mount src="child-alias.xml"/></r></xs:module>"#).unwrap();
+    fs::write(&source, r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test" entry="m:main"><xs:import src="child.xml"/><xs:import src="child-alias.xml"/><xs:macro name="m:main"><r><xs:insert get="file.name"/><child/></r></xs:macro></xs:module>"#).unwrap();
     fs::write(
         logical.join("child.xml"),
-        r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><child/></xs:module>"#,
+        r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"/>"#,
     )
     .unwrap();
     if !link_file(&source, &alias) {

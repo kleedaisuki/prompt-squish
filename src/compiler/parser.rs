@@ -31,58 +31,35 @@ pub(super) fn parse(path: &Path, text: &str, next_id: &mut usize) -> Result<Unit
             .loc(root)
             .error("Syntax: source root must be xs:module"));
     }
-    parser.attrs(root, &[])?;
-    let main_id = *next_id;
-    *next_id += 1;
-    let mut main = MacroDef {
-        id: main_id,
-        loc: parser.loc(root),
-        name: None,
-        params: Vec::new(),
-        slots: BTreeMap::new(),
-        body: Vec::new(),
-    };
+    parser.attrs(root, &["entry"])?;
+    let entry = root
+        .has_attribute("entry")
+        .then(|| {
+            parser
+                .qname(root, "entry")
+                .map(|name| (name, parser.loc(root)))
+        })
+        .transpose()?;
     let mut macros = Vec::new();
-    let mut content = false;
-    for child in root
-        .prev_siblings()
-        .skip(1)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-    {
-        main.body.push(parser.node(child, &mut main.slots)?);
-    }
     for child in root.children() {
-        if builtin(child, "import") || builtin(child, "param") || builtin(child, "macro") {
-            if content {
-                return Err(parser
-                    .loc(child)
-                    .error("Syntax: declarations must precede module content"));
-            }
-            if builtin(child, "import") {
-                parser.attrs(child, &["src"])?;
-                parser.empty(child)?;
-                parser.source(child)?;
-            } else if builtin(child, "param") {
-                parser.param(child, &mut main.params)?;
-            } else {
-                macros.push(parser.macro_def(child, next_id)?);
-            }
+        if trivia(child) || child.pi().is_some() {
+            continue;
+        }
+        if builtin(child, "import") {
+            parser.attrs(child, &["src"])?;
+            parser.empty(child)?;
+            parser.source(child)?;
+        } else if builtin(child, "macro") {
+            macros.push(parser.macro_def(child, next_id)?);
         } else {
-            if !trivia(child) {
-                content = true;
-            }
-            main.body.push(parser.node(child, &mut main.slots)?);
+            return Err(parser.loc(child).error(
+                "Syntax: module contains only xs:import and explicit xs:macro declarations",
+            ));
         }
     }
-    for child in root.next_siblings().skip(1) {
-        main.body.push(parser.node(child, &mut main.slots)?);
-    }
-    macros.insert(0, main);
     Ok(Unit {
         path: path.into(),
-        main: main_id,
+        entry,
         macros,
         references: parser.references,
     })
@@ -202,7 +179,7 @@ impl Parser<'_> {
         let mut def = MacroDef {
             id,
             loc: self.loc(n),
-            name: Some(name),
+            name,
             params: Vec::new(),
             slots: BTreeMap::new(),
             body: Vec::new(),
@@ -274,13 +251,8 @@ impl Parser<'_> {
         n: Xml<'_, '_>,
         slots: &mut BTreeMap<String, bool>,
     ) -> Result<Kind, CompileError> {
-        let target = if builtin(n, "mount") {
-            self.attrs(n, &["src"])?;
-            Target::Source(self.source(n)?)
-        } else {
-            self.attrs(n, &["ref"])?;
-            Target::Named(self.qname(n, "ref")?)
-        };
+        self.attrs(n, &["ref"])?;
+        let target = Target::Named(self.qname(n, "ref")?);
         let mut args = Vec::new();
         let mut fills = Vec::new();
         let mut names = BTreeSet::new();
@@ -318,7 +290,7 @@ impl Parser<'_> {
             } else {
                 return Err(self
                     .loc(c)
-                    .error("Syntax: call/mount children must be xs:arg or xs:fill"));
+                    .error("Syntax: expand children must be xs:arg or xs:fill"));
             }
         }
         Ok(Kind::Invoke {
@@ -365,7 +337,7 @@ impl Parser<'_> {
                     )
                 })
                 .collect();
-            // 防止挂载后意外继承调用者默认命名空间。 / Prevent accidental default namespace inheritance after mounting.
+            // 防止展开后意外继承调用者默认命名空间。 / Prevent accidental default namespace inheritance after expansion.
             if !attrs.iter().any(|(name, _)| name == "xmlns") {
                 attrs.push(("xmlns".into(), String::new()));
             }
@@ -412,7 +384,7 @@ impl Parser<'_> {
                     }
                     Kind::Slot { name, required }
                 }
-                "call" | "mount" => self.invoke(n, slots)?,
+                "expand" => self.invoke(n, slots)?,
                 "ifr" => {
                     self.attrs(n, &["get", "str", "pattern"])?;
                     if n.has_attribute("get") == n.has_attribute("str") {
@@ -503,13 +475,12 @@ mod tests {
     }
     #[test]
     fn expanded_names_and_ids_are_stable() {
-        let parsed=unit(r#"<xs:macro name="m:f"><xs:param name="p"/><xs:insert get="arg.p"/></xs:macro><Root/>"#).unwrap();
-        assert_eq!(parsed.main, 0);
-        assert_eq!(parsed.macros[1].id, 1);
-        assert_eq!(
-            parsed.macros[1].name,
-            Some(("urn:macros".into(), "f".into()))
-        );
+        let parsed =
+            unit(r#"<xs:macro name="m:f"><xs:param name="p"/><xs:insert get="arg.p"/></xs:macro>"#)
+                .unwrap();
+        assert!(parsed.entry.is_none());
+        assert_eq!(parsed.macros[0].id, 0);
+        assert_eq!(parsed.macros[0].name, ("urn:macros".into(), "f".into()));
     }
     #[test]
     fn invalid_static_syntax_is_rejected_even_in_dead_macro() {
@@ -517,24 +488,24 @@ mod tests {
             r#"<xs:macro name="f"/>"#,
             r#"<Root/><xs:param name="x"/>"#,
             r#"<xs:macro name="m:f"><xs:ifr str="" pattern="(a)"/></xs:macro>"#,
-            r#"<xs:call ref="m:f"><xs:arg name="x" value="a">b</xs:arg></xs:call>"#,
-            r#"<xs:slot name="x"/><xs:slot name="x"/>"#,
-            r#"<xs:insert get="slot.x"/>"#,
+            r#"<xs:macro name="m:f"><xs:expand ref="m:f"><xs:arg name="x" value="a">b</xs:arg></xs:expand></xs:macro>"#,
+            r#"<xs:macro name="m:f"><xs:slot name="x"/><xs:slot name="x"/></xs:macro>"#,
+            r#"<xs:macro name="m:f"><xs:insert get="slot.x"/></xs:macro>"#,
             r#"<xs:macro name="xs:f"/>"#,
         ] {
             assert!(unit(bad).is_err(), "accepted {bad}");
         }
     }
     #[test]
-    fn dead_mounts_are_discovered_and_slots_are_lexical() {
-        let parsed=unit(r#"<xs:macro name="m:f"><xs:ifr str="" pattern="a"><xs:mount src="lib/../part.xml"><xs:fill name="content"><xs:slot name="inner" required="true"/></xs:fill></xs:mount></xs:ifr></xs:macro><Root/>"#).unwrap();
+    fn imports_are_discovered_and_slots_are_lexical() {
+        let parsed=unit(r#"<xs:macro name="m:f"><xs:ifr str="" pattern="a"><xs:expand ref="m:g"><xs:fill name="content"><xs:slot name="inner" required="true"/></xs:fill></xs:expand></xs:ifr></xs:macro><xs:import src="lib/../part.xml"/>"#).unwrap();
         assert_eq!(parsed.references.len(), 1);
-        assert_eq!(parsed.macros[1].slots.get("inner"), Some(&true));
+        assert_eq!(parsed.macros[0].slots.get("inner"), Some(&true));
     }
     #[test]
     fn scalar_body_retains_whitespace_and_entity_text() {
         let parsed =
-            unit(r#"<xs:call ref="m:f"><xs:arg name="x"> &amp; </xs:arg></xs:call>"#).unwrap();
+            unit(r#"<xs:macro name="m:entry"><xs:expand ref="m:f"><xs:arg name="x"> &amp; </xs:arg></xs:expand></xs:macro>"#).unwrap();
         let Kind::Invoke { args, .. } = &parsed.macros[0].body[0].kind else {
             panic!()
         };
@@ -544,9 +515,10 @@ mod tests {
         assert!(matches!(&body[0].kind,Kind::Text(s) if s==" & "));
     }
     #[test]
-    fn namespace_reset_and_document_processing_instructions_survive() {
-        let text =
-            format!(r#"<?before yes?><xs:module xmlns:xs="{NS}"><Root/></xs:module><?after?>"#);
+    fn namespace_reset_and_macro_processing_instructions_survive() {
+        let text = format!(
+            r#"<?outside?><xs:module xmlns:xs="{NS}" xmlns:m="urn:macros"><xs:macro name="m:entry"><?before yes?><Root/><?after?></xs:macro></xs:module>"#
+        );
         let parsed = parse(
             &std::env::current_dir().unwrap().join("test/main.xml"),
             &text,
@@ -572,7 +544,7 @@ mod tests {
     fn deeply_nested_xml_does_not_overflow_native_stack() {
         let depth = 6000;
         let xml = format!("{}leaf{}", "<a>".repeat(depth), "</a>".repeat(depth));
-        let parsed = unit(&xml).unwrap();
+        let parsed = unit(&format!(r#"<xs:macro name="m:entry">{xml}</xs:macro>"#)).unwrap();
         let mut node = &parsed.macros[0].body[0];
         for _ in 0..depth {
             let Kind::Element { children, .. } = &node.kind else {
@@ -589,7 +561,9 @@ mod tests {
     fn deep_full_compilation_and_error_unwinding_are_stack_safe() {
         let depth = 6000;
         let body = format!("{}leaf{}", "<a>".repeat(depth), "</a>".repeat(depth));
-        let source = format!(r#"<xs:module xmlns:xs="{NS}">{body}</xs:module>"#);
+        let source = format!(
+            r#"<xs:module xmlns:xs="{NS}" xmlns:m="urn:macros" entry="m:entry"><xs:macro name="m:entry">{body}</xs:macro></xs:module>"#
+        );
         let result = super::super::Compiler::default()
             .compile(Path::new("deep.xml"), &source, |_| unreachable!())
             .unwrap();
@@ -599,13 +573,13 @@ mod tests {
             "<a>".repeat(depth),
             "</a>".repeat(depth)
         );
-        let error = unit(&invalid).unwrap_err();
+        let error = unit(&format!(r#"<xs:macro name="m:entry">{invalid}</xs:macro>"#)).unwrap_err();
         assert!(error.message.contains("unknown or misplaced"));
     }
 
     #[test]
     fn empty_argument_body_is_an_empty_scalar() {
-        let parsed = unit(r#"<xs:call ref="m:f"><xs:arg name="x"/></xs:call>"#).unwrap();
+        let parsed = unit(r#"<xs:macro name="m:entry"><xs:expand ref="m:f"><xs:arg name="x"/></xs:expand></xs:macro>"#).unwrap();
         let Kind::Invoke { args, .. } = &parsed.macros[0].body[0].kind else {
             panic!()
         };

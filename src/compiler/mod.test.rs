@@ -2,7 +2,28 @@
 use super::*;
 const NS: &str = "https://xmlsquish.moesegfault.dev/ns";
 /// Wrap a module with stable test namespace. / 使用稳定测试命名空间包装模块。
-fn module(body: &str) -> String {
+pub(super) fn module(body: &str) -> String {
+    let source = format!(r#"<xs:module xmlns:xs="{NS}" xmlns:m="urn:test">{body}</xs:module>"#);
+    let doc = roxmltree::Document::parse(&source).unwrap();
+    let mut declarations = String::new();
+    let mut content = String::new();
+    for node in doc.root_element().children() {
+        let target = if node.is_element()
+            && node.tag_name().namespace() == Some(NS)
+            && matches!(node.tag_name().name(), "macro" | "import")
+        {
+            &mut declarations
+        } else {
+            &mut content
+        };
+        target.push_str(&source[node.range()]);
+    }
+    format!(
+        r#"<xs:module xmlns:xs="{NS}" xmlns:m="urn:test" xmlns:test="urn:fixture-entry" entry="test:main">{declarations}<xs:macro name="test:main">{content}</xs:macro></xs:module>"#
+    )
+}
+/// Wrap declarations without an executable entry. / 包装无可执行入口的声明。
+fn library(body: &str) -> String {
     format!(r#"<xs:module xmlns:xs="{NS}" xmlns:m="urn:test">{body}</xs:module>"#)
 }
 /// Compile a standalone source. / 编译独立源码。
@@ -13,7 +34,7 @@ fn compile(body: &str) -> Result<CompileResult, CompileError> {
 }
 #[test]
 fn named_macros_are_forward_resolved_and_scalar_escaped() {
-    let r=compile(r#"<xs:macro name="m:emit"><xs:param name="x"/><xs:insert get="arg.x"/></xs:macro><r><xs:call ref="m:emit"><xs:arg name="x" value="&lt;safe&gt;&amp;"/></xs:call></r>"#).unwrap();
+    let r=compile(r#"<xs:macro name="m:emit"><xs:param name="x"/><xs:insert get="arg.x"/></xs:macro><r><xs:expand ref="m:emit"><xs:arg name="x" value="&lt;safe&gt;&amp;"/></xs:expand></r>"#).unwrap();
     assert!(r.output.contains("&lt;safe&gt;&amp;"));
     assert!(!r.intermediate.is_empty());
 }
@@ -40,9 +61,9 @@ fn root_arguments_are_explicit_and_required() {
 #[test]
 fn import_cycles_freeze_each_logical_source_once() {
     let source = module(
-        r#"<xs:import src="./lib/../lib.xml"/><xs:import src="lib.xml"/><r><xs:call ref="m:x"/></r>"#,
+        r#"<xs:import src="./lib/../lib.xml"/><xs:import src="lib.xml"/><r><xs:expand ref="m:x"/></r>"#,
     );
-    let lib = module(r#"<xs:import src="entry.xml"/><xs:macro name="m:x">ok</xs:macro>"#);
+    let lib = library(r#"<xs:import src="entry.xml"/><xs:macro name="m:x">ok</xs:macro>"#);
     let mut reads = 0;
     let result = Compiler::default()
         .compile(Path::new("entry.xml"), &source, |p| {
@@ -55,18 +76,19 @@ fn import_cycles_freeze_each_logical_source_once() {
     assert!(result.output.contains("ok"));
 }
 #[test]
-fn unreachable_mount_is_discovered_and_invalid_calls_rejected() {
+fn unused_import_is_discovered_and_invalid_expands_rejected() {
     let mut reads = 0;
-    let source = module(r#"<xs:macro name="m:unused"><xs:mount src="dead.xml"/></xs:macro><r/>"#);
+    let source = module(r#"<xs:macro name="m:unused"/><xs:import src="dead.xml"/><r/>"#);
     Compiler::default()
         .compile(Path::new("entry.xml"), &source, |_| {
             reads += 1;
-            Ok(module(""))
+            Ok(library(""))
         })
         .unwrap();
     assert_eq!(reads, 1);
     assert!(
-        compile(r#"<xs:macro name="m:unused"><xs:call ref="m:missing"/></xs:macro><r/>"#).is_err()
+        compile(r#"<xs:macro name="m:unused"><xs:expand ref="m:missing"/></xs:macro><r/>"#)
+            .is_err()
     );
 }
 #[test]
@@ -77,12 +99,12 @@ fn duplicate_expanded_names_are_rejected() {
 }
 #[test]
 fn scalar_body_cannot_carry_xml_nodes() {
-    let error=compile(r#"<xs:macro name="m:f"><xs:param name="x"/><xs:insert get="arg.x"/></xs:macro><r><xs:call ref="m:f"><xs:arg name="x"><x/></xs:arg></xs:call></r>"#).unwrap_err();
+    let error=compile(r#"<xs:macro name="m:f"><xs:param name="x"/><xs:insert get="arg.x"/></xs:macro><r><xs:expand ref="m:f"><xs:arg name="x"><x/></xs:arg></xs:expand></r>"#).unwrap_err();
     assert!(error.message.contains("non-text"));
 }
 #[test]
 fn output_erases_namespaces_after_macro_resolution() {
-    let result=compile(r#"<xs:macro name="m:f"><u:item xmlns:u="urn:child"/></xs:macro><r xmlns="urn:root"><xs:call ref="m:f"/></r>"#).unwrap();
+    let result=compile(r#"<xs:macro name="m:f"><u:item xmlns:u="urn:child"/></xs:macro><r xmlns="urn:root"><xs:expand ref="m:f"/></r>"#).unwrap();
     let doc = roxmltree::Document::parse(&result.output).unwrap();
     assert_eq!(doc.root_element().tag_name().namespace(), None);
     assert_eq!(
@@ -97,7 +119,7 @@ fn output_erases_namespaces_after_macro_resolution() {
 #[test]
 fn bounded_recursive_execution_fails_with_frame_chain() {
     let source = module(
-        r#"<xs:macro name="m:loop"><xs:call ref="m:loop"/></xs:macro><r><xs:call ref="m:loop"/></r>"#,
+        r#"<xs:macro name="m:loop"><xs:expand ref="m:loop"/></xs:macro><r><xs:expand ref="m:loop"/></r>"#,
     );
     let options = CompileOptions {
         max_depth: 8,
@@ -111,10 +133,14 @@ fn bounded_recursive_execution_fails_with_frame_chain() {
 }
 
 #[test]
-fn mounted_macro_references_and_file_bindings_use_definition_site() {
-    let entry = module(r#"<xs:import src="lib/macros.xml"/><r><xs:call ref="m:where"/></r>"#);
-    let library = module(r#"<xs:macro name="m:where"><xs:mount src="helper.xml"/></xs:macro>"#);
-    let helper = module(r#"<location><xs:insert get="file.name"/></location>"#);
+fn imported_macro_references_and_file_bindings_use_definition_site() {
+    let entry = module(r#"<xs:import src="lib/macros.xml"/><r><xs:expand ref="m:where"/></r>"#);
+    let library = library(
+        r#"<xs:macro name="m:where"><xs:expand ref="m:helper"/></xs:macro><xs:import src="helper.xml"/>"#,
+    );
+    let helper = self::library(
+        r#"<xs:macro name="m:helper"><location><xs:insert get="file.name"/></location></xs:macro>"#,
+    );
     let result = Compiler::default()
         .compile(Path::new("entry.xml"), &entry, |path| {
             match path.file_name().unwrap().to_str().unwrap() {
@@ -133,9 +159,11 @@ fn mounted_macro_references_and_file_bindings_use_definition_site() {
 #[test]
 fn invocation_reuses_definition_not_execution_frame() {
     let source = module(
-        r#"<r><xs:mount src="child.xml"><xs:arg name="x" value="first"/></xs:mount><xs:mount src="child.xml"><xs:arg name="x" value="second"/></xs:mount></r>"#,
+        r#"<xs:import src="child.xml"/><r><xs:expand ref="m:child"><xs:arg name="x" value="first"/></xs:expand><xs:expand ref="m:child"><xs:arg name="x" value="second"/></xs:expand></r>"#,
     );
-    let child = module(r#"<xs:param name="x"/><x><xs:insert get="arg.x"/></x>"#);
+    let child = library(
+        r#"<xs:macro name="m:child"><xs:param name="x"/><x><xs:insert get="arg.x"/></x></xs:macro>"#,
+    );
     let mut reads = 0;
     let result = Compiler::default()
         .compile(Path::new("entry.xml"), &source, |_| {
@@ -156,12 +184,14 @@ fn invocation_reuses_definition_not_execution_frame() {
 
 #[test]
 fn compiler_loads_dependencies_with_an_in_memory_loader() {
-    let source = r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><root><xs:mount src="child.xml"/></root></xs:module>"#;
+    let source = module(r#"<xs:import src="child.xml"/><root><xs:expand ref="m:child"/></root>"#);
     let mut loaded = Vec::new();
     let compiled = Compiler::default()
-        .compile(Path::new("virtual/main.xml"), source, |path| {
+        .compile(Path::new("virtual/main.xml"), &source, |path| {
             loaded.push(path.to_owned());
-            Ok(r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><child>  hello  </child></xs:module>"#.into())
+            Ok(library(
+                r#"<xs:macro name="m:child"><child>  hello  </child></xs:macro>"#,
+            ))
         })
         .unwrap();
     assert_eq!(loaded.len(), 1);

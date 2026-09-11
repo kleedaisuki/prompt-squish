@@ -239,8 +239,8 @@ for (const [path, locale, kind] of [
       else assert(/\p{Script=Han}/u.test(text), "Chinese page is missing localized copy");
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
       if (kind === "namespace") {
-        assert.equal(await page.locator("tbody tr").count(), 11);
-        assert.equal(await page.locator('link[rel="describedby"]').getAttribute("href"), "/ns/0.2.0/dsl.md");
+        assert.equal(await page.locator("tbody tr").count(), 10);
+        assert.equal(await page.locator('link[rel="describedby"]').getAttribute("href"), "/ns/dsl.md");
         assert.equal(await page.locator(".identity code").textContent(), "https://xmlsquish.moesegfault.dev/ns");
       } else {
         assert.equal(await page.locator(".release-highlights article").count(), 3);
@@ -286,6 +286,13 @@ for (const locale of ["zh-CN", "en"]) {
     await page.close();
   });
 }
+
+test("current namespace specification follows the working source", async () => {
+  const published = await readFile(join(root, "ns/dsl.md"), "utf8");
+  const source = await readFile(new URL("../../../docs/dsl.md", import.meta.url), "utf8");
+  assert.equal(published, source);
+  assert(published.includes("xs:expand"));
+});
 
 test("published namespace specification is a byte-exact 0.2.0 snapshot", async () => {
   const published = await readFile(join(root, "ns/0.2.0/dsl.md"), "utf8");

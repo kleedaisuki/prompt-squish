@@ -75,7 +75,7 @@ pub struct CompileOptions {
     /// This is not a cumulative allocation or provenance-IR memory limit.
     /// 这不是累计分配量或来源 IR 的内存上限。
     pub max_output_bytes: usize,
-    /// Root main scalar parameters. / 根 main 的标量参数。
+    /// Explicit entry macro scalar parameters. / 显式入口宏的标量参数。
     pub args: BTreeMap<String, String>,
 }
 impl Default for CompileOptions {
@@ -128,33 +128,47 @@ impl Compiler {
         runtime::expand(&program, &self.options)
     }
 }
+/// Classify a syntactically valid library without loading imports or executing macros.
+/// 不加载导入或展开宏，仅将语法有效且未声明入口的模块识别为库。
+pub(crate) fn is_library(path: &Path, source: &str) -> Result<bool, CompileError> {
+    Ok(parser::parse(path, source, &mut 0)?.entry.is_none())
+}
+
 /// Intern definitions before traversing edges, so import cycles terminate.
 /// 遍历引用前驻留定义，因此 import 环能正常终止。
 fn discover<F>(path: &Path, source: &str, loader: &mut F) -> Result<Program, CompileError>
 where
     F: FnMut(&Path) -> Result<String, String>,
 {
-    let mut program = Program {
-        defs: Vec::new(),
-        symbols: BTreeMap::new(),
-        mains: BTreeMap::new(),
-        root: 0,
-    };
+    let mut defs: Vec<MacroDef> = Vec::new();
+    let mut symbols: BTreeMap<Name, usize> = BTreeMap::new();
+    let mut entries = Vec::new();
+    let mut root_entry = None;
     let mut next_id = 0;
     let mut seen = BTreeSet::from([path.to_path_buf()]);
     let mut pending = VecDeque::from([(path.to_path_buf(), source.to_owned())]);
-    while let Some((path, text)) = pending.pop_front() {
-        let unit = parser::parse(&path, &text, &mut next_id)?;
-        program.mains.insert(unit.path, unit.main);
-        for def in unit.macros {
-            if let Some(name) = &def.name {
-                if let Some(previous) = program.symbols.get(name) {
-                    let first = &program.defs[*previous];
-                    return Err(def.loc.error(format!("Namespace: macro redefinition {{{}}}{}; first definition {}:{}; second definition {}:{}",name.0,name.1,first.loc.path.display(),first.loc.line,def.loc.path.display(),def.loc.line)));
-                }
-                program.symbols.insert(name.clone(), def.id);
+    while let Some((source_path, text)) = pending.pop_front() {
+        let unit = parser::parse(&source_path, &text, &mut next_id)?;
+        if unit.path == path {
+            root_entry = unit.entry;
+            if root_entry.is_none() {
+                return Err(CompileError {
+                    path: path.into(),
+                    line: 1,
+                    message: "Signature: root module requires an explicit entry QName".into(),
+                });
             }
-            program.defs.push(def);
+        } else {
+            entries.extend(unit.entry);
+        }
+        for def in unit.macros {
+            let name = &def.name;
+            if let Some(previous) = symbols.get(name) {
+                let first = &defs[*previous];
+                return Err(def.loc.error(format!("Namespace: macro redefinition {{{}}}{}; first definition {}:{}; second definition {}:{}",name.0,name.1,first.loc.path.display(),first.loc.line,def.loc.path.display(),def.loc.line)));
+            }
+            symbols.insert(name.clone(), def.id);
+            defs.push(def);
         }
         for (target, loc) in unit.references {
             if seen.insert(target.clone()) {
@@ -165,19 +179,42 @@ where
             }
         }
     }
-    program.defs.sort_by_key(|def| def.id);
-    program.root = program.mains[path];
-    validate_calls(&program)?;
+    defs.sort_by_key(|def| def.id);
+    let (root_name, entry_loc) = root_entry.expect("root entry checked during discovery");
+    for (name, loc) in entries
+        .iter()
+        .map(|(name, loc)| (name, loc))
+        .chain(std::iter::once((&root_name, &entry_loc)))
+    {
+        if !symbols.contains_key(name) {
+            return Err(loc.error(format!(
+                "Namespace: unresolved entry {{{}}}{}",
+                name.0, name.1
+            )));
+        }
+    }
+    let mut program = Program {
+        root: symbols[&root_name],
+        entry_loc,
+        defs,
+        symbols,
+    };
+    validate_expansions(&program)?;
+    link_expansions(&mut program);
     Ok(program)
 }
-/// Validate all calls, including branches and macros that never execute.
-/// 校验所有调用，包括不会执行的分支和宏。
-fn validate_calls(program: &Program) -> Result<(), CompileError> {
+/// Validate every expansion before linking, including unreachable definitions.
+/// 链接前校验全部展开，包括不可达定义。
+fn validate_expansions(program: &Program) -> Result<(), CompileError> {
     let mut pending: Vec<&Node> = program.defs.iter().flat_map(|d| d.body.iter()).collect();
     while let Some(node) = pending.pop() {
         match &node.kind {
-            Kind::Element { children, .. } | Kind::If { body: children, .. } => {
-                pending.extend(children)
+            Kind::Element { children, .. } => pending.extend(children),
+            Kind::If { input, body, .. } => {
+                pending.extend(body);
+                if let Value::Body(nodes) = input {
+                    pending.extend(nodes);
+                }
             }
             Kind::Invoke {
                 target,
@@ -185,8 +222,8 @@ fn validate_calls(program: &Program) -> Result<(), CompileError> {
                 fills,
             } => {
                 let id = match target {
-                    Target::Source(path) => program.mains.get(path),
                     Target::Named(name) => program.symbols.get(name),
+                    Target::Linked(id) => Some(id),
                 }
                 .ok_or_else(|| {
                     node.loc
@@ -222,6 +259,45 @@ fn validate_calls(program: &Program) -> Result<(), CompileError> {
     }
     Ok(())
 }
+/// Freeze all symbolic expansion edges into direct definition indices.
+/// 将全部符号展开边冻结为直接定义索引；运行时无需名称查询。
+fn link_expansions(program: &mut Program) {
+    let mut pending: Vec<&mut Node> = program
+        .defs
+        .iter_mut()
+        .flat_map(|def| def.body.iter_mut())
+        .collect();
+    while let Some(node) = pending.pop() {
+        match &mut node.kind {
+            Kind::Element { children, .. } => pending.extend(children),
+            Kind::If { input, body, .. } => {
+                pending.extend(body);
+                if let Value::Body(nodes) = input {
+                    pending.extend(nodes);
+                }
+            }
+            Kind::Invoke {
+                target,
+                args,
+                fills,
+            } => {
+                if let Target::Named(name) = target {
+                    *target = Target::Linked(program.symbols[name]);
+                }
+                for arg in args {
+                    if let Value::Body(body) = &mut arg.value {
+                        pending.extend(body);
+                    }
+                }
+                for fill in fills {
+                    pending.extend(&mut fill.body);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "mod.test.rs"]
 mod tests;

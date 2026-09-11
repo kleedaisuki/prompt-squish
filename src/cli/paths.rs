@@ -10,11 +10,15 @@ use walkdir::WalkDir;
 #[derive(Debug)]
 pub struct Discovery {
     pub files: Vec<PathBuf>,
+    /// Explicit file operands win over directory/glob discovery.
+    /// 显式文件参数优先于目录或通配符发现，不能被作为库静默跳过。
+    pub explicit: BTreeSet<PathBuf>,
     pub errors: Vec<String>,
 }
 
 pub fn discover(inputs: &[PathBuf]) -> Discovery {
     let mut files = BTreeSet::new();
+    let mut explicit = BTreeSet::new();
     let mut errors = Vec::new();
 
     for input in inputs {
@@ -22,6 +26,12 @@ pub fn discover(inputs: &[PathBuf]) -> Discovery {
             expand_glob(input, &mut files, &mut errors);
         } else {
             collect_path(input, &mut files, &mut errors);
+            if input.is_file()
+                && is_input_xml(input)
+                && let Ok(path) = logical_absolute(input)
+            {
+                explicit.insert(path);
+            }
         }
     }
 
@@ -29,6 +39,7 @@ pub fn discover(inputs: &[PathBuf]) -> Discovery {
 
     Discovery {
         files: files.into_iter().collect(),
+        explicit,
         errors,
     }
 }

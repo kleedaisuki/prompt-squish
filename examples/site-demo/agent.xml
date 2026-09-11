@@ -1,7 +1,10 @@
-<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:demo="https://example.com/macros/demo">
+<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:demo="https://example.com/macros/demo" entry="demo:main">
+  <xs:import src="persona.xml"/>
   <xs:import src="tasks.xml"/>
-  <prompt>
-    <xs:mount src="persona.xml"><xs:arg name="audience" value="researchers"/></xs:mount>
-    <xs:call ref="demo:task"/>
-  </prompt>
+  <xs:macro name="demo:main">
+    <prompt>
+      <xs:expand ref="demo:persona"><xs:arg name="audience" value="researchers"/></xs:expand>
+      <xs:expand ref="demo:task"/>
+    </prompt>
+  </xs:macro>
 </xs:module>

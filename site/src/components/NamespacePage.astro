@@ -6,12 +6,12 @@ interface Props { locale: Locale; }
 const { locale } = Astro.props;
 const m = messages[locale].reference;
 const n = m.ns;
-const names = ["module","import","macro","param","mount","call","arg","fill","slot","insert","ifr"];
+const names = ["module","import","macro","param","expand","arg","fill","slot","insert","ifr"];
 const example = '<xs:module xmlns:xs="' + namespaceUri + '">\n  <Prompt>Hello, xmlsquish.</Prompt>\n</xs:module>';
 const standards = ["https://www.w3.org/TR/REC-xml-names/","https://www.w3.org/TR/webarch/#namespace-document","https://semver.org/"];
 ---
 <ReferenceLayout locale={locale} page="namespace" title={n.title} description={n.description}>
-  <Fragment slot="head"><link rel="describedby" href="/ns/0.2.0/dsl.md" type="text/markdown" /><link rel="version-history" href={paths[locale].releases} /></Fragment>
+  <Fragment slot="head"><link rel="describedby" href="/ns/dsl.md" type="text/markdown" /><link rel="version-history" href={paths[locale].releases} /></Fragment>
   <p>{n.eyebrow} · xmlsquish 0.2.0</p>
   <h1>{n.heading}</h1>
   <p class="identity"><strong>{n.name}</strong><br /><code>{namespaceUri}</code></p>
@@ -21,7 +21,7 @@ const standards = ["https://www.w3.org/TR/REC-xml-names/","https://www.w3.org/TR
   <p>{n.identityBody}</p><p>{n.namesBody}</p>
   <h2 id="resources">{n.resources}</h2>
   <ul>
-    <li><a href="/ns/0.2.0/dsl.md" rel="describedby">{n.specification}</a></li>
+    <li><a href="/ns/dsl.md" rel="describedby">{n.specification}</a></li>
     <li><a href="https://github.com/kleedaisuki/prompt-squish/blob/v0.2.0/docs/dsl.md">{n.tagged}</a></li>
     <li><a href={paths[locale].releases}>{n.migration}</a></li>
     <li><a href="https://github.com/kleedaisuki/prompt-squish/tree/v0.2.0/examples">{n.examples}</a></li>

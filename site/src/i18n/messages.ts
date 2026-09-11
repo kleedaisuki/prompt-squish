@@ -17,6 +17,7 @@ type Messages = {
   };
   hero: {
     badge: string;
+    revision: string;
     title: string;
     accent: string;
     lead: string;
@@ -121,6 +122,7 @@ const zh: Messages = {
   },
   hero: {
     badge: "XML PROMPT BUILD SYSTEM",
+    revision: "开发版 · 统一宏语法",
     title: "提示词，也值得",
     accent: "好好构建。",
     lead: "拆成文件，组合内容，显式传递上下文。xmlsquish 把可维护的 XML 源码，构建成给 Agent 的最终提示词。宏展开保留文本语义，最终产物压紧空白。",
@@ -137,7 +139,7 @@ const zh: Messages = {
       {
         label: "01 / AUTHOR",
         title: "按职责拆分",
-        body: "Persona、任务与规则各自维护；用 mount / call 组合，而不是复制粘贴。",
+        body: "Persona、任务与规则各自维护；用 import / expand 组合，而不是复制粘贴。",
       },
       {
         label: "02 / COMPILE",
@@ -156,7 +158,7 @@ const zh: Messages = {
     eyebrow: "SHOW, DON'T JUST MINIFY",
     title: "从三个文件，看懂一次构建。",
     intro:
-      "打开源码，再看展开结果：挂载 Persona，显式传递 audience，再调用任务宏。点击 .i.xml / .o.xml 查看展开和最终结果。",
+      "打开源码，再看展开结果：导入宏定义，显式传递 audience 并展开 Persona 与任务宏。点击 .i.xml / .o.xml 查看展开和最终结果。",
     label: "显式传给 audience 的参数",
     parent: "researchers · 研究者",
     self: "everyone · 所有人",
@@ -195,9 +197,9 @@ const zh: Messages = {
     title: "组合、选择、输出，各司其职。",
     items: [
       {
-        title: "导入定义，挂载或调用内容",
-        body: "import 只装载命名宏，不产生输出。mount 调用模块主体，call 调用静态命名宏；slot / fill 组合 XML 节点。",
-        code: '<xs:import src="tasks.xml"/>\n<xs:mount src="persona.xml">\n  <xs:arg name="audience" value="researchers"/>\n</xs:mount>',
+        title: "导入定义，递归展开宏",
+        body: "module 只包含宏定义与 import；entry 显式选择宏，expand 递归展开并按值返回结果。slot / fill 组合 XML 节点。",
+        code: '<xs:import src="persona.xml"/>\n<xs:expand ref="demo:persona">\n  <xs:arg name="audience" value="researchers"/>\n</xs:expand>',
       },
       {
         title: "在编译时做选择",
@@ -215,12 +217,12 @@ const zh: Messages = {
     eyebrow: "FROM SOURCE TO YOUR WORKFLOW",
     title: "检查展开结果，再交给 Agent。",
     intro:
-      "接收文件、目录或 glob。发现阶段跳过 .i.xml / .o.xml，原子替换产物；一个文件失败，不阻止其他独立输入。",
+      "接收文件、目录或 glob。跳过 .i.xml / .o.xml；目录与 glob 跳过无入口库模块，原子替换产物；一个文件失败，不阻止其他独立输入。",
     install: "从仓库安装",
     inspect: "只编译，保留中间表示",
     optimize: "展开、清理来源信息并压紧最终 XML",
     color: "纯文本诊断，也适合 CI",
-    note: "目录递归发现；源文件保持不变。示例路径对应本仓库 examples/site-demo。",
+    note: "目录递归发现；源文件保持不变。示例路径对应本仓库 examples/site-demo；使用当前源码构建，历史 v0.2.0 不支持此语法。",
     diagnosticTitle: "错误回到源码，而不是一串重复路径。",
     diagnosticBody:
       "下面是独立错误用例的真实诊断，显示文件、行号和源码快照；支持 --color auto / always / never。没有精确列号，就不虚构插入符位置。",
@@ -273,6 +275,7 @@ const en: Messages = {
   },
   hero: {
     badge: "XML PROMPT BUILD SYSTEM",
+    revision: "Development · unified macros",
     title: "Your prompts deserve",
     accent: "a proper build.",
     lead: "Split files. Compose content. Pass context explicitly. xmlsquish turns maintainable XML source into a finished prompt for your agent. Expansion preserves text semantics; the final product compacts whitespace.",
@@ -289,7 +292,7 @@ const en: Messages = {
       {
         label: "01 / AUTHOR",
         title: "Split by responsibility",
-        body: "Maintain personas, tasks, and rules separately. Compose with mount / call instead of copy-paste.",
+        body: "Maintain personas, tasks, and rules separately. Compose with import / expand instead of copy-paste.",
       },
       {
         label: "02 / COMPILE",
@@ -308,7 +311,7 @@ const en: Messages = {
     eyebrow: "SHOW, DON'T JUST MINIFY",
     title: "Three files. One understandable build.",
     intro:
-      "Read the sources, then inspect the expansion: Persona is mounted with an explicit audience argument, and a named task macro is called. Select .i.xml / .o.xml to see the results.",
+      "Read the sources, then inspect the expansion: Persona and task macros are expanded with an explicit audience argument. Select .i.xml / .o.xml to see the results.",
     label: "Explicit audience argument",
     parent: "researchers · focused audience",
     self: "everyone · broad audience",
@@ -349,7 +352,7 @@ const en: Messages = {
     items: [
       {
         title: "Import definitions. Invoke content.",
-        body: "import loads named macros without output. mount invokes a module main; call invokes a static named macro. slot / fill compose XML nodes.",
+        body: "Modules contain imports and named macros only. entry explicitly selects a macro; expand recursively produces its return value. slot / fill compose XML nodes.",
         code: zh.capabilities.items[0].code,
       },
       {
@@ -368,12 +371,12 @@ const en: Messages = {
     eyebrow: "FROM SOURCE TO YOUR WORKFLOW",
     title: "Inspect the expansion. Then feed your agent.",
     intro:
-      "Accept files, directories, or globs. Discovery skips .i.xml / .o.xml, output replacement is atomic, and one failed file does not stop independent inputs.",
+      "Accept files, directories, or globs. Discovery skips .i.xml / .o.xml and valid libraries without entry in directories/globs; output replacement is atomic, and one failed file does not stop independent inputs.",
     install: "Install from a repository checkout",
     inspect: "Compile only; keep the intermediate",
     optimize: "Expand, lower provenance, and compact final XML",
     color: "Plain diagnostics, ready for CI",
-    note: "Directories are recursive; sources stay untouched. These paths use examples/site-demo in this repository.",
+    note: "Directories are recursive; sources stay untouched. These paths use examples/site-demo in this repository. Build current sources; historical v0.2.0 does not support this syntax.",
     diagnosticTitle: "Errors point to source, not a pile of repeated paths.",
     diagnosticBody:
       "This separate failing example shows the physical file, line, and original source snapshot. Choose --color auto / always / never; no caret is invented when a column isn't known.",

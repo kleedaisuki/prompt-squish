@@ -1,7 +1,7 @@
 <xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:str="https://example.com/macros/string">
   <xs:macro name="str:items">
     <xs:param name="list"/>
-    <xs:ifr get="arg.list" pattern="^(?&lt;head&gt;[^,]+),(?&lt;tail&gt;.*)$"><Item><xs:insert get="match.head"/></Item><xs:call ref="str:items"><xs:arg name="list" get="match.tail"/></xs:call></xs:ifr>
+    <xs:ifr get="arg.list" pattern="^(?&lt;head&gt;[^,]+),(?&lt;tail&gt;.*)$"><Item><xs:insert get="match.head"/></Item><xs:expand ref="str:items"><xs:arg name="list" get="match.tail"/></xs:expand></xs:ifr>
     <xs:ifr get="arg.list" pattern="^(?&lt;last&gt;[^,]+)$"><Item><xs:insert get="match.last"/></Item></xs:ifr>
   </xs:macro>
 </xs:module>

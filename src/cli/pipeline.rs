@@ -39,6 +39,9 @@ impl Size {
 #[derive(Default)]
 pub(crate) struct Stats {
     pub processed_files: u64,
+    /// Valid discovered libraries produce no artifacts or size measurements.
+    /// 发现的合法库不生成产物，也不纳入产物大小统计。
+    pub skipped_libraries: u64,
     pub source: Size,
     pub ir: Size,
     pub final_prompt: Size,
@@ -50,6 +53,9 @@ pub(crate) struct Stats {
 impl Stats {
     fn include(&mut self, other: Self) {
         self.processed_files = self.processed_files.saturating_add(other.processed_files);
+        self.skipped_libraries = self
+            .skipped_libraries
+            .saturating_add(other.skipped_libraries);
         self.source.include(other.source);
         self.ir.include(other.ir);
         self.final_prompt.include(other.final_prompt);
@@ -75,11 +81,21 @@ pub(crate) struct Report {
 
 #[cfg(test)]
 pub(crate) fn run(paths: &[PathBuf], stage: OutputStage, logs: &mut dyn Write) -> Report {
-    run_with_color(paths, stage, logs, false, CompileOptions::default(), false)
+    let explicit = paths.iter().cloned().collect();
+    run_with_color(
+        paths,
+        &explicit,
+        stage,
+        logs,
+        false,
+        CompileOptions::default(),
+        false,
+    )
 }
 
 pub(crate) fn run_with_color(
     paths: &[PathBuf],
+    explicit: &BTreeSet<PathBuf>,
     stage: OutputStage,
     logs: &mut dyn Write,
     color: bool,
@@ -95,7 +111,19 @@ pub(crate) fn run_with_color(
         ..Report::default()
     };
     for path in paths {
-        match process_one(&compiler, path, stage, logs, color, debug, max_output_bytes) {
+        let input = CompileInput {
+            path,
+            explicit: explicit.contains(path),
+        };
+        match process_one(
+            &compiler,
+            input,
+            stage,
+            logs,
+            color,
+            debug,
+            max_output_bytes,
+        ) {
             Ok(file) => report.stats.include(file),
             Err(error) => report.failures.push(*error),
         }
@@ -103,20 +131,39 @@ pub(crate) fn run_with_color(
     report
 }
 
+/// Operand provenance controls whether a valid library may be skipped.
+/// 输入来源决定合法库是否可以跳过；显式文件始终请求编译。
+struct CompileInput<'a> {
+    /// Logical input path / 逻辑输入路径。
+    path: &'a Path,
+    /// Explicit file operand rather than directory/glob match / 显式文件参数。
+    explicit: bool,
+}
+
 fn process_one(
     compiler: &Compiler,
-    path: &Path,
+    input: CompileInput<'_>,
     stage: OutputStage,
     logs: &mut dyn Write,
     color: bool,
     debug: bool,
     max_output_bytes: usize,
 ) -> Result<Stats, Box<Diagnostic>> {
+    let path = input.path;
     let logical_path =
         logical_absolute(path).map_err(|error| Diagnostic::new(Stage::Read, path, error))?;
     let path = logical_path.as_path();
     let (source, bom) =
         read_xml(path).map_err(|error| Diagnostic::new(Stage::Read, path, error))?;
+    if !input.explicit
+        && crate::compiler::is_library(path, &source)
+            .map_err(|error| Diagnostic::compile(error, path, Some(&source)))?
+    {
+        return Ok(Stats {
+            skipped_libraries: 1,
+            ..Stats::default()
+        });
+    }
     let mut stats = Stats {
         source: Size::measure(&source)
             .map_err(|error| Diagnostic::new(Stage::Measure, path, error))?,

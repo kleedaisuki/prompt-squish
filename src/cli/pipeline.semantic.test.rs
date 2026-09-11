@@ -2,8 +2,11 @@
 use std::{ffi::OsString, fs, path::Path};
 
 /// Write a namespaced module / 写入带命名空间的模块。
-fn write(path: &Path, body: &str) {
-    fs::write(path, format!(r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test">{body}</xs:module>"#)).unwrap();
+fn write(path: &Path, entry: Option<&str>, body: &str) {
+    let entry = entry
+        .map(|name| format!(" entry=\"{name}\""))
+        .unwrap_or_default();
+    fs::write(path, format!(r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test"{entry}>{body}</xs:module>"#)).unwrap();
 }
 
 /// Run with retained intermediate artifact / 运行并保留中间产物。
@@ -28,15 +31,18 @@ fn imported_macro_uses_definition_site_and_explicit_slots() {
     let main = dir.path().join("main.xml");
     write(
         &main,
-        r#"<xs:import src="lib/macros.xml"/><root><xs:call ref="m:panel"><xs:arg name="title" value="你好 &amp; &lt;世界&gt;"/><xs:fill name="body"><Body> keep </Body></xs:fill></xs:call></root>"#,
+        Some("m:main"),
+        r#"<xs:import src="lib/macros.xml"/><xs:macro name="m:main"><root><xs:expand ref="m:panel"><xs:arg name="title" value="你好 &amp; &lt;世界&gt;"/><xs:fill name="body"><Body> keep </Body></xs:fill></xs:expand></root></xs:macro>"#,
     );
     write(
         &dir.path().join("lib/macros.xml"),
-        r#"<xs:macro name="m:panel"><xs:param name="title"/><Panel><Title><xs:insert get="arg.title"/></Title><xs:mount src="leaf.xml"/><xs:slot name="body" required="true"/></Panel></xs:macro>"#,
+        None,
+        r#"<xs:import src="leaf.xml"/><xs:macro name="m:panel"><xs:param name="title"/><Panel><Title><xs:insert get="arg.title"/></Title><xs:expand ref="m:leaf"/><xs:slot name="body" required="true"/></Panel></xs:macro>"#,
     );
     write(
         &dir.path().join("lib/leaf.xml"),
-        r#"<Source><xs:insert get="file.name"/></Source>"#,
+        None,
+        r#"<xs:macro name="m:leaf"><Source><xs:insert get="file.name"/></Source></xs:macro>"#,
     );
     let (code, err) = invoke(&main);
     assert_eq!(code, 0, "{err}");
@@ -58,7 +64,8 @@ fn unicode_recursion_and_failure_do_not_commit_partial_output() {
     let main = dir.path().join("main.xml");
     write(
         &main,
-        r#"<xs:macro name="m:chars"><xs:param name="text"/><xs:ifr get="arg.text" pattern="^(?&lt;head&gt;.)(?&lt;tail&gt;.*)$"><C><xs:insert get="match.head"/></C><xs:call ref="m:chars"><xs:arg name="text" get="match.tail"/></xs:call></xs:ifr></xs:macro><r><xs:call ref="m:chars"><xs:arg name="text" value="你好"/></xs:call></r>"#,
+        Some("m:main"),
+        r#"<xs:macro name="m:chars"><xs:param name="text"/><xs:ifr get="arg.text" pattern="^(?&lt;head&gt;.)(?&lt;tail&gt;.*)$"><C><xs:insert get="match.head"/></C><xs:expand ref="m:chars"><xs:arg name="text" get="match.tail"/></xs:expand></xs:ifr></xs:macro><xs:macro name="m:main"><r><xs:expand ref="m:chars"><xs:arg name="text" value="你好"/></xs:expand></r></xs:macro>"#,
     );
     let (code, err) = invoke(&main);
     assert_eq!(code, 0, "{err}");
@@ -75,7 +82,11 @@ fn unicode_recursion_and_failure_do_not_commit_partial_output() {
         r#"<r><xs:ifr str="x" pattern="["/></r>"#,
         "<a/><b/>",
     ] {
-        write(&main, broken);
+        write(
+            &main,
+            Some("m:main"),
+            &format!(r#"<xs:macro name="m:main">{broken}</xs:macro>"#),
+        );
         let (code, err) = invoke(&main);
         assert_eq!(code, 1, "{err}");
         assert!(err.contains("main.xml"), "{err}");

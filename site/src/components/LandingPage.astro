@@ -18,7 +18,7 @@ const metrics = demo.scenarios.parent.metrics;
 const [diagnosticHeadline, ...diagnosticLines] = demo.diagnostic.split("\n");
 const diagnosticRest = "\n" + diagnosticLines.join("\n");
 const heroCode =
-  '<xs:mount src="persona.xml">\n  <xs:arg name="audience" value="researchers"/>\n</xs:mount>\n<xs:call ref="demo:task"/>';
+  '<xs:expand ref="demo:persona">\n  <xs:arg name="audience" value="researchers"/>\n</xs:expand>\n<xs:expand ref="demo:task"/>';
 const commands = [
   {
     title: m.cli.install,
@@ -62,7 +62,7 @@ const stages = [
 <main id="main">
   <section class="hero page-width" aria-labelledby="hero-title">
     <div class="hero-copy">
-      <p class="eyebrow"><span class="spark" aria-hidden="true">✦</span> {m.hero.badge} · <a href={paths[locale].releases}>v0.2.0</a></p>
+      <p class="eyebrow"><span class="spark" aria-hidden="true">✦</span> {m.hero.badge} · <span>{m.hero.revision}</span></p>
       <h1 id="hero-title">{m.hero.title}<em>{m.hero.accent}</em></h1>
       <p class="hero-lead">{m.hero.lead}</p>
       <div class="hero-actions">
@@ -77,7 +77,7 @@ const stages = [
         <div class="graph-label"><span>01</span>{m.hero.source}</div>
         <div class="entry-file"><span class="file-symbol" aria-hidden="true">&lt;/&gt;</span><strong>agent.xml</strong><code>xs:arg</code></div>
         <div class="file-branches">
-          <div><span aria-hidden="true">├─</span><code>persona.xml</code><small>mount + arg</small></div>
+          <div><span aria-hidden="true">├─</span><code>persona.xml</code><small>expand + arg</small></div>
           <div><span aria-hidden="true">└─</span><code>tasks.xml</code><small>import + call</small></div>
         </div>
       </div>

@@ -28,10 +28,10 @@ fn strip(bytes: &[u8]) -> Vec<u8> {
 
 fn failure_fixture(dir: &Path) -> std::path::PathBuf {
     let main = dir.join("main.xml");
-    fs::write(&main, "<xs:module xmlns:xs='https://xmlsquish.moesegfault.dev/ns'><r><xs:mount src='child.xml'/></r></xs:module>").unwrap();
+    fs::write(&main, "<xs:module xmlns:xs='https://xmlsquish.moesegfault.dev/ns' xmlns:m='urn:test' entry='m:main'><xs:import src='child.xml'/><xs:macro name='m:main'><r><xs:expand ref='m:child'/></r></xs:macro></xs:module>").unwrap();
     fs::write(
         dir.join("child.xml"),
-        "<xs:module xmlns:xs='https://xmlsquish.moesegfault.dev/ns'><child>\r\n    <xs:insert get='arg.missing'/>\r\n</child></xs:module>",
+        "<xs:module xmlns:xs='https://xmlsquish.moesegfault.dev/ns' xmlns:m='urn:test'><xs:macro name='m:child'><child>\r\n    <xs:insert get='arg.missing'/>\r\n</child></xs:macro></xs:module>",
     )
     .unwrap();
     main

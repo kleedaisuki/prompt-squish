@@ -23,10 +23,11 @@ use std::path::PathBuf;
 #[command(
     name = "xmlsquish",
     version,
-    about = "Compile XML modules and macros, then compress whitespace",
-    long_about = "Compile XML macros to provenance *.i.xml and compressed *.o.xml.\n\
+    about = "Expand explicit XML macros, then compress whitespace",
+    long_about = "Expand the module entry macro to provenance *.i.xml and compressed *.o.xml.\n\
                   Use -I to retain only the intermediate stage; -O is the default.\n\
-                  Directories are searched recursively, ignoring *.i.xml and *.o.xml."
+                  Directories are searched recursively, ignoring *.i.xml and *.o.xml.\n\
+                  Directory/glob libraries without entry are skipped; explicit files require entry."
 )]
 struct Args {
     /// Color output: auto detects each terminal / 颜色模式，auto 按终端能力决定
@@ -50,7 +51,7 @@ struct Args {
     /// Maximum output UTF-8 bytes / 输出 UTF-8 字节预算。
     #[arg(long)]
     max_output_bytes: Option<usize>,
-    /// Root main argument, repeatable / 根 main 参数，可重复指定不同参数名。
+    /// Entry macro argument, repeatable / 显式入口宏参数，可重复指定不同参数名。
     #[arg(long = "arg", value_name = "NAME=VALUE", value_parser = parse_argument)]
     arguments: Vec<(String, String)>,
     /// Input XML files, directories, or glob patterns / 输入文件、目录或通配符
@@ -181,6 +182,7 @@ fn execute(
     };
     let report = pipeline::run_with_color(
         &discovery.files,
+        &discovery.explicit,
         stage,
         &mut stdout,
         out_color,
@@ -229,6 +231,7 @@ fn print_report_colored(
     let failures = discovery_failures.saturating_add(report.failures.len());
     section(out, "Summary", color);
     let _ = writeln!(out, "Processed files: {discovered}");
+    let _ = writeln!(out, "Skipped libraries: {}", stats.skipped_libraries);
     let _ = writeln!(
         out,
         "{}",

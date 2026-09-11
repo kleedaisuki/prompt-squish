@@ -1,7 +1,10 @@
-<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns">
-  <xs:param name="audience"/>
-  <Section>
-    <xs:slot name="heading" required="true"/>
-    <xs:mount src="./leaf.xml"><xs:arg name="audience" get="arg.audience"/></xs:mount>
-  </Section>
+<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:p="https://example.com/macros/sections">
+  <xs:import src="./leaf.xml"/>
+  <xs:macro name="p:section">
+    <xs:param name="audience"/>
+    <Section>
+      <xs:slot name="heading" required="true"/>
+      <xs:expand ref="p:leaf"><xs:arg name="audience" get="arg.audience"/></xs:expand>
+    </Section>
+  </xs:macro>
 </xs:module>
