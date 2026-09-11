@@ -590,7 +590,7 @@ mod tests {
         let depth = 6000;
         let body = format!("{}leaf{}", "<a>".repeat(depth), "</a>".repeat(depth));
         let source = format!(r#"<xs:module xmlns:xs="{NS}">{body}</xs:module>"#);
-        let result = super::super::Compiler::new()
+        let result = super::super::Compiler::default()
             .compile(Path::new("deep.xml"), &source, |_| unreachable!())
             .unwrap();
         assert_eq!(result.output.matches("</a>").count(), depth);
@@ -612,3 +612,7 @@ mod tests {
         assert!(matches!(&args[0].value, Value::Body(body) if body.is_empty()));
     }
 }
+
+#[cfg(test)]
+#[path = "parser.contract.test.rs"]
+mod contract_tests;

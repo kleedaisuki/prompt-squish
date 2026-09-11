@@ -65,7 +65,7 @@ impl Diagnostic {
     /// Capture the compiler's original source, never re-read a possibly changed file.
     /// 捕获编译器实际读取的源码，不重新读取可能已变化的文件。
     pub(crate) fn compile(
-        error: crate::CompileError,
+        error: crate::compiler::CompileError,
         primary: &Path,
         source: Option<&str>,
     ) -> Self {

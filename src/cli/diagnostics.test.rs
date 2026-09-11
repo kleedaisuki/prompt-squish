@@ -29,7 +29,7 @@ fn canonical_working_directory_paths_are_relative() {
 #[test]
 fn plain_diagnostic_has_source_and_no_fabricated_column() {
     let diagnostic = Diagnostic::compile(
-        crate::CompileError {
+        crate::compiler::CompileError {
             path: "part.xml".into(),
             line: 2,
             message: "undefined variable $x".into(),
@@ -58,7 +58,7 @@ fn color_only_wraps_the_same_plain_text() {
 #[test]
 fn messages_paths_and_snippets_cannot_inject_terminal_controls() {
     let diagnostic = Diagnostic::compile(
-        crate::CompileError {
+        crate::compiler::CompileError {
             path: "bad\x1b[2J.xml".into(),
             line: 1,
             message: "bad\x1b[31m\nsecond\rthird\u{202e}".into(),
@@ -77,7 +77,7 @@ fn messages_paths_and_snippets_cannot_inject_terminal_controls() {
 fn snippet_is_an_owned_snapshot_and_long_lines_are_clipped() {
     let mut source = "original".repeat(100);
     let diagnostic = Diagnostic::compile(
-        crate::CompileError {
+        crate::compiler::CompileError {
             path: "a.xml".into(),
             line: 1,
             message: "bad".into(),

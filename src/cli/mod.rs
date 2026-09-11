@@ -71,10 +71,11 @@ fn parse_argument(input: &str) -> Result<(String, String), String> {
 /// Runs the CLI with injectable streams. Returns the intended process exit code.
 /// 使用可注入的输出流运行命令行，返回进程退出码。
 ///
-/// ```
+/// ```ignore
 /// let (mut out, mut err) = (Vec::new(), Vec::new());
-/// assert_eq!(xmlsquish::cli::run(["xmlsquish", "--help"], &mut out, &mut err), 0);
+/// assert_eq!(crate::cli::run(["xmlsquish", "--help"], &mut out, &mut err), 0);
 /// ```
+#[cfg(test)]
 pub fn run<I, T>(args: I, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32
 where
     I: IntoIterator<Item = T>,
@@ -144,7 +145,7 @@ fn execute(
         return 0;
     }
 
-    let mut options = crate::CompileOptions::default();
+    let mut options = crate::compiler::CompileOptions::default();
     if let Some(limit) = args.max_depth {
         options.max_depth = limit;
     }
@@ -333,3 +334,7 @@ mod tests;
 #[cfg(test)]
 #[path = "mod.pipeline_tests.test.rs"]
 mod pipeline_tests;
+
+#[cfg(test)]
+#[path = "pipeline.semantic.test.rs"]
+mod semantic_tests;

@@ -4,7 +4,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::{CompileOptions, Compiler};
+use crate::compiler::{CompileOptions, Compiler};
 use tiktoken_rs::o200k_base_singleton;
 
 use super::diagnostics::{Diagnostic, Stage, painted, safe_text};
@@ -143,7 +143,7 @@ fn process_one(
     // Validate final-stage growth before committing either artifact.
     // 最终压缩可能新增分隔空格，写入任何产物前也必须验证其预算。
     let final_output = if stage == OutputStage::Optimized {
-        let output = crate::squish(&compiled.output)
+        let output = crate::squish::squish(&compiled.output)
             .map_err(|error| Diagnostic::new(Stage::Squish, path, error))?
             .output;
         if output.len() > max_output_bytes {

@@ -95,10 +95,6 @@ pub struct Compiler {
     options: CompileOptions,
 }
 impl Compiler {
-    /// Construct with default invocation budgets. / 使用默认调用预算构造。
-    pub fn new() -> Self {
-        Self::default()
-    }
     /// Construct with explicit budgets and root parameters. / 使用显式预算与根参数构造。
     pub fn with_options(options: CompileOptions) -> Self {
         Self { options }
@@ -227,5 +223,9 @@ fn validate_calls(program: &Program) -> Result<(), CompileError> {
     Ok(())
 }
 #[cfg(test)]
-#[path = "compiler.test.rs"]
+#[path = "mod.test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "source.test.rs"]
+mod source_tests;

@@ -67,15 +67,15 @@ Regexes reject positional captures, backreferences, and look-around. Use noncapt
 
 The core does not read environment variables or time or execute subprocesses. The local loader is not a filesystem sandbox: compile trusted sources and set suitable automation budgets.
 
-## 示例与库 / Examples and library
+## 示例与内部模块 / Examples and internal modules
 
 - [组合与递归 / Composition and recursion](examples/semantic/README.md)
 - [显式参数而非继承 / Explicit arguments, not inheritance](examples/inheritance/README.md)
 - [网站演示源码 / Site demo sources](examples/site-demo/agent.xml)
 
-公共库提供 `Compiler::new()`、`Compiler::with_options(CompileOptions)` 和可注入源码加载器；入口参数放在 `CompileOptions.args`。独立 `squish` 工具保留其词法空白转换用途；它**不是宏求值或 lowering**，而是在干净 XML 之后执行的最终产品压缩步骤，不保证 XML 文本语义。
+编译器内部模块提供 `Compiler::default()`、`Compiler::with_options(CompileOptions)` 和可注入源码加载器；入口参数放在 `CompileOptions.args`。独立 `squish` 工具保留其词法空白转换用途；它**不是宏求值或 lowering**，而是在干净 XML 之后执行的最终产品压缩步骤，不保证 XML 文本语义。
 
-The library exposes `Compiler::new()`, `Compiler::with_options(CompileOptions)`, and an injectable source loader; entry arguments belong in `CompileOptions.args`. The standalone `squish` utility remains a lexical whitespace transformer, **not macro evaluation or lowering**; it runs after clean XML as the final product compression pass and does not preserve XML text semantics.
+The internal compiler module provides `Compiler::default()`, `Compiler::with_options(CompileOptions)`, and an injectable source loader; entry arguments belong in `CompileOptions.args`. The standalone `squish` utility remains a lexical whitespace transformer, **not macro evaluation or lowering**; it runs after clean XML as the final product compression pass and does not preserve XML text semantics.
 
 ## 开发与站点 / Development and site
 

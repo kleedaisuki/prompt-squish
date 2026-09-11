@@ -1,10 +1,10 @@
 //! XML data and invocation isolation regressions. / XML 数据与调用隔离回归。
+use crate::compiler::{CompileError, CompileOptions, CompileResult, Compiler};
 use std::path::Path;
-use xmlsquish::{CompileOptions, Compiler};
 
 /// Compile a complete in-memory module. / 编译完整的内存模块。
-fn compile(body: &str) -> Result<xmlsquish::CompileResult, xmlsquish::CompileError> {
-    Compiler::new().compile(
+fn compile(body: &str) -> Result<CompileResult, CompileError> {
+    Compiler::default().compile(
         Path::new("boundaries.xml"),
         &format!(r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:macro">{body}</xs:module>"#),
         |_| Err("unexpected dependency".into()),
@@ -101,35 +101,4 @@ fn module_namespace_bindings_survive_removing_the_declaration_container() {
         parsed.root_element().attribute(("urn:attr", "key")),
         Some("value")
     );
-}
-
-#[test]
-fn percent_encoded_file_uri_and_relative_reference_share_identity() {
-    let base = std::env::current_dir().unwrap().join("virtual/main.xml");
-    let dependency = base.parent().unwrap().join("a b.xml");
-    let uri = url::Url::from_file_path(&dependency).unwrap();
-    let source = format!(
-        r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><xs:import src="{uri}"/><xs:import src="./a%20b.xml"/><root/></xs:module>"#
-    );
-    let mut loads = 0;
-    Compiler::new()
-        .compile(&base, &source, |path| {
-            loads += 1;
-            assert_eq!(path, dependency);
-            Ok(r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"/>"#.into())
-        })
-        .unwrap();
-    assert_eq!(loads, 1);
-}
-
-#[test]
-fn unsupported_uri_schemes_are_not_treated_as_local_filenames() {
-    for src in [
-        "https://example.test/a.xml",
-        "urn:module:a",
-        "data:text/plain,hello",
-    ] {
-        let error = compile(&format!(r#"<xs:import src="{src}"/><root/>"#)).unwrap_err();
-        assert!(error.message.contains("unsupported URI scheme"), "{error}");
-    }
 }

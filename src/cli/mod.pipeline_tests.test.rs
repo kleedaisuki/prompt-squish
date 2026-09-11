@@ -186,10 +186,10 @@ fn final_compression_growth_is_budgeted_before_artifact_commit() {
     let input = dir.path().join("a.xml");
     let source = module("<r><a/></r>");
     fs::write(&input, &source).unwrap();
-    let compiled = crate::Compiler::new()
+    let compiled = crate::compiler::Compiler::default()
         .compile(&input, &source, |_| unreachable!())
         .unwrap();
-    let compressed = crate::squish(&compiled.output).unwrap();
+    let compressed = crate::squish::squish(&compiled.output).unwrap();
     assert!(compressed.output.len() > compiled.output.len());
     fs::write(input.with_extension("i.xml"), "old ir").unwrap();
     fs::write(input.with_extension("o.xml"), "old output").unwrap();

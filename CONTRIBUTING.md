@@ -2,9 +2,9 @@
 
 ## 契约优先 / Contracts first
 
-先阅读 [DSL 规范](docs/dsl.md) 和 [ADR 0005](docs/adr/0005-dsl-language.md)。ADR 0001–0003 是历史记录，其旧 DSL、元数据继承决策已被替代，最终产品空白压缩保持；ADR 0004 的单 package 结构仍适用。
+先阅读 [DSL 规范](docs/dsl.md) 和 [ADR 0005](docs/adr/0005-dsl-language.md)。ADR 0001–0003 是历史记录，其旧 DSL、元数据继承决策已被替代，最终产品空白压缩保持；ADR 0004 的单 package 原则保留，其 library/binary 布局由 [ADR 0006](docs/adr/0006-binary-module-layout.md) 替代。
 
-Read the DSL specification and ADR 0005 first. ADRs 0001–0003 retain historical context, not current language authority. ADR 0004's single-package organization remains applicable.
+Read the DSL specification and ADR 0005 first. ADRs 0001–0003 retain historical context, not current language authority. ADR 0004's single-package principle remains; ADR 0006 supersedes its library/binary layout.
 
 - 源码身份使用词法规范 URI，不以文件内容或 symlink 真实路径折叠。 / Use logical canonical source URIs, not content or symlink identity.
 - 源码装载闭包、不可变宏定义与运行时展开帧（Expansion Frame）分离。 / Separate discovery, immutable definitions, and runtime frames.
@@ -38,9 +38,9 @@ Tests use temporary directories. Do not commit generated XML, build directories,
 
 ## 结构与测试 / Structure and tests
 
-保持一个 Cargo package，包含 library 与 binary。编译器负责源码装载、静态验证、展开与来源记录；CLI 负责路径发现、预算/参数、诊断展示、统计和原子写入。词法转换器不参与宏求值，但负责最终产品空白压缩。
+保持一个 Cargo package 和一个 binary target，以 `src/main.rs` 为唯一入口，不保留库门面。编译器负责源码装载、静态验证、展开与来源记录；CLI 负责路径发现、预算/参数、诊断展示、统计和原子写入。词法转换器不参与宏求值，但负责最终产品空白压缩。
 
-Keep one Cargo package with library and binary targets. The compiler owns loading, validation, expansion, and provenance; the CLI owns discovery, options, presentation, metrics, and atomic persistence. The lexical utility is outside macro evaluation but performs final product whitespace compression.
+Keep one Cargo package with a single binary target rooted at `src/main.rs`, without a library facade. The compiler owns loading, validation, expansion, and provenance; the CLI owns discovery, options, presentation, metrics, and atomic persistence. The lexical utility is outside macro evaluation but performs final product whitespace compression.
 
 最低回归矩阵 / Minimum regression matrix:
 

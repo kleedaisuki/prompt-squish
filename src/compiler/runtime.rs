@@ -646,3 +646,11 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "runtime.contract.test.rs"]
+mod contract_tests;
+
+#[cfg(test)]
+#[path = "runtime.xml.test.rs"]
+mod xml_tests;

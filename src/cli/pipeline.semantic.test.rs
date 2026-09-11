@@ -9,7 +9,7 @@ fn write(path: &Path, body: &str) {
 /// Run with retained intermediate artifact / 运行并保留中间产物。
 fn invoke(path: &Path) -> (i32, String) {
     let mut err = Vec::new();
-    let code = xmlsquish::cli::run(
+    let code = crate::cli::run(
         [
             OsString::from("xmlsquish"),
             OsString::from("--debug"),
