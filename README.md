@@ -4,7 +4,19 @@
 
 xmlsquish 是 Rust 编写的 XML 结构预处理器：冻结源码模块，以显式参数、XML 插槽和递归宏生成一个 XML 文档。语言规范以 [`docs/dsl.md`](docs/dsl.md) 为准；设计与迁移见 [ADR 0005](docs/adr/0005-dsl-language.md)。
 
+当前版本 / Current version: **0.2.0** · [发布说明 / Release notes](docs/releases/0.2.0.md) · [更新日志 / Changelog](CHANGELOG.md) · [命名空间 / Namespace](https://xmlsquish.moesegfault.dev/ns)
+
 ## 安装与运行 / Install and run
+
+需要 Rust 1.88 或更高版本。从固定版本安装：
+
+Requires Rust 1.88 or newer. Install the pinned release:
+
+```bash
+cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v0.2.0 --locked
+```
+
+从当前检出源码安装并运行 / Install and run from the current checkout:
 
 ```bash
 cargo install --path . --locked

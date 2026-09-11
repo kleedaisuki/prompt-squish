@@ -1,6 +1,6 @@
 [package]
 name = "xmlsquish"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"
@@ -9,7 +9,7 @@ description = "Compile namespace-aware XML macros with explicit parameters and s
 
 # Ship only Rust sources, language fixtures, and essential documentation.
 # 仅发布 Rust 源码、语言测试样例和必要文档，不包含站点资产。
-include = ["/src/**", "/examples/**", "/docs/dsl.md", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
+include = ["/src/**", "/examples/**", "/docs/dsl.md", "/docs/releases/**", "/CHANGELOG.md", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
 
 [[test]]
 name = "diagnostics"
