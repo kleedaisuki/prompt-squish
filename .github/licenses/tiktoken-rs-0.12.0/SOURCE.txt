@@ -1,0 +1,6 @@
+The published tiktoken-rs 0.12.0 crate omits its repository-root LICENSE.
+发布的 tiktoken-rs 0.12.0 crate 未包含仓库根目录 LICENSE。
+
+LICENSE was copied without modification from the crate's .cargo_vcs_info.json commit:
+LICENSE 原样复制自该 crate 的 .cargo_vcs_info.json 对应提交：
+https://github.com/zurawiki/tiktoken-rs/blob/32de8dc0526d67f2c266c4e5e7c6a8ec5a0ce3d7/LICENSE
