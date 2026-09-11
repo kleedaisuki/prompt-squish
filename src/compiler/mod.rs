@@ -94,6 +94,30 @@ impl Default for CompileOptions {
 pub struct Compiler {
     options: CompileOptions,
 }
+
+/// A validated, linked snapshot that can be expanded with independent inputs.
+/// 已验证并链接的源码快照，可用相互独立的输入重复展开。
+///
+/// Preparing freezes the source closure; expansion never reloads files. Prepare
+/// again to observe changed sources. Each expansion owns its frames and budgets.
+/// 准备阶段冻结源码闭包；展开不重新读取文件。源码变化后须重新准备；
+/// 每次展开独立持有执行帧和预算，不缓存宏执行结果。
+/// Static serialization caches are local to this single-thread-owned snapshot;
+/// they retain reached node payloads until it is dropped. No global cache exists.
+/// 静态序列化缓存由此单线程快照持有，已访问节点的载荷保留到快照释放；
+/// 不使用全局缓存，也不隐式监听文件变化。
+pub struct PreparedProgram {
+    program: Program,
+}
+
+impl PreparedProgram {
+    /// Expand the frozen snapshot with fresh parameters and resource budgets.
+    /// 使用新的参数与资源预算展开冻结快照。
+    pub fn expand(&self, options: &CompileOptions) -> Result<CompileResult, CompileError> {
+        runtime::expand(&self.program, options)
+    }
+}
+
 impl Compiler {
     /// Construct with explicit budgets and root parameters. / 使用显式预算与根参数构造。
     pub fn with_options(options: CompileOptions) -> Self {
@@ -108,8 +132,31 @@ impl Compiler {
         &self,
         path: &Path,
         source: &str,
-        mut loader: F,
+        loader: F,
     ) -> Result<CompileResult, CompileError>
+    where
+        F: FnMut(&Path) -> Result<String, String>,
+    {
+        self.prepare(path, source, loader)?.expand(&self.options)
+    }
+
+    /// Freeze and link sources once, independently of expansion inputs.
+    /// 一次冻结并链接源码，与展开输入分离。
+    ///
+    /// Reuse example / 复用示例：
+    /// ```ignore
+    /// let plan = compiler.prepare(path, source, loader)?;
+    /// let first = plan.expand(&CompileOptions::default())?;
+    /// let second = plan.expand(&other_options)?;
+    /// ```
+    /// Both results describe independent executions of the same snapshot.
+    /// 两份结果来自同一源码快照的独立执行。
+    pub fn prepare<F>(
+        &self,
+        path: &Path,
+        source: &str,
+        mut loader: F,
+    ) -> Result<PreparedProgram, CompileError>
     where
         F: FnMut(&Path) -> Result<String, String>,
     {
@@ -125,7 +172,7 @@ impl Compiler {
                 .join(path)
         });
         let program = discover(&path, source, &mut loader)?;
-        runtime::expand(&program, &self.options)
+        Ok(PreparedProgram { program })
     }
 }
 /// Classify a syntactically valid library without loading imports or executing macros.
@@ -301,6 +348,10 @@ mod source_tests;
 #[cfg(test)]
 #[path = "perf.test.rs"]
 mod perf_tests;
+
+#[cfg(test)]
+#[path = "reuse.test.rs"]
+mod reuse_tests;
 
 #[cfg(test)]
 mod test_support;

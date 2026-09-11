@@ -35,6 +35,20 @@ impl Loc {
         }
     }
 }
+/// Immutable bytes shared independently of execution provenance. / 不依赖执行来源的共享不可变字节。
+#[derive(Debug)]
+pub(super) struct Payload {
+    /// Diagnostic event XML. / 诊断事件 XML。
+    pub xml: String,
+    /// Decoded scalar text, absent for structural events. / 解码标量文本，结构事件为空。
+    pub text: Option<String>,
+    /// Lazy diagnostic escaping; discarded argument values need no IR bytes.
+    /// 惰性诊断转义；已消费的参数值不需要 IR 字节。
+    pub intermediate: std::cell::OnceCell<String>,
+    /// Matching close event has no close child: ownership depth is at most one.
+    /// 匹配结束事件不再包含结束子节点，所有权深度最多为一。
+    pub close: Option<std::rc::Rc<Payload>>,
+}
 /// Immutable executable syntax. / 不可变可执行语法。
 #[derive(Debug)]
 pub(super) struct Node {
@@ -42,6 +56,8 @@ pub(super) struct Node {
     pub loc: Loc,
     /// Data or computation at this node. / 本节点的数据或计算操作。
     pub kind: Kind,
+    /// Lazy immutable event serialization, shared across expansions. / 惰性不可变事件序列化，跨展开共享。
+    pub events: std::cell::OnceCell<std::rc::Rc<Payload>>,
 }
 impl Drop for Node {
     /// Flatten child ownership before destruction, even for deeply authored XML.

@@ -1,0 +1,224 @@
+{
+  "baseline": {
+    "name": "baseline-cli.exe",
+    "sha256": "ffb656c7d2252af9f9369dc78ca4c4434bc45ae75feded68de49cd7360b7b840"
+  },
+  "candidate": {
+    "name": "candidate-cli.exe",
+    "sha256": "38d01721cf4db60154c28a3f4c92235b1970ae2e995ebffc7f43a381a1beda56"
+  },
+  "cases": [
+    {
+      "case": "repeat-args",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 0,
+      "artifacts": {
+        "input.o.xml": "040f3b8489df15deb324c93183b4241d1ecc2c73ba091d81785e33ca1c699293",
+        "input.i.xml": "10fd9a09653507199c9cf776a7baf01b1c888e3028cf3b82aab9e73c2b0e50e4"
+      }
+    },
+    {
+      "case": "fill-origin",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 0,
+      "artifacts": {
+        "input.o.xml": "338aed40be01119351d1eaf592b7b75c092f666ada4617950e7358ada573e7a6",
+        "input.i.xml": "8484831204927b09712e797779d5a1c12bda9a889fdf15d77d55c7cd3d04c664"
+      }
+    },
+    {
+      "case": "recursive-return",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 0,
+      "artifacts": {
+        "input.o.xml": "a68eff11e3205d7532450969a4aebb5714d87b01ba90f3a439183e3eee2dbf1d",
+        "input.i.xml": "72971fbb62e4b91fea9071ff46194267e601e6b9f6635c1c4a3d7b54f79e1d97"
+      }
+    },
+    {
+      "case": "xml-escaping",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 0,
+      "artifacts": {
+        "input.o.xml": "44e06dc3072ab10d0742c18073443818536b1fc340d9ec538fbe441e5def2559",
+        "input.i.xml": "3c35ce4e8ce21de26b9c525549fb55388afb245fb49466c053818699fccd5fe4"
+      }
+    },
+    {
+      "case": "invalid-arg",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 1,
+      "artifacts": {}
+    },
+    {
+      "case": "missing-root-arg",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 1,
+      "artifacts": {}
+    },
+    {
+      "case": "isolated-scope",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 1,
+      "artifacts": {}
+    },
+    {
+      "case": "required-fill",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 1,
+      "artifacts": {}
+    },
+    {
+      "case": "max-depth-0",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 1,
+      "artifacts": {}
+    },
+    {
+      "case": "max-depth-1",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 1,
+      "artifacts": {}
+    },
+    {
+      "case": "max-depth-2",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 1,
+      "artifacts": {}
+    },
+    {
+      "case": "max-depth-3",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 1,
+      "artifacts": {}
+    },
+    {
+      "case": "max-depth-4",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 0,
+      "artifacts": {
+        "input.o.xml": "7af23e8ff05bdbfbb242c8f4ea593f2f1bac5779ba0944e54435381bc825c84d",
+        "input.i.xml": "3e7540a588cfaf1652bb91e5738d229441ec898e8ccf3fd9b93914f7cf244d5b"
+      }
+    },
+    {
+      "case": "max-depth-5",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 0,
+      "artifacts": {
+        "input.o.xml": "7af23e8ff05bdbfbb242c8f4ea593f2f1bac5779ba0944e54435381bc825c84d",
+        "input.i.xml": "342a14c6b31b1ffdaef741a1dd860628a2383bf519e5623ba4c3737f79fd4d73"
+      }
+    },
+    {
+      "case": "max-expansions-0",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 1,
+      "artifacts": {}
+    },
+    {
+      "case": "max-expansions-1",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 1,
+      "artifacts": {}
+    },
+    {
+      "case": "max-expansions-2",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 1,
+      "artifacts": {}
+    },
+    {
+      "case": "max-expansions-3",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 1,
+      "artifacts": {}
+    },
+    {
+      "case": "max-expansions-4",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 0,
+      "artifacts": {
+        "input.o.xml": "7af23e8ff05bdbfbb242c8f4ea593f2f1bac5779ba0944e54435381bc825c84d",
+        "input.i.xml": "45034a6c90ac3cd846e0580343b2a9a215872b4db0ff6389b0bb0335cdd7759d"
+      }
+    },
+    {
+      "case": "max-expansions-5",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 0,
+      "artifacts": {
+        "input.o.xml": "7af23e8ff05bdbfbb242c8f4ea593f2f1bac5779ba0944e54435381bc825c84d",
+        "input.i.xml": "92dcd2db79fc3d68fd72343a1928f17364d0eb285f49dcf25a22935ccd785fbd"
+      }
+    },
+    {
+      "case": "byte-probe",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 0,
+      "artifacts": {
+        "input.o.xml": "b0e2b34af2b83ec660e9bd2e64134a887324811523331cd17fc2e33e1d7cc2d5",
+        "input.i.xml": "3eebcdc941f61818c6a7c758c9e2d78be21964b3a7dd4dcb1492db748c7431af"
+      }
+    },
+    {
+      "case": "diamond-import",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 0,
+      "artifacts": {
+        "input.o.xml": "909c789f85c095181884f064dfa8e5647f9e3fb4092a4194768f4b692002c31a",
+        "input.i.xml": "2651a485275cdf81bc6b29f1decb68714f7a126f46fb8c2514e868accff8a276"
+      }
+    },
+    {
+      "case": "bytes-16",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 1,
+      "artifacts": {}
+    },
+    {
+      "case": "bytes-17",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 0,
+      "artifacts": {
+        "input.o.xml": "b0e2b34af2b83ec660e9bd2e64134a887324811523331cd17fc2e33e1d7cc2d5",
+        "input.i.xml": "0f323cedb092eb226b2ec593e4c84e01b0963d6c095cd8c9ae86fedb09082903"
+      }
+    },
+    {
+      "case": "bytes-18",
+      "equal": true,
+      "differences": [],
+      "baseline_exit": 0,
+      "artifacts": {
+        "input.o.xml": "b0e2b34af2b83ec660e9bd2e64134a887324811523331cd17fc2e33e1d7cc2d5",
+        "input.i.xml": "9eb47388c41b246dfb93cc6f0d7b2a51802b9fad4c320a6359554dc7e305c0e0"
+      }
+    }
+  ],
+  "scope": "Exact bytes compared at identical temporary paths within this run. IR fingerprints include temporary provenance paths and are not stable across independent runs."
+}

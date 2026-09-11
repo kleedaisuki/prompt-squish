@@ -458,6 +458,7 @@ impl Parser<'_> {
         Ok(Node {
             loc: self.loc(n),
             kind,
+            events: Default::default(),
         })
     }
 }

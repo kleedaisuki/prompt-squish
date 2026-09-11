@@ -1,0 +1,112 @@
+{
+  "schema": 1,
+  "platform": "Windows-11-10.0.26200-SP0",
+  "python": "3.14.6",
+  "executables": {
+    "baseline": {
+      "name": "baseline-cli.exe",
+      "sha256": "ffb656c7d2252af9f9369dc78ca4c4434bc45ae75feded68de49cd7360b7b840"
+    },
+    "candidate": {
+      "name": "candidate-cli.exe",
+      "sha256": "38d01721cf4db60154c28a3f4c92235b1970ae2e995ebffc7f43a381a1beda56"
+    }
+  },
+  "input_xml_files": 17,
+  "warmups_per_binary": 1,
+  "scope": "Wall-clock process time includes launch, discovery, compilation, tokenization, artifact I/O, and diagnostics. Warm filesystem caches; generated outputs removed outside timing. Exact stdout/stderr and all intermediate/final artifact bytes compared on identical temporary paths. Source bytes checked unchanged outside timing. No source data published.",
+  "rounds": [
+    {
+      "index": 1,
+      "order": [
+        "baseline",
+        "candidate"
+      ],
+      "elapsed_ns": {
+        "baseline": 179856400,
+        "candidate": 173456600
+      },
+      "candidate_over_baseline": 0.9644171683632053
+    },
+    {
+      "index": 2,
+      "order": [
+        "candidate",
+        "baseline"
+      ],
+      "elapsed_ns": {
+        "candidate": 176374500,
+        "baseline": 178560800
+      },
+      "candidate_over_baseline": 0.9877559912365984
+    },
+    {
+      "index": 3,
+      "order": [
+        "baseline",
+        "candidate"
+      ],
+      "elapsed_ns": {
+        "baseline": 173500700,
+        "candidate": 174235700
+      },
+      "candidate_over_baseline": 1.0042362941475165
+    },
+    {
+      "index": 4,
+      "order": [
+        "candidate",
+        "baseline"
+      ],
+      "elapsed_ns": {
+        "candidate": 174536600,
+        "baseline": 178144500
+      },
+      "candidate_over_baseline": 0.9797473399403294
+    },
+    {
+      "index": 5,
+      "order": [
+        "baseline",
+        "candidate"
+      ],
+      "elapsed_ns": {
+        "baseline": 186561100,
+        "candidate": 172470500
+      },
+      "candidate_over_baseline": 0.9244719290355814
+    },
+    {
+      "index": 6,
+      "order": [
+        "candidate",
+        "baseline"
+      ],
+      "elapsed_ns": {
+        "candidate": 177451100,
+        "baseline": 177009900
+      },
+      "candidate_over_baseline": 1.0024925159553222
+    },
+    {
+      "index": 7,
+      "order": [
+        "baseline",
+        "candidate"
+      ],
+      "elapsed_ns": {
+        "baseline": 173159200,
+        "candidate": 184491600
+      },
+      "candidate_over_baseline": 1.0654449778007753
+    }
+  ],
+  "artifact_files": 14,
+  "artifact_bytes": 309715,
+  "median_ns": {
+    "baseline": 178144500,
+    "candidate": 174536600
+  },
+  "median_paired_ratio": 0.9877559912365984,
+  "all_results_identical": true
+}

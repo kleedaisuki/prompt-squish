@@ -95,7 +95,11 @@ The core does not read environment variables or time or execute subprocesses. Th
 
 编译器内部模块提供 `Compiler::default()`、`Compiler::with_options(CompileOptions)` 和可注入源码加载器；入口参数放在 `CompileOptions.args`。独立 `squish` 工具保留其词法空白转换用途；它**不是宏求值或 lowering**，而是在干净 XML 之后执行的最终产品压缩步骤，不保证 XML 文本语义。
 
-The internal compiler module provides `Compiler::default()`, `Compiler::with_options(CompileOptions)`, and an injectable source loader; entry arguments belong in `CompileOptions.args`. The standalone `squish` utility remains a lexical whitespace transformer, **not macro evaluation or lowering**; it runs after clean XML as the final product compression pass and does not preserve XML text semantics.
+The internal compiler module provides `Compiler::default()`, `Compiler::with_options(CompileOptions)`, and an injectable source loader; entry arguments belong in `CompileOptions.args`. `Compiler::prepare` freezes and links a reusable snapshot; `PreparedProgram::expand` executes it with fresh inputs and budgets, without reloading sources. Reprepare to observe edits. The standalone `squish` utility remains a lexical whitespace transformer, **not macro evaluation or lowering**; it runs after clean XML as the final product compression pass and does not preserve XML text semantics.
+
+内部编译器支持 `prepare` 一次、`expand` 多次：复用冻结源码与静态 IR 载荷，不复用参数、执行帧或预算状态。源码修改后需重新准备快照。实现与性能取舍见 [性能报告](docs/performance/README.md)，包含原始样本、差分验证和复现命令。
+
+See the [performance report](docs/performance/README.md) for implementation trade-offs, raw paired measurements, differential checks and reproduction commands. These are internal binary modules, not a new public library target.
 
 ## 开发与站点 / Development and site
 

@@ -1,14 +1,13 @@
 //! Iterative, caller-evaluated expansion and provenance-preserving lowering.
 //! 迭代展开：参数与填充在调用方求值，降级时保留可追溯信息。
 use super::*;
-use std::{collections::BTreeMap, rc::Rc};
+use std::{collections::BTreeMap, fmt::Write, path::Path, rc::Rc};
 
 /// Flat output event; ownership never forms recursive trees. / 扁平输出事件，避免递归树所有权。
 #[derive(Clone)]
 struct Token<'a> {
     /// Serialized XML and optional decoded character data. / XML 序列化与可选解码文本。
-    xml: Rc<str>,
-    text: Option<Rc<str>>,
+    payload: Rc<Payload>,
     /// Original generation site, retained through slot substitution. / 生成位置，slot 替换不修改。
     loc: &'a Loc,
     frame: usize,
@@ -21,7 +20,7 @@ impl Token<'_> {
     /// Product bytes, excluding attributes retained only by the diagnostic IR.
     /// 产品字节数，不计仅供诊断 IR 保留的属性。
     fn output_len(&self) -> usize {
-        self.element.map_or(self.xml.len(), |name| {
+        self.element.map_or(self.payload.xml.len(), |name| {
             name.rsplit(':').next().unwrap().len() + 2 + usize::from(self.kind == "end")
         })
     }
@@ -29,7 +28,7 @@ impl Token<'_> {
     /// 从结构化事件降级，移除全部属性与命名空间声明；不重解析文本。
     fn lower(&self, output: &mut String) {
         let Some(name) = self.element else {
-            output.push_str(&self.xml);
+            output.push_str(&self.payload.xml);
             return;
         };
         output.push('<');
@@ -38,6 +37,51 @@ impl Token<'_> {
         }
         output.push_str(name.rsplit(':').next().unwrap());
         output.push('>');
+    }
+}
+impl Payload {
+    /// Serialize once; sharing never elides budget checks or frame creation.
+    /// 仅序列化一次；共享不会省略预算检查或调用帧创建。
+    fn new(xml: String, text: Option<String>) -> Rc<Self> {
+        Rc::new(Self {
+            intermediate: Default::default(),
+            xml,
+            text,
+            close: None,
+        })
+    }
+    /// Serialize diagnostic embedding only for events surviving into the final IR.
+    /// 仅为保留到最终 IR 的事件生成诊断包装字节。
+    fn intermediate(&self) -> &str {
+        self.intermediate.get_or_init(|| escape(&self.xml, false))
+    }
+}
+impl Node {
+    /// Cache only context-free serialization, never macro results or provenance.
+    /// 仅缓存不依赖上下文的序列化，不缓存宏结果或来源信息。
+    fn events(&self) -> &Rc<Payload> {
+        self.events.get_or_init(|| {
+            let (xml, text, close) = match &self.kind {
+                Kind::Text(value) => (escape(value, false), Some(value.clone()), None),
+                Kind::Comment(value) => (format!("<!--{value}-->"), None, None),
+                Kind::Pi(value) => (format!("<?{value}?>"), None, None),
+                Kind::Element { name, attrs, .. } => {
+                    let mut xml = format!("<{name}");
+                    for (key, value) in attrs {
+                        write!(xml, " {key}=\"{}\"", escape(value, true)).unwrap();
+                    }
+                    xml.push('>');
+                    (xml, None, Some(Payload::new(format!("</{name}>"), None)))
+                }
+                _ => unreachable!("only static events are cached"),
+            };
+            Rc::new(Payload {
+                intermediate: Default::default(),
+                xml,
+                text,
+                close,
+            })
+        })
     }
 }
 /// A live lexical scope; captures do not cross calls. / 活跃词法作用域，捕获不跨调用。
@@ -115,7 +159,7 @@ struct Machine<'a> {
 }
 /// Escape character data without changing its Unicode value. / 转义字符数据而不改变 Unicode 值。
 fn escape(value: &str, attr: bool) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
             '&' => out.push_str("&amp;"),
@@ -296,30 +340,21 @@ impl<'a> Machine<'a> {
     }
     /// Interpret one node without recursive calls. / 不使用递归调用解释一个节点。
     fn node(&mut self, node: &'a Node, env: Env, out: usize) -> Result<(), CompileError> {
-        let (xml, text, kind) = match &node.kind {
-            Kind::Text(value) => (escape(value, false), Some(Rc::from(value.as_str())), "text"),
+        let (payload, kind) = match &node.kind {
+            Kind::Text(_) => (node.events().clone(), "text"),
             Kind::Insert(key) => {
                 let value = self.get(key, &env, &node.loc)?;
                 if !value.chars().all(|c| matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')) {
                     return Err(self.fail(&node.loc, env.frame, "Scalar: insert contains a character forbidden by XML 1.0"));
                 }
-                (escape(&value, false), Some(Rc::from(value)), "text")
+                (Payload::new(escape(&value, false), Some(value)), "text")
             }
-            Kind::Comment(value) => (format!("<!--{value}-->"), None, "comment"),
-            Kind::Pi(value) => (format!("<?{value}?>"), None, "pi"),
-            Kind::Element {
-                name,
-                attrs,
-                children,
-            } => {
-                let mut xml = format!("<{name}");
-                for (key, value) in attrs {
-                    xml.push_str(&format!(" {key}=\"{}\"", escape(value, true)));
-                }
-                xml.push('>');
+            Kind::Comment(_) => (node.events().clone(), "comment"),
+            Kind::Pi(_) => (node.events().clone(), "pi"),
+            Kind::Element { name, children, .. } => {
                 self.tasks.push(Task::Close(node, env.clone(), out, name));
                 self.schedule(children, &env, out);
-                (xml, None, "start")
+                (node.events().clone(), "start")
             }
             Kind::If { input, regex, body } => {
                 let input = self.value(input, &env, &node.loc)?;
@@ -383,8 +418,7 @@ impl<'a> Machine<'a> {
         self.emit(
             out,
             Token {
-                xml: Rc::from(xml),
-                text,
+                payload,
                 loc: &node.loc,
                 frame: env.frame,
                 kind,
@@ -403,8 +437,7 @@ impl<'a> Machine<'a> {
                 Task::Close(node, env, out, name) => self.emit(
                     out,
                     Token {
-                        xml: Rc::from(format!("</{name}>")),
-                        text: None,
+                        payload: node.events().close.as_ref().unwrap().clone(),
                         loc: &node.loc,
                         frame: env.frame,
                         kind: "end",
@@ -438,14 +471,14 @@ impl<'a> Machine<'a> {
                     let tokens = self.buffers.remove(&buffer).unwrap().tokens;
                     let mut value = String::new();
                     for token in tokens {
-                        let Some(text) = token.text else {
+                        let Some(text) = &token.payload.text else {
                             return Err(self.fail(
                                 token.loc,
                                 token.frame,
                                 "Scalar: scalar argument expansion produced a non-text node",
                             ));
                         };
-                        value.push_str(&text);
+                        value.push_str(text);
                     }
                     call.values.insert(call.args[index].name.clone(), value);
                     self.tasks.push(Task::Arg(call, index + 1));
@@ -479,6 +512,10 @@ impl<'a> Machine<'a> {
     }
     /// Serialize a namespace-independent event IR with complete frame records. / 序列化命名空间独立的事件 IR 与完整调用帧记录。
     fn intermediate(&self, tokens: &[Token<'a>]) -> Result<String, CompileError> {
+        // Cache by logical path, not physical file identity; symlink semantics are preserved.
+        // 按逻辑路径缓存，不按物理文件身份缓存，保留符号链接语义。
+        let mut sources: BTreeMap<&Path, String> = BTreeMap::new();
+        let mut files: BTreeMap<&Path, (String, String)> = BTreeMap::new();
         let mut xml =
             String::from("<ir:expansion xmlns:ir=\"urn:xmlsquish:provenance\"><ir:frames>");
         for (id, frame) in self.frames.iter().enumerate() {
@@ -487,11 +524,44 @@ impl<'a> Machine<'a> {
                 Identity::Entry => "kind=\"entry\"".into(),
                 Identity::Macro(id) => format!("kind=\"macro\" macro=\"{id}\""),
             };
-            xml.push_str(&format!("<ir:frame id=\"{id}\" {identity} parent=\"{}\" source=\"{}\" definition-start=\"{}\" definition-end=\"{}\" call-source=\"{}\" call-line=\"{}\" call-start=\"{}\" call-end=\"{}\" file-dir=\"{}\" file-name=\"{}\"/>", frame.parent.map(|v| v.to_string()).unwrap_or_default(), escape(&file_uri(&loc.path).map_err(|e| self.fail(loc, id, e))?, true), loc.start, loc.end, escape(&file_uri(&frame.call.path).map_err(|e| self.fail(frame.call, id, e))?, true), frame.call.line, frame.call.start, frame.call.end, escape(&directory_uri(&loc.path).map_err(|e| self.fail(loc, id, e))?, true), escape(&loc.path.file_name().unwrap_or_default().to_string_lossy(), true)));
+            for source in [loc, frame.call] {
+                if !sources.contains_key(source.path.as_path()) {
+                    sources.insert(
+                        &source.path,
+                        escape(
+                            &file_uri(&source.path).map_err(|e| self.fail(source, id, e))?,
+                            true,
+                        ),
+                    );
+                }
+            }
+            if !files.contains_key(loc.path.as_path()) {
+                files.insert(
+                    &loc.path,
+                    (
+                        escape(
+                            &directory_uri(&loc.path).map_err(|e| self.fail(loc, id, e))?,
+                            true,
+                        ),
+                        escape(
+                            &loc.path.file_name().unwrap_or_default().to_string_lossy(),
+                            true,
+                        ),
+                    ),
+                );
+            }
+            write!(xml, "<ir:frame id=\"{id}\" {identity} parent=\"{}\" source=\"{}\" definition-start=\"{}\" definition-end=\"{}\" call-source=\"{}\" call-line=\"{}\" call-start=\"{}\" call-end=\"{}\" file-dir=\"{}\" file-name=\"{}\"/>", frame.parent.map(|v| v.to_string()).unwrap_or_default(), sources[loc.path.as_path()], loc.start, loc.end, sources[frame.call.path.as_path()], frame.call.line, frame.call.start, frame.call.end, files[loc.path.as_path()].0, files[loc.path.as_path()].1).unwrap();
         }
         xml.push_str("</ir:frames><ir:nodes>");
         for token in tokens {
-            xml.push_str(&format!("<ir:node kind=\"{}\" frame=\"{}\" source=\"{}\" line=\"{}\" start=\"{}\" end=\"{}\">{}</ir:node>", token.kind, token.frame, escape(&file_uri(&token.loc.path).map_err(|e| self.fail(token.loc, token.frame, e))?, true), token.loc.line, token.loc.start, token.loc.end, escape(&token.xml, false)));
+            let source = match sources.entry(token.loc.path.as_path()) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => entry.insert(escape(
+                    &file_uri(&token.loc.path).map_err(|e| self.fail(token.loc, token.frame, e))?,
+                    true,
+                )),
+            };
+            write!(xml, "<ir:node kind=\"{}\" frame=\"{}\" source=\"{}\" line=\"{}\" start=\"{}\" end=\"{}\">{}</ir:node>", token.kind, token.frame, source, token.loc.line, token.loc.start, token.loc.end, token.payload.intermediate()).unwrap();
         }
         xml.push_str("</ir:nodes></ir:expansion>");
         Ok(xml)
@@ -553,7 +623,7 @@ pub(super) fn expand(
     );
     machine.run()?;
     let tokens = &machine.buffers[&0].tokens;
-    let mut output = String::new();
+    let mut output = String::with_capacity(machine.buffers[&0].bytes);
     for token in tokens {
         token.lower(&mut output);
     }
@@ -586,6 +656,82 @@ mod tests {
             |_| Err("unexpected load".into()),
         )
     }
+    /// Shared payloads must never contain occurrence-dependent execution metadata.
+    /// 共享负载不得包含依赖展开次数的执行元数据。
+    #[test]
+    fn static_payload_is_lazy_and_shared_without_sharing_occurrence_metadata() {
+        let node = Node {
+            loc: Loc {
+                path: "cache.xml".into(),
+                line: 1,
+                start: 0,
+                end: 4,
+            },
+            kind: Kind::Text("<&".into()),
+            events: Default::default(),
+        };
+        assert!(node.events.get().is_none());
+        let first = Token {
+            payload: node.events().clone(),
+            loc: &node.loc,
+            frame: 1,
+            kind: "text",
+            element: None,
+        };
+        let second = Token {
+            payload: node.events().clone(),
+            frame: 2,
+            ..first.clone()
+        };
+        assert!(Rc::ptr_eq(&first.payload, &second.payload));
+        assert_ne!(first.frame, second.frame);
+        assert_eq!(first.payload.xml, "&lt;&amp;");
+        assert!(first.payload.intermediate.get().is_none());
+        assert_eq!(first.payload.intermediate(), "&amp;lt;&amp;amp;");
+        assert!(first.payload.intermediate.get().is_some());
+        assert_eq!(first.payload.text.as_deref(), Some("<&"));
+    }
+
+    /// Opening/closing bytes are cached separately and retain diagnostic attributes.
+    /// 起止字节分开缓存，同时保留诊断属性。
+    #[test]
+    fn cached_element_events_keep_ir_attributes_but_lower_without_them() {
+        let node = Node {
+            loc: Loc {
+                path: "cache.xml".into(),
+                line: 1,
+                start: 0,
+                end: 4,
+            },
+            kind: Kind::Element {
+                name: "n:Root".into(),
+                attrs: vec![("a".into(), "<&\"".into())],
+                children: vec![],
+            },
+            events: Default::default(),
+        };
+        let cached = node.events();
+        assert_eq!(cached.xml, "<n:Root a=\"&lt;&amp;&quot;\">");
+        assert_eq!(cached.close.as_ref().unwrap().xml, "</n:Root>");
+        let mut output = String::new();
+        for (payload, kind) in [
+            (cached.clone(), "start"),
+            (cached.close.as_ref().unwrap().clone(), "end"),
+        ] {
+            let token = Token {
+                payload,
+                loc: &node.loc,
+                frame: 0,
+                kind,
+                element: Some("n:Root"),
+            };
+            let before = output.len();
+            token.lower(&mut output);
+            assert_eq!(output.len() - before, token.output_len());
+        }
+        assert_eq!(output, "<Root></Root>");
+    }
+
     #[test]
     fn root_entry_has_distinct_provenance_identity() {
         let directory = std::env::current_dir().unwrap();
