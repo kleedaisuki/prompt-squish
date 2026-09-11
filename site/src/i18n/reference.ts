@@ -19,13 +19,13 @@ const en = {
     "introduction": "This namespace document describes the built-in XML vocabulary of xmlsquish. It is not an XML Schema (XSD), and is not fetched when compiling a program.",
     "identity": "Identity",
     "identityBody": "Use the exact HTTPS URI above, without a trailing slash. Prefixes such as xs are lexical aliases. Namespace names are compared as case-sensitive strings: HTTP, HTTPS, a trailing slash and a version suffix identify different namespaces. A browser redirect does not change this identity.",
-    "namesBody": "Directive attributes such as name, src and get are unqualified. Macro name/ref values are prefixed QNames resolved at their lexical site. User macros must use a different namespace.",
+    "namesBody": "Directive attributes such as name, src and get are unqualified. Macro name/ref values are prefixed QNames resolved locally. Import loads definitions, not prefix bindings: declare your chosen prefix with the same namespace URI. User macros must use a different namespace.",
     "resources": "Resources",
-    "specification": "Current development DSL specification (Simplified Chinese)",
-    "tagged": "Historical 0.2.0 specification",
+    "specification": "0.3.0 normative DSL specification (Simplified Chinese)",
+    "tagged": "Specification at v0.3.0",
     "migration": "Release notes and migration",
     "examples": "Executable examples",
-    "vocabulary": "Current development vocabulary (not the 0.2.0 snapshot)",
+    "vocabulary": "0.3.0 core vocabulary",
     "element": "Element",
     "contract": "Contract",
     "elements": [
@@ -50,31 +50,51 @@ const en = {
       "W3C Namespaces in XML 1.0 — namespace identity and QName rules",
       "W3C Web Architecture §4.5.4 — namespace documentation",
       "Semantic Versioning 2.0.0 — development-version policy"
-    ]
+    ],
+    "history": "Historical 0.2.0 specification"
   },
   "release": {
-    "title": "xmlsquish 0.2.0 release notes",
-    "description": "Installation, breaking changes, migration and resource limits for xmlsquish 0.2.0.",
+    "title": "xmlsquish 0.3.0 release notes",
+    "description": "Installation, breaking changes, migration and resource limits for xmlsquish 0.3.0.",
     "eyebrow": "A new language for your prompts",
-    "heroTitle": "Compose with clarity.",
-    "heroAccent": "Build with confidence.",
-    "heroBody": "Meet xmlsquish 0.2.0. Turn reusable XML modules into compact prompts—with explicit inputs, composable macros and a build you can inspect.",
-    "installCta": "Get 0.2.0",
+    "heroTitle": "Macros for reuse.",
+    "heroAccent": "Entries for building.",
+    "heroBody": "Meet xmlsquish 0.3.0. Keep reusable macros in libraries, compose each prompt in an explicit entry, and ship only the structure and text your agent needs.",
+    "installCta": "Get 0.3.0",
     "changesCta": "Explore what’s new",
     "sourceInstall": "Install from source",
-    "sourceNote": "Rust 1.88+ · GPL-3.0-or-later · Git tag v0.2.0",
+    "sourceNote": "Rust 1.88+ · GPL-3.0-or-later · Git tag v0.3.0",
     "highlightsLabel": "Built for prompts that grow",
-    "highlightsTitle": "Small pieces. One deliberate build.",
+    "highlightsTitle": "Clear boundaries. Less repeated work.",
     "highlights": [
-      { "number": "01", "title": "Compose, don’t duplicate", "body": "Define named macros once. Reuse them across files with stable namespace identity.", "code": "xs:import → xs:call" },
-      { "number": "02", "title": "Make every input explicit", "body": "Pass text with arguments and XML with slots. No hidden caller state or accidental inheritance.", "code": "arg : String · slot : XML" },
-      { "number": "03", "title": "See how your prompt was built", "body": "Inspect source locations and call frames. Keep recursive expansion under configurable budgets.", "code": "--explain · --max-depth" }
+      {
+        "number": "01",
+        "title": "Libraries are not entry points",
+        "body": "Define macros in modules. Import them into a separate entry and expand exactly what you need. No implicit main.",
+        "code": "module → import → entry"
+      },
+      {
+        "number": "02",
+        "title": "Keep the prompt, drop the metadata",
+        "body": "Final XML keeps structure and text, removes every attribute and namespace declaration, and compresses formatting whitespace.",
+        "code": ".o.xml = structure + text"
+      },
+      {
+        "number": "03",
+        "title": "Reuse work, not execution state",
+        "body": "Shared static IR payloads avoid repeated serialization. Recursive frames, explicit inputs and diagnostic origins remain independent.",
+        "code": "prepare once · expand again"
+      }
     ],
     "pipelineTitle": "From readable source to a focused prompt.",
-    "pipelineSteps": ["Compose modules", "Inspect expansion", "Ship compact XML"],
-    "pipelineNote": "Final whitespace compression stays. The new macro language changes how you compose—not the compact output you expect.",
-    "breakingLabel": "Upgrading from 0.1?",
-    "breakingBody": "0.2.0 introduces a new DSL and a CLI-only architecture. Existing templates need migration; there is no legacy compatibility layer.",
+    "pipelineSteps": [
+      "Compose an entry",
+      "Inspect provenance",
+      "Ship compact XML"
+    ],
+    "pipelineNote": "Macros still recurse and return values. Arguments stay isolated and explicit. Metadata belongs in the diagnostic IR—not in the prompt you send.",
+    "breakingLabel": "Upgrading from 0.2?",
+    "breakingBody": "0.3.0 separates entry documents from macro libraries and replaces mount/call with expand. Migrate your sources; old syntax and module entry attributes are not supported.",
     "technicalDetails": "Release details & migration",
     "closeTitle": "Ready to build your next prompt?",
     "closeBody": "Start with the tagged release. Keep the source readable, the inputs explicit and the result compact.",
@@ -86,56 +106,56 @@ const en = {
     "tagLabel": "Git tag",
     "rustLabel": "Minimum supported Rust version",
     "github": "View on GitHub",
-    "introduction": "0.2.0 implements the new XML macro language and consolidates the project into a single binary. This is a breaking language release with no compatibility layer for 0.1 syntax or the former Rust library interface.",
+    "introduction": "0.3.0 introduces separate xs:entry and xs:module sources, one import operation and recursive xs:expand. There is no implicit main, module entry selector or fragment construct. The compiler remains an internal module of the CLI binary.",
     "installation": "Installation",
     "installBody": "Use Rust 1.88 or newer to install from the pinned tag and lockfile.",
-    "installNote": "Expected version: xmlsquish 0.2.0. Installation uses the Git tag; this release does not include a crates.io publication.",
+    "installNote": "Expected version: xmlsquish 0.3.0. Installation uses the Git tag; this release does not include a crates.io publication.",
     "migration": "Language and migration",
-    "contract": "0.2.0 contract",
+    "contract": "0.3.0 contract",
     "action": "Migration",
     "migrationRows": [
       [
-        "Builtins use namespace identity",
-        "Wrap sources in xs:module and bind the exact namespace URI below."
+        "Separate libraries and builds",
+        "Use xs:entry for imports, input parameters and output construction. Keep macro definitions in xs:module files."
       ],
       [
-        "Macros use namespace-qualified names",
-        "Declare xs:macro name=\"app:name\" and invoke xs:call ref=\"app:name\"."
+        "One loading and one expansion operation",
+        "Replace call with expand. Replace mount with import plus a named macro expansion. An entry cannot be imported."
       ],
       [
-        "No inherited arguments",
-        "Declare xs:param and supply xs:arg; pass entry values with --arg NAME=VALUE."
+        "Explicit inputs and returned values",
+        "Pass Unicode text with arg and node sequences with fill/slot. Recursive results compose without capturing caller variables."
       ],
       [
-        "Explicit XML slots",
-        "Pass node sequences with xs:fill and xs:slot, not implicit context."
+        "Local namespace bindings",
+        "Import definitions, then bind a local prefix to the macro namespace URI. Prefix spellings need not match across files."
       ],
       [
-        "No $ text interpolation",
-        "Read scalars with xs:insert get=\"arg.name\"."
+        "Attribute-free final prompts",
+        "All attributes, namespace declarations and element prefixes are removed from .o.xml. Move meaningful attribute content into text elements."
       ],
       [
-        "Single executable",
-        "Use the CLI; the compiler is an internal module, not a public Rust library."
+        "Reusable compiler snapshots",
+        "Internal prepare/expand APIs reuse frozen sources and static event payloads. Reprepare to observe source edits; no global cache or new CLI flag."
       ]
     ],
     "example": "Minimal program",
     "exampleNote": "Save as hello.xml, then run the command below.",
     "execution": "Execution and output",
     "outputRules": [
-      "Validate the complete static source closure, including inactive branches. Imports load definitions; mounts execute module bodies. Import cycles are legal; execution recursion is budgeted.",
-      "-I emits provenance-bearing .i.xml; default -O emits .o.xml. --debug and --explain retain diagnostic information without changing the final output.",
-      "Final .o.xml continues to squish whitespace as insignificant formatting. This established product behavior is unchanged; text preservation during macro evaluation does not imply whitespace fidelity in the final product.",
-      "Sources are not overwritten, and failed expansion does not commit partial output. Independent inputs may continue, but any failure causes a nonzero exit status."
+      "The complete import closure is frozen, validated and linked before entry execution. Imports only load modules; expand only targets named macros. Module import cycles are legal, recursive expansion is budgeted.",
+      "-I emits provenance-bearing .i.xml; default -O emits clean .o.xml. --debug and --explain retain diagnostics without changing the final prompt.",
+      "Final .o.xml removes all attributes, namespace declarations and element prefixes, then squishes whitespace. Intermediate diagnostics preserve origin and expansion frames.",
+      "Sources are not overwritten. Failed expansion publishes no partial result. Directory/glob builds skip valid library modules; explicitly compiling a module is an error."
     ],
     "limits": "Resource and security boundaries",
     "option": "Option",
     "default": "Default",
     "scope": "Scope",
     "budgetScopes": [
-      "Simultaneously active macro frames",
-      "Total macro frame creations",
-      "Serialized bytes of final output and each temporary argument/fill sequence"
+      "Active execution frames, including one entry frame",
+      "Total execution frames, including one entry frame",
+      "Serialized final-output bytes and each temporary argument/fill buffer"
     ],
     "security": "The byte guard checks buffers separately, not aggregate allocations or all provenance-IR overhead. It is not a process-memory limit. The loader supports only file: URIs representable as native paths, rejecting other schemes, queries and fragments. Paths do not dereference symbolic links. This is not a filesystem sandbox: untrusted sources need external filesystem and process-resource isolation.",
     "verification": "Verification",
@@ -143,7 +163,11 @@ const en = {
     "links": "Further reading",
     "changelog": "Changelog",
     "design": "Language design and migration rationale",
-    "readme": "Project documentation"
+    "readme": "Project documentation",
+    "performance": "Performance, with context",
+    "performanceBody": "Seven paired release-build microbenchmarks reduced full in-memory compilation time by 17–81%. This includes parsing, expansion and IR serialization, but excludes CLI startup, token counting and file I/O. The small GSP CLI build was effectively unchanged within run-to-run noise. Some preparation-only cases got slower; cached payloads remain in memory until the snapshot is dropped.",
+    "performanceLink": "Inspect workloads, raw samples and trade-offs",
+    "history": "Previous release: 0.2.0"
   }
 };
 
@@ -164,13 +188,13 @@ const zh: typeof en = {
     "introduction": "本页是内建 XML 词汇的命名空间文档（Namespace Document），不是 XML Schema，也不是编译时需要访问的服务。",
     "identity": "身份规则",
     "identityBody": "必须使用上方精确的 HTTPS URI，不加末尾斜杠。xs 等前缀仅是词法别名。命名空间 URI 按区分大小写的字符串比较；HTTP、HTTPS、末尾斜杠和版本后缀都会形成不同身份。浏览器对文档地址的重定向不改变命名空间身份。",
-    "namesBody": "name、src、get 等指令属性不带命名空间。宏名与引用是带前缀的限定名（QName），按词法位置解析。用户宏必须定义在其他命名空间中。",
+    "namesBody": "name、src、get 等指令属性不带命名空间。宏名与引用使用本地解析的限定名（QName）。import 只导入定义，不继承前缀绑定；引用方须将自选前缀绑定到相同 URI。用户宏须使用其他命名空间。",
     "resources": "规范资源",
-    "specification": "当前开发版语言规范（简体中文）",
-    "tagged": "历史 0.2.0 规范",
+    "specification": "0.3.0 规范性语言文档（简体中文）",
+    "tagged": "v0.3.0 标签中的规范",
     "migration": "发布与迁移说明",
     "examples": "可运行示例",
-    "vocabulary": "当前开发版元素（不同于 0.2.0 快照）",
+    "vocabulary": "0.3.0 核心元素",
     "element": "元素",
     "contract": "契约",
     "elements": [
@@ -195,31 +219,51 @@ const zh: typeof en = {
       "W3C XML 命名空间 1.0：命名空间身份与限定名规则",
       "W3C Web 架构 §4.5.4：命名空间文档",
       "语义化版本 2.0.0：开发阶段的版本策略"
-    ]
+    ],
+    "history": "历史 0.2.0 规范"
   },
   "release": {
-    "title": "xmlsquish 0.2.0 发布说明",
-    "description": "xmlsquish 0.2.0 的安装方法、破坏性变更、迁移指南及资源边界。",
+    "title": "xmlsquish 0.3.0 发布说明",
+    "description": "xmlsquish 0.3.0 的安装方法、破坏性变更、迁移指南及资源边界。",
     "eyebrow": "为提示词组合，带来新的语言",
-    "heroTitle": "清晰地组合，",
-    "heroAccent": "有依据地构建。",
-    "heroBody": "认识 xmlsquish 0.2.0。把可复用的 XML 模块构建成紧凑提示词：输入显式传递，宏自由组合，展开过程可供检查。",
-    "installCta": "获取 0.2.0",
+    "heroTitle": "宏，负责复用。",
+    "heroAccent": "入口，负责构建。",
+    "heroBody": "认识 xmlsquish 0.3.0。宏库维护可复用定义，独立入口组织每一份提示词；交给 Agent 的，只留下需要的结构与文本。",
+    "installCta": "获取 0.3.0",
     "changesCta": "看看有哪些新变化",
     "sourceInstall": "从源码安装",
-    "sourceNote": "Rust 1.88+ · GPL-3.0-or-later · Git 标签 v0.2.0",
+    "sourceNote": "Rust 1.88+ · GPL-3.0-or-later · Git 标签 v0.3.0",
     "highlightsLabel": "为不断成长的提示词而设计",
-    "highlightsTitle": "小模块，构建完整提示词。",
+    "highlightsTitle": "职责更清楚，重复工作更少。",
     "highlights": [
-      { "number": "01", "title": "组合，而非重复复制", "body": "定义一次命名宏，在不同文件间复用；命名空间为每个宏提供稳定身份。", "code": "xs:import → xs:call" },
-      { "number": "02", "title": "让每一份输入都明确", "body": "参数传文本，插槽传 XML。不依赖隐藏的调用方状态，也不发生意外继承。", "code": "arg : String · slot : XML" },
-      { "number": "03", "title": "看清提示词如何生成", "body": "检查来源位置与调用帧，用可配置预算约束递归展开。", "code": "--explain · --max-depth" }
+      {
+        "number": "01",
+        "title": "宏库不是程序入口",
+        "body": "module 定义宏，独立 entry 导入并展开所需内容。没有隐式 main，也不把文件偷偷当作宏。",
+        "code": "module → import → entry"
+      },
+      {
+        "number": "02",
+        "title": "保留提示词，移除元数据",
+        "body": "最终 XML 保留结构与文本，移除全部属性和命名空间声明，并压缩无意义的格式空白。",
+        "code": ".o.xml = structure + text"
+      },
+      {
+        "number": "03",
+        "title": "复用工作，不复用执行状态",
+        "body": "共享静态中间表示（IR）载荷，减少重复序列化；递归执行帧、显式输入和诊断来源仍各自独立。",
+        "code": "prepare once · expand again"
+      }
     ],
     "pipelineTitle": "从可读源码，到紧凑提示词。",
-    "pipelineSteps": ["组合源码模块", "检查展开过程", "生成紧凑 XML"],
-    "pipelineNote": "最终空白压缩保持不变。新的宏语言改变组合方式，不改变你期望的紧凑产物。",
-    "breakingLabel": "正在从 0.1 升级？",
-    "breakingBody": "0.2.0 引入新的 DSL，并改为纯 CLI 架构。现有模板需要迁移，不提供旧语法兼容层。",
+    "pipelineSteps": [
+      "组织独立入口",
+      "检查来源信息",
+      "生成紧凑 XML"
+    ],
+    "pipelineNote": "宏仍可递归展开并传递返回值，参数保持显式且相互隔离。元数据留在诊断 IR 中，不混入最终发送的提示词。",
+    "breakingLabel": "正在从 0.2 升级？",
+    "breakingBody": "0.3.0 将入口文档与宏库分离，用 expand 替代 mount/call。源码需要迁移，不再接受旧语法或 module 的 entry 属性。",
     "technicalDetails": "发布细节与迁移指南",
     "closeTitle": "准备好构建下一份提示词了吗？",
     "closeBody": "从固定版本开始，让源码可读、输入明确、产物紧凑。",
@@ -231,56 +275,56 @@ const zh: typeof en = {
     "tagLabel": "Git 标签",
     "rustLabel": "最低 Rust 版本",
     "github": "在 GitHub 查看",
-    "introduction": "0.2.0 实现新的 XML 宏语言，并统一为单二进制架构。这是一次破坏性语言更新，不提供 0.1 语法或原 Rust 库接口的兼容层。",
+    "introduction": "0.3.0 区分 xs:entry 与 xs:module，只保留 import 装载定义、xs:expand 递归展开宏。没有隐式 main、模块入口选择器或独立 fragment 构造。编译器仍是 CLI 二进制的内部模块。",
     "installation": "安装",
     "installBody": "使用 Rust 1.88 或更高版本，从固定标签及锁文件安装。",
-    "installNote": "预期版本为 xmlsquish 0.2.0。本次发布使用 Git 标签安装，不包含 crates.io 发布。",
+    "installNote": "预期版本为 xmlsquish 0.3.0。本次发布使用 Git 标签安装，不包含 crates.io 发布。",
     "migration": "语言与迁移",
-    "contract": "0.2.0 契约",
+    "contract": "0.3.0 契约",
     "action": "迁移操作",
     "migrationRows": [
       [
-        "内建操作按命名空间身份识别",
-        "将源码包在 xs:module 中，并绑定下方精确 URI。"
+        "分离宏库与构建入口",
+        "xs:entry 放置导入、输入参数与输出结构；宏定义放入 xs:module 文件。"
       ],
       [
-        "宏使用命名空间限定名",
-        "用 xs:macro name=\"app:name\" 声明，用 xs:call ref=\"app:name\" 调用。"
+        "一个装载操作，一个展开操作",
+        "call 改为 expand；mount 改为 import 加具名宏展开。不能 import 入口文件。"
       ],
       [
-        "参数不继承",
-        "用 xs:param 声明、xs:arg 传入；入口使用 --arg NAME=VALUE。"
+        "显式输入与返回值",
+        "arg 传 Unicode 文本，fill/slot 传节点序列；递归结果可组合，不捕获调用方变量。"
       ],
       [
-        "XML 插槽显式传递",
-        "用 xs:fill 和 xs:slot 传递节点序列，而不是依赖隐式上下文。"
+        "前缀在本地声明",
+        "import 引入定义后，将本地前缀绑定到宏的命名空间 URI；文件间前缀拼写不必一致。"
       ],
       [
-        "普通文本无 $ 插值",
-        "用 xs:insert get=\"arg.name\" 读取标量。"
+        "最终提示词没有属性",
+        "从 .o.xml 移除所有属性、命名空间声明与元素前缀；有意义的属性内容应迁移成文本节点。"
       ],
       [
-        "单二进制程序",
-        "通过 CLI 使用；编译器是内部模块，不再提供公共 Rust 库。"
+        "复用编译器快照",
+        "内部 prepare/expand 接口复用冻结源码和静态事件载荷；源码变化后重新准备，不引入全局缓存或新 CLI 选项。"
       ]
     ],
     "example": "最小程序",
     "exampleNote": "保存为 hello.xml 后运行下方命令。",
     "execution": "执行与输出",
     "outputRules": [
-      "验证完整静态源码闭包，包括未选中的分支。导入只装载定义，挂载执行模块主体。纯导入环合法，执行递归受预算约束。",
-      "-I 输出带来源信息（Provenance）的 .i.xml，默认 -O 输出 .o.xml。--debug 与 --explain 保留诊断信息，但不改变最终输出。",
-      "最终 .o.xml 继续压缩空白，空白视为无意义的格式内容。这是既有产品语义，本版本保持不变；宏求值时保留文本，不代表最终产物保留空白。",
-      "不覆盖输入源码，失败的展开不提交部分输出。独立输入可以继续处理，但任一失败都会使命令返回非零退出码。"
+      "入口执行前冻结、验证并链接完整导入闭包。import 只装载模块，expand 只展开具名宏；模块导入环合法，递归展开受预算约束。",
+      "-I 生成带来源信息的 .i.xml；默认 -O 生成干净的 .o.xml。--debug 与 --explain 保留诊断，不改变最终提示词。",
+      "最终 .o.xml 移除全部属性、命名空间声明和元素前缀，再执行固定空白压缩；中间诊断保留生成来源与展开帧。",
+      "不覆盖源码，展开失败不发布部分结果。目录与 glob 构建跳过合法宏库；显式编译 module 文件会报错。"
     ],
     "limits": "资源与安全边界",
     "option": "选项",
     "default": "默认值",
     "scope": "范围",
     "budgetScopes": [
-      "同时活动的宏展开帧",
-      "宏帧创建总数",
-      "最终输出与每个临时 argument/fill 序列的序列化字节数"
+      "活动执行帧数，包含一个入口帧",
+      "累计执行帧数，包含一个入口帧",
+      "最终输出及每个临时参数/fill 缓冲区的序列化字节数"
     ],
     "security": "字节预算分别检查缓冲区，不是全部活动分配量之和，也不包含所有来源中间表示（Intermediate Representation, IR）的开销，因此不是进程总内存限制。加载器仅支持可表示为本机路径的 file: URI，拒绝其他协议、查询参数和片段；路径规范化不解引用符号链接。这不是文件访问沙箱，不可信源码需要外部文件权限与进程资源隔离。",
     "verification": "验证",
@@ -288,7 +332,11 @@ const zh: typeof en = {
     "links": "延伸阅读",
     "changelog": "更新日志",
     "design": "语言设计与迁移依据",
-    "readme": "项目文档"
+    "readme": "项目文档",
+    "performance": "性能数据，也说明边界",
+    "performanceBody": "7 组配对 release 微基准中，完整内存编译耗时下降 17%–81%。范围包含解析、展开与 IR 序列化，不含 CLI 启动、token 计数及文件 I/O。小型 GSP 的实际 CLI 构建变化接近运行波动。部分单独准备阶段变慢，缓存载荷也会保留到快照释放；这些取舍均列入报告。",
+    "performanceLink": "查看工作负载、原始样本与取舍",
+    "history": "上一版本：0.2.0"
   }
 };
 

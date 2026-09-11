@@ -4,11 +4,11 @@
 
 xmlsquish 是 Rust 编写的 XML 结构预处理器：冻结源码模块，以显式参数、XML 插槽和递归宏生成一个 XML 文档。语言规范以 [`docs/dsl.md`](docs/dsl.md) 为准；统一宏设计与迁移见 [ADR 0007](docs/adr/0007-unified-macro-expansion.md)。
 
-最近发布版本 / Latest published version: **0.2.0** · [发布说明 / Release notes](docs/releases/0.2.0.md) · [更新日志 / Changelog](CHANGELOG.md) · [命名空间 / Namespace](https://xmlsquish.moesegfault.dev/ns)
+最近发布版本 / Latest published version: **0.3.0** · [发布说明 / Release notes](docs/releases/0.3.0.md) · [更新日志 / Changelog](CHANGELOG.md) · [命名空间 / Namespace](https://xmlsquish.moesegfault.dev/ns)
 
-当前工作树采用统一 `macro` / `expand` 语法，与已发布的 0.2.0 不兼容。以下语言示例请使用当前检出源码编译；历史发布说明和版本快照保持不变。
+0.3.0 将显式 `xs:entry` 构建入口与 `xs:module` 宏库分离，统一使用 `macro` / `expand`，不兼容 0.2.0 语法。以下示例使用 0.3.0；历史发布说明和版本快照保持不变。
 
-The current checkout uses the unified `macro` / `expand` language and is incompatible with published 0.2.0. Build this checkout for the language examples below; historical release notes and snapshots remain unchanged.
+0.3.0 separates explicit `xs:entry` build roots from `xs:module` libraries and uses unified `macro` / `expand` syntax, breaking compatibility with 0.2.0. The examples below target 0.3.0; historical release notes and snapshots remain unchanged.
 
 ## 安装与运行 / Install and run
 
@@ -17,7 +17,7 @@ The current checkout uses the unified `macro` / `expand` language and is incompa
 Requires Rust 1.88 or newer. Install the pinned release:
 
 ```bash
-cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v0.2.0 --locked
+cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v0.3.0 --locked
 ```
 
 从当前检出源码安装并运行 / Install and run from the current checkout:
@@ -71,9 +71,9 @@ xmlsquish --arg name=Klee hello.xml
 | `xs:insert get="..."` | 读取 `file.*`、`arg.*`、词法 `match.*` / Read immutable scalar binding |
 | `xs:ifr` | Unicode 正则条件与命名捕获（named capture） / Regex condition with named captures |
 
-内建操作按命名空间 URI 识别，不按 `xs` 拼写识别。宏 `name` / `ref` 必须有绑定的前缀。相对 `src` 与 `file.*` 绑定定义位置；不继承调用者参数。静态装载完整源码闭包，即使某个分支不会执行，也会验证其中的引用和模式。纯导入环合法；执行递归由可调预算约束。
+内建操作按命名空间 URI 识别，不按 `xs` 拼写识别。宏 `name` / `ref` 必须有绑定的前缀；`import` 不继承被导入文件的前缀绑定，引用方自行声明相同 URI 的别名。相对 `src` 与 `file.*` 绑定定义位置；不继承调用者参数。静态装载完整源码闭包，即使某个分支不会执行，也会验证其中的引用和模式。纯导入环合法；执行递归由可调预算约束。
 
-Builtin identity uses the namespace URI, not prefix spelling. Macro names/references require bound prefixes. Relative sources and `file.*` bind at the definition site. Arguments are not inherited. Discovery validates the complete static source closure, including unselected branches. Import cycles are legal; execution recursion is guarded by configurable budgets.
+Builtin identity uses the namespace URI, not prefix spelling. Macro names/references require bound prefixes. Imports do not inherit prefix bindings: the referencing file declares its own alias for the same URI. Relative sources and `file.*` bind at the definition site. Arguments are not inherited. Discovery validates the complete static source closure, including unselected branches. Import cycles are legal; execution recursion is guarded by configurable budgets.
 
 模块没有隐式正文或 `main`。`xs:entry` 是独立源码根，只构造文档、不定义宏；它不是符号或隐式宏。`import` 是唯一装载操作，只接受模块，不能导入入口。`expand` 是唯一展开操作；每次展开拥有独立作用域，参数与 fill 在展开者环境中求值一次后按值传递，不捕获外部变量。宏返回有序节点序列；纯文本返回值可在另一个 `xs:arg` body 中组合传递，结构返回值可在 `xs:fill` 中组合。`fragment` 不是独立语言构造。
 

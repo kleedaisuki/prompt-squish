@@ -22,7 +22,7 @@ const heroCode =
 const commands = [
   {
     title: m.cli.install,
-    code: "cargo install --path . --locked",
+    code: "cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v0.3.0 --locked",
   },
   { title: m.cli.inspect, code: "xmlsquish -I examples/site-demo/agent.xml" },
   { title: m.cli.optimize, code: "xmlsquish -O examples/site-demo/agent.xml" },
@@ -48,7 +48,7 @@ const stages = [
       <a href="#build">{m.nav.build}</a>
       <a href="#model">{m.nav.model}</a>
       <a href="#cli">{m.nav.cli}</a>
-      <a href={paths[locale].releases}>v0.2.0</a>
+      <a href={paths[locale].releases}>v0.3.0</a>
       <a href={paths[locale].namespace}>{m.reference.nav.namespace}</a>
     </nav>
     <div class="header-actions">

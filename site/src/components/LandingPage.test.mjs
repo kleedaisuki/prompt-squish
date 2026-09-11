@@ -234,19 +234,19 @@ for (const [path, locale, kind] of [
       assert.equal(await page.locator(".language-link").getAttribute("href"), locale === "en" ? zhPath : enPath);
       assert.equal(await page.locator('meta[property="og:locale"]').getAttribute("content"), locale === "en" ? "en_US" : "zh_CN");
       const text = await page.locator("main").textContent();
-      assert(text.includes("0.2.0"));
+      assert(text.includes("0.3.0"));
       if (locale === "en") assert(!/\p{Script=Han}/u.test(text), "English page contains untranslated Chinese copy");
       else assert(/\p{Script=Han}/u.test(text), "Chinese page is missing localized copy");
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
       if (kind === "namespace") {
         assert.equal(await page.locator("tbody tr").count(), 11);
-        assert.equal(await page.locator('link[rel="describedby"]').getAttribute("href"), "/ns/dsl.md");
+        assert.equal(await page.locator('link[rel="describedby"]').getAttribute("href"), "/ns/0.3.0/dsl.md");
         assert.equal(await page.locator(".identity code").textContent(), "https://xmlsquish.moesegfault.dev/ns");
       } else {
         assert.equal(await page.locator(".release-highlights article").count(), 3);
         assert.equal(await page.locator(".release-details").getAttribute("open"), null);
         assert.equal(await page.locator(".release-intro .primary").getAttribute("href"), "#install");
-        assert((await page.locator("[data-install-command]").textContent()).includes("--tag v0.2.0 --locked"));
+        assert((await page.locator("[data-install-command]").textContent()).includes("--tag v0.3.0 --locked"));
       }
       if (process.env.UI_SCREENSHOT_DIR) {
         await mkdir(process.env.UI_SCREENSHOT_DIR, { recursive: true });
@@ -292,6 +292,14 @@ test("current namespace specification follows the working source", async () => {
   const source = await readFile(new URL("../../../docs/dsl.md", import.meta.url), "utf8");
   assert.equal(published, source);
   assert(published.includes("xs:expand"));
+});
+
+test("published namespace specification is a byte-exact 0.3.0 snapshot", async () => {
+  const published = await readFile(join(root, "ns/0.3.0/dsl.md"), "utf8");
+  // Pin the immutable release contract independently of the working specification.
+  // 独立固定不可变发布契约，不随工作规范变动。
+  assert.equal(createHash("sha256").update(published.replaceAll("\r\n", "\n")).digest("hex"),
+    "45beace4d8782c0ec4024c56bf581a7e65cc8bf9fadd97dcc3cdf2a856368945");
 });
 
 test("published namespace specification is a byte-exact 0.2.0 snapshot", async () => {

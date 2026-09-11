@@ -6,8 +6,8 @@ import { namespaceUri, paths } from "../i18n/routes";
 interface Props { locale: Locale; }
 const { locale } = Astro.props;
 const m = messages[locale].reference.release;
-const install = "cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v0.2.0 --locked";
-const example = '<xs:module xmlns:xs="' + namespaceUri + '">\n  <xs:param name="name"/>\n  <Greeting>Hello, <xs:insert get="arg.name"/>!</Greeting>\n</xs:module>';
+const install = "cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v0.3.0 --locked";
+const example = '<xs:entry xmlns:xs="' + namespaceUri + '">\n  <xs:param name="name"/>\n  <Greeting>Hello, <xs:insert get="arg.name"/>!</Greeting>\n</xs:entry>';
 const budgets = [["--max-depth","1024"],["--max-expansions","100000"],["--max-output-bytes","67108864"]];
 const verify = "cargo fmt --all -- --check\ncargo test --all-features --locked\ncargo clippy --all-targets --all-features --locked -- -D warnings\ncargo +1.88.0 check --all-targets --locked\ncd site && npm ci && npm run test && npm run demo:check\nnpx playwright install chromium\nnpm run test:browser";
 const repo = "https://github.com/kleedaisuki/prompt-squish";
@@ -15,15 +15,15 @@ const repo = "https://github.com/kleedaisuki/prompt-squish";
 <ReferenceLayout locale={locale} page="releases" title={m.title} description={m.description} product>
   <section class="release-hero" aria-labelledby="release-title">
     <div class="release-intro">
-      <p class="release-eyebrow">xmlsquish 0.2.0 · {m.date}</p>
+      <p class="release-eyebrow">xmlsquish 0.3.0 · {m.date}</p>
       <h1 id="release-title">{m.heroTitle}<em>{m.heroAccent}</em></h1>
       <p class="release-lead">{m.heroBody}</p>
       <div class="release-actions"><a class="release-button primary" href="#install">{m.installCta}<span aria-hidden="true">↓</span></a><a class="release-button secondary" href="#highlights">{m.changesCta}</a></div>
       <p class="release-requirements">{m.sourceNote}</p>
     </div>
-    <div class="version-panel" aria-label={"xmlsquish 0.2.0"}>
-      <div class="version-top"><span>xmlsquish</span><code>v0.2.0</code></div>
-      <div class="version-number" aria-hidden="true">0.2.0<span>XML → XML</span></div>
+    <div class="version-panel" aria-label={"xmlsquish 0.3.0"}>
+      <div class="version-top"><span>xmlsquish</span><code>v0.3.0</code></div>
+      <div class="version-number" aria-hidden="true">0.3.0<span>XML → XML</span></div>
       <div class="version-pipeline">
         {["source.xml","source.i.xml","source.o.xml"].map((file,i) => <div><small>0{i+1}</small><code>{file}</code><span>{m.pipelineSteps[i]}</span></div>)}
       </div>
@@ -34,8 +34,8 @@ const repo = "https://github.com/kleedaisuki/prompt-squish";
     <div class="release-highlights">{m.highlights.map(item => <article><span class="feature-number">{item.number}</span><h3>{item.title}</h3><p>{item.body}</p><code>{item.code}</code></article>)}</div>
   </section>
   <section id="install" class="install-section release-section" aria-labelledby="install-title">
-    <div><p class="release-eyebrow">{m.sourceInstall}</p><h2 id="install-title">{m.installCta}</h2><p>{m.installBody}</p><p class="release-requirements">{m.installNote}</p><a href={repo + "/releases/tag/v0.2.0"}>{m.github} ↗</a></div>
-    <div class="install-terminal"><div class="terminal-header"><code>v0.2.0</code><button type="button" hidden data-install-copy data-copied={m.copied} data-failed={m.copyFailed}>{m.copy}</button></div><pre><code data-install-command>{install}</code></pre><div class="terminal-check"><code>xmlsquish --version<br />xmlsquish 0.2.0</code></div><span role="status" aria-live="polite" data-copy-status></span></div>
+    <div><p class="release-eyebrow">{m.sourceInstall}</p><h2 id="install-title">{m.installCta}</h2><p>{m.installBody}</p><p class="release-requirements">{m.installNote}</p><a href={repo + "/releases/tag/v0.3.0"}>{m.github} ↗</a></div>
+    <div class="install-terminal"><div class="terminal-header"><code>v0.3.0</code><button type="button" hidden data-install-copy data-copied={m.copied} data-failed={m.copyFailed}>{m.copy}</button></div><pre><code data-install-command>{install}</code></pre><div class="terminal-check"><code>xmlsquish --version<br />xmlsquish 0.3.0</code></div><span role="status" aria-live="polite" data-copy-status></span></div>
   </section>
   <section class="release-continuity"><h2>{m.pipelineTitle}</h2><p>{m.pipelineNote}</p></section>
   <section class="release-section" aria-labelledby="migration-title">
@@ -48,8 +48,9 @@ const repo = "https://github.com/kleedaisuki/prompt-squish";
         <h3>{m.example}</h3><Code code={example} lang="xml" theme="rose-pine" /><p>{m.exampleNote}</p><pre><code>xmlsquish --arg name=Klee hello.xml</code></pre>
         <h3>{m.execution}</h3><ul>{m.outputRules.map(rule => <li>{rule}</li>)}</ul>
         <h3>{m.limits}</h3><div class="release-table"><table><thead><tr><th>{m.option}</th><th>{m.default}</th><th>{m.scope}</th></tr></thead><tbody>{budgets.map(([name,value],i) => <tr><td><code>{name}</code></td><td>{value}</td><td>{m.budgetScopes[i]}</td></tr>)}</tbody></table></div><p>{m.security}</p>
+        <h3>{m.performance}</h3><p>{m.performanceBody}</p><p><a href={repo + "/blob/v0.3.0/docs/performance/README.md"}>{m.performanceLink}</a></p>
         <h3>{m.verification}</h3><p>{m.verifyBody}</p><Code code={verify} lang="bash" theme="rose-pine" />
-        <h3>{m.links}</h3><ul><li><a href={paths[locale].namespace}>{messages[locale].reference.nav.namespace}</a></li><li><a href={repo + "/blob/v0.2.0/CHANGELOG.md"}>{m.changelog}</a></li><li><a href={repo + "/blob/v0.2.0/docs/adr/0005-dsl-language.md"}>{m.design}</a></li><li><a href={repo + "/blob/v0.2.0/README.md"}>{m.readme}</a></li></ul>
+        <h3>{m.links}</h3><ul><li><a href={repo + "/releases/tag/v0.2.0"}>{m.history}</a></li><li><a href={paths[locale].namespace}>{messages[locale].reference.nav.namespace}</a></li><li><a href={repo + "/blob/v0.3.0/CHANGELOG.md"}>{m.changelog}</a></li><li><a href={repo + "/blob/v0.3.0/docs/adr/0007-unified-macro-expansion.md"}>{m.design}</a></li><li><a href={repo + "/blob/v0.3.0/README.md"}>{m.readme}</a></li></ul>
       </div>
     </details>
   </section>

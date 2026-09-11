@@ -122,10 +122,10 @@ const zh: Messages = {
   },
   hero: {
     badge: "XML PROMPT BUILD SYSTEM",
-    revision: "开发版 · 统一宏语法",
+    revision: "v0.3.0 · 独立入口与宏库",
     title: "提示词，也值得",
     accent: "好好构建。",
-    lead: "拆成文件，组合内容，显式传递上下文。xmlsquish 把可维护的 XML 源码，构建成给 Agent 的最终提示词。宏展开保留文本语义，最终产物压紧空白。",
+    lead: "宏库维护定义，独立入口组织提示词。显式传参，递归展开，共享静态 IR；最终只保留结构与文本，移除属性并压紧空白。",
     primary: "看一次真实构建",
     secondary: "安装 CLI",
     footnote: "Rust 2024 · 源文件不改写 · 编译产物可检查",
@@ -218,11 +218,11 @@ const zh: Messages = {
     title: "检查展开结果，再交给 Agent。",
     intro:
       "接收文件、目录或 glob。跳过 .i.xml / .o.xml；目录与 glob 跳过 module 库文件，原子替换产物；一个文件失败，不阻止其他独立输入。",
-    install: "从仓库安装",
+    install: "安装 v0.3.0",
     inspect: "只编译，保留中间表示",
     optimize: "展开、清理来源信息并压紧最终 XML",
     color: "纯文本诊断，也适合 CI",
-    note: "目录递归发现；源文件保持不变。示例路径对应本仓库 examples/site-demo；使用当前源码构建，历史 v0.2.0 不支持此语法。",
+    note: "目录递归发现；源文件保持不变。示例路径对应本仓库 examples/site-demo；使用 v0.3.0 编译。",
     diagnosticTitle: "错误回到源码，而不是一串重复路径。",
     diagnosticBody:
       "下面是独立错误用例的真实诊断，显示文件、行号和源码快照；支持 --color auto / always / never。没有精确列号，就不虚构插入符位置。",
@@ -275,10 +275,10 @@ const en: Messages = {
   },
   hero: {
     badge: "XML PROMPT BUILD SYSTEM",
-    revision: "Development · unified macros",
+    revision: "v0.3.0 · Explicit entries and macro libraries",
     title: "Your prompts deserve",
     accent: "a proper build.",
-    lead: "Split files. Compose content. Pass context explicitly. xmlsquish turns maintainable XML source into a finished prompt for your agent. Expansion preserves text semantics; the final product compacts whitespace.",
+    lead: "Keep definitions in macro libraries and compose prompts in explicit entries. Pass inputs, expand recursively and reuse static IR. Final output keeps structure and text, strips attributes and compacts whitespace.",
     primary: "See a real build",
     secondary: "Install the CLI",
     footnote: "Rust 2024 · Sources stay untouched · Inspectable artifacts",
@@ -372,11 +372,11 @@ const en: Messages = {
     title: "Inspect the expansion. Then feed your agent.",
     intro:
       "Accept files, directories, or globs. Discovery skips .i.xml / .o.xml and module libraries in directories/globs; output replacement is atomic, and one failed file does not stop independent inputs.",
-    install: "Install from a repository checkout",
+    install: "Install v0.3.0",
     inspect: "Compile only; keep the intermediate",
     optimize: "Expand, lower provenance, and compact final XML",
     color: "Plain diagnostics, ready for CI",
-    note: "Directories are recursive; sources stay untouched. These paths use examples/site-demo in this repository. Build current sources; historical v0.2.0 does not support this syntax.",
+    note: "Directories are recursive; sources stay untouched. These paths use examples/site-demo in this repository. Compile with v0.3.0.",
     diagnosticTitle: "Errors point to source, not a pile of repeated paths.",
     diagnosticBody:
       "This separate failing example shows the physical file, line, and original source snapshot. Choose --color auto / always / never; no caret is invented when a column isn't known.",
