@@ -91,14 +91,15 @@ fn non_utf8_file_names_keep_ascii_suffix_semantics() {
     assert!(!is_input_xml(&output));
 }
 
-#[cfg(unix)]
 #[test]
 fn colliding_outputs_reject_both_inputs_deterministically() {
     let temp = tempfile::tempdir().unwrap();
     fs::write(temp.path().join("a.xml"), "<lower/>").unwrap();
     fs::write(temp.path().join("a.XML"), "<upper/>").unwrap();
 
-    let result = discover(&[temp.path().to_path_buf()]);
+    // Explicit logical spellings collide even on case-insensitive volumes.
+    // 显式逻辑路径在大小写不敏感卷上也产生同名输出，不依赖目录能否存储两个文件。
+    let result = discover(&[temp.path().join("a.xml"), temp.path().join("a.XML")]);
     assert!(result.files.is_empty());
     assert_eq!(result.errors.len(), 1);
     assert!(result.errors[0].contains("a.o.xml"));
