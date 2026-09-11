@@ -1,0 +1,299 @@
+{
+  "schema": 1,
+  "baseline_commit": "7c1e10d",
+  "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "cpu": "12th Gen Intel(R) Core(TM) i9-12900H",
+  "os": "Windows",
+  "profile": "release",
+  "warmup": 3,
+  "samples": 11,
+  "timing_scope": "Each sample includes result destruction; full compile uses in-memory loader, excludes CLI I/O and final squish. Discovery includes Program destruction; expand reuses a prepared Program and includes clean/provenance serialization. Phases measured separately, not additive due to source path and execution differences.",
+  "command": "cargo test --release compiler::perf_tests::compiler_baseline -- --ignored --nocapture --test-threads=1",
+  "measurements": [
+    {
+      "name": "tiny",
+      "batch": 100,
+      "samples_ns": [
+        22339,
+        22860,
+        22607,
+        22620,
+        23711,
+        23215,
+        20922,
+        21038,
+        22395,
+        23782,
+        21584
+      ],
+      "output_bytes": 37,
+      "intermediate_bytes": 1093,
+      "output_fnv": "78adf398c9fc3161",
+      "intermediate_fnv": "b19085655332de5c"
+    },
+    {
+      "name": "tiny",
+      "phase": "discover",
+      "batch": 100,
+      "samples_ns": [
+        6057,
+        7146,
+        6301,
+        7264,
+        6051,
+        6241,
+        6041,
+        5767,
+        5799,
+        5698,
+        5642
+      ]
+    },
+    {
+      "name": "tiny",
+      "phase": "expand",
+      "batch": 100,
+      "samples_ns": [
+        15205,
+        15272,
+        15760,
+        15859,
+        15654,
+        16411,
+        16247,
+        17168,
+        16126,
+        15147,
+        15015
+      ]
+    },
+    {
+      "name": "static_2000",
+      "batch": 1,
+      "samples_ns": [
+        33817700,
+        37653300,
+        37162100,
+        34208100,
+        35486800,
+        36846000,
+        37000000,
+        36882200,
+        36018700,
+        37039500,
+        39704400
+      ],
+      "output_bytes": 174013,
+      "intermediate_bytes": 2977925,
+      "output_fnv": "27357e181aa7991c",
+      "intermediate_fnv": "f362f188c3b3b25f"
+    },
+    {
+      "name": "static_2000",
+      "phase": "discover",
+      "batch": 1,
+      "samples_ns": [
+        1286000,
+        1211100,
+        1246300,
+        1294700,
+        1235400,
+        1253300,
+        1288500,
+        1261200,
+        1387200,
+        1367900,
+        1310000
+      ]
+    },
+    {
+      "name": "static_2000",
+      "phase": "expand",
+      "batch": 1,
+      "samples_ns": [
+        37097200,
+        35215400,
+        37013000,
+        39361000,
+        38442600,
+        37432200,
+        37908300,
+        35568100,
+        36276700,
+        33780100,
+        35929500
+      ]
+    },
+    {
+      "name": "slots_48x24x12",
+      "batch": 1,
+      "samples_ns": [
+        14793400,
+        14049300,
+        14402100,
+        14797200,
+        14700000,
+        15019400,
+        14487500,
+        14916500,
+        15546600,
+        14028300,
+        14109700
+      ],
+      "output_bytes": 10561,
+      "intermediate_bytes": 502575,
+      "output_fnv": "5d12f6cd5c9a34d0",
+      "intermediate_fnv": "bcc814d6f67041b8"
+    },
+    {
+      "name": "slots_48x24x12",
+      "phase": "discover",
+      "batch": 1,
+      "samples_ns": [
+        635400,
+        625300,
+        711200,
+        659700,
+        694800,
+        616600,
+        591900,
+        589100,
+        658200,
+        595700,
+        612300
+      ]
+    },
+    {
+      "name": "slots_48x24x12",
+      "phase": "expand",
+      "batch": 1,
+      "samples_ns": [
+        13499500,
+        12734600,
+        11642600,
+        13086100,
+        12653000,
+        10963600,
+        12309900,
+        10517600,
+        12455600,
+        10524500,
+        13629100
+      ]
+    },
+    {
+      "name": "recursive_384",
+      "batch": 1,
+      "samples_ns": [
+        3933200,
+        3608000,
+        3439300,
+        3454700,
+        3549200,
+        3681700,
+        3534300,
+        3511300,
+        3542800,
+        3559000,
+        3752300
+      ],
+      "output_bytes": 5389,
+      "intermediate_bytes": 278072,
+      "output_fnv": "8737093614ae600c",
+      "intermediate_fnv": "bdd7ff9654e1cd29"
+    },
+    {
+      "name": "recursive_384",
+      "phase": "discover",
+      "batch": 1,
+      "samples_ns": [
+        78000,
+        131900,
+        104000,
+        82000,
+        78000,
+        78300,
+        74300,
+        73400,
+        72200,
+        72700,
+        75400
+      ]
+    },
+    {
+      "name": "recursive_384",
+      "phase": "expand",
+      "batch": 1,
+      "samples_ns": [
+        3380700,
+        3457200,
+        3428600,
+        3933200,
+        3664800,
+        3618400,
+        3595000,
+        3444400,
+        3908400,
+        3390200,
+        3581500
+      ]
+    },
+    {
+      "name": "attrs_1000x48",
+      "batch": 1,
+      "samples_ns": [
+        27408300,
+        28957100,
+        26163000,
+        28049100,
+        28647000,
+        26716100,
+        25538800,
+        26935900,
+        26903700,
+        27300500,
+        27312700
+      ],
+      "output_bytes": 35013,
+      "intermediate_bytes": 2192214,
+      "output_fnv": "871074ac76f6e5e4",
+      "intermediate_fnv": "e620a224102643d4"
+    },
+    {
+      "name": "attrs_1000x48",
+      "phase": "discover",
+      "batch": 1,
+      "samples_ns": [
+        347800,
+        346200,
+        343700,
+        344200,
+        376700,
+        425800,
+        571600,
+        647600,
+        507300,
+        493800,
+        452400
+      ]
+    },
+    {
+      "name": "attrs_1000x48",
+      "phase": "expand",
+      "batch": 1,
+      "samples_ns": [
+        29230000,
+        27917100,
+        28292500,
+        27971300,
+        28263300,
+        28479000,
+        27854600,
+        27708700,
+        27729300,
+        28861400,
+        28450800
+      ]
+    }
+  ]
+}

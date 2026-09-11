@@ -299,4 +299,8 @@ mod tests;
 mod source_tests;
 
 #[cfg(test)]
+#[path = "perf.test.rs"]
+mod perf_tests;
+
+#[cfg(test)]
 mod test_support;
