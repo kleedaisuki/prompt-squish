@@ -106,7 +106,7 @@ jobs:
           # 历史标签假设 Unix 临时文件区分 a.xml/a.XML；仅调整测试临时目录。
           image="$RUNNER_TEMP/xmlsquish-tests.sparseimage"
           mount="$RUNNER_TEMP/xmlsquish-tests-volume"
-          hdiutil create -size 256m -type SPARSE -fs APFSX -volname xmlsquish-tests "$image"
+          hdiutil create -size 256m -type SPARSE -fs 'Case-sensitive APFS' -volname xmlsquish-tests "$image"
           mkdir -p "$mount"
           hdiutil attach "$image" -mountpoint "$mount" -nobrowse
           trap 'hdiutil detach "$mount" || hdiutil detach "$mount" -force' EXIT
