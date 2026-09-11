@@ -4,6 +4,7 @@ import ThemeControl from "./ThemeControl";
 import BuildExplorer from "./BuildExplorer.astro";
 import type { Locale } from "../i18n/messages";
 import { messages } from "../i18n/messages";
+import { paths } from "../i18n/routes";
 import demo from "../data/build-demo.json";
 
 interface Props {
@@ -47,8 +48,8 @@ const stages = [
       <a href="#build">{m.nav.build}</a>
       <a href="#model">{m.nav.model}</a>
       <a href="#cli">{m.nav.cli}</a>
-      <a href="/releases/">v0.2.0</a>
-      <a href="/ns">XML namespace</a>
+      <a href={paths[locale].releases}>v0.2.0</a>
+      <a href={paths[locale].namespace}>{m.reference.nav.namespace}</a>
     </nav>
     <div class="header-actions">
       <a class="language-link" href={languageHref} lang={locale === "zh-CN" ? "en" : "zh-CN"} hreflang={locale === "zh-CN" ? "en" : "zh-CN"}>{m.nav.language}</a>
@@ -61,7 +62,7 @@ const stages = [
 <main id="main">
   <section class="hero page-width" aria-labelledby="hero-title">
     <div class="hero-copy">
-      <p class="eyebrow"><span class="spark" aria-hidden="true">✦</span> {m.hero.badge} · <a href="/releases/">v0.2.0</a></p>
+      <p class="eyebrow"><span class="spark" aria-hidden="true">✦</span> {m.hero.badge} · <a href={paths[locale].releases}>v0.2.0</a></p>
       <h1 id="hero-title">{m.hero.title}<em>{m.hero.accent}</em></h1>
       <p class="hero-lead">{m.hero.lead}</p>
       <div class="hero-actions">
@@ -907,29 +908,6 @@ const stages = [
   .footer-inner a {
     color: inherit;
     text-decoration: none;
-  }
-  :global(.theme-control) {
-    display: flex;
-    padding: 0.2rem;
-    border: 1px solid var(--moe-border);
-    border-radius: 2rem;
-    background: var(--moe-surface-strong);
-  }
-  :global(.theme-control__option) {
-    display: grid;
-    place-items: center;
-    width: 1.7rem;
-    height: 1.7rem;
-    padding: 0;
-    border: 0;
-    border-radius: 50%;
-    cursor: pointer;
-    color: var(--moe-text-soft);
-    background: transparent;
-  }
-  :global(.theme-control__option[aria-pressed="true"]) {
-    background: var(--moe-accent-strong);
-    color: var(--moe-on-accent);
   }
   a:focus-visible,
   summary:focus-visible,

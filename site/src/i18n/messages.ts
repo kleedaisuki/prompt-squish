@@ -1,3 +1,5 @@
+import { referenceMessages, type ReferenceMessages } from "./reference";
+
 export const locales = ["zh-CN", "en"] as const;
 export type Locale = (typeof locales)[number];
 
@@ -408,4 +410,7 @@ const en: Messages = {
   theme: { label: "Theme", auto: "System", light: "Light", dark: "Dark" },
 };
 
-export const messages: Record<Locale, Messages> = { "zh-CN": zh, en };
+export const messages: Record<Locale, Messages & { reference: ReferenceMessages }> = {
+  "zh-CN": { ...zh, reference: referenceMessages["zh-CN"] },
+  en: { ...en, reference: referenceMessages.en },
+};

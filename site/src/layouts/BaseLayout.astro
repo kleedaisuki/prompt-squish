@@ -1,18 +1,19 @@
 ---
 import type { Locale } from "../i18n/messages";
 import { messages } from "../i18n/messages";
+import { paths, type Page } from "../i18n/routes";
 
 interface Props {
   locale: Locale;
   /** Page metadata; defaults remain the landing page. / 页面元数据，默认保持首页。 */
   title?: string;
   description?: string;
-  canonicalPath?: string;
+  page?: Page;
 }
 
-const { locale, title, description, canonicalPath: requestedPath } = Astro.props;
+const { locale, title, description, page = "home" } = Astro.props;
 const m = messages[locale];
-const canonicalPath = requestedPath ?? (locale === "zh-CN" ? "/" : "/en/");
+const canonicalPath = paths[locale][page];
 const pageTitle = title ?? m.meta.title;
 const pageDescription = description ?? m.meta.description;
 const canonical = new URL(canonicalPath, Astro.site);
@@ -34,19 +35,19 @@ const socialImageAlt = locale === "zh-CN"
     <meta property="og:title" content={pageTitle} />
     <meta property="og:description" content={pageDescription} />
     <meta property="og:url" content={canonical} />
-    <meta property="og:image" content={socialImage} />
-    <meta property="og:image:width" content="1200" />
-    <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content={socialImageAlt} />
-    <meta property="og:locale" content={locale === "zh-CN" ? "zh_CN" : "en_US"} />
-    <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:image" content={socialImage} />
-    <link rel="canonical" href={canonical} />
-    {!requestedPath && <>
-      <link rel="alternate" hreflang="zh-CN" href={new URL("/", Astro.site)} />
-      <link rel="alternate" hreflang="en" href={new URL("/en/", Astro.site)} />
-      <link rel="alternate" hreflang="x-default" href={new URL("/", Astro.site)} />
+    {page === "home" && <>
+      <meta property="og:image" content={socialImage} />
+      <meta property="og:image:width" content="1200" />
+      <meta property="og:image:height" content="630" />
+      <meta property="og:image:alt" content={socialImageAlt} />
     </>}
+    <meta property="og:locale" content={locale === "zh-CN" ? "zh_CN" : "en_US"} />
+    <meta name="twitter:card" content={page === "home" ? "summary_large_image" : "summary"} />
+    {page === "home" && <meta name="twitter:image" content={socialImage} />}
+    <link rel="canonical" href={canonical} />
+    <link rel="alternate" hreflang="zh-CN" href={new URL(paths["zh-CN"][page], Astro.site)} />
+    <link rel="alternate" hreflang="en" href={new URL(paths.en[page], Astro.site)} />
+    <link rel="alternate" hreflang="x-default" href={new URL(paths["zh-CN"][page], Astro.site)} />
     <slot name="head" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link
@@ -109,6 +110,10 @@ const socialImageAlt = locale === "zh-CN"
 
     .skip-link:focus {
       transform: translateY(0);
+    }
+    a:focus-visible, button:focus-visible, summary:focus-visible {
+      outline: 3px solid var(--moe-accent-strong);
+      outline-offset: 4px;
     }
   }
 </style>

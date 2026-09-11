@@ -1,0 +1,37 @@
+---
+import ReferenceLayout from "../layouts/ReferenceLayout.astro";
+import { messages, type Locale } from "../i18n/messages";
+import { namespaceUri, paths } from "../i18n/routes";
+interface Props { locale: Locale; }
+const { locale } = Astro.props;
+const m = messages[locale].reference;
+const n = m.ns;
+const names = ["module","import","macro","param","mount","call","arg","fill","slot","insert","ifr"];
+const example = '<xs:module xmlns:xs="' + namespaceUri + '">\n  <Prompt>Hello, xmlsquish.</Prompt>\n</xs:module>';
+const standards = ["https://www.w3.org/TR/REC-xml-names/","https://www.w3.org/TR/webarch/#namespace-document","https://semver.org/"];
+---
+<ReferenceLayout locale={locale} page="namespace" title={n.title} description={n.description}>
+  <Fragment slot="head"><link rel="describedby" href="/ns/0.2.0/dsl.md" type="text/markdown" /><link rel="version-history" href={paths[locale].releases} /></Fragment>
+  <p>{n.eyebrow} · xmlsquish 0.2.0</p>
+  <h1>{n.heading}</h1>
+  <p class="identity"><strong>{n.name}</strong><br /><code>{namespaceUri}</code></p>
+  <p>{n.introduction}</p>
+  <h2 id="identity">{n.identity}</h2>
+  <pre><code>{example}</code></pre>
+  <p>{n.identityBody}</p><p>{n.namesBody}</p>
+  <h2 id="resources">{n.resources}</h2>
+  <ul>
+    <li><a href="/ns/0.2.0/dsl.md" rel="describedby">{n.specification}</a></li>
+    <li><a href="https://github.com/kleedaisuki/prompt-squish/blob/v0.2.0/docs/dsl.md">{n.tagged}</a></li>
+    <li><a href={paths[locale].releases}>{n.migration}</a></li>
+    <li><a href="https://github.com/kleedaisuki/prompt-squish/tree/v0.2.0/examples">{n.examples}</a></li>
+    <li><a href="/LICENSE.txt" rel="license">{m.nav.license}</a></li>
+  </ul>
+  <h2 id="vocabulary">{n.vocabulary}</h2>
+  <table><thead><tr><th scope="col">{n.element}</th><th scope="col">{n.contract}</th></tr></thead><tbody>
+    {names.map((name,i) => <tr id={name}><td><code>xs:{name}</code></td><td>{n.elements[i]}</td></tr>)}
+  </tbody></table>
+  <h2 id="validation">{n.validation}</h2><p>{n.validationBody}</p>
+  <h2 id="versioning">{n.versioning}</h2><p>{n.versionBody}</p>
+  <h2 id="standards">{n.standards}</h2><ul>{standards.map((href,i) => <li><a href={href}>{n.standardLabels[i]}</a></li>)}</ul>
+</ReferenceLayout>

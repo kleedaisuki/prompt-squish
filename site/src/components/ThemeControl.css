@@ -1,0 +1,24 @@
+/** Shared theme control styling. / 所有页面共用的主题控件样式。 */
+.theme-control {
+  display: flex;
+  padding: 0.2rem;
+  border: 1px solid var(--moe-border);
+  border-radius: 2rem;
+  background: var(--moe-surface-strong);
+}
+.theme-control__option {
+  display: grid;
+  place-items: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  color: var(--moe-text-soft);
+  background: transparent;
+}
+.theme-control__option[aria-pressed="true"] {
+  background: var(--moe-accent-strong);
+  color: var(--moe-on-accent);
+}

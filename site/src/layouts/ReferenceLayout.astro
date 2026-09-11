@@ -1,24 +1,36 @@
 ---
 import BaseLayout from "./BaseLayout.astro";
+import ThemeControl from "../components/ThemeControl";
+import { messages, type Locale } from "../i18n/messages";
+import { paths, type Page } from "../i18n/routes";
 
 /** Shared release and namespace reference shell. / 发布与命名空间文档共用阅读布局。 */
-interface Props { title: string; description: string; path: string; }
-const { title, description, path } = Astro.props;
+interface Props { title: string; description: string; locale: Locale; page: Page; product?: boolean; }
+const { title, description, locale, page, product = false } = Astro.props;
+const m = messages[locale];
+const other = locale === "zh-CN" ? "en" : "zh-CN";
 ---
-<BaseLayout locale="en" title={title} description={description} canonicalPath={path}>
+<BaseLayout locale={locale} title={title} description={description} page={page}>
   <slot name="head" slot="head" />
   <header class="reference-header">
-    <a class="reference-brand" href="/"><img src="/favicon.svg" alt="" width="32" height="32" />xmlsquish</a>
-    <nav aria-label="Reference navigation"><a href="/releases/">Releases / 发布</a><a href="/ns">Namespace / 命名空间</a><a href="https://github.com/kleedaisuki/prompt-squish">GitHub</a></nav>
+    <a class="reference-brand" href={paths[locale].home}><img src="/favicon.svg" alt="" width="32" height="32" />xmlsquish</a>
+    <nav aria-label={m.reference.nav.label}>
+      <a href={paths[locale].releases}>{m.reference.nav.releases}</a>
+      <a href={paths[locale].namespace}>{m.reference.nav.namespace}</a>
+      <a class="language-link" href={paths[other][page]} lang={other} hreflang={other}>{m.nav.language}</a>
+      <ThemeControl client:load labels={m.theme} />
+    </nav>
   </header>
-  <main id="main" class="reference-content"><slot /></main>
-  <footer class="reference-footer"><a href="/LICENSE.txt" rel="license">GPL-3.0-or-later</a> · Maintained by the xmlsquish project / 由 xmlsquish 项目维护</footer>
+  <main id="main" class:list={["reference-content", { "product-release": product }]}><slot /></main>
+  <footer class="reference-footer"><a href="/LICENSE.txt" rel="license">GPL-3.0-or-later</a> · {m.reference.nav.maintained}</footer>
 </BaseLayout>
 <style is:global>
   .reference-header, .reference-content, .reference-footer { max-width: 64rem; margin-inline: auto; padding: 1.5rem; }
   .reference-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem; border-bottom: 1px solid var(--moe-border, #bbb); }
   .reference-brand { display: inline-flex; gap: .6rem; align-items: center; font-weight: 800; text-decoration: none; }
   .reference-header nav { display: flex; flex-wrap: wrap; gap: 1rem; }
+  .reference-header nav { align-items: center; }
+  .reference-content.product-release { max-width: 73.75rem; }
   .reference-content { line-height: 1.8; overflow-wrap: anywhere; }
   .reference-content h1 { font-size: clamp(2rem, 5vw, 3.25rem); line-height: 1.15; margin-block: 1.5rem; }
   .reference-content h2 { margin-top: 2.5rem; line-height: 1.3; }

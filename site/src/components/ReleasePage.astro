@@ -1,0 +1,137 @@
+---
+import { Code } from "astro:components";
+import ReferenceLayout from "../layouts/ReferenceLayout.astro";
+import { messages, type Locale } from "../i18n/messages";
+import { namespaceUri, paths } from "../i18n/routes";
+interface Props { locale: Locale; }
+const { locale } = Astro.props;
+const m = messages[locale].reference.release;
+const install = "cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v0.2.0 --locked";
+const example = '<xs:module xmlns:xs="' + namespaceUri + '">\n  <xs:param name="name"/>\n  <Greeting>Hello, <xs:insert get="arg.name"/>!</Greeting>\n</xs:module>';
+const budgets = [["--max-depth","1024"],["--max-expansions","100000"],["--max-output-bytes","67108864"]];
+const verify = "cargo fmt --all -- --check\ncargo test --all-features --locked\ncargo clippy --all-targets --all-features --locked -- -D warnings\ncargo +1.88.0 check --all-targets --locked\ncd site && npm ci && npm run test && npm run demo:check\nnpx playwright install chromium\nnpm run test:browser";
+const repo = "https://github.com/kleedaisuki/prompt-squish";
+---
+<ReferenceLayout locale={locale} page="releases" title={m.title} description={m.description} product>
+  <section class="release-hero" aria-labelledby="release-title">
+    <div class="release-intro">
+      <p class="release-eyebrow">xmlsquish 0.2.0 · {m.date}</p>
+      <h1 id="release-title">{m.heroTitle}<em>{m.heroAccent}</em></h1>
+      <p class="release-lead">{m.heroBody}</p>
+      <div class="release-actions"><a class="release-button primary" href="#install">{m.installCta}<span aria-hidden="true">↓</span></a><a class="release-button secondary" href="#highlights">{m.changesCta}</a></div>
+      <p class="release-requirements">{m.sourceNote}</p>
+    </div>
+    <div class="version-panel" aria-label={"xmlsquish 0.2.0"}>
+      <div class="version-top"><span>xmlsquish</span><code>v0.2.0</code></div>
+      <div class="version-number" aria-hidden="true">0.2.0<span>XML → XML</span></div>
+      <div class="version-pipeline">
+        {["source.xml","source.i.xml","source.o.xml"].map((file,i) => <div><small>0{i+1}</small><code>{file}</code><span>{m.pipelineSteps[i]}</span></div>)}
+      </div>
+    </div>
+  </section>
+  <section id="highlights" class="release-section" aria-labelledby="highlights-title">
+    <p class="release-eyebrow">{m.highlightsLabel}</p><h2 id="highlights-title">{m.highlightsTitle}</h2>
+    <div class="release-highlights">{m.highlights.map(item => <article><span class="feature-number">{item.number}</span><h3>{item.title}</h3><p>{item.body}</p><code>{item.code}</code></article>)}</div>
+  </section>
+  <section id="install" class="install-section release-section" aria-labelledby="install-title">
+    <div><p class="release-eyebrow">{m.sourceInstall}</p><h2 id="install-title">{m.installCta}</h2><p>{m.installBody}</p><p class="release-requirements">{m.installNote}</p><a href={repo + "/releases/tag/v0.2.0"}>{m.github} ↗</a></div>
+    <div class="install-terminal"><div class="terminal-header"><code>v0.2.0</code><button type="button" hidden data-install-copy data-copied={m.copied} data-failed={m.copyFailed}>{m.copy}</button></div><pre><code data-install-command>{install}</code></pre><div class="terminal-check"><code>xmlsquish --version<br />xmlsquish 0.2.0</code></div><span role="status" aria-live="polite" data-copy-status></span></div>
+  </section>
+  <section class="release-continuity"><h2>{m.pipelineTitle}</h2><p>{m.pipelineNote}</p></section>
+  <section class="release-section" aria-labelledby="migration-title">
+    <div class="breaking-notice"><span aria-hidden="true">↳</span><div><h2 id="migration-title">{m.breakingLabel}</h2><p>{m.breakingBody}</p></div></div>
+    <details class="release-details">
+      <summary>{m.technicalDetails}<span aria-hidden="true"></span></summary>
+      <div class="release-detail-body">
+        <h3>{m.migration}</h3><p>{m.introduction}</p>
+        <div class="release-table"><table><thead><tr><th>{m.contract}</th><th>{m.action}</th></tr></thead><tbody>{m.migrationRows.map(([contract,action]) => <tr><td>{contract}</td><td>{action}</td></tr>)}</tbody></table></div>
+        <h3>{m.example}</h3><Code code={example} lang="xml" theme="rose-pine" /><p>{m.exampleNote}</p><pre><code>xmlsquish --arg name=Klee hello.xml</code></pre>
+        <h3>{m.execution}</h3><ul>{m.outputRules.map(rule => <li>{rule}</li>)}</ul>
+        <h3>{m.limits}</h3><div class="release-table"><table><thead><tr><th>{m.option}</th><th>{m.default}</th><th>{m.scope}</th></tr></thead><tbody>{budgets.map(([name,value],i) => <tr><td><code>{name}</code></td><td>{value}</td><td>{m.budgetScopes[i]}</td></tr>)}</tbody></table></div><p>{m.security}</p>
+        <h3>{m.verification}</h3><p>{m.verifyBody}</p><Code code={verify} lang="bash" theme="rose-pine" />
+        <h3>{m.links}</h3><ul><li><a href={paths[locale].namespace}>{messages[locale].reference.nav.namespace}</a></li><li><a href={repo + "/blob/v0.2.0/CHANGELOG.md"}>{m.changelog}</a></li><li><a href={repo + "/blob/v0.2.0/docs/adr/0005-dsl-language.md"}>{m.design}</a></li><li><a href={repo + "/blob/v0.2.0/README.md"}>{m.readme}</a></li></ul>
+      </div>
+    </details>
+  </section>
+  <section class="release-closing"><h2>{m.closeTitle}</h2><p>{m.closeBody}</p><a class="release-button primary" href="#install">{m.installCta}<span aria-hidden="true">↑</span></a></section>
+</ReferenceLayout>
+<script>
+  /** Progressive enhancement: the command stays readable without JavaScript.
+   * 渐进增强：没有 JavaScript 也能直接读取安装命令。 */
+  const button = document.querySelector<HTMLButtonElement>("[data-install-copy]");
+  const command = document.querySelector<HTMLElement>("[data-install-command]");
+  const status = document.querySelector<HTMLElement>("[data-copy-status]");
+  if (button && command && status && navigator.clipboard) {
+    button.hidden = false;
+    button.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(command.textContent ?? "");
+        status.textContent = button.dataset.copied ?? "";
+      } catch {
+        status.textContent = button.dataset.failed ?? "";
+      }
+    });
+  }
+</script>
+<style>
+  .release-hero { display: grid; grid-template-columns: 1.1fr 1fr; align-items: center; gap: 3rem; padding-block: 4rem 5rem; }
+  .release-eyebrow { text-transform: uppercase; letter-spacing: .09em; font-size: .78rem; font-weight: 700; color: var(--moe-accent-strong); }
+  .release-intro h1 { font-size: clamp(2.7rem, 4.7vw, 4.5rem); letter-spacing: -.055em; margin-block: 1.25rem; line-height: 1.08; }
+  .release-intro h1 em { display: block; color: var(--moe-accent-strong); font-style: normal; }
+  .release-lead { max-width: 35rem; font-size: 1.12rem; }
+  .release-actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1.75rem; }
+  .release-button { display: inline-flex; align-items: center; justify-content: center; gap: 1.5rem; padding: .85rem 1.2rem; border-radius: .5rem; text-decoration: none; font-weight: 700; border: 1px solid var(--xs-line); }
+  .release-button.primary { background: var(--moe-accent-strong, #b84420); color: var(--moe-on-accent, #fff); border-color: transparent; }
+  .release-button.secondary { color: inherit; }
+  .release-button:hover { filter: brightness(.94); }
+  .release-requirements { font-size: .8rem; opacity: .78; }
+  .version-panel { overflow: hidden; background: var(--xs-code); color: var(--xs-code-text); border-radius: 1rem; box-shadow: 0 1.5rem 4rem #2412091a; border: 1px solid #fff2; }
+  .version-top { display: flex; justify-content: space-between; padding: 1rem 1.5rem; border-bottom: 1px solid #fff2; font-size: .8rem; }
+  .version-number { font-family: ui-monospace, monospace; font-size: clamp(4rem, 8vw, 7rem); line-height: 1; letter-spacing: -.08em; padding: 2.5rem 1.5rem; color: #ffbc91; }
+  .version-number span { display: block; letter-spacing: .18em; font-size: .75rem; margin-top: 1rem; }
+  .version-pipeline { padding: 0 1.5rem 1.5rem; }
+  .version-pipeline > div { display: grid; grid-template-columns: 1.5rem 1fr; gap: .2rem .75rem; border-top: 1px solid #fff2; padding-block: .8rem; }
+  .version-pipeline small { grid-row: span 2; opacity: .5; }
+  .version-pipeline span { font-size: .8rem; opacity: .7; }
+  .release-section { padding-block: 3rem; }
+  .release-section h2, .release-closing h2, .release-continuity h2 { font-size: clamp(1.7rem, 3vw, 2.6rem); line-height: 1.2; letter-spacing: -.025em; margin-top: 0; }
+  .release-highlights { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.25rem; margin-top: 2rem; }
+  .release-highlights article { padding: 1.5rem; border: 1px solid var(--xs-line); border-radius: .75rem; }
+  .feature-number { font-family: ui-monospace, monospace; color: var(--moe-accent-strong); font-size: .8rem; }
+  .release-highlights h3 { margin-top: 1rem; font-size: 1.3rem; }
+  .release-highlights p { font-size: .95rem; }
+  .release-highlights code { display: block; margin-top: 1.5rem; font-size: .75rem; }
+  .install-section { display: grid; grid-template-columns: .8fr 1.2fr; gap: 3rem; align-items: center; }
+  .install-terminal { min-width: 0; border: 1px solid var(--xs-line); border-radius: .75rem; background: var(--xs-code); color: var(--xs-code-text); padding: 1.25rem; }
+  .terminal-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; font-size: .8rem; }
+  .terminal-header button { font: inherit; padding: .4rem .75rem; background: transparent; color: inherit; border: 1px solid #fff4; border-radius: .35rem; cursor: pointer; }
+  .install-terminal pre { border: 0; padding: 1.25rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .terminal-check { border-top: 1px solid #fff2; padding-top: 1rem; font-size: .85rem; opacity: .75; }
+  .install-terminal [role="status"] { display: block; min-height: 1.5em; font-size: .75rem; }
+  .release-continuity { padding: 2rem; border-left: .25rem solid var(--moe-accent-strong); margin-block: 2rem; background: var(--xs-glow); border-radius: 0 .75rem .75rem 0; }
+  .release-continuity h2 { font-size: 1.6rem; }
+  .release-continuity p { margin-bottom: 0; }
+  .breaking-notice { display: flex; gap: 1rem; align-items: baseline; }
+  .breaking-notice > span { color: var(--moe-accent-strong); font-size: 2rem; }
+  .breaking-notice h2 { font-size: 1.7rem; }
+  .breaking-notice p { max-width: 52rem; }
+  .release-details { margin-top: 1.5rem; border: 1px solid var(--xs-line); border-radius: .75rem; }
+  .release-details summary { display: flex; justify-content: space-between; padding: 1.25rem 1.5rem; cursor: pointer; font-weight: 700; }
+  .release-details summary > span::before { content: "+"; }
+  .release-details[open] summary > span::before { content: "−"; }
+  .release-detail-body { padding: 0 1.5rem 1.5rem; }
+  .release-detail-body h3 { margin-top: 2rem; }
+  .release-table { overflow-x: auto; }
+  .release-closing { text-align: center; padding-block: 3rem 5rem; }
+  .release-closing p { max-width: 36rem; margin: 1rem auto 1.5rem; }
+  @media (max-width: 800px) {
+    .release-hero, .install-section { grid-template-columns: 1fr; gap: 2rem; }
+    .release-hero { padding-block: 2rem; }
+    .release-highlights { grid-template-columns: 1fr; }
+    .release-section { padding-block: 2rem; }
+    .version-number { font-size: 5rem; padding-block: 1.5rem; }
+    .release-continuity { padding: 1.25rem; }
+    .release-detail-body { padding-inline: 1rem; }
+  }
+  @media (prefers-reduced-motion: reduce) { .release-button { transition: none; } }
+</style>

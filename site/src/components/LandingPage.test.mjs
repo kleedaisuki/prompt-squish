@@ -210,36 +210,80 @@ test("without JavaScript, all recorded sources and outputs remain readable", asy
   await page.close();
 });
 
-/** Namespace identity and release resources are part of the published contract.
- * 命名空间身份与发布资源属于网站发布契约，不依赖客户端脚本。 */
-for (const path of ["/ns/", "/releases/"]) {
+/** Localized reference and product pages preserve language, route and product identity.
+ * 本地化文档与产品页保持语言、对应路由和产品身份。 */
+for (const [path, locale, kind] of [
+  ["/ns/", "zh-CN", "namespace"], ["/en/ns/", "en", "namespace"],
+  ["/releases/", "zh-CN", "releases"], ["/en/releases/", "en", "releases"],
+]) {
   for (const width of [390, 1440]) {
-    test(path + ": canonical metadata and readable reference at " + width, async () => {
+    test(path + ": localized metadata and layout at " + width, async () => {
       const page = await browser.newPage({ viewport: { width, height: 1000 }, javaScriptEnabled: false });
-      const errors = [];
-      page.on("pageerror", error => errors.push(error.message));
       const response = await page.goto(base + path, { waitUntil: "networkidle" });
       assert.equal(response.status(), 200);
+      assert.equal(await page.locator("html").getAttribute("lang"), locale);
       assert.equal(await page.locator("main h1").count(), 1);
-      assert.equal(await page.locator('link[rel="canonical"]').getAttribute("href"),
-        "https://xmlsquish.moesegfault.dev" + (path === "/ns/" ? "/ns" : path));
-      assert(await page.locator("main").innerText().then(text => text.includes("0.2.0")));
+      const canonical = path === "/ns/" ? "/ns" : path;
+      assert.equal(await page.locator('link[rel="canonical"]').getAttribute("href"), "https://xmlsquish.moesegfault.dev" + canonical);
+      const zhPath = kind === "namespace" ? "/ns" : "/releases/";
+      const enPath = kind === "namespace" ? "/en/ns/" : "/en/releases/";
+      assert.equal(await page.locator('link[hreflang="zh-CN"]').getAttribute("href"), "https://xmlsquish.moesegfault.dev" + zhPath);
+      assert.equal(await page.locator('link[hreflang="en"]').getAttribute("href"), "https://xmlsquish.moesegfault.dev" + enPath);
+      assert.equal(await page.locator('link[hreflang="x-default"]').getAttribute("href"), "https://xmlsquish.moesegfault.dev" + zhPath);
+      assert.equal(await page.locator(".language-link").getAttribute("href"), locale === "en" ? zhPath : enPath);
+      assert.equal(await page.locator('meta[property="og:locale"]').getAttribute("content"), locale === "en" ? "en_US" : "zh_CN");
+      const text = await page.locator("main").textContent();
+      assert(text.includes("0.2.0"));
+      if (locale === "en") assert(!/\p{Script=Han}/u.test(text), "English page contains untranslated Chinese copy");
+      else assert(/\p{Script=Han}/u.test(text), "Chinese page is missing localized copy");
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
-      if (path === "/ns/") {
+      if (kind === "namespace") {
         assert.equal(await page.locator("tbody tr").count(), 11);
         assert.equal(await page.locator('link[rel="describedby"]').getAttribute("href"), "/ns/0.2.0/dsl.md");
-        assert((await page.locator(".identity code").textContent()).endsWith("/ns"));
+        assert.equal(await page.locator(".identity code").textContent(), "https://xmlsquish.moesegfault.dev/ns");
       } else {
-        assert(await page.locator("main").innerText().then(text => text.includes("--tag v0.2.0 --locked")));
+        assert.equal(await page.locator(".release-highlights article").count(), 3);
+        assert.equal(await page.locator(".release-details").getAttribute("open"), null);
+        assert.equal(await page.locator(".release-intro .primary").getAttribute("href"), "#install");
+        assert((await page.locator("[data-install-command]").textContent()).includes("--tag v0.2.0 --locked"));
       }
       if (process.env.UI_SCREENSHOT_DIR) {
         await mkdir(process.env.UI_SCREENSHOT_DIR, { recursive: true });
-        await page.screenshot({ path: join(process.env.UI_SCREENSHOT_DIR, path.replaceAll("/", "") + "-" + width + ".png"), fullPage: true });
+        await page.screenshot({ path: join(process.env.UI_SCREENSHOT_DIR, locale + "-" + kind + "-" + width + ".png"), fullPage: true });
       }
-      assert.deepEqual(errors, []);
+      await page.locator(".language-link").click();
+      assert.equal(await page.locator("html").getAttribute("lang"), locale === "en" ? "zh-CN" : "en");
+      assert.equal(new URL(page.url()).pathname.replace(/\/$/, ""), (locale === "en" ? zhPath : enPath).replace(/\/$/, ""));
       await page.close();
     });
   }
+}
+
+for (const locale of ["zh-CN", "en"]) {
+  test(locale + ": release command copy and progressive details", async () => {
+    const page = await browser.newPage({ viewport: { width: 390, height: 1000 } });
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async text => { window.copiedCommand = text; } } });
+    });
+    await page.goto(base + (locale === "en" ? "/en/releases/" : "/releases/"), { waitUntil: "networkidle" });
+    await page.locator("[data-install-copy]").click();
+    assert.equal(await page.evaluate(() => window.copiedCommand), await page.locator("[data-install-command]").textContent());
+    assert.equal(await page.locator("[data-copy-status]").textContent(), locale === "en" ? "Copied" : "已复制");
+    await page.locator(".release-details summary").click();
+    assert(await page.locator(".release-detail-body").isVisible());
+    await page.getByRole("button", { name: locale === "en" ? "Dark" : "深色", exact: true }).click();
+    assert.equal(await page.evaluate(() => document.documentElement.dataset.moeTheme), "dark");
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+    if (process.env.UI_SCREENSHOT_DIR) {
+      await mkdir(process.env.UI_SCREENSHOT_DIR, { recursive: true });
+      await page.screenshot({ path: join(process.env.UI_SCREENSHOT_DIR, locale + "-releases-390-dark-expanded.png"), fullPage: true });
+    }
+    await page.goto(base + (locale === "en" ? "/en/ns/" : "/ns/"), { waitUntil: "networkidle" });
+    assert.equal(await page.evaluate(() => document.documentElement.dataset.moeTheme), "dark");
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+    if (process.env.UI_SCREENSHOT_DIR) await page.screenshot({ path: join(process.env.UI_SCREENSHOT_DIR, locale + "-namespace-390-dark.png"), fullPage: true });
+    await page.close();
+  });
 }
 
 test("published namespace specification is a byte-exact 0.2.0 snapshot", async () => {

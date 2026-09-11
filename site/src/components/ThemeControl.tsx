@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import "./ThemeControl.css";
 
 type Theme = "auto" | "light" | "dark";
 
