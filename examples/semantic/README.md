@@ -1,20 +1,20 @@
-# 语义编译示例 / Semantic compilation example
+# 组合与递归 / Composition and recursion
 
 从仓库根目录运行 / Run from the repository root:
 
-```sh
+```bash
+cargo run -- examples/semantic/prompt.xml
 cargo run -- -I examples/semantic/prompt.xml
-cargo run -- -O examples/semantic/prompt.xml
 ```
 
-`-I` 生成保留普通文本布局的 `prompt.i.xml`；`-O` 生成压缩后的 `prompt.o.xml` 并删除对应中间文件。源文件不修改。日志包含所属物理文件名及行号。
+`prompt.o.xml` 包含 `Hello, Klee &amp; friends!`，随后按顺序包含 `XML`、`macros`、`recursion` 三个 `Item`。最终产品阶段会压缩空白，编译与中间表示不做此压缩。`prompt.i.xml` 是来源可追踪的中间表示，而不是最终提示词。
 
-`-I` writes `prompt.i.xml` without whitespace compression; `-O` writes compact `prompt.o.xml` and removes the corresponding intermediate. Sources stay untouched. Logs identify the physical source file and line.
+The final document contains the escaped greeting and three ordered `Item` elements. The final product pass compresses whitespace; compilation and the intermediate representation do not. The intermediate file includes provenance and is not the final prompt.
 
-`mount` 保留 `greeting` 根，`import` 只保留 `fragment` 的内容。三个文件都可以定义 `msg`，但互不可见。普通标签、属性和文本中的 `$msg` 不会展开。
+`import` 仅注册宏；调用方的 `s` 与定义方的 `str` 绑定同一 URI，因此引用同一符号。`items` 用命名捕获（named capture）拆分字符串，并以显式参数递归；捕获只在当前条件块内有效。`greet` 的紧凑宏体避免向标量结果意外加入排版空白。
 
-`mount` retains the `greeting` root; `import` retains only the contents of `fragment`. All three files can define `msg` independently. `$msg` in ordinary elements, attributes, and text is not expanded.
+Imports register definitions without executing module bodies. Caller prefix `s` and definition prefix `str` identify the same namespace. `items` decomposes a string with named captures and recursively passes explicit arguments; captures remain lexical. The compact greeting body avoids unintended formatting whitespace.
 
-示例先用 `let` 声明 `result`，再用互补的 `if` / `ifn` 分支中的 `set` 赋值。`set` 不能创建变量，也不能修改其他文件的变量或内置命名空间。缺失的环境变量会报错，而不是自动当作空字符串。
+这些示例替代旧版 `let`、`set`、`meta` 和 `$` 插值演示；当前契约见 [DSL 规范](../../docs/dsl.md)。
 
-The example declares `result` with `let`, then assigns it using `set` in complementary `if` / `ifn` branches. `set` cannot create variables or mutate other files' variables or built-in namespaces. Missing environment variables are errors, not empty strings.
+These examples replace the legacy mutable-variable and metadata language. See the DSL specification for the current contract.

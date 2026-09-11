@@ -1,5 +1,5 @@
-//! XML prompt compilation and lexical whitespace normalization.
-//! XML 提示词编译与词法空白规范化。
+//! Namespace-aware XML macros with frozen sources and explicit invocation frames.
+//! 基于命名空间的 XML 宏，使用冻结源码与显式调用帧。
 //!
 //! [`Compiler`] resolves macros with a caller-supplied include loader; [`squish`]
 //! independently normalizes whitespace while preserving markup bytes.
@@ -9,13 +9,16 @@
 //!
 //! ```
 //! use std::path::Path;
-//! use xmlsquish::{Compiler, squish};
+//! use xmlsquish::Compiler;
 //!
 //! let compiled = Compiler::new().compile(
-//!     Path::new("prompt.xml"), "<p>  hello  </p>",
+//!     Path::new("prompt.xml"),
+//!     r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><p>  hello  </p></xs:module>"#,
 //!     |_| Err("no includes available".into()),
 //! )?;
-//! assert_eq!(squish(&compiled.output)?.output, "<p> hello </p>");
+//! assert!(compiled.output.contains("  hello  "));
+//! // Normal compilation preserves text; squish is an independent, lossy utility.
+//! // 正常编译保留文本；squish 是独立、有损的工具。
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -23,5 +26,5 @@ pub mod cli;
 mod compiler;
 mod squish;
 
-pub use compiler::{CompileError, CompileLog, CompileResult, Compiler};
+pub use compiler::{CompileError, CompileLog, CompileOptions, CompileResult, Compiler};
 pub use squish::{SquishError, SquishErrorKind, SquishOutput, WhitespaceStats, squish};

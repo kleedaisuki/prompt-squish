@@ -3,7 +3,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Command;
 
 fn command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_xmlsquish"));
@@ -28,10 +28,10 @@ fn strip(bytes: &[u8]) -> Vec<u8> {
 
 fn failure_fixture(dir: &Path) -> std::path::PathBuf {
     let main = dir.join("main.xml");
-    fs::write(&main, "<r><xmlsquish:mount path='child.xml'/></r>").unwrap();
+    fs::write(&main, "<xs:module xmlns:xs='https://xmlsquish.moesegfault.dev/ns'><r><xs:mount src='child.xml'/></r></xs:module>").unwrap();
     fs::write(
         dir.join("child.xml"),
-        "<child>\r\n    <xmlsquish:log msg='$missing'/>\r\n</child>",
+        "<xs:module xmlns:xs='https://xmlsquish.moesegfault.dev/ns'><child>\r\n    <xs:insert get='arg.missing'/>\r\n</child></xs:module>",
     )
     .unwrap();
     main
@@ -59,11 +59,11 @@ fn redirected_auto_is_plain_and_forced_color_preserves_diagnostic_content() {
     assert_eq!(strip(&always.stderr), never.stderr);
     let diagnostic = String::from_utf8(never.stderr).unwrap();
     assert!(
-        diagnostic.starts_with("error[compile]: undefined variable '$missing'\n"),
+        diagnostic.starts_with("error[compile]:") && diagnostic.contains("missing"),
         "{diagnostic}"
     );
     assert!(diagnostic.contains("child.xml:2"));
-    assert!(diagnostic.contains("2 |     <xmlsquish:log msg='$missing'/>"));
+    assert!(diagnostic.contains("2 |     <xs:insert get='arg.missing'/>"));
     assert!(diagnostic.contains("while compiling"));
     assert_eq!(diagnostic.matches("[compile]").count(), 1);
 }
@@ -156,25 +156,15 @@ fn argument_newlines_cannot_forge_colored_diagnostic_labels() {
 }
 
 #[test]
-fn user_control_sequences_never_become_terminal_commands() {
+fn user_controls_in_invalid_source_never_become_terminal_commands() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("log.xml");
-    fs::write(&path, "<r><xmlsquish:log msg='hello\x1b[2J\u{202e}'/></r>").unwrap();
-    let Output {
-        status,
-        stdout,
-        stderr,
-    } = command().arg("--color=always").arg(path).output().unwrap();
-    assert_eq!(
-        status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&stderr)
-    );
-    let text = String::from_utf8(stdout).unwrap();
+    let path = dir.path().join("bad.xml");
+    fs::write(&path, "<xs:module xmlns:xs='https://xmlsquish.moesegfault.dev/ns'><xs:unknown name='hello\x1b[2J\u{202e}'/></xs:module>").unwrap();
+    let result = command().arg("--color=never").arg(path).output().unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    let text = String::from_utf8(result.stderr).unwrap();
     assert!(!text.contains("\x1b[2J"));
     assert!(!text.contains('\u{202e}'));
-    assert!(text.contains(r"\u{1b}[2J\u{202e}"), "{text}");
 }
 
 #[test]

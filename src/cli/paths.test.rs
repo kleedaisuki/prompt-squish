@@ -47,7 +47,7 @@ fn expands_globs_and_filters_output_documents() {
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     assert_eq!(
         result.files,
-        vec![fs::canonicalize(temp.path().join("a.xml")).unwrap()]
+        vec![logical_absolute(&temp.path().join("a.xml")).unwrap()]
     );
 }
 
@@ -109,4 +109,85 @@ fn colliding_outputs_reject_both_inputs_deterministically() {
         "conflict inputs must be sorted: {}",
         result.errors[0]
     );
+}
+
+#[test]
+fn lexical_dot_segments_collapse_without_filesystem_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("a.xml");
+    fs::write(&file, "<a/>").unwrap();
+    let result = discover(&[file.clone(), temp.path().join("unused/../a.xml")]);
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.files, vec![logical_absolute(&file).unwrap()]);
+}
+
+/// Symlink permissions are optional on Windows, mandatory on Unix.
+/// Windows 符号链接权限可能不可用；Unix 创建失败必须使测试失败。
+#[cfg(any(unix, windows))]
+fn link_file(source: &Path, alias: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(source, alias).unwrap();
+        true
+    }
+    #[cfg(windows)]
+    {
+        match std::os::windows::fs::symlink_file(source, alias) {
+            Ok(()) => true,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    || error.raw_os_error() == Some(1314) =>
+            {
+                eprintln!("SKIP: Windows symlink privilege unavailable: {error}");
+                false
+            }
+            Err(error) => panic!("cannot create symlink: {error}"),
+        }
+    }
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn symlink_root_keeps_logical_definition_base_and_distinct_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let physical = temp.path().join("physical");
+    let logical = temp.path().join("logical");
+    fs::create_dir(&physical).unwrap();
+    fs::create_dir(&logical).unwrap();
+    let source = physical.join("main.xml");
+    let alias = logical.join("alias.xml");
+    fs::write(&source, r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><r><xs:insert get="file.name"/><xs:mount src="child.xml"/><xs:mount src="child-alias.xml"/></r></xs:module>"#).unwrap();
+    fs::write(
+        logical.join("child.xml"),
+        r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><child/></xs:module>"#,
+    )
+    .unwrap();
+    if !link_file(&source, &alias) {
+        return;
+    }
+    assert!(link_file(
+        &logical.join("child.xml"),
+        &logical.join("child-alias.xml")
+    ));
+    let found = discover(&[source.clone(), alias.clone()]);
+    assert!(found.errors.is_empty(), "{:?}", found.errors);
+    assert_eq!(found.files.len(), 2);
+    assert!(found.files.contains(&logical_absolute(&alias).unwrap()));
+    let mut err = Vec::new();
+    let mut out = Vec::new();
+    let code = crate::cli::run(
+        [
+            std::ffi::OsString::from("xmlsquish"),
+            alias.into_os_string(),
+        ],
+        &mut out,
+        &mut err,
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let report = String::from_utf8(out).unwrap();
+    assert!(report.contains("Unique dependency files: 2"), "{report}");
+    let output = fs::read_to_string(logical.join("alias.o.xml")).unwrap();
+    assert!(output.contains("alias.xml"), "{output}");
+    assert!(output.contains("child"), "{output}");
+    assert!(!physical.join("main.o.xml").exists());
 }

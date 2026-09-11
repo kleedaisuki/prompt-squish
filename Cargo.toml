@@ -5,11 +5,11 @@ edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/kleedaisuki/prompt-squish"
-description = "Compile XML prompt macros and compress whitespace"
+description = "Compile namespace-aware XML macros with explicit parameters and slots"
 
 # Ship only Rust sources, language fixtures, and essential documentation.
 # 仅发布 Rust 源码、语言测试样例和必要文档，不包含站点资产。
-include = ["/src/**", "/examples/**", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
+include = ["/src/**", "/tests/**", "/examples/**", "/docs/dsl.md", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
 
 [[test]]
 name = "diagnostics"
@@ -29,6 +29,11 @@ clap = { version = "4.6.6", features = ["derive"] }
 glob = "0.3.4"
 quick-xml = "0.38"
 regex = "1.12"
+# 0.18 uses the iterative xmlparser tokenizer; 0.20/0.21 overflow on deep XML.
+# 0.18 使用迭代式 xmlparser；0.20/0.21 在深层 XML 上产生本机栈溢出。
+roxmltree = "0.18"
+stacker = "0.1"
+url = "2.5"
 tempfile = "3.23.0"
 tiktoken-rs = "0.12.0"
 walkdir = "2.5.0"

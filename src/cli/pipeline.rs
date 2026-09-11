@@ -4,12 +4,12 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::Compiler;
+use crate::{CompileOptions, Compiler};
 use tiktoken_rs::o200k_base_singleton;
 
 use super::diagnostics::{Diagnostic, Stage, painted, safe_text};
 use super::files::{atomic_write, read_xml};
-use super::paths::{intermediate_path, output_path_for};
+use super::paths::{intermediate_path, logical_absolute, output_path_for};
 
 /// Text metrics exclude the encoding envelope (BOM) / 文本统计不包含 BOM。
 #[derive(Clone, Copy, Default)]
@@ -75,7 +75,7 @@ pub(crate) struct Report {
 
 #[cfg(test)]
 pub(crate) fn run(paths: &[PathBuf], stage: OutputStage, logs: &mut dyn Write) -> Report {
-    run_with_color(paths, stage, logs, false)
+    run_with_color(paths, stage, logs, false, CompileOptions::default(), false)
 }
 
 pub(crate) fn run_with_color(
@@ -83,16 +83,19 @@ pub(crate) fn run_with_color(
     stage: OutputStage,
     logs: &mut dyn Write,
     color: bool,
+    options: CompileOptions,
+    debug: bool,
 ) -> Report {
-    // One compiler snapshots system/environment values for the whole invocation.
-    // 整次调用共享系统和环境快照；每个源文件仍有独立词法环境。
-    let compiler = Compiler::new();
+    // Each compile freezes its own source closure and immutable root arguments.
+    // 每次编译冻结独立源码闭包，复用只读根参数和预算配置。
+    let max_output_bytes = options.max_output_bytes;
+    let compiler = Compiler::with_options(options);
     let mut report = Report {
         stage,
         ..Report::default()
     };
     for path in paths {
-        match process_one(&compiler, path, stage, logs, color) {
+        match process_one(&compiler, path, stage, logs, color, debug, max_output_bytes) {
             Ok(file) => report.stats.include(file),
             Err(error) => report.failures.push(*error),
         }
@@ -106,7 +109,12 @@ fn process_one(
     stage: OutputStage,
     logs: &mut dyn Write,
     color: bool,
+    debug: bool,
+    max_output_bytes: usize,
 ) -> Result<Stats, Box<Diagnostic>> {
+    let logical_path =
+        logical_absolute(path).map_err(|error| Diagnostic::new(Stage::Read, path, error))?;
+    let path = logical_path.as_path();
     let (source, bom) =
         read_xml(path).map_err(|error| Diagnostic::new(Stage::Read, path, error))?;
     let mut stats = Stats {
@@ -120,9 +128,7 @@ fn process_one(
             let (text, _) = read_xml(path)?;
             stats.dependency_loads = stats.dependency_loads.saturating_add(1);
             stats.dependency_bytes = stats.dependency_bytes.saturating_add(text.len() as u64);
-            stats
-                .dependency_paths
-                .insert(fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
+            stats.dependency_paths.insert(path.to_path_buf());
             snapshots.insert(path.to_path_buf(), text.clone());
             Ok(text)
         })
@@ -134,6 +140,25 @@ fn process_one(
             };
             Diagnostic::compile(error, path, text)
         })?;
+    // Validate final-stage growth before committing either artifact.
+    // 最终压缩可能新增分隔空格，写入任何产物前也必须验证其预算。
+    let final_output = if stage == OutputStage::Optimized {
+        let output = crate::squish(&compiled.output)
+            .map_err(|error| Diagnostic::new(Stage::Squish, path, error))?
+            .output;
+        if output.len() > max_output_bytes {
+            return Err(Box::new(Diagnostic::compile(
+                compiled.output_error(format!(
+                    "Expansion: final output exceeds max-output-bytes budget {max_output_bytes}"
+                )),
+                path,
+                Some(&source),
+            )));
+        }
+        output
+    } else {
+        String::new()
+    };
     for log in compiled.logs {
         let name = log.path.file_name().unwrap_or(log.path.as_os_str());
         let prefix = format!("{}:{}:", safe_text(&name.to_string_lossy()), log.line);
@@ -145,24 +170,24 @@ fn process_one(
         );
     }
     let ir_path = intermediate_path(path);
-    stats.ir = Size::measure(&compiled.output)
+    stats.ir = Size::measure(&compiled.intermediate)
         .map_err(|error| Diagnostic::new(Stage::Measure, path, error))?;
-    atomic_write(&ir_path, bom, &compiled.output)
+    atomic_write(&ir_path, bom, &compiled.intermediate)
         .map_err(|error| Diagnostic::new(Stage::WriteIntermediate, &ir_path, error))?;
     if stage == OutputStage::Intermediate {
         stats.final_prompt = stats.ir;
     } else {
-        let squished = crate::squish(&compiled.output)
-            .map_err(|error| Diagnostic::new(Stage::Squish, &ir_path, error))?;
-        stats.final_prompt = Size::measure(&squished.output)
+        stats.final_prompt = Size::measure(&final_output)
             .map_err(|error| Diagnostic::new(Stage::Measure, &ir_path, error))?;
         let output_path = output_path_for(path);
-        atomic_write(&output_path, bom, &squished.output)
+        atomic_write(&output_path, bom, &final_output)
             .map_err(|error| Diagnostic::new(Stage::WriteOutput, &output_path, error))?;
         // Only discard this input's IR after its final output is persisted.
         // 仅在最终文件成功持久化后删除本输入的中间产物。
-        fs::remove_file(&ir_path)
-            .map_err(|error| Diagnostic::new(Stage::Cleanup, &ir_path, error))?;
+        if !debug {
+            fs::remove_file(&ir_path)
+                .map_err(|error| Diagnostic::new(Stage::Cleanup, &ir_path, error))?;
+        }
     }
     stats.processed_files = 1;
     Ok(stats)

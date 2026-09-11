@@ -1,181 +1,87 @@
-//! End-to-end language examples / 语言示例的端到端回归。
-use std::ffi::OsString;
-use std::fs;
-use std::path::Path;
+//! End-to-end module composition / 模块组合端到端回归。
+use std::{ffi::OsString, fs, path::Path};
 
-fn invoke(path: &Path, stage: &str) -> (i32, String, String) {
-    let mut out = Vec::new();
+/// Write a namespaced module / 写入带命名空间的模块。
+fn write(path: &Path, body: &str) {
+    fs::write(path, format!(r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test">{body}</xs:module>"#)).unwrap();
+}
+
+/// Run with retained intermediate artifact / 运行并保留中间产物。
+fn invoke(path: &Path) -> (i32, String) {
     let mut err = Vec::new();
     let code = xmlsquish::cli::run(
         [
             OsString::from("xmlsquish"),
-            OsString::from(stage),
+            OsString::from("--debug"),
             path.as_os_str().to_owned(),
         ],
-        &mut out,
+        &mut Vec::new(),
         &mut err,
     );
-    (
-        code,
-        String::from_utf8(out).unwrap(),
-        String::from_utf8(err).unwrap(),
-    )
+    (code, String::from_utf8(err).unwrap())
 }
 
 #[test]
-fn documented_inheritance_example_compiles_in_both_stages() {
+fn imported_macro_uses_definition_site_and_explicit_slots() {
     let dir = tempfile::tempdir().unwrap();
-    fs::create_dir(dir.path().join("parts")).unwrap();
-    let files = [
-        (
-            "prompt.xml",
-            include_str!("../../examples/inheritance/prompt.xml"),
-        ),
-        (
-            "parts/section.xml",
-            include_str!("../../examples/inheritance/parts/section.xml"),
-        ),
-        (
-            "parts/leaf.xml",
-            include_str!("../../examples/inheritance/parts/leaf.xml"),
-        ),
-    ];
-    for (name, source) in files {
-        fs::write(dir.path().join(name), source).unwrap();
-    }
-    let source = dir.path().join("prompt.xml");
-    let (code, report, errors) = invoke(&source, "-I");
-    assert_eq!(code, 0, "{errors}");
-    assert!(report.contains("Optimization: not run (-I)"));
-    let ir_path = source.with_extension("i.xml");
-    let ir = fs::read_to_string(&ir_path).unwrap();
-    assert!(ir.contains('\n'));
-    assert!(!ir.contains("<xmlsquish:"));
-    assert!(!ir.contains("<?"));
-    assert!(!ir.contains("<!--"));
-    assert!(!source.with_extension("o.xml").exists());
-
-    let (code, report, errors) = invoke(&source, "-O");
-    assert_eq!(code, 0, "{errors}");
-    assert!(report.contains("Dependency loads: 6"), "{report}");
-    assert!(report.contains("Unique dependency files: 2"), "{report}");
-    let dependency_bytes = files[1].1.len() * 2 + files[2].1.len() * 4;
-    assert!(report.contains(&format!("Dependency UTF-8 bytes read: {dependency_bytes} ")));
-    assert!(!ir_path.exists());
-    let output = fs::read_to_string(source.with_extension("o.xml")).unwrap();
-    assert_eq!(
-        output,
-        concat!(
-            "<prompt> <section> <author> klee </author> <source> section.xml </source> ",
-            "<author> klee </author> <source> leaf.xml </source> ",
-            "<leaf> <author> leaf-author </author> <source> leaf.xml </source> </leaf> </section> ",
-            "<section> <author> section-author </author> <source> section.xml </source> ",
-            "<author> section-author </author> <source> leaf.xml </source> ",
-            "<leaf> <author> leaf-author </author> <source> leaf.xml </source> </leaf> </section> ",
-            "<message> Hello &amp; welcome, &lt;researcher&gt;! </message> ",
-            "<matched> The physical filename matches. </matched> </prompt>"
-        )
+    fs::create_dir(dir.path().join("lib")).unwrap();
+    let main = dir.path().join("main.xml");
+    write(
+        &main,
+        r#"<xs:import src="lib/macros.xml"/><root><xs:call ref="m:panel"><xs:arg name="title" value="你好 &amp; &lt;世界&gt;"/><xs:fill name="body"><Body> keep </Body></xs:fill></xs:call></root>"#,
     );
-    for (name, original) in files {
-        assert_eq!(fs::read_to_string(dir.path().join(name)).unwrap(), original);
-    }
-}
-
-#[test]
-fn parent_adds_absent_metadata_without_relocating_physical_files() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("main.xml");
-    fs::create_dir(dir.path().join("sub")).unwrap();
-    fs::write(
-        &path,
-        r#"<?xmlsquish stamp="root" name="logical.xml" path="not-a-directory"?>
-<r><xmlsquish:let mode="parent"/><xmlsquish:mount path="sub/child.xml" openat="$mode"/></r>"#,
-    )
-    .unwrap();
-    fs::write(
-        dir.path().join("sub/child.xml"),
-        r#"<?xmlsquish own="child"?><c><xmlsquish:insert get="meta:stamp"/>/<xmlsquish:insert get="meta:name"/>/<xmlsquish:insert get="file:name"/>/<xmlsquish:insert get="meta:own"/><xmlsquish:mount path="leaf.xml" openat="parent"/></c>"#,
-    )
-    .unwrap();
-    fs::write(
-        dir.path().join("sub/leaf.xml"),
-        r#"<leaf><xmlsquish:insert get="meta:stamp"/>/<xmlsquish:insert get="meta:own"/>/<xmlsquish:insert get="file:name"/></leaf>"#,
-    )
-    .unwrap();
-    let (code, _, errors) = invoke(&path, "-I");
-    assert_eq!(code, 0, "{errors}");
-    assert!(
-        fs::read_to_string(path.with_extension("i.xml"))
-            .unwrap()
-            .contains("<c>root/logical.xml/child.xml/child<leaf>root/child/leaf.xml</leaf></c>")
+    write(
+        &dir.path().join("lib/macros.xml"),
+        r#"<xs:macro name="m:panel"><xs:param name="title"/><Panel><Title><xs:insert get="arg.title"/></Title><xs:mount src="leaf.xml"/><xs:slot name="body" required="true"/></Panel></xs:macro>"#,
     );
+    write(
+        &dir.path().join("lib/leaf.xml"),
+        r#"<Source><xs:insert get="file.name"/></Source>"#,
+    );
+    let (code, err) = invoke(&main);
+    assert_eq!(code, 0, "{err}");
+    let output = fs::read_to_string(main.with_extension("o.xml"))
+        .unwrap()
+        .replace(" xmlns=\"\"", "")
+        .replace(" xmlns:m=\"urn:test\"", "");
+    assert!(output.contains("你好 &amp; &lt;世界&gt;"), "{output}");
+    assert!(output.contains("<Source> leaf.xml </Source>"), "{output}");
+    assert!(output.contains("<Body> keep </Body>"), "{output}");
+    assert!(!output.contains("<xs:"));
+    let ir = fs::read_to_string(main.with_extension("i.xml")).unwrap();
+    assert_ne!(ir, output);
 }
 
 #[test]
-fn regex_unicode_and_insert_failures_follow_normal_output_safety() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("main.xml");
-    fs::write(
-        &path,
-        r#"<r><xmlsquish:let value="你好 &amp; &lt;世界&gt;"/><xmlsquish:ifr str="你好" pattern="\A\p{Han}+\z"><xmlsquish:insert get="value"/></xmlsquish:ifr></r>"#,
-    )
-    .unwrap();
-    let (code, _, errors) = invoke(&path, "-I");
-    assert_eq!(code, 0, "{errors}");
-    let ir_path = path.with_extension("i.xml");
-    let original = fs::read_to_string(&ir_path).unwrap();
-    assert_eq!(original, "<r>你好 &amp; &lt;世界&gt;</r>");
-
-    for broken in [
-        "<r><xmlsquish:insert get='missing'/></r>",
-        "<r><xmlsquish:ifr str='x' pattern='['/></r>",
-        "<r><xmlsquish:mount path='unused.xml' openat='invalid'/></r>",
-    ] {
-        fs::write(&path, broken).unwrap();
-        let (code, report, errors) = invoke(&path, "-I");
-        assert_eq!(code, 1, "{report}");
-        assert!(errors.contains("main.xml:1"), "{errors}");
-        assert!(report.contains("Succeeded: 0"));
-        assert_eq!(fs::read_to_string(&ir_path).unwrap(), original);
-    }
-}
-
-#[test]
-fn renamed_mount_persists_both_stages_and_preserves_source_and_previous_output() {
+fn unicode_recursion_and_failure_do_not_commit_partial_output() {
     let dir = tempfile::tempdir().unwrap();
     let main = dir.path().join("main.xml");
-    let child = dir.path().join("child.xml");
-    let child_source =
-        "<?xmlsquish author='child'?><旧 a='旧'><旧/><xmlsquish:insert get='meta:author'/></旧>";
-    fs::write(&child, child_source).unwrap();
-    fs::write(&main, "<?xmlsquish author='parent'?><r><xmlsquish:let tag='Persona'/><xmlsquish:mount path='child.xml' rename='$tag' openat='parent'/></r>").unwrap();
-    let (code, _, errors) = invoke(&main, "-I");
-    assert_eq!(code, 0, "{errors}");
-    assert_eq!(
-        fs::read_to_string(main.with_extension("i.xml")).unwrap(),
-        "<r><Persona a='旧'><旧/>parent</Persona></r>"
-    );
-    let (code, _, errors) = invoke(&main, "-O");
-    assert_eq!(code, 0, "{errors}");
-    let output = "<r> <Persona a='旧'> <旧/> parent </Persona> </r>";
-    assert_eq!(
-        fs::read_to_string(main.with_extension("o.xml")).unwrap(),
-        output
-    );
-    assert!(!main.with_extension("i.xml").exists());
-    assert_eq!(fs::read_to_string(&child).unwrap(), child_source);
-
-    fs::write(
+    write(
         &main,
-        "<r>\n<xmlsquish:mount path='child.xml' rename='bad name'/></r>",
-    )
-    .unwrap();
-    let (code, _, errors) = invoke(&main, "-O");
-    assert_eq!(code, 1);
-    assert!(errors.contains("main.xml:2"), "{errors}");
-    assert_eq!(
-        fs::read_to_string(main.with_extension("o.xml")).unwrap(),
-        output
+        r#"<xs:macro name="m:chars"><xs:param name="text"/><xs:ifr get="arg.text" pattern="^(?&lt;head&gt;.)(?&lt;tail&gt;.*)$"><C><xs:insert get="match.head"/></C><xs:call ref="m:chars"><xs:arg name="text" get="match.tail"/></xs:call></xs:ifr></xs:macro><r><xs:call ref="m:chars"><xs:arg name="text" value="你好"/></xs:call></r>"#,
     );
-    assert!(!main.with_extension("i.xml").exists());
+    let (code, err) = invoke(&main);
+    assert_eq!(code, 0, "{err}");
+    let original = fs::read_to_string(main.with_extension("o.xml")).unwrap();
+    assert!(
+        original
+            .replace(" xmlns=\"\"", "")
+            .replace(" xmlns:m=\"urn:test\"", "")
+            .contains("<C> 你 </C> <C> 好 </C>"),
+        "{original}"
+    );
+    for broken in [
+        r#"<r><xs:insert get="arg.missing"/></r>"#,
+        r#"<r><xs:ifr str="x" pattern="["/></r>"#,
+        "<a/><b/>",
+    ] {
+        write(&main, broken);
+        let (code, err) = invoke(&main);
+        assert_eq!(code, 1, "{err}");
+        assert!(err.contains("main.xml"), "{err}");
+        assert_eq!(
+            fs::read_to_string(main.with_extension("o.xml")).unwrap(),
+            original
+        );
+    }
 }

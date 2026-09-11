@@ -1,12 +1,12 @@
-<?xmlsquish author="klee" audience="researchers"?>
-<prompt>
-    <!-- 每条引用边独立指定；连续 parent 可传递元数据。 -->
-    <!-- Each include decides independently; consecutive parent edges propagate metadata. -->
-    <xmlsquish:mount path="parts/section.xml" openat="parent"/>
-    <xmlsquish:mount path="parts/section.xml" openat="self"/>
-    <xmlsquish:let message="Hello &amp; welcome, &lt;researcher&gt;!"/>
-    <message><xmlsquish:insert get="message"/></message>
-    <xmlsquish:ifr str="$file:name" pattern="^prompt\.xml$">
-        <matched>The physical filename matches.</matched>
-    </xmlsquish:ifr>
-</prompt>
+<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns">
+  <Prompt>
+    <xs:mount src="parts/section.xml">
+      <xs:arg name="audience" value="researchers"/>
+      <xs:fill name="heading"><Title>Explicit data flow</Title></xs:fill>
+    </xs:mount>
+    <xs:mount src="parts/section.xml">
+      <xs:arg name="audience" value="everyone"/>
+      <xs:fill name="heading"><Title>Independent frame</Title></xs:fill>
+    </xs:mount>
+  </Prompt>
+</xs:module>

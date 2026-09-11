@@ -1,6 +1,3 @@
-<?xmlsquish author="klee"?>
-<greeting>
-    <xmlsquish:let msg="Hello from an independent file frame!"/>
-    <xmlsquish:log msg="$msg"/>
-    Hello World!
-</greeting>
+<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:str="https://example.com/macros/string">
+  <xs:macro name="str:greet"><xs:param name="name"/>Hello, <xs:insert get="arg.name"/>!</xs:macro>
+</xs:module>

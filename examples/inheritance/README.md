@@ -1,24 +1,18 @@
-# 元数据继承与显式插入 / Metadata inheritance and explicit insertion
+# 显式传参，而非继承 / Explicit arguments, not inheritance
 
-从仓库根目录运行 / Run from the repository root:
+目录名保留以便找到迁移示例；语言已不支持 `openat` 或隐式 `meta` 继承。
 
-```sh
-cargo run -- -I examples/inheritance/prompt.xml
-cargo run -- -O examples/inheritance/prompt.xml
+The historical directory name is retained for migration discoverability. The language no longer supports `openat` or implicit metadata inheritance.
+
+```bash
+cargo run -- examples/inheritance/prompt.xml
+cargo run -- --explain examples/inheritance/prompt.xml
 ```
 
-`file:name` 始终是实际源文件名；`meta:author` 则可继承。父文件通过 `openat="parent"` 加载 `section.xml` 时，`klee` 覆盖 `section-author`，并通过同样显式写 `openat="parent"` 的后续 `import` 继续覆盖 `leaf-author`。省略参数始终等于 `self`，不沿用上一次引用边的模式。
+从仓库根目录运行。输出的两个 `Section` 分别包含 `researchers` 与 `everyone`。每次 `mount` 创建独立展开帧（Expansion Frame），但 `section.xml` 和 `leaf.xml` 每次编译只装载一次。
 
-`file:name` always names the physical source; `meta:author` can be inherited. Loading `section.xml` with `openat="parent"` replaces `section-author` with `klee`, which also overrides `leaf-author` in the subsequent import explicitly using `openat="parent"`. Omission always means `self`, independent of the preceding edge's mode.
+Run from the repository root. Two sections contain `researchers` and `everyone` respectively. Each mount creates a fresh frame, while each source is loaded only once per compilation.
 
-| 所在位置 / Location | `meta:author` | `file:name` |
-| --- | --- | --- |
-| 第一个 section / First section | `klee` | `section.xml` |
-| 第一个 section 内 import / Import in first section | `klee` | `leaf.xml` |
-| 第一个 section 内省略参数 / Omitted parameter in first section | `leaf-author` | `leaf.xml` |
-| 第二个 section / Second section | `section-author` | `section.xml` |
-| 第二个 section 内 parent import / Parent import in second section | `section-author` | `leaf.xml` |
+`section.xml` 显式把 `arg.audience` 传给 `leaf.xml`；删去该参数将报错，而不是自动继承。相对路径 `./leaf.xml` 始终相对 `section.xml` 解析。标题通过 `fill` 传递 XML 节点，不作为字符串；缺少必需标题也会报错。
 
-`insert` 按名字查找变量，不写 `$`，输出是经过 XML 转义的文本，变量中的 `<researcher>` 不会变成元素。`ifr` 的 `str` 展开变量，`pattern` 是原样正则表达式（regular expression），因此 `$` 可以直接表示末尾锚点。
-
-`insert` looks up a variable name without `$` and writes XML-escaped text: `<researcher>` inside the value does not become an element. `ifr` expands its `str` argument but treats `pattern` as a literal regular expression, so `$` can directly denote an end anchor.
+The section explicitly forwards its argument to the leaf: removing it is an error, not inheritance. The leaf path resolves relative to the section definition. Titles pass as XML through fills, not strings; omitting the required title also fails.

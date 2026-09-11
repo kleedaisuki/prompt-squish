@@ -23,8 +23,8 @@ use std::path::PathBuf;
 #[command(
     name = "xmlsquish",
     version,
-    about = "Compile XML prompt macros and compress whitespace",
-    long_about = "Compile XML macros to *.i.xml, then compress whitespace to *.o.xml.\n\
+    about = "Compile XML modules and macros, then compress whitespace",
+    long_about = "Compile XML macros to provenance *.i.xml and compressed *.o.xml.\n\
                   Use -I to retain only the intermediate stage; -O is the default.\n\
                   Directories are searched recursively, ignoring *.i.xml and *.o.xml."
 )]
@@ -35,12 +35,37 @@ struct Args {
     /// Compile only to *.i.xml / 仅生成中间表示
     #[arg(short = 'I', conflicts_with = "optimized")]
     intermediate: bool,
-    /// Compile and optimize to *.o.xml (default) / 编译并压缩
+    /// Compile and compress to *.o.xml (default) / 编译并压缩空白
     #[arg(short = 'O')]
     optimized: bool,
-    /// Input XML files, directories, or glob patterns
+    /// Retain provenance IR; alias: --explain / 保留来源中间表示，别名 --explain。
+    #[arg(long, visible_alias = "explain")]
+    debug: bool,
+    /// Maximum frame depth / 展开帧深度预算。
+    #[arg(long)]
+    max_depth: Option<usize>,
+    /// Maximum expansion frames / 展开帧数量预算。
+    #[arg(long)]
+    max_expansions: Option<usize>,
+    /// Maximum output UTF-8 bytes / 输出 UTF-8 字节预算。
+    #[arg(long)]
+    max_output_bytes: Option<usize>,
+    /// Root main argument, repeatable / 根 main 参数，可重复指定不同参数名。
+    #[arg(long = "arg", value_name = "NAME=VALUE", value_parser = parse_argument)]
+    arguments: Vec<(String, String)>,
+    /// Input XML files, directories, or glob patterns / 输入文件、目录或通配符
     #[arg(value_name = "PATH")]
     paths: Vec<PathBuf>,
+}
+
+/// Split once so empty values and embedded equals remain literal.
+/// 仅分割首个等号，保留空值和后续等号；名字的 NCName 契约由编译器校验。
+fn parse_argument(input: &str) -> Result<(String, String), String> {
+    let (name, value) = input.split_once('=').ok_or("expected NAME=VALUE")?;
+    if name.is_empty() {
+        return Err("argument name must not be empty".into());
+    }
+    Ok((name.to_owned(), value.to_owned()))
 }
 
 /// Runs the CLI with injectable streams. Returns the intended process exit code.
@@ -119,6 +144,29 @@ fn execute(
         return 0;
     }
 
+    let mut options = crate::CompileOptions::default();
+    if let Some(limit) = args.max_depth {
+        options.max_depth = limit;
+    }
+    if let Some(limit) = args.max_expansions {
+        options.max_expansions = limit;
+    }
+    if let Some(limit) = args.max_output_bytes {
+        options.max_output_bytes = limit;
+    }
+    for (name, value) in args.arguments {
+        if options.args.insert(name.clone(), value).is_some() {
+            console::clap_text(
+                &mut stderr,
+                &format!(
+                    "error: duplicate root argument '{}'\n",
+                    diagnostics::safe_text(&name)
+                ),
+                err_color,
+            );
+            return 2;
+        }
+    }
     let discovery = paths::discover(&args.paths);
     for error in &discovery.errors {
         let _ = diagnostics::Diagnostic::discovery(error.clone()).render(&mut stderr, err_color);
@@ -130,7 +178,14 @@ fn execute(
     } else {
         pipeline::OutputStage::Optimized
     };
-    let report = pipeline::run_with_color(&discovery.files, stage, &mut stdout, out_color);
+    let report = pipeline::run_with_color(
+        &discovery.files,
+        stage,
+        &mut stdout,
+        out_color,
+        options,
+        args.debug,
+    );
     let _ = stdout.flush();
     for failure in &report.failures {
         let _ = failure.render(&mut stderr, err_color);

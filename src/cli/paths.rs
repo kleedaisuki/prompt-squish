@@ -4,7 +4,7 @@ use glob::{MatchOptions, Pattern, PatternError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use walkdir::WalkDir;
 
 #[derive(Debug)]
@@ -69,8 +69,11 @@ fn expand_glob(pattern: &Path, files: &mut BTreeSet<PathBuf>, errors: &mut Vec<S
                     || pattern.matches_path_with(relative, options)
                 {
                     found = true;
-                    if entry.file_type().is_file() && is_input_xml(path) {
-                        insert_normalized(path, files);
+                    if (entry.file_type().is_file()
+                        || entry.file_type().is_symlink() && path.is_file())
+                        && is_input_xml(path)
+                    {
+                        insert_normalized(path, files, errors);
                     } else if entry.file_type().is_dir() {
                         matched_directories.push(path.to_path_buf());
                     }
@@ -113,7 +116,15 @@ fn format_glob_error(pattern: &str, error: PatternError) -> String {
 }
 
 fn collect_path(path: &Path, files: &mut BTreeSet<PathBuf>, errors: &mut Vec<String>) {
-    let metadata = match fs::symlink_metadata(path) {
+    let normalized = match logical_absolute(path) {
+        Ok(path) => path,
+        Err(error) => {
+            errors.push(format!("无法解析 {}：{error}", path.display()));
+            return;
+        }
+    };
+    let path = normalized.as_path();
+    let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(error) => {
             errors.push(format!("无法访问 {}：{error}", path.display()));
@@ -121,12 +132,9 @@ fn collect_path(path: &Path, files: &mut BTreeSet<PathBuf>, errors: &mut Vec<Str
         }
     };
 
-    if metadata.file_type().is_symlink() {
-        return;
-    }
     if metadata.is_file() {
         if is_input_xml(path) {
-            insert_normalized(path, files);
+            insert_normalized(path, files, errors);
         }
         return;
     }
@@ -137,8 +145,12 @@ fn collect_path(path: &Path, files: &mut BTreeSet<PathBuf>, errors: &mut Vec<Str
 
     for entry in WalkDir::new(path).follow_links(false).sort_by_file_name() {
         match entry {
-            Ok(entry) if entry.file_type().is_file() && is_input_xml(entry.path()) => {
-                insert_normalized(entry.path(), files);
+            Ok(entry)
+                if (entry.file_type().is_file()
+                    || entry.file_type().is_symlink() && entry.path().is_file())
+                    && is_input_xml(entry.path()) =>
+            {
+                insert_normalized(entry.path(), files, errors);
             }
             Ok(_) => {}
             Err(error) => errors.push(format!("遍历 {} 失败：{error}", path.display())),
@@ -146,11 +158,32 @@ fn collect_path(path: &Path, files: &mut BTreeSet<PathBuf>, errors: &mut Vec<Str
     }
 }
 
-fn insert_normalized(path: &Path, files: &mut BTreeSet<PathBuf>) {
-    // Canonicalization makes duplicate spellings of the same input collapse. If the
-    // filesystem cannot canonicalize an otherwise readable path, retain that path so
-    // processing can report the more useful I/O error later.
-    files.insert(fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
+/// Absolute lexical identity; never dereference a symbolic link.
+/// 绝对词法身份；从不解引用符号链接，也不依赖文件是否存在。
+pub(super) fn logical_absolute(path: &Path) -> std::io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
+/// Intern only logical spellings; physical aliases remain separate sources.
+/// 仅合并词法拼写；物理别名仍是不同源码。
+fn insert_normalized(path: &Path, files: &mut BTreeSet<PathBuf>, errors: &mut Vec<String>) {
+    match logical_absolute(path) {
+        Ok(path) => {
+            files.insert(path);
+        }
+        Err(error) => errors.push(format!("无法解析 {}：{error}", path.display())),
+    }
 }
 
 pub fn is_input_xml(path: &Path) -> bool {
