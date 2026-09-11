@@ -29,26 +29,23 @@ xmlsquish examples/site-demo/agent.xml
 xmlsquish --debug --max-depth 128 --max-expansions 10000 --max-output-bytes 1048576 examples/semantic/prompt.xml
 ```
 
-`--arg NAME=VALUE` 可重复，为 `entry` 选定的入口宏提供字符串参数。`-I` 生成带来源信息（provenance）的 `.i.xml`；默认 `-O` 生成干净的 `.o.xml`。**最终 `.o.xml` 移除所有属性与命名空间声明（namespace declaration），元素仅保留局部名（local name），并继续压缩空白。** 属性不属于提示词产品语义；空白是无意义的格式字符串。这些行为不能通过输出选项或 `xml:space` 改变。`--debug` 与 `--explain` 等价，保留中间诊断信息但不改变最终产品行为。源码中的 DSL 指令属性仍用于编译和展开，标量求值仍保留字符串内容；最终提示词输出不承诺通用 XML 数据语义等价。输入文件不覆盖，失败不得提交部分成功输出。
+`--arg NAME=VALUE` 可重复，为 `xs:entry` 的声明参数提供字符串值。`-I` 生成带来源信息（provenance）的 `.i.xml`；默认 `-O` 生成干净的 `.o.xml`。**最终 `.o.xml` 移除所有属性与命名空间声明（namespace declaration），元素仅保留局部名（local name），并继续压缩空白。** 属性不属于提示词产品语义；空白是无意义的格式字符串。这些行为不能通过输出选项或 `xml:space` 改变。`--debug` 与 `--explain` 等价，保留中间诊断信息但不改变最终产品行为。源码中的 DSL 指令属性仍用于编译和展开，标量求值仍保留字符串内容；最终提示词输出不承诺通用 XML 数据语义等价。输入文件不覆盖，失败不得提交部分成功输出。
 
 Repeat `--arg NAME=VALUE` for entry parameters. `-I` writes provenance-bearing `.i.xml`; default `-O` writes clean `.o.xml`. **Final `.o.xml` removes every attribute and namespace declaration, uses local element names, and squishes whitespace.** Attributes are not prompt product semantics; whitespace is formatting noise. Neither output options nor `xml:space` can override these rules. `--debug` and `--explain` are aliases that retain intermediate diagnostics without changing final product behavior. Source DSL directive attributes still drive compilation and expansion, and scalar evaluation still preserves string contents; final prompt output does not promise general XML data equivalence. Sources are never overwritten and failed expansion must not publish partial output.
 
-路径可为文件、目录或引号括起的 glob。目录和 glob 发现的合法无入口库模块会跳过；显式指定无入口文件仍报错。无路径时显示帮助；生成的 `.i.xml` / `.o.xml` 不再作为输入。`--color auto|always|never` 控制终端颜色。独立文件可继续处理，但任一失败使退出码非零。具体选项以 `xmlsquish --help` 为准。
+路径可为文件、目录或引号括起的 glob。目录和 glob 发现的合法 `xs:module` 库文件会跳过；显式指定模块文件仍报错。无路径时显示帮助；生成的 `.i.xml` / `.o.xml` 不再作为输入。`--color auto|always|never` 控制终端颜色。独立文件可继续处理，但任一失败使退出码非零。具体选项以 `xmlsquish --help` 为准。
 
-Paths accept files, directories, or quoted globs. Directory/glob discovery skips valid libraries without entry; explicitly naming such a file remains an error. No paths prints help. Generated artifacts are excluded from discovery. Independent inputs may continue after an error, but any failure yields a nonzero exit status. Consult `xmlsquish --help` for options.
+Paths accept files, directories, or quoted globs. Directory/glob discovery skips valid `xs:module` libraries; explicitly naming such a file remains an error. No paths prints help. Generated artifacts are excluded from discovery. Independent inputs may continue after an error, but any failure yields a nonzero exit status. Consult `xmlsquish --help` for options.
 
 ## 最小程序 / Minimal program
 
 保存为 `hello.xml` / Save as `hello.xml`:
 
 ```xml
-<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"
-           xmlns:app="urn:example:hello" entry="app:greeting">
-  <xs:macro name="app:greeting">
-    <xs:param name="name"/>
-    <Greeting>Hello, <xs:insert get="arg.name"/>!</Greeting>
-  </xs:macro>
-</xs:module>
+<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns">
+  <xs:param name="name"/>
+  <Greeting>Hello, <xs:insert get="arg.name"/>!</Greeting>
+</xs:entry>
 ```
 
 ```bash
@@ -63,7 +60,8 @@ xmlsquish --arg name=Klee hello.xml
 
 | 结构 / Form | 契约 / Contract |
 | --- | --- |
-| `xs:module` | 仅包含 import 与 macro；可用 `entry` 选择入口宏 / Declarations only; `entry` selects a named macro |
+| `xs:module` | 只包含 import 与 macro 的库 / Library containing imports and macro definitions only |
+| `xs:entry` | 导入、入口参数与产品构造正文，不是宏 / Imports, root parameters, and document construction; not a macro |
 | `xs:import src="..."` | 仅装载定义，不执行 / Load definitions without execution |
 | `xs:macro name="app:name"` | 按扩展名（Expanded Name）注册，不可重定义 / Immutable namespace-qualified definition |
 | `xs:param name="x"` | 必需字符串参数，声明在主体之前 / Required string parameter before body |
@@ -73,13 +71,13 @@ xmlsquish --arg name=Klee hello.xml
 | `xs:insert get="..."` | 读取 `file.*`、`arg.*`、词法 `match.*` / Read immutable scalar binding |
 | `xs:ifr` | Unicode 正则条件与命名捕获（named capture） / Regex condition with named captures |
 
-内建操作按命名空间 URI 识别，不按 `xs` 拼写识别。宏 `name` / `ref` 和模块 `entry` 必须有绑定的前缀。相对 `src` 与 `file.*` 绑定定义位置；不继承调用者参数。静态装载完整源码闭包，即使某个分支不会执行，也会验证其中的引用和模式。纯导入环合法；执行递归由可调预算约束。
+内建操作按命名空间 URI 识别，不按 `xs` 拼写识别。宏 `name` / `ref` 必须有绑定的前缀。相对 `src` 与 `file.*` 绑定定义位置；不继承调用者参数。静态装载完整源码闭包，即使某个分支不会执行，也会验证其中的引用和模式。纯导入环合法；执行递归由可调预算约束。
 
 Builtin identity uses the namespace URI, not prefix spelling. Macro names/references require bound prefixes. Relative sources and `file.*` bind at the definition site. Arguments are not inherited. Discovery validates the complete static source closure, including unselected branches. Import cycles are legal; execution recursion is guarded by configurable budgets.
 
-模块没有隐式正文或 `main`。`import` 是唯一装载操作，不执行被导入模块的入口。`expand` 是唯一展开操作；每次展开拥有独立作用域，参数与 fill 在展开者环境中求值一次后按值传递，不捕获外部变量。宏返回有序节点序列；纯文本返回值可在另一个 `xs:arg` body 中组合传递，结构返回值可在 `xs:fill` 中组合。`fragment` 不是独立语言构造。
+模块没有隐式正文或 `main`。`xs:entry` 是独立源码根，只构造文档、不定义宏；它不是符号或隐式宏。`import` 是唯一装载操作，只接受模块，不能导入入口。`expand` 是唯一展开操作；每次展开拥有独立作用域，参数与 fill 在展开者环境中求值一次后按值传递，不捕获外部变量。宏返回有序节点序列；纯文本返回值可在另一个 `xs:arg` body 中组合传递，结构返回值可在 `xs:fill` 中组合。`fragment` 不是独立语言构造。
 
-Modules have no implicit body or `main`. `import` is the sole loading operation and never executes an imported entry. `expand` is the sole expansion operation: each expansion has an isolated scope with eagerly evaluated, immutable arguments and fills, without caller capture. Macros return ordered node sequences; text-only results compose in `xs:arg` bodies and structural results in `xs:fill`. There is no separate `fragment` construct.
+Modules have no implicit body or `main`. `xs:entry` is a separate source root for document construction, not a macro definition or symbol. `import` is the sole loading operation and accepts modules only, never entries. `expand` is the sole expansion operation: each expansion has an isolated scope with eagerly evaluated, immutable arguments and fills, without caller capture. Macros return ordered node sequences; text-only results compose in `xs:arg` bodies and structural results in `xs:fill`. There is no separate `fragment` construct.
 
 正则表达式不允许普通位置捕获、反向引用（backreference）和环视（look-around）。用 `(?:...)` 分组、`(?<name>...)` 捕获；XML 属性中 `<` 写成 `&lt;`。空白敏感的标量 body 应写为紧凑内联形式。
 

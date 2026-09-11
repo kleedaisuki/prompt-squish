@@ -140,7 +140,7 @@ async function diagnosticExample(temporary) {
   await mkdir(directory);
   await writeFile(
     join(directory, "agent.xml"),
-    '<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:d="urn:demo" entry="d:main"><xs:import src="broken.xml"/><xs:macro name="d:main"><prompt>\n  <xs:expand ref="d:broken"/>\n</prompt></xs:macro></xs:module>\n',
+    '<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:d="urn:demo"><xs:import src="broken.xml"/><prompt>\n  <xs:expand ref="d:broken"/>\n</prompt></xs:entry>\n',
     "utf8",
   );
   await writeFile(

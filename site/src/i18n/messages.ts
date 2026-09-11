@@ -198,7 +198,7 @@ const zh: Messages = {
     items: [
       {
         title: "导入定义，递归展开宏",
-        body: "module 只包含宏定义与 import；entry 显式选择宏，expand 递归展开并按值返回结果。slot / fill 组合 XML 节点。",
+        body: "module 只存放宏定义；独立的 entry 导入模块、构建提示词。expand 递归展开宏并按值返回结果。",
         code: '<xs:import src="persona.xml"/>\n<xs:expand ref="demo:persona">\n  <xs:arg name="audience" value="researchers"/>\n</xs:expand>',
       },
       {
@@ -217,7 +217,7 @@ const zh: Messages = {
     eyebrow: "FROM SOURCE TO YOUR WORKFLOW",
     title: "检查展开结果，再交给 Agent。",
     intro:
-      "接收文件、目录或 glob。跳过 .i.xml / .o.xml；目录与 glob 跳过无入口库模块，原子替换产物；一个文件失败，不阻止其他独立输入。",
+      "接收文件、目录或 glob。跳过 .i.xml / .o.xml；目录与 glob 跳过 module 库文件，原子替换产物；一个文件失败，不阻止其他独立输入。",
     install: "从仓库安装",
     inspect: "只编译，保留中间表示",
     optimize: "展开、清理来源信息并压紧最终 XML",
@@ -351,8 +351,8 @@ const en: Messages = {
     title: "Compose. Select. Emit. Explicitly.",
     items: [
       {
-        title: "Import definitions. Invoke content.",
-        body: "Modules contain imports and named macros only. entry explicitly selects a macro; expand recursively produces its return value. slot / fill compose XML nodes.",
+        title: "Import modules. Expand macros.",
+        body: "Modules contain macro definitions. A separate entry imports modules and constructs the prompt; expand recursively produces macro return values.",
         code: zh.capabilities.items[0].code,
       },
       {
@@ -371,7 +371,7 @@ const en: Messages = {
     eyebrow: "FROM SOURCE TO YOUR WORKFLOW",
     title: "Inspect the expansion. Then feed your agent.",
     intro:
-      "Accept files, directories, or globs. Discovery skips .i.xml / .o.xml and valid libraries without entry in directories/globs; output replacement is atomic, and one failed file does not stop independent inputs.",
+      "Accept files, directories, or globs. Discovery skips .i.xml / .o.xml and module libraries in directories/globs; output replacement is atomic, and one failed file does not stop independent inputs.",
     install: "Install from a repository checkout",
     inspect: "Compile only; keep the intermediate",
     optimize: "Expand, lower provenance, and compact final XML",

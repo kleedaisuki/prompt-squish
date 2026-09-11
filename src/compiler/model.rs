@@ -165,13 +165,23 @@ pub(super) struct MacroDef {
     /// Ordered lexical body, never cloned during expansion. / 有序词法主体，展开时不复制。
     pub body: Vec<Node>,
 }
+/// Explicit executable source, never registered as a macro. / 显式可执行源码，不注册为宏。
+#[derive(Debug)]
+pub(super) struct Entry {
+    /// Entry source span. / 入口源码范围。
+    pub loc: Loc,
+    /// Required CLI scalar inputs. / 必需 CLI 标量输入。
+    pub params: Vec<String>,
+    /// Ordered output construction. / 有序输出构造。
+    pub body: Vec<Node>,
+}
 /// One parsed logical resource. / 一个已解析逻辑资源。
 #[derive(Debug)]
 pub(super) struct Unit {
-    /// Normalized logical loader path. / 规范化逻辑加载路径。
-    pub path: PathBuf,
-    /// Optional explicit entry symbol and declaration origin. / 可选显式入口符号及声明来源。
-    pub entry: Option<(Name, Loc)>,
+    /// Source root span. / 源码根范围。
+    pub loc: Loc,
+    /// Executable entry, absent for library modules. / 可执行入口，库模块无此字段值。
+    pub entry: Option<Entry>,
     /// Explicit named definitions in ID order. / 按 ID 排序的显式命名定义。
     pub macros: Vec<MacroDef>,
     /// Static source edges with diagnostic origins. / 带诊断来源的静态源码边。
@@ -184,10 +194,8 @@ pub(super) struct Program {
     pub defs: Vec<MacroDef>,
     /// Global expanded-name symbol table. / 全局扩展名符号表。
     pub symbols: BTreeMap<Name, usize>,
-    /// Explicit root entry definition ID. / 显式根入口定义 ID。
-    pub root: usize,
-    /// Root module entry declaration, distinct from the macro definition. / 根模块入口声明，与宏定义位置分离。
-    pub entry_loc: Loc,
+    /// Explicit entry source, outside the macro symbol graph. / 宏符号图之外的显式入口源码。
+    pub entry: Entry,
 }
 /// Normalize lexically without filesystem canonicalization or symlink folding.
 /// 仅词法规范化，不访问文件系统或折叠符号链接。

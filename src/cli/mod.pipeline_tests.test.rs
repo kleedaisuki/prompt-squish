@@ -1,10 +1,10 @@
 //! CLI DSL contracts and artifact safety / 命令行 DSL 契约与产物安全。
 use super::*;
 
-/// Build a module fixture / 构造模块样例。
-fn module(body: &str) -> String {
+/// Build an entry fixture / 构造入口样例。
+fn entry_source(body: &str) -> String {
     format!(
-        r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test" entry="m:main"><xs:macro name="m:main">{body}</xs:macro></xs:module>"#
+        r#"<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test">{body}</xs:entry>"#
     )
 }
 
@@ -26,7 +26,7 @@ fn invoke(path: &Path, flags: &[&str]) -> (i32, String, String) {
 fn stages_separate_macro_text_from_final_compression() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("a.xml");
-    let source = module("<a>  text  <!--keep--><?user data?></a>");
+    let source = entry_source("<a>  text  <!--keep--><?user data?></a>");
     fs::write(&input, &source).unwrap();
     fs::write(dir.path().join("orphan.i.xml"), "untouched").unwrap();
     for flag in ["--debug", "--explain", "-I"] {
@@ -65,7 +65,7 @@ fn root_arguments_preserve_empty_equals_unicode() {
     let input = dir.path().join("a.xml");
     fs::write(
         &input,
-        module(r#"<xs:param name="x"/><a><xs:insert get="arg.x"/></a>"#),
+        entry_source(r#"<xs:param name="x"/><a><xs:insert get="arg.x"/></a>"#),
     )
     .unwrap();
     for value in ["", "萌=a & <b>"] {
@@ -96,7 +96,12 @@ fn root_arguments_preserve_empty_equals_unicode() {
 fn budgets_fail_without_overwriting_previous_artifacts() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("a.xml");
-    fs::write(&input, module(r#"<xs:expand ref="m:main"/>"#)).unwrap();
+    fs::write(dir.path().join("loop.xml"), r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test"><xs:macro name="m:loop"><xs:expand ref="m:loop"/></xs:macro></xs:module>"#).unwrap();
+    fs::write(
+        &input,
+        entry_source(r#"<xs:import src="loop.xml"/><xs:expand ref="m:loop"/>"#),
+    )
+    .unwrap();
     for flag in ["--max-depth", "--max-expansions"] {
         fs::write(input.with_extension("i.xml"), "old ir").unwrap();
         fs::write(input.with_extension("o.xml"), "old output").unwrap();
@@ -112,7 +117,7 @@ fn budgets_fail_without_overwriting_previous_artifacts() {
             "old output"
         );
     }
-    fs::write(&input, module("<r>long output</r>")).unwrap();
+    fs::write(&input, entry_source("<r>long output</r>")).unwrap();
     assert_eq!(invoke(&input, &["--max-output-bytes", "1"]).0, 1);
     assert_eq!(
         fs::read_to_string(input.with_extension("o.xml")).unwrap(),
@@ -126,7 +131,7 @@ fn output_failure_keeps_ir_and_bom_is_preserved() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("a.xml");
     let mut bytes = UTF8_BOM.to_vec();
-    bytes.extend_from_slice(module("<a>萌</a>").as_bytes());
+    bytes.extend_from_slice(entry_source("<a>萌</a>").as_bytes());
     fs::write(&input, bytes).unwrap();
     fs::create_dir(input.with_extension("o.xml")).unwrap();
     let (code, _, err) = invoke(&input, &[]);
@@ -148,7 +153,7 @@ fn repeated_import_loads_dependency_once_and_expansion_repeats_output() {
     let input = dir.path().join("a.xml");
     fs::write(
         &input,
-        r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test" entry="m:main"><xs:import src="part.xml"/><xs:import src="./part.xml"/><xs:macro name="m:main"><r><xs:expand ref="m:part"/><xs:expand ref="m:part"/></r></xs:macro></xs:module>"#,
+        r#"<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test"><xs:import src="part.xml"/><xs:import src="./part.xml"/><r><xs:expand ref="m:part"/><xs:expand ref="m:part"/></r></xs:entry>"#,
     )
     .unwrap();
     fs::write(dir.path().join("part.xml"), r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test"><xs:macro name="m:part"><part/></xs:macro></xs:module>"#).unwrap();
@@ -184,7 +189,7 @@ fn empty_report_avoids_nan_and_infinite_ratios() {
 fn final_compression_growth_is_budgeted_before_artifact_commit() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("a.xml");
-    let source = module("<r><a/></r>");
+    let source = entry_source("<r><a/></r>");
     fs::write(&input, &source).unwrap();
     let compiled = crate::compiler::Compiler::default()
         .compile(&input, &source, |_| unreachable!())
@@ -215,7 +220,7 @@ fn directory_and_glob_skip_libraries_but_compile_entries() {
     let dir = tempfile::tempdir().unwrap();
     let entry = dir.path().join("entry.xml");
     let library = dir.path().join("library.xml");
-    fs::write(&entry, module("<r> ready </r>")).unwrap();
+    fs::write(&entry, entry_source("<r> ready </r>")).unwrap();
     let source = r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test"><xs:macro name="m:helper"><part/></xs:macro></xs:module>"#;
     let mut bytes = UTF8_BOM.to_vec();
     bytes.extend_from_slice(source.as_bytes());
@@ -252,7 +257,7 @@ fn explicit_library_wins_over_discovery_in_either_argument_order() {
             let (mut out, mut err) = (Vec::new(), Vec::new());
             assert_eq!(run(args, &mut out, &mut err), 1);
             let err = String::from_utf8(err).unwrap();
-            assert!(err.contains("explicit entry"), "{err}");
+            assert!(err.contains("xs:entry"), "{err}");
             assert_eq!(err.matches("error[compile]").count(), 1, "{err}");
             assert!(
                 String::from_utf8(out)
@@ -274,6 +279,8 @@ fn discovered_invalid_sources_are_errors_not_libraries() {
         b"<not-a-module/>",
         br#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><p/></xs:module>"#,
         br#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test"><xs:macro name="m:bad"><xs:unknown/></xs:macro></xs:module>"#,
+        br#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test" entry="m:main"><xs:macro name="m:main"><r/></xs:macro></xs:module>"#,
+        br#"<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test"><xs:macro name="m:bad"><r/></xs:macro></xs:entry>"#,
         &[0xff, 0xfe, b'<', 0],
     ];
     for source in cases {
@@ -285,4 +292,19 @@ fn discovered_invalid_sources_are_errors_not_libraries() {
             assert!(out.contains("Skipped libraries: 0"), "{out}");
         }
     }
+}
+
+/// Imports link declaration modules; executable entries are not libraries.
+/// 导入仅链接声明模块，可执行入口不是库。
+#[test]
+fn importing_an_entry_is_rejected_without_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("main.xml");
+    fs::write(dir.path().join("other.xml"), entry_source("<other/>")).unwrap();
+    fs::write(&main, entry_source(r#"<xs:import src="other.xml"/><r/>"#)).unwrap();
+    let (code, _, err) = invoke(&main, &[]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("import"), "{err}");
+    assert!(!main.with_extension("i.xml").exists());
+    assert!(!main.with_extension("o.xml").exists());
 }

@@ -15,10 +15,10 @@ fn version_matches_release_package_metadata() {
     assert!(output.stderr.is_empty());
 }
 
-/// A source file is not an implicit executable macro.
-/// 源文件不是隐式可执行宏；库模块必须由显式入口引用。
+/// A library module is not an executable entry.
+/// 库模块不是可执行入口，必须由入口源码导入。
 #[test]
-fn library_without_entry_is_not_a_cli_program() {
+fn library_module_is_not_a_cli_program() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("library.xml"),
@@ -32,7 +32,7 @@ fn library_without_entry_is_not_a_cli_program() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     let diagnostic = String::from_utf8(output.stderr).unwrap();
-    assert!(diagnostic.contains("explicit entry"), "{diagnostic}");
+    assert!(diagnostic.contains("xs:entry"), "{diagnostic}");
     assert!(!dir.path().join("library.o.xml").exists());
     assert!(!dir.path().join("library.i.xml").exists());
 }
@@ -40,7 +40,7 @@ fn library_without_entry_is_not_a_cli_program() {
 #[test]
 fn binary_compiles_from_its_working_directory() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("prompt.xml"), r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test" entry="m:main"><xs:macro name="m:main"><p>  hello  </p></xs:macro></xs:module>"#).unwrap();
+    std::fs::write(dir.path().join("prompt.xml"), r#"<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test"><p>  hello  </p></xs:entry>"#).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_xmlsquish"))
         .current_dir(dir.path())
         .args(["--color=never", "prompt.xml"])
@@ -60,7 +60,7 @@ fn binary_compiles_from_its_working_directory() {
 #[test]
 fn final_prompt_strips_attributes_and_keeps_whitespace_compression() {
     let dir = tempfile::tempdir().unwrap();
-    let source = r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:demo="https://example.com/macros/demo" xmlns:m="urn:test" entry="m:main"><xs:macro name="m:main"><prompt id="discard"><Persona xml:space="preserve"><audience>  everyone  </audience><voice> clear &amp; kind </voice></Persona><demo:task role="ignored"> Explain the trade-offs. </demo:task></prompt></xs:macro></xs:module>"#;
+    let source = r#"<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:demo="https://example.com/macros/demo" xmlns:m="urn:test"><prompt id="discard"><Persona xml:space="preserve"><audience>  everyone  </audience><voice> clear &amp; kind </voice></Persona><demo:task role="ignored"> Explain the trade-offs. </demo:task></prompt></xs:entry>"#;
     std::fs::write(dir.path().join("prompt.xml"), source).unwrap();
     for debug in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_xmlsquish"));

@@ -66,16 +66,16 @@ impl Error for CompileError {}
 /// Invocation budgets and explicit root arguments. / 单次调用预算与显式根参数。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileOptions {
-    /// Maximum simultaneously active macro frames. / 最大同时活动宏帧数。
+    /// Maximum active execution frames, including the entry. / 最大活动执行帧数，包含入口帧。
     pub max_depth: usize,
-    /// Maximum total macro frame creations. / 最大宏帧创建总数。
+    /// Maximum total execution frames, including the entry. / 最大执行帧创建总数，包含入口帧。
     pub max_expansions: usize,
     /// Maximum serialized bytes of the final output and each temporary argument/fill sequence.
     /// 最终输出及每个临时 argument/fill 序列的最大序列化字节数。
     /// This is not a cumulative allocation or provenance-IR memory limit.
     /// 这不是累计分配量或来源 IR 的内存上限。
     pub max_output_bytes: usize,
-    /// Explicit entry macro scalar parameters. / 显式入口宏的标量参数。
+    /// Explicit entry scalar parameters. / 显式入口的标量参数。
     pub args: BTreeMap<String, String>,
 }
 impl Default for CompileOptions {
@@ -129,7 +129,7 @@ impl Compiler {
     }
 }
 /// Classify a syntactically valid library without loading imports or executing macros.
-/// 不加载导入或展开宏，仅将语法有效且未声明入口的模块识别为库。
+/// 不加载导入或展开宏，将语法有效的 xs:module 识别为库，xs:entry 识别为入口。
 pub(crate) fn is_library(path: &Path, source: &str) -> Result<bool, CompileError> {
     Ok(parser::parse(path, source, &mut 0)?.entry.is_none())
 }
@@ -142,24 +142,21 @@ where
 {
     let mut defs: Vec<MacroDef> = Vec::new();
     let mut symbols: BTreeMap<Name, usize> = BTreeMap::new();
-    let mut entries = Vec::new();
     let mut root_entry = None;
     let mut next_id = 0;
     let mut seen = BTreeSet::from([path.to_path_buf()]);
-    let mut pending = VecDeque::from([(path.to_path_buf(), source.to_owned())]);
-    while let Some((source_path, text)) = pending.pop_front() {
+    let mut pending = VecDeque::from([(path.to_path_buf(), source.to_owned(), None::<Loc>)]);
+    while let Some((source_path, text, imported_at)) = pending.pop_front() {
         let unit = parser::parse(&source_path, &text, &mut next_id)?;
-        if unit.path == path {
-            root_entry = unit.entry;
-            if root_entry.is_none() {
-                return Err(CompileError {
-                    path: path.into(),
-                    line: 1,
-                    message: "Signature: root module requires an explicit entry QName".into(),
-                });
+        if let Some(origin) = imported_at {
+            if unit.entry.is_some() {
+                return Err(origin.error("Source: import target must be xs:module, not xs:entry"));
             }
         } else {
-            entries.extend(unit.entry);
+            root_entry = Some(unit.entry.ok_or_else(|| {
+                unit.loc
+                    .error("Syntax: compilation requires xs:entry; xs:module is a library")
+            })?);
         }
         for def in unit.macros {
             let name = &def.name;
@@ -171,31 +168,20 @@ where
             defs.push(def);
         }
         for (target, loc) in unit.references {
+            if target == path {
+                return Err(loc.error("Source: import target must be xs:module, not xs:entry"));
+            }
             if seen.insert(target.clone()) {
                 let bytes = loader(&target).map_err(|e| {
                     loc.error(format!("Source: cannot load {}: {e}", target.display()))
                 })?;
-                pending.push_back((target, bytes));
+                pending.push_back((target, bytes, Some(loc)));
             }
         }
     }
     defs.sort_by_key(|def| def.id);
-    let (root_name, entry_loc) = root_entry.expect("root entry checked during discovery");
-    for (name, loc) in entries
-        .iter()
-        .map(|(name, loc)| (name, loc))
-        .chain(std::iter::once((&root_name, &entry_loc)))
-    {
-        if !symbols.contains_key(name) {
-            return Err(loc.error(format!(
-                "Namespace: unresolved entry {{{}}}{}",
-                name.0, name.1
-            )));
-        }
-    }
     let mut program = Program {
-        root: symbols[&root_name],
-        entry_loc,
+        entry: root_entry.expect("entry parsed before dependency discovery"),
         defs,
         symbols,
     };
@@ -206,7 +192,12 @@ where
 /// Validate every expansion before linking, including unreachable definitions.
 /// 链接前校验全部展开，包括不可达定义。
 fn validate_expansions(program: &Program) -> Result<(), CompileError> {
-    let mut pending: Vec<&Node> = program.defs.iter().flat_map(|d| d.body.iter()).collect();
+    let mut pending: Vec<&Node> = program
+        .defs
+        .iter()
+        .flat_map(|d| d.body.iter())
+        .chain(program.entry.body.iter())
+        .collect();
     while let Some(node) = pending.pop() {
         match &node.kind {
             Kind::Element { children, .. } => pending.extend(children),
@@ -266,6 +257,7 @@ fn link_expansions(program: &mut Program) {
         .defs
         .iter_mut()
         .flat_map(|def| def.body.iter_mut())
+        .chain(program.entry.body.iter_mut())
         .collect();
     while let Some(node) = pending.pop() {
         match &mut node.kind {
@@ -305,3 +297,6 @@ mod tests;
 #[cfg(test)]
 #[path = "source.test.rs"]
 mod source_tests;
+
+#[cfg(test)]
+mod test_support;

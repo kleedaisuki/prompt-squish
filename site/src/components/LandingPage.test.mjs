@@ -239,7 +239,7 @@ for (const [path, locale, kind] of [
       else assert(/\p{Script=Han}/u.test(text), "Chinese page is missing localized copy");
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
       if (kind === "namespace") {
-        assert.equal(await page.locator("tbody tr").count(), 10);
+        assert.equal(await page.locator("tbody tr").count(), 11);
         assert.equal(await page.locator('link[rel="describedby"]').getAttribute("href"), "/ns/dsl.md");
         assert.equal(await page.locator(".identity code").textContent(), "https://xmlsquish.moesegfault.dev/ns");
       } else {

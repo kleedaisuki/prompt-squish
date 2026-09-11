@@ -87,7 +87,7 @@ q=(\text{NamespaceURI},\text{LocalName})
 </xs:module>
 ```
 
-`name`、`ref` 与模块 `entry` 的值必须是带前缀的词法 QName；前缀必须在其 XML 词法位置有效。宏身份不得以原始字符串或前缀比较。
+宏 `name` 与 `ref` 的值必须是带前缀的词法 QName；前缀必须在其 XML 词法位置有效。宏身份不得以原始字符串或前缀比较。
 
 参数名、slot 名和 capture 名是局部 NCName，不带命名空间。
 
@@ -117,42 +117,43 @@ q=(\text{NamespaceURI},\text{LocalName})
 
 每个源码资源形成一个不可变的源码单元（SourceUnit）：
 
-```text
-SourceUnit
-├── SourceId
-├── imports            静态依赖
-├── named macros       零个或多个命名宏定义
-└── entry?             可选入口 QName，不是宏定义
-```
+源码单元具有两种互斥种类，由 XML 根元素显式区分：
 
-源码单元使用 `xs:module` 作为声明容器：
+| 根元素 | 职责 | 内容 |
+|---|---|---|
+| `xs:module` | 组织可复用宏定义 | `xs:import` 与零个或多个 `xs:macro` |
+| `xs:entry` | 构造一个产品文档 | 声明区的 `xs:import`、可选 `xs:param`，随后是输出构造正文 |
+
+模块示例 `macros.xml`：
 
 ```xml
-<xs:module
-    xmlns:xs="https://xmlsquish.moesegfault.dev/ns"
-    xmlns:app="https://example.com/app/macros"
-    entry="app:prompt">
-    <xs:import src="./string.xml"/>
+<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"
+           xmlns:app="https://example.com/app/macros">
     <xs:macro name="app:badge">
         <xs:param name="text"/>
         <Badge><xs:insert get="arg.text"/></Badge>
     </xs:macro>
-    <xs:macro name="app:prompt">
-        <xs:param name="title"/>
-        <Prompt><xs:insert get="arg.title"/></Prompt>
-    </xs:macro>
 </xs:module>
 ```
 
-模块直接子元素只能是 `xs:import` 与 `xs:macro`；声明之间的格式空白、注释及处理指令不产生输出。普通 XML 元素、非空白文本、顶层 `xs:param` 或展开指令均非法。模块没有可执行正文，也没有隐式 `main`。宏定义不得嵌套。
+入口示例 `prompt.xml`：
 
-`entry` 在模块元素的词法命名空间环境中解析为静态 QName。作为编译根的模块必须显式提供 `entry`；其目标必须在冻结源码闭包的符号表中存在，可以来自当前模块或导入模块。入口宏与其他宏具有完全相同的参数、slot、作用域和返回语义；命令行 `--arg` 传给这个宏，不传给模块。
+```xml
+<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns"
+          xmlns:app="https://example.com/app/macros">
+    <xs:import src="./macros.xml"/>
+    <xs:param name="title"/>
+    <Prompt><xs:expand ref="app:badge"><xs:arg name="text" get="arg.title"/></xs:expand></Prompt>
+</xs:entry>
+```
 
-作为依赖导入时，模块的 `entry` 不会被执行，也不会替代根模块入口；其 QName 仍须词法合法，且所有已声明的 `entry` 目标必须在完整冻结符号表中静态解析成功。库模块可以省略 `entry`。不存在根据文件名、声明顺序或唯一宏自动猜测入口的规则。
+模块直接子元素只能是 `xs:import` 与 `xs:macro`；声明之间的格式空白、注释及处理指令不产生输出。普通 XML 元素、非空白文本、顶层 `xs:param` 或展开指令均非法。模块没有可执行正文、入口属性或隐式 `main`。宏定义不得嵌套；模块内导入与宏声明可以交错。
 
-导入与宏声明可以交错；宏可以前向引用，也可以直接或相互递归，不依赖文本声明顺序。
+入口不是宏，不注册符号，不拥有 `MacroDefId`，不能被 `expand` 引用。入口正文在独立的构造上下文（Construction Context）中求值：`file.*` 来自入口源码，`arg.*` 来自显式命令行参数，初始匹配作用域为空。`xs:param` 声明必需字符串参数，规则与宏参数相同；`--arg` 只提供入口参数，不隐式传给宏。入口声明必须在正文之前；入口不得定义宏，也不得声明根 slot，因为命令行不提供 fill。正文允许普通 XML、`expand`、`insert` 和 `ifr`，并按后续章节相同规则组合结果。
 
-根 invocation 的最终结果必须是一个格式良好的 XML 文档。宏和内部展开过程可以暂时产生 XML 节点序列。
+`import` 的目标只能是模块，不能是入口。入口只能作为编译根使用；直接指定模块进行编译必须报错，目录或 glob 批量发现时跳过合法模块。不得根据文件名、宏个数或声明顺序猜测入口，不接受旧的模块 `entry` 属性。
+
+宏可以前向引用，也可以直接或相互递归，不依赖文本声明顺序。根 invocation 的最终结果必须是一个格式良好的 XML 文档；宏和内部展开过程可以暂时产生 XML 节点序列。
 
 ### 3.2 SourceId
 
@@ -220,8 +221,9 @@ Frame #7  Frame #8  Frame #9
 
 它只执行 `resolve SourceId → load/intern SourceUnit → register MacroDefs`。
 
-- 只能作为模块的直接子元素；
-- 不产生输出、不展开入口、不创建运行时 frame；
+- 只能作为模块的直接子元素，或入口声明区的直接子元素；
+- 目标必须为模块；入口不得被导入；
+- 不产生输出、不执行宏、不创建运行时 frame；
 - 不接受 `xs:arg` 或 `xs:fill`；
 - 同一 SourceId 只装载一次，重复导入和导入环不重复注册定义；
 - 递归发现全部静态导入，在开始展开前冻结闭包。
@@ -238,13 +240,13 @@ Frame #7  Frame #8  Frame #9
 
 `ref` 必须是静态 QName，不能来自 `get`、字符串拼接或正则捕获。展开自身不装载源码；目标必须已存在于冻结符号表。宏不是一等值（First-class Value），没有动态分派或闭包。
 
-每次展开创建独立 frame，将宏体递归求值得到的有序节点序列返回至当前位置。入口展开也遵循这条规则，只额外要求最终产品是单一 XML 文档。
+每次展开创建独立 frame，将宏体递归求值得到的有序节点序列返回至当前位置。入口构造上下文消费这些返回值，最终产品必须是单一 XML 文档；入口自身不创建宏展开帧。
 
 语言不再接受 `xs:call`、`xs:mount` 或 `xs:fragment`，也不提供兼容别名。
 
 ### 4.3 定义位置语义
 
-相对导入地址绑定到声明所在模块；宏中 `file.*` 绑定宏定义源码，而不是展开位置。QName 同样在其源码词法位置解析。例如 `/lib/a.xml` 中的 `<xs:import src="./helper.xml"/>` 总是装载 `/lib/helper.xml`，不受谁引用该模块影响。
+相对导入地址绑定到声明所在源码；宏中 `file.*` 绑定宏定义源码，而不是展开位置。QName 同样在其源码词法位置解析。例如 `/lib/a.xml` 中的 `<xs:import src="./helper.xml"/>` 总是装载 `/lib/helper.xml`，不受谁引用该模块影响。
 
 展开者信息只存在于诊断 frame，不作为宏可读的动态环境。宏需要外部数据时必须通过 `xs:arg` 或 `xs:fill` 显式传入。
 
@@ -275,7 +277,7 @@ Frame #7  Frame #8  Frame #9
 - 声明的参数均为必需参数；
 - 参数类型固定为 Unicode 字符串。
 
-`xs:param` 只能声明在所属宏中；模块不具有参数。
+`xs:param` 可声明在所属宏或入口声明区中；模块不具有参数。
 
 调用必须恰好提供所有声明参数。缺失参数、未知参数和重复参数都是 hard error。
 
@@ -335,19 +337,26 @@ XML 字符数据在解析实体后按原样保留；实现不得自动 trim 或�
 例如，把内层宏的返回文本按值传入另一个宏：
 
 ```xml
+<!-- result-macros.xml -->
 <xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"
-           xmlns:m="urn:example:result" entry="m:prompt">
+           xmlns:m="urn:example:result">
     <xs:macro name="m:prefix"><xs:param name="text"/><xs:insert get="arg.text"/></xs:macro>
     <xs:macro name="m:wrap">
         <xs:param name="text"/>
         <Message><xs:insert get="arg.text"/></Message>
     </xs:macro>
-    <xs:macro name="m:prompt">
-        <xs:expand ref="m:wrap">
-            <xs:arg name="text">Hello, <xs:expand ref="m:prefix"><xs:arg name="text" value="Klee"/></xs:expand>!</xs:arg>
-        </xs:expand>
-    </xs:macro>
 </xs:module>
+```
+
+```xml
+<!-- result.xml -->
+<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns"
+          xmlns:m="urn:example:result">
+    <xs:import src="./result-macros.xml"/>
+    <xs:expand ref="m:wrap">
+        <xs:arg name="text">Hello, <xs:expand ref="m:prefix"><xs:arg name="text" value="Klee"/></xs:expand>!</xs:arg>
+    </xs:expand>
+</xs:entry>
 ```
 
 这里 `m:prefix` 的返回值先完成求值，才形成 `m:wrap` 的 `arg.text`。若内层返回 `<Name>Klee</Name>`，这不是字符串返回值，必须报非文本参数错误，不能偷偷去标签或序列化为字符串。普通源码的排版空白仍按第 5.2 节参与标量拼接；最终产品压缩只在整个展开结束后发生。
@@ -394,7 +403,7 @@ slot 只承载 XML 节点序列，不属于标量环境。
 
 ## 7. 标量环境与作用域
 
-宏程序可见的标量环境只有三层：
+宏与入口构造正文可见的标量环境只有三层；入口不是隐式宏：
 
 | 命名空间 | 生命周期 | 可变性 | 含义 |
 |---|---|---|---|
@@ -666,23 +675,23 @@ attribute-free XML with local element names
 
 编译阶段：
 
-1. 解析入口 SourceUnit；
-2. 静态解析模块级 `import` 的 `src`；
+1. 解析 `xs:entry` 根源码；
+2. 静态解析入口与模块声明区中 `import` 的 `src`；
 3. 按 SourceId intern 并冻结完整源码闭包；
 4. 按 Expanded Name 注册所有 MacroDef；
 5. 校验重定义、QName、宏签名、静态展开引用与 regex 语法；
-6. 验证所有已声明的模块入口均可静态解析；根模块必须声明入口，并检查其入口参数契约。
+6. 验证所有导入目标都是模块，并检查入口参数契约。
 
 定义解析与文本顺序无关；不存在“调用发生后才偶然注册宏”的运行时副作用。完整冻结闭包和静态宏边为链接时优化（Link-time Optimization, LTO）提供分析基础，但不表示已经实现内联、常量折叠或死代码消除。优化不得改变错误、预算或来源信息契约。
 
 ### 11.2 Expansion 与 `*.i.xml`
 
-展开阶段从根模块 `entry` 指定的命名宏创建根 frame，执行 expand、argument evaluation、slot substitution、regex matching 与递归。
+展开阶段创建入口构造上下文，求值其正文；遇到 `expand` 才创建命名宏展开帧，执行参数求值、slot 替换、正则匹配与递归。入口诊断上下文应与宏帧明确区分，不得伪造隐式 `main` 或宏定义标识。
 
 `*.i.xml` 是带完整 provenance 的中间表示（Intermediate Representation, IR）的可序列化视图。实现应为每个生成节点保留：
 
 - originating SourceId 与 source span；
-- MacroDefId；
+- 若节点由宏生成，记录 MacroDefId；入口直接生成节点不伪造此标识；
 - 当前 frame id；
 - parent/caller frame；
 - 触发调用的 `expand` 位置；
@@ -715,7 +724,9 @@ XML declaration 只作为输入/输出文档声明处理，不参与宏展开。
 
 语言抽象语义中的递归深度、展开次数和输出长度不设固定上限。否则语言会因规范常数上界而失去计算完备性。
 
-实现必须提供可配置的资源 guard：
+实现必须提供可配置的资源 guard。`max-depth` 与 `max-expansions` 统计执行帧，包含一个入口构造帧；入口帧不具有宏身份。初始深度和展开计数均为 1，每次 `expand` 再创建一个宏帧。
+
+可配置项：
 
 ```text
 --max-depth
@@ -788,8 +799,10 @@ M_u=parse(bytes_u)
 其中：
 
 \[
-M_u=(imports_u,\{f_1,f_2,\ldots,f_n\},entry_u?)
+M_u=(imports_u,\{f_1,f_2,\ldots,f_n\})
 \]
+
+入口另表示为 `E = (SourceId, imports, params, body)`；它不属于宏符号表，也不具有 `MacroDefId`。入口构造上下文 `Context(E, args)` 的求值启动整个文档构造，随后仅 `expand` 创建宏帧。
 
 每个命名宏具有唯一扩展名：
 

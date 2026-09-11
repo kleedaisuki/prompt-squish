@@ -1,17 +1,18 @@
 //! Parser syntax and namespace contracts. / 解析器语法与命名空间契约。
-use crate::compiler::{CompileError, CompileResult, Compiler};
+use crate::compiler::test_support::TestCompiler as Compiler;
+use crate::compiler::{CompileError, CompileResult};
 use std::path::Path;
 
 /// Wrap a compact fixture for expansion-stage assertions.
 /// 包装紧凑样例，供展开阶段断言使用。
-fn module(body: &str) -> String {
-    crate::compiler::tests::module(body)
+fn fixture(body: &str) -> String {
+    crate::compiler::tests::fixture(body)
 }
 
 /// Compile without allowing unexpected source discovery.
 /// 编译并拒绝意外源码装载。
 fn compile(body: &str) -> Result<CompileResult, CompileError> {
-    Compiler::default().compile(Path::new("fixtures/main.xml"), &module(body), |p| {
+    Compiler::default().compile(Path::new("fixtures/main.xml"), &fixture(body), |p| {
         Err(format!("unexpected load: {}", p.display()))
     })
 }
@@ -74,7 +75,7 @@ fn regex_dialect_rejects_positional_captures_and_backtracking_features() {
 
 #[test]
 fn builtin_prefix_is_only_a_lexical_alias() {
-    let source = r#"<z:module xmlns:z="https://xmlsquish.moesegfault.dev/ns" xmlns:xs="urn:user" entry="xs:main"><z:macro name="xs:main"><xs:R><z:insert get="file.name"/></xs:R></z:macro></z:module>"#;
+    let source = r#"<z:entry xmlns:z="https://xmlsquish.moesegfault.dev/ns" xmlns:xs="urn:user"><xs:R><z:insert get="file.name"/></xs:R></z:entry>"#;
     let result = Compiler::default()
         .compile(Path::new("main.xml"), source, |_| unreachable!())
         .unwrap();
@@ -82,39 +83,38 @@ fn builtin_prefix_is_only_a_lexical_alias() {
     assert!(!result.output.contains("urn:user"));
 }
 
-/// A module is declarations only; no positional implicit entry survives.
-/// 模块只能包含声明，不保留按位置推导的隐式入口。
+/// Modules are libraries; entries own execution and reject macro declarations.
+/// 模块是库，入口独占执行职责并拒绝宏声明。
 #[test]
-fn modules_require_explicit_root_entry_and_reject_old_executable_forms() {
+fn source_kinds_reject_implicit_entries_and_cross_kind_declarations() {
     let ns = "https://xmlsquish.moesegfault.dev/ns";
-    for (entry, body) in [
-        ("", r#"<xs:macro name="m:main"><R/></xs:macro>"#),
+    for (kind, attributes, body) in [
+        ("module", "", r#"<xs:macro name="m:main"><R/></xs:macro>"#),
         (
+            "module",
             r#" entry="m:main""#,
+            r#"<xs:macro name="m:main"><R/></xs:macro>"#,
+        ),
+        ("module", "", "<R/>"),
+        ("module", "", r#"<xs:param name="x"/>"#),
+        ("module", "", "text"),
+        (
+            "entry",
+            "",
             r#"<xs:macro name="m:main"><R/></xs:macro><R/>"#,
         ),
-        (
-            r#" entry="m:main""#,
-            r#"<xs:param name="x"/><xs:macro name="m:main"><R/></xs:macro>"#,
-        ),
-        (
-            r#" entry="m:main""#,
-            r#"text<xs:macro name="m:main"><R/></xs:macro>"#,
-        ),
-        (
-            r#" entry="m:missing""#,
-            r#"<xs:macro name="m:main"><R/></xs:macro>"#,
-        ),
-        (
-            r#" entry="main""#,
-            r#"<xs:macro name="m:main"><R/></xs:macro>"#,
-        ),
+        ("entry", r#" entry="m:main""#, "<R/>"),
+        ("entry", "", r#"<R/><xs:import src="lib.xml"/>"#),
+        ("entry", "", r#"<R/><xs:param name="x"/>"#),
     ] {
-        let source =
-            format!(r#"<xs:module xmlns:xs="{ns}" xmlns:m="urn:test"{entry}>{body}</xs:module>"#);
+        let source = format!(
+            r#"<xs:{kind} xmlns:xs="{ns}" xmlns:m="urn:test"{attributes}>{body}</xs:{kind}>"#
+        );
         assert!(
             Compiler::default()
-                .compile(Path::new("main.xml"), &source, |_| unreachable!())
+                .compile(Path::new("main.xml"), &source, |_| Err(
+                    "unexpected load".into()
+                ))
                 .is_err(),
             "accepted {source}"
         );
@@ -132,4 +132,25 @@ fn modules_require_explicit_root_entry_and_reject_old_executable_forms() {
             "invalid executable import loaded a file: {error}"
         );
     }
+}
+
+/// Source classification follows the root kind, not an optional entry attribute.
+/// 源码分类取决于根种类，而非可选入口属性。
+#[test]
+fn module_is_a_library_and_entry_is_executable() {
+    let path = Path::new("main.xml");
+    assert!(
+        crate::compiler::is_library(
+            path,
+            r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"/>"#
+        )
+        .unwrap()
+    );
+    assert!(
+        !crate::compiler::is_library(
+            path,
+            r#"<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><R/></xs:entry>"#
+        )
+        .unwrap()
+    );
 }

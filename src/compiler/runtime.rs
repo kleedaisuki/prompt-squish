@@ -46,9 +46,32 @@ struct Env {
     frame: usize,
     captures: Rc<BTreeMap<String, String>>,
 }
+/// Distinct execution identities; entries are not synthetic macros.
+/// 不同的执行身份；入口不是合成宏。
+#[derive(Clone, Copy)]
+enum Identity {
+    Entry,
+    Macro(usize),
+}
+impl Identity {
+    /// Definition location for lexical file bindings. / 词法文件绑定所用定义位置。
+    fn loc(self, program: &Program) -> &Loc {
+        match self {
+            Self::Entry => &program.entry.loc,
+            Self::Macro(id) => &program.defs[id].loc,
+        }
+    }
+    /// Human-readable provenance identity. / 人类可读来源身份。
+    fn label(self) -> String {
+        match self {
+            Self::Entry => "entry".into(),
+            Self::Macro(id) => format!("macro #{id}"),
+        }
+    }
+}
 /// Invocation provenance and immutable inputs. / 调用来源及不可变输入。
 struct Frame<'a> {
-    def: usize,
+    def: Identity,
     parent: Option<usize>,
     call: &'a Loc,
     depth: usize,
@@ -114,18 +137,18 @@ impl<'a> Machine<'a> {
         let mut current = Some(frame);
         while let Some(id) = current {
             let f = &self.frames[id];
-            let def = &self.program.defs[f.def];
+            let loc = f.def.loc(self.program);
             chain.push(format!(
-                "\n  frame #{id}: call {}:{} [{}..{}], definition #{} {}:{} [{}..{}]",
+                "\n  frame #{id}: call {}:{} [{}..{}], definition {} {}:{} [{}..{}]",
                 file_uri(&f.call.path).unwrap_or_else(|_| f.call.path.display().to_string()),
                 f.call.line,
                 f.call.start,
                 f.call.end,
-                f.def,
-                file_uri(&def.loc.path).unwrap_or_else(|_| def.loc.path.display().to_string()),
-                def.loc.line,
-                def.loc.start,
-                def.loc.end
+                f.def.label(),
+                file_uri(&loc.path).unwrap_or_else(|_| loc.path.display().to_string()),
+                loc.line,
+                loc.start,
+                loc.end
             ));
             current = f.parent;
         }
@@ -181,7 +204,7 @@ impl<'a> Machine<'a> {
     /// Resolve only the three language-defined scalar namespaces. / 仅解析语言规定的三种标量命名空间。
     fn get(&self, key: &str, env: &Env, loc: &Loc) -> Result<String, CompileError> {
         let f = &self.frames[env.frame];
-        let path = &self.program.defs[f.def].loc.path;
+        let path = &f.def.loc(self.program).path;
         let value = match key.split_once('.') {
             Some(("arg", name)) => f.args.get(name).cloned(),
             Some(("match", name)) => env.captures.get(name).cloned(),
@@ -248,7 +271,7 @@ impl<'a> Machine<'a> {
         let depth = self.frames[call.env.frame].depth + 1;
         let frame = self.frames.len();
         self.frames.push(Frame {
-            def: call.target,
+            def: Identity::Macro(call.target),
             parent: Some(call.env.frame),
             call: &call.node.loc,
             depth,
@@ -459,8 +482,12 @@ impl<'a> Machine<'a> {
         let mut xml =
             String::from("<ir:expansion xmlns:ir=\"urn:xmlsquish:provenance\"><ir:frames>");
         for (id, frame) in self.frames.iter().enumerate() {
-            let def = &self.program.defs[frame.def];
-            xml.push_str(&format!("<ir:frame id=\"{id}\" macro=\"{}\" parent=\"{}\" source=\"{}\" definition-start=\"{}\" definition-end=\"{}\" call-source=\"{}\" call-line=\"{}\" call-start=\"{}\" call-end=\"{}\" file-dir=\"{}\" file-name=\"{}\"/>", frame.def, frame.parent.map(|v| v.to_string()).unwrap_or_default(), escape(&file_uri(&def.loc.path).map_err(|e| self.fail(&def.loc, id, e))?, true), def.loc.start, def.loc.end, escape(&file_uri(&frame.call.path).map_err(|e| self.fail(frame.call, id, e))?, true), frame.call.line, frame.call.start, frame.call.end, escape(&directory_uri(&def.loc.path).map_err(|e| self.fail(&def.loc, id, e))?, true), escape(&def.loc.path.file_name().unwrap_or_default().to_string_lossy(), true)));
+            let loc = frame.def.loc(self.program);
+            let identity = match frame.def {
+                Identity::Entry => "kind=\"entry\"".into(),
+                Identity::Macro(id) => format!("kind=\"macro\" macro=\"{id}\""),
+            };
+            xml.push_str(&format!("<ir:frame id=\"{id}\" {identity} parent=\"{}\" source=\"{}\" definition-start=\"{}\" definition-end=\"{}\" call-source=\"{}\" call-line=\"{}\" call-start=\"{}\" call-end=\"{}\" file-dir=\"{}\" file-name=\"{}\"/>", frame.parent.map(|v| v.to_string()).unwrap_or_default(), escape(&file_uri(&loc.path).map_err(|e| self.fail(loc, id, e))?, true), loc.start, loc.end, escape(&file_uri(&frame.call.path).map_err(|e| self.fail(frame.call, id, e))?, true), frame.call.line, frame.call.start, frame.call.end, escape(&directory_uri(&loc.path).map_err(|e| self.fail(loc, id, e))?, true), escape(&loc.path.file_name().unwrap_or_default().to_string_lossy(), true)));
         }
         xml.push_str("</ir:frames><ir:nodes>");
         for token in tokens {
@@ -475,14 +502,14 @@ pub(super) fn expand(
     program: &Program,
     options: &CompileOptions,
 ) -> Result<CompileResult, CompileError> {
-    let root = &program.defs[program.root];
+    let root = &program.entry;
     let mut machine = Machine {
         program,
         options,
         frames: vec![Frame {
-            def: program.root,
+            def: Identity::Entry,
             parent: None,
-            call: &program.entry_loc,
+            call: &root.loc,
             depth: 1,
             args: options.args.clone(),
             slots: BTreeMap::new(),
@@ -493,7 +520,7 @@ pub(super) fn expand(
     };
     if options.max_depth == 0 || options.max_expansions == 0 {
         return Err(machine.fail(
-            &program.entry_loc,
+            &root.loc,
             0,
             "Expansion: root frame exceeds max-depth or max-expansions",
         ));
@@ -501,7 +528,7 @@ pub(super) fn expand(
     for param in &root.params {
         if !options.args.contains_key(param) {
             return Err(machine.fail(
-                &program.entry_loc,
+                &root.loc,
                 0,
                 format!("Signature: missing argument '{param}'"),
             ));
@@ -510,18 +537,9 @@ pub(super) fn expand(
     for param in options.args.keys() {
         if !root.params.contains(param) {
             return Err(machine.fail(
-                &program.entry_loc,
+                &root.loc,
                 0,
                 format!("Signature: unknown argument '{param}'"),
-            ));
-        }
-    }
-    for (slot, required) in &root.slots {
-        if *required {
-            return Err(machine.fail(
-                &program.entry_loc,
-                0,
-                format!("Signature: missing required fill '{slot}'"),
             ));
         }
     }
@@ -541,7 +559,7 @@ pub(super) fn expand(
     }
     roxmltree::Document::parse(&output).map_err(|error| {
         machine.fail(
-            &program.entry_loc,
+            &root.loc,
             0,
             format!("Output: final result is not a well-formed XML document: {error}"),
         )
@@ -551,18 +569,17 @@ pub(super) fn expand(
         output,
         intermediate,
         logs: Vec::new(),
-        root_context: machine.fail(&program.entry_loc, 0, ""),
+        root_context: machine.fail(&root.loc, 0, ""),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::test_support::{TestCompiler as Compiler, fixture};
     /// Compile a self-contained module. / 编译自包含模块。
     fn compile(body: &str, options: CompileOptions) -> Result<CompileResult, CompileError> {
-        let source = format!(
-            "<xs:module xmlns:xs=\"https://xmlsquish.moesegfault.dev/ns\" xmlns:m=\"urn:test\" entry=\"m:entry\">{body}</xs:module>"
-        );
+        let source = fixture(body);
         Compiler::with_options(options).compile(
             std::path::Path::new("runtime-test.xml"),
             &source,
@@ -570,67 +587,47 @@ mod tests {
         )
     }
     #[test]
-    fn root_entry_origin_is_distinct_from_local_or_imported_definition() {
+    fn root_entry_has_distinct_provenance_identity() {
         let directory = std::env::current_dir().unwrap();
-        let root_path = directory.join("entry-origin.xml");
-        let library_path = directory.join("entry-library.xml");
-        let definition = r#"<xs:macro name="m:chosen"><root/></xs:macro>"#;
-        for imported in [false, true] {
-            let declarations = if imported {
-                r#"<xs:import src="entry-library.xml"/>"#.to_owned()
-            } else {
-                definition.to_owned()
-            };
-            let source = format!(
-                r#"<?xml version="1.0"?>
-<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test" entry="m:chosen">
-{declarations}</xs:module>"#
-            );
-            let library = format!(
-                r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test">
-{definition}</xs:module>"#
-            );
-            let result = Compiler::default()
-                .compile(&root_path, &source, |_| Ok(library.clone()))
-                .unwrap();
-            let ir = roxmltree::Document::parse(&result.intermediate).unwrap();
-            let frame = ir
-                .descendants()
-                .find(|node| node.has_tag_name(("urn:xmlsquish:provenance", "frame")))
-                .unwrap();
-            let expected_definition = if imported { &library_path } else { &root_path };
-            assert_eq!(
-                frame.attribute("source"),
-                Some(file_uri(expected_definition).unwrap().as_str())
-            );
-            assert_eq!(
-                frame.attribute("call-source"),
-                Some(file_uri(&root_path).unwrap().as_str())
-            );
-            assert_eq!(frame.attribute("call-line"), Some("2"));
-            assert_eq!(
-                frame.attribute("call-start"),
-                Some(source.find("<xs:module").unwrap().to_string().as_str())
-            );
-            let error = result.output_error("Output: test budget");
-            assert_eq!(error.path, root_path);
-            assert_eq!(error.line, 2);
-            let options = CompileOptions {
-                args: BTreeMap::from([("extra".into(), "value".into())]),
-                ..CompileOptions::default()
-            };
-            let error = Compiler::with_options(options)
-                .compile(&root_path, &source, |_| Ok(library.clone()))
-                .unwrap_err();
-            assert_eq!(error.path, root_path);
-            assert_eq!(error.line, 2);
-            assert!(error.message.contains("unknown argument"));
-        }
+        let path = directory.join("entry-origin.xml");
+        let source = r#"<?xml version="1.0"?>
+<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test">
+<xs:import src="entry-library.xml"/><xs:expand ref="m:chosen"/></xs:entry>"#;
+        let library = r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test"><xs:macro name="m:chosen"><root/></xs:macro></xs:module>"#;
+        let result = Compiler::default()
+            .compile(&path, source, |_| Ok(library.into()))
+            .unwrap();
+        let ir = roxmltree::Document::parse(&result.intermediate).unwrap();
+        let frames: Vec<_> = ir
+            .descendants()
+            .filter(|n| n.has_tag_name(("urn:xmlsquish:provenance", "frame")))
+            .collect();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].attribute("kind"), Some("entry"));
+        assert_eq!(frames[0].attribute("macro"), None);
+        assert_eq!(
+            frames[0].attribute("source"),
+            Some(file_uri(&path).unwrap().as_str())
+        );
+        assert_eq!(frames[0].attribute("call-line"), Some("2"));
+        assert_eq!(frames[1].attribute("kind"), Some("macro"));
+        assert_eq!(frames[1].attribute("macro"), Some("0"));
+        assert_eq!(
+            frames[1].attribute("source"),
+            Some(
+                file_uri(&directory.join("entry-library.xml"))
+                    .unwrap()
+                    .as_str()
+            )
+        );
+        let error = result.output_error("Output: test budget");
+        assert_eq!(error.path, path);
+        assert_eq!(error.line, 2);
     }
 
     #[test]
     fn scalar_body_is_decoded_once_and_insert_is_escaped() {
-        let result = compile(r#"<xs:macro name="m:echo"><xs:param name="s"/><xs:insert get="arg.s"/></xs:macro><xs:macro name="m:entry"><root><xs:expand ref="m:echo"><xs:arg name="s"> &lt;x&gt;&amp; </xs:arg></xs:expand></root></xs:macro>"#, CompileOptions::default()).unwrap();
+        let result = compile(r#"<xs:macro name="m:echo"><xs:param name="s"/><xs:insert get="arg.s"/></xs:macro><root><xs:expand ref="m:echo"><xs:arg name="s"> &lt;x&gt;&amp; </xs:arg></xs:expand></root>"#, CompileOptions::default()).unwrap();
         let doc = roxmltree::Document::parse(&result.output).unwrap();
         assert_eq!(doc.root_element().text(), Some(" <x>& "));
         roxmltree::Document::parse(&result.intermediate).unwrap();
@@ -642,13 +639,13 @@ mod tests {
             max_expansions: 6000,
             ..CompileOptions::default()
         };
-        let error = compile(r#"<xs:macro name="m:loop"><xs:expand ref="m:loop"/></xs:macro><xs:macro name="m:entry"><root><xs:expand ref="m:loop"/></root></xs:macro>"#, options).unwrap_err();
+        let error = compile(r#"<xs:macro name="m:loop"><xs:expand ref="m:loop"/></xs:macro><root><xs:expand ref="m:loop"/></root>"#, options).unwrap_err();
         assert!(error.message.contains("max-depth"));
         assert!(error.message.contains("frame #5000"));
     }
     #[test]
     fn capture_scopes_restore_and_do_not_leak_to_siblings() {
-        let result = compile(r#"<xs:macro name="m:entry"><root><xs:ifr str="a" pattern="(?&lt;x&gt;a)"><xs:insert get="match.x"/><xs:ifr str="b" pattern="(?&lt;x&gt;b)"><xs:insert get="match.x"/></xs:ifr><xs:insert get="match.x"/></xs:ifr></root></xs:macro>"#, CompileOptions::default()).unwrap();
+        let result = compile(r#"<root><xs:ifr str="a" pattern="(?&lt;x&gt;a)"><xs:insert get="match.x"/><xs:ifr str="b" pattern="(?&lt;x&gt;b)"><xs:insert get="match.x"/></xs:ifr><xs:insert get="match.x"/></xs:ifr></root>"#, CompileOptions::default()).unwrap();
         assert_eq!(
             roxmltree::Document::parse(&result.output)
                 .unwrap()
@@ -657,7 +654,7 @@ mod tests {
             Some("aba")
         );
         let error = compile(
-            r#"<xs:macro name="m:entry"><root><xs:ifr str="a" pattern="(?&lt;x&gt;a)"/><xs:insert get="match.x"/></root></xs:macro>"#,
+            r#"<root><xs:ifr str="a" pattern="(?&lt;x&gt;a)"/><xs:insert get="match.x"/></root>"#,
             CompileOptions::default(),
         )
         .unwrap_err();
@@ -665,7 +662,7 @@ mod tests {
     }
     #[test]
     fn scalar_body_rejects_comment_nodes() {
-        let error = compile(r#"<xs:macro name="m:echo"><xs:param name="s"/><xs:insert get="arg.s"/></xs:macro><xs:macro name="m:entry"><root><xs:expand ref="m:echo"><xs:arg name="s"><!--not scalar--></xs:arg></xs:expand></root></xs:macro>"#, CompileOptions::default()).unwrap_err();
+        let error = compile(r#"<xs:macro name="m:echo"><xs:param name="s"/><xs:insert get="arg.s"/></xs:macro><root><xs:expand ref="m:echo"><xs:arg name="s"><!--not scalar--></xs:arg></xs:expand></root>"#, CompileOptions::default()).unwrap_err();
         assert!(error.message.contains("non-text node"));
     }
     #[test]
@@ -675,7 +672,7 @@ mod tests {
             args: BTreeMap::from([("s".into(), "a".repeat(1500))]),
             ..CompileOptions::default()
         };
-        let result = compile(r#"<xs:macro name="m:loop"><xs:param name="s"/><xs:ifr get="arg.s" pattern="^a(?&lt;tail&gt;.*)$"><xs:expand ref="m:loop"><xs:arg name="s" get="match.tail"/></xs:expand></xs:ifr><xs:ifr get="arg.s" pattern="^$">done</xs:ifr></xs:macro><xs:macro name="m:entry"><xs:param name="s"/><root><xs:expand ref="m:loop"><xs:arg name="s" get="arg.s"/></xs:expand></root></xs:macro>"#, options).unwrap();
+        let result = compile(r#"<xs:macro name="m:loop"><xs:param name="s"/><xs:ifr get="arg.s" pattern="^a(?&lt;tail&gt;.*)$"><xs:expand ref="m:loop"><xs:arg name="s" get="match.tail"/></xs:expand></xs:ifr><xs:ifr get="arg.s" pattern="^$">done</xs:ifr></xs:macro><xs:param name="s"/><root><xs:expand ref="m:loop"><xs:arg name="s" get="arg.s"/></xs:expand></root>"#, options).unwrap();
         assert_eq!(
             roxmltree::Document::parse(&result.output)
                 .unwrap()
@@ -683,7 +680,7 @@ mod tests {
                 .text(),
             Some("done")
         );
-        let result = compile(r#"<xs:macro name="m:emit">once</xs:macro><xs:macro name="m:panel"><xs:slot name="content" required="true"/></xs:macro><xs:macro name="m:entry"><root><xs:ifr str="caller" pattern="(?&lt;who&gt;.*)"><xs:expand ref="m:panel"><xs:fill name="content"><xs:insert get="match.who"/><xs:expand ref="m:emit"/></xs:fill></xs:expand></xs:ifr></root></xs:macro>"#, CompileOptions::default()).unwrap();
+        let result = compile(r#"<xs:macro name="m:emit">once</xs:macro><xs:macro name="m:panel"><xs:slot name="content" required="true"/></xs:macro><root><xs:ifr str="caller" pattern="(?&lt;who&gt;.*)"><xs:expand ref="m:panel"><xs:fill name="content"><xs:insert get="match.who"/><xs:expand ref="m:emit"/></xs:fill></xs:expand></xs:ifr></root>"#, CompileOptions::default()).unwrap();
         assert_eq!(
             roxmltree::Document::parse(&result.output)
                 .unwrap()
@@ -701,14 +698,14 @@ mod tests {
     }
     #[test]
     fn captures_do_not_cross_macro_frames() {
-        let error = compile(r#"<xs:macro name="m:read"><xs:insert get="match.x"/></xs:macro><xs:macro name="m:entry"><root><xs:ifr str="a" pattern="(?&lt;x&gt;a)"><xs:expand ref="m:read"/></xs:ifr></root></xs:macro>"#, CompileOptions::default()).unwrap_err();
+        let error = compile(r#"<xs:macro name="m:read"><xs:insert get="match.x"/></xs:macro><root><xs:ifr str="a" pattern="(?&lt;x&gt;a)"><xs:expand ref="m:read"/></xs:ifr></root>"#, CompileOptions::default()).unwrap_err();
         assert!(error.message.contains("undefined binding 'match.x'"));
         assert!(error.message.contains("frame #1"));
     }
     #[test]
     fn slot_budget_failure_reports_execution_frame_not_origin() {
         let body = format!(
-            r#"<xs:macro name="m:f">{}<xs:slot name="s"/></xs:macro><xs:macro name="m:entry"><root><xs:expand ref="m:f"><xs:fill name="s">{}</xs:fill></xs:expand></root></xs:macro>"#,
+            r#"<xs:macro name="m:f">{}<xs:slot name="s"/></xs:macro><root><xs:expand ref="m:f"><xs:fill name="s">{}</xs:fill></xs:expand></root>"#,
             "a".repeat(100),
             "b".repeat(100)
         );
@@ -722,23 +719,16 @@ mod tests {
     }
     #[test]
     fn output_budget_counts_utf8_serialized_bytes() {
-        let result = compile(
-            r#"<xs:macro name="m:entry"><root>猫</root></xs:macro>"#,
-            CompileOptions::default(),
-        )
-        .unwrap();
+        let result = compile(r#"<root>猫</root>"#, CompileOptions::default()).unwrap();
         let options = CompileOptions {
             max_output_bytes: result.output.len() - 1,
             ..CompileOptions::default()
         };
         assert!(
-            compile(
-                r#"<xs:macro name="m:entry"><root>猫</root></xs:macro>"#,
-                options
-            )
-            .unwrap_err()
-            .message
-            .contains("max-output-bytes")
+            compile(r#"<root>猫</root>"#, options)
+                .unwrap_err()
+                .message
+                .contains("max-output-bytes")
         );
     }
 }

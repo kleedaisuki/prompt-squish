@@ -6,7 +6,7 @@ interface Props { locale: Locale; }
 const { locale } = Astro.props;
 const m = messages[locale].reference;
 const n = m.ns;
-const names = ["module","import","macro","param","expand","arg","fill","slot","insert","ifr"];
+const names = ["module","entry","import","macro","param","expand","arg","fill","slot","insert","ifr"];
 const example = '<xs:module xmlns:xs="' + namespaceUri + '">\n  <Prompt>Hello, xmlsquish.</Prompt>\n</xs:module>';
 const standards = ["https://www.w3.org/TR/REC-xml-names/","https://www.w3.org/TR/webarch/#namespace-document","https://semver.org/"];
 ---

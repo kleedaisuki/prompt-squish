@@ -1,12 +1,13 @@
 //! XML data and invocation isolation regressions. / XML 数据与调用隔离回归。
-use crate::compiler::{CompileError, CompileOptions, CompileResult, Compiler};
+use crate::compiler::test_support::TestCompiler as Compiler;
+use crate::compiler::{CompileError, CompileOptions, CompileResult};
 use std::path::Path;
 
 /// Compile a complete in-memory module. / 编译完整的内存模块。
 fn compile(body: &str) -> Result<CompileResult, CompileError> {
     Compiler::default().compile(
         Path::new("boundaries.xml"),
-        &crate::compiler::tests::module(body),
+        &crate::compiler::tests::fixture(body),
         |_| Err("unexpected dependency".into()),
     )
 }
@@ -65,7 +66,7 @@ fn scalar_insertion_is_not_reparsed_as_control_markup() {
     let result = Compiler::with_options(options)
         .compile(
             Path::new("in.xml"),
-            &crate::compiler::tests::module(
+            &crate::compiler::tests::fixture(
                 r#"<xs:param name="payload"/><root><xs:insert get="arg.payload"/></root>"#,
             ),
             |_| unreachable!(),
@@ -92,7 +93,7 @@ fn xml_invalid_entry_argument_fails_instead_of_emitting_invalid_output() {
     options.args.insert("payload".into(), "\u{0}".into());
     let result = Compiler::with_options(options).compile(
         Path::new("in.xml"),
-        &crate::compiler::tests::module(
+        &crate::compiler::tests::fixture(
             r#"<xs:param name="payload"/><root><xs:insert get="arg.payload"/></root>"#,
         ),
         |_| unreachable!(),

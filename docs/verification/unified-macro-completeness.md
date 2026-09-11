@@ -4,7 +4,7 @@
 
 **推导结论：** 在字符串长度、展开次数和存储空间没有语言级固定上界的抽象语义下，当前 `docs/dsl.md` 的统一宏核能够模拟通用两计数器机。显式入口、声明式模块、静态 `xs:expand`、独立展开作用域与按值传参都不破坏这一能力。资源受限的实际编译器只能执行其中有限的运行前缀；这不是无界机器实现的证明。
 
-**Derived result:** With no language-level fixed bound on strings, expansion count, or storage, the unified macro core simulates universal two-counter machines. Explicit entry selection, declaration-only modules, static expansion targets, isolated scopes, and value passing preserve that power. A resource-bounded compiler executes only finite prefixes; it is not an implementation of physically unbounded computation.
+**Derived result:** With no language-level fixed bound on strings, expansion count, or storage, the unified macro core simulates universal two-counter machines. Explicit entry construction, declaration-only modules, static expansion targets, isolated scopes, and value passing preserve that power. A resource-bounded compiler executes only finite prefixes; it is not an implementation of physically unbounded computation.
 
 这是构造性模拟论证，不是 Lean/Coq 机器核验，也不是以有限测试冒充普适性证明。
 This is a constructive simulation argument, not a Lean/Coq-checked proof or an inference of universality from finite tests.
@@ -51,15 +51,21 @@ Swap the parameter names for counter 1. A text-only `HALT` body is:
 <xs:insert get="arg.c0"/>#<xs:insert get="arg.c1"/>
 ```
 
-入口包装宏可以将初始值显式传入对应标签。`module` 只组织这些定义并显式选择入口；是否拆分到若干通过 `import` 连接的文件不影响翻译。
-An entry wrapper passes the initial counters explicitly. A module only organizes definitions and selects an entry; splitting definitions into statically imported files does not affect the translation.
+入口 `xs:entry` 将初始值显式传入对应标签。`xs:module` 只组织指令宏定义，不选择入口；是否拆分到若干通过 `import` 连接的模块不影响翻译。入口是构造上下文，不是宏或符号，不对应机器指令标签。
+An `xs:entry` source passes the initial counters explicitly. Modules only organize instruction macros; splitting definitions into statically imported modules does not affect the translation. The entry context is not a macro, symbol, or machine instruction label.
 
-完整编译要求单个输出根元素，因此入口包装宏应把机器结果放进 `<Result>`，而不是把纯文本 `HALT` 直接作为文档入口。例如：
-Full compilation requires one output root element, so wrap the machine result in `<Result>` rather than using the text-only `HALT` directly as the document entry:
+完整编译要求单个输出根元素，因此入口把机器的纯文本结果放进 `<Result>`。假设 `machine.xml` 是包含 `m:start` 及其余指令宏的模块：
+Full compilation requires one output root, so the entry wraps the text result in `<Result>`. Assume `machine.xml` is a module defining `m:start` and the remaining instruction macros:
 
 ```xml
-<xs:macro name="m:entry"><Result><xs:expand ref="m:start"><xs:arg name="c0" value="111"/><xs:arg name="c1" value=""/></xs:expand></Result></xs:macro>
+<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:counter-machine">
+    <xs:import src="./machine.xml"/>
+    <Result><xs:expand ref="m:start"><xs:arg name="c0" value="111"/><xs:arg name="c1" value=""/></xs:expand></Result>
+</xs:entry>
 ```
+
+入口不能被导入或递归展开；只有命名宏参与机器状态转移。这不限制通用性，因为任意两计数器机的有限标签都已被编码为命名宏。
+Entries cannot be imported or recursively expanded. Only named macros encode machine transitions, which suffices because every finite program label is represented by such a macro.
 
 ## 模拟不变量 / Simulation invariant
 
@@ -86,5 +92,5 @@ At audit time, `Task::ArgDone` resumes after body tasks, concatenates decoded te
 具体回归覆盖应包含：两计数器交换/转移、零与非零分支、互递归、非尾返回组合、callee 不能读取 caller capture、可配置资源上限失败。任何有限测试集合都只核验这些实例；普适性来自上面的有效翻译与归纳不变量。
 Regression coverage should include counter transfer, both branches, mutual recursion, non-tail result composition, inaccessible caller captures, and configured resource failures. Finite tests check instances; universality follows from the translation and invariant.
 
-独立执行 `cargo test --bin xmlsquish compiler::runtime::contract_tests -- --nocapture`：16 项通过，其中包含双计数器转移、直接递归返回、互递归参数体返回组合和作用域隔离测试。这仅是对应实现实例的核查证据。
-Independent run of the command above passed 16 tests, including counter transfer, direct recursive returns, mutual recursive argument-body composition, and scope isolation. This validates the tested implementation instances only.
+当前独立 `xs:entry` 实现已执行 `cargo test --all-features --locked`：121 项单元测试、10 项进程测试通过，其中覆盖入口与宏帧身份、递归返回值、按值参数与捕获隔离。严格 Clippy 和 Rust 1.88 检查通过。这些结果是实现回归证据，不替代上述抽象模拟论证。
+The separate-entry implementation passes 121 unit tests and 10 process tests with `cargo test --all-features --locked`, covering entry/macro identity, recursive returns, value passing and capture isolation. Strict Clippy and Rust 1.88 checks also pass. These are implementation regression results, not substitutes for the abstract simulation argument.

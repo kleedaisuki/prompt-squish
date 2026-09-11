@@ -13,6 +13,6 @@ cargo run -- --explain examples/inheritance/prompt.xml
 
 Run from the repository root. Two sections contain `researchers` and `everyone` respectively. Each expansion creates a fresh frame, while each source is loaded only once per compilation.
 
-入口的 `entry="p:main"` 选择显式宏。模块只组织导入与宏定义；`import` 不产生内容。`section.xml` 显式把 `arg.audience` 传给 `leaf.xml`；删去该参数将报错，而不是自动继承。相对路径 `./leaf.xml` 始终相对 `section.xml` 解析。标题通过 `fill` 传递 XML 节点，不作为字符串；缺少必需标题也会报错。
+`xs:entry` 声明编译入口，导入之后的正文直接构造输出。模块只组织导入与宏定义；`import` 不产生内容。`section.xml` 显式把 `arg.audience` 传给 `leaf.xml`；删去该参数将报错，而不是自动继承。相对路径 `./leaf.xml` 始终相对 `section.xml` 解析。标题通过 `fill` 传递 XML 节点，不作为字符串；缺少必需标题也会报错。
 
-The root entry selects the explicit `p:main` macro. Modules contain only imports and macro definitions; importing produces no content. The section explicitly forwards its argument to the leaf: removing it is an error, not inheritance. The leaf path resolves relative to the section definition. Titles pass as XML through fills, not strings; omitting the required title also fails.
+The `xs:entry` document is the compilation entry; its body after imports constructs output directly. Modules contain only imports and macro definitions; importing produces no content. The section explicitly forwards its argument to the leaf: removing it is an error, not inheritance. The leaf path resolves relative to the section definition. Titles pass as XML through fills, not strings; omitting the required title also fails.

@@ -1,11 +1,12 @@
 //! Frozen source discovery and static call contracts. / 冻结源码发现与静态调用契约。
-use crate::compiler::{CompileError, CompileOptions, CompileResult, Compiler};
+use crate::compiler::test_support::TestCompiler as Compiler;
+use crate::compiler::{CompileError, CompileOptions, CompileResult};
 use std::{collections::BTreeMap, path::Path};
 
 /// Wrap a compact fixture for expansion-stage assertions.
 /// 包装紧凑样例，供展开阶段断言使用。
-fn module(body: &str) -> String {
-    crate::compiler::tests::module(body)
+fn fixture(body: &str) -> String {
+    crate::compiler::tests::fixture(body)
 }
 
 /// Wrap library declarations without entry. / 包装无入口的库声明。
@@ -18,7 +19,7 @@ fn library(body: &str) -> String {
 /// Compile without allowing unexpected source discovery.
 /// 编译并拒绝意外源码装载。
 fn compile(body: &str) -> Result<CompileResult, CompileError> {
-    Compiler::default().compile(Path::new("fixtures/main.xml"), &module(body), |p| {
+    Compiler::default().compile(Path::new("fixtures/main.xml"), &fixture(body), |p| {
         Err(format!("unexpected load: {}", p.display()))
     })
 }
@@ -64,7 +65,7 @@ fn dead_branches_and_unused_macros_are_statically_validated() {
 
 #[test]
 fn import_cycles_freeze_sources_without_executing_them() {
-    let source = module(
+    let source = fixture(
         r#"<xs:import src="./lib/../lib/a.xml"/><xs:import src="lib/a.xml"/><R><xs:expand ref="m:a"/></R>"#,
     );
     let mut reads = BTreeMap::<String, usize>::new();
@@ -72,7 +73,7 @@ fn import_cycles_freeze_sources_without_executing_them() {
         let key = path.to_string_lossy().replace('\\', "/");
         *reads.entry(key.clone()).or_default() += 1;
         if key.ends_with("/lib/a.xml") {
-            Ok(library(r#"<xs:import src="../main.xml"/><xs:macro name="m:unused"><xs:param name="not-executed"/>ignored</xs:macro><xs:macro name="m:a">A</xs:macro>"#))
+            Ok(library(r#"<xs:import src="a.xml"/><xs:macro name="m:unused"><xs:param name="not-executed"/>ignored</xs:macro><xs:macro name="m:a">A</xs:macro>"#))
         } else { Err(format!("unexpected {key}")) }
     }).unwrap();
     assert_eq!(text(&result.output), "A");
@@ -81,7 +82,7 @@ fn import_cycles_freeze_sources_without_executing_them() {
 
 #[test]
 fn macro_relative_sources_and_file_bindings_use_definition_site() {
-    let source = module(r#"<xs:import src="lib/a.xml"/><R><xs:expand ref="m:a"/></R>"#);
+    let source = fixture(r#"<xs:import src="lib/a.xml"/><R><xs:expand ref="m:a"/></R>"#);
     let result = Compiler::default().compile(Path::new("fixtures/main.xml"), &source, |path| {
         let path = path.to_string_lossy().replace('\\', "/");
         if path.ends_with("/lib/a.xml") {
@@ -109,7 +110,7 @@ fn required_arguments_are_exact_and_not_inherited() {
         args: BTreeMap::from([("x".into(), "parent".into())]),
         ..Default::default()
     };
-    let source = module(
+    let source = fixture(
         r#"<xs:param name="x"/><xs:macro name="m:f"><xs:param name="x"/></xs:macro><R><xs:expand ref="m:f"/></R>"#,
     );
     assert!(
@@ -136,7 +137,7 @@ fn slot_contracts_are_enforced() {
 
 #[test]
 fn repeated_expansions_share_frozen_definitions_but_not_arguments() {
-    let source = module(
+    let source = fixture(
         r#"<xs:import src="child.xml"/><xs:import src="./child.xml"/><R><xs:expand ref="m:child"><xs:arg name="x" value="one"/></xs:expand><xs:expand ref="m:child"><xs:arg name="x" value="two"/></xs:expand></R>"#,
     );
     let mut reads = 0;
@@ -154,7 +155,7 @@ fn repeated_expansions_share_frozen_definitions_but_not_arguments() {
 
 #[test]
 fn same_bytes_at_different_source_paths_are_distinct_definitions() {
-    let source = module(r#"<xs:import src="a.xml"/><xs:import src="alias.xml"/><R/>"#);
+    let source = fixture(r#"<xs:import src="a.xml"/><xs:import src="alias.xml"/><R/>"#);
     let result = Compiler::default().compile(Path::new("fixtures/main.xml"), &source, |_| {
         Ok(library(r#"<xs:macro name="m:f"/>"#))
     });
@@ -166,7 +167,7 @@ fn percent_encoded_file_uri_and_relative_reference_share_identity() {
     let base = std::env::current_dir().unwrap().join("virtual/main.xml");
     let dependency = base.parent().unwrap().join("a b.xml");
     let uri = url::Url::from_file_path(&dependency).unwrap();
-    let source = module(&format!(
+    let source = fixture(&format!(
         r#"<xs:import src="{uri}"/><xs:import src="./a%20b.xml"/><root/>"#
     ));
     let mut loads = 0;
@@ -196,7 +197,7 @@ fn unsupported_uri_schemes_are_not_treated_as_local_filenames() {
 /// 菱形依赖及回边在执行前各冻结一次规范化源码。
 #[test]
 fn diamond_and_cycle_imports_share_one_frozen_definition() {
-    let source = module(
+    let source = fixture(
         r#"<xs:import src="a.xml"/><xs:import src="b.xml"/><R><xs:expand ref="m:a"/><xs:expand ref="m:b"/></R>"#,
     );
     let mut reads = BTreeMap::<String, usize>::new();
@@ -206,7 +207,7 @@ fn diamond_and_cycle_imports_share_one_frozen_definition() {
         Ok(match name.as_str() {
             "a.xml" => library(r#"<xs:macro name="m:a"><xs:expand ref="m:c"/></xs:macro><xs:import src="c.xml"/>"#),
             "b.xml" => library(r#"<xs:import src="./c.xml"/><xs:macro name="m:b"><xs:expand ref="m:c"/></xs:macro>"#),
-            "c.xml" => library(r#"<xs:import src="main.xml"/><xs:macro name="m:c">C</xs:macro>"#),
+            "c.xml" => library(r#"<xs:import src="a.xml"/><xs:macro name="m:c">C</xs:macro>"#),
             _ => panic!("unexpected source {name}"),
         })
     }).unwrap();
@@ -221,29 +222,25 @@ fn diamond_and_cycle_imports_share_one_frozen_definition() {
     );
 }
 
-/// Library entries are validated, but importing never expands or binds them.
-/// 库入口必须静态有效，但 import 既不展开也不绑定入口参数。
+/// Importing declarations never executes unused macro bodies.
+/// 导入声明不执行未使用的宏正文。
 #[test]
-fn library_entry_is_validated_but_not_executed() {
-    let source = module(r#"<xs:import src="lib.xml"/><R><xs:expand ref="m:value"/></R>"#);
-    let valid = r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test" entry="m:library-main"><xs:macro name="m:library-main"><xs:param name="missing"/><xs:expand ref="m:library-main"><xs:arg name="missing" get="arg.missing"/></xs:expand></xs:macro><xs:macro name="m:value">ok</xs:macro></xs:module>"#;
+fn unused_library_macro_is_not_executed() {
+    let source = fixture(r#"<xs:import src="lib.xml"/><R><xs:expand ref="m:value"/></R>"#);
+    let library = library(
+        r#"<xs:macro name="m:unused"><xs:param name="missing"/><xs:expand ref="m:unused"><xs:arg name="missing" get="arg.missing"/></xs:expand></xs:macro><xs:macro name="m:value">ok</xs:macro>"#,
+    );
     let result = Compiler::default()
-        .compile(Path::new("main.xml"), &source, |_| Ok(valid.into()))
+        .compile(Path::new("main.xml"), &source, |_| Ok(library.clone()))
         .unwrap();
     assert_eq!(text(&result.output), "ok");
-    let invalid = valid.replace("entry=\"m:library-main\"", "entry=\"m:undefined\"");
-    assert!(
-        Compiler::default()
-            .compile(Path::new("main.xml"), &source, |_| Ok(invalid.clone()))
-            .is_err()
-    );
 }
 
-/// Root entry lookup uses expanded-name identity across the complete import closure.
-/// 根入口通过完整导入闭包中的扩展名身份解析。
+/// Entry expansion lookup uses expanded-name identity across the import closure.
+/// 入口展开通过导入闭包中的扩展名身份解析。
 #[test]
-fn root_entry_can_select_an_imported_macro_through_namespace_alias() {
-    let source = r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:entry="urn:test" entry="entry:start"><xs:import src="lib.xml"/></xs:module>"#;
+fn entry_expands_imported_macro_through_namespace_alias() {
+    let source = r#"<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:entry="urn:test"><xs:import src="lib.xml"/><xs:expand ref="entry:start"/></xs:entry>"#;
     let result = Compiler::default()
         .compile(Path::new("main.xml"), source, |_| {
             Ok(library(
@@ -252,4 +249,23 @@ fn root_entry_can_select_an_imported_macro_through_namespace_alias() {
         })
         .unwrap();
     assert_eq!(text(&result.output), "imported entry");
+}
+
+/// Imports may target modules only, including normalized back-edges to the root entry.
+/// import 只能指向模块，规范化后回到根入口的回边也必须拒绝。
+#[test]
+fn importing_an_entry_is_rejected_even_when_it_is_the_frozen_root() {
+    let source = fixture(r#"<xs:import src="lib.xml"/><R/>"#);
+    for imported in [
+        r#"<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><R/></xs:entry>"#.to_owned(),
+        library(r#"<xs:import src="./main.xml"/>"#),
+    ] {
+        let error = Compiler::default()
+            .compile(Path::new("main.xml"), &source, |_| Ok(imported.clone()))
+            .unwrap_err();
+        assert!(
+            error.message.contains("entry") || error.message.contains("module"),
+            "{error}"
+        );
+    }
 }

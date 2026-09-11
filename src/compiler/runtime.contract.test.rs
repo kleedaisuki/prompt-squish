@@ -1,17 +1,18 @@
 //! Invocation, resource and provenance contracts. / 调用、资源与来源信息契约。
-use crate::compiler::{CompileError, CompileOptions, CompileResult, Compiler};
+use crate::compiler::test_support::TestCompiler as Compiler;
+use crate::compiler::{CompileError, CompileOptions, CompileResult};
 use std::path::Path;
 
 /// Wrap a compact fixture for expansion-stage assertions.
 /// 包装紧凑样例，供展开阶段断言使用。
-fn module(body: &str) -> String {
-    crate::compiler::tests::module(body)
+fn fixture(body: &str) -> String {
+    crate::compiler::tests::fixture(body)
 }
 
 /// Compile without allowing unexpected source discovery.
 /// 编译并拒绝意外源码装载。
 fn compile(body: &str) -> Result<CompileResult, CompileError> {
-    Compiler::default().compile(Path::new("fixtures/main.xml"), &module(body), |p| {
+    Compiler::default().compile(Path::new("fixtures/main.xml"), &fixture(body), |p| {
         Err(format!("unexpected load: {}", p.display()))
     })
 }
@@ -75,7 +76,7 @@ fn finite_recursive_scalar_computation() {
 
 #[test]
 fn resource_guards_reject_infinite_recursion_and_large_output() {
-    let source = module(
+    let source = fixture(
         r#"<xs:macro name="m:loop"><xs:expand ref="m:loop"/></xs:macro><R><xs:expand ref="m:loop"/></R>"#,
     );
     for options in [
@@ -101,7 +102,7 @@ fn resource_guards_reject_infinite_recursion_and_large_output() {
         Compiler::with_options(options)
             .compile(
                 Path::new("main.xml"),
-                &module("<R>0123456789</R>"),
+                &fixture("<R>0123456789</R>"),
                 |_| unreachable!()
             )
             .is_err()
@@ -134,7 +135,7 @@ fn arguments_under_construction_do_not_see_each_other() {
 
 #[test]
 fn arguments_and_fills_are_eager_and_evaluated_exactly_once() {
-    let source = module(
+    let source = fixture(
         r#"<xs:macro name="m:value">v</xs:macro><xs:macro name="m:target"><xs:param name="x"/><R><xs:insert get="arg.x"/><xs:slot name="s"/></R></xs:macro><xs:expand ref="m:target"><xs:arg name="x"><xs:expand ref="m:value"/></xs:arg><xs:fill name="s"><xs:expand ref="m:value"/></xs:fill></xs:expand>"#,
     );
     let options = CompileOptions {
@@ -169,6 +170,10 @@ fn intermediate_has_valid_xml_and_distinct_execution_frames() {
         .filter(|node| node.is_element() && node.tag_name().name() == "frame")
         .collect();
     assert_eq!(frames.len(), 3);
+    assert_eq!(frames[0].attribute("kind"), Some("entry"));
+    assert_eq!(frames[0].attribute("macro"), None);
+    assert_eq!(frames[1].attribute("kind"), Some("macro"));
+    assert!(frames[1].attribute("macro").is_some());
     assert_ne!(frames[1].attribute("id"), frames[2].attribute("id"));
     assert_eq!(frames[1].attribute("macro"), frames[2].attribute("macro"));
     assert_eq!(frames[1].attribute("parent"), frames[0].attribute("id"));
@@ -203,7 +208,7 @@ fn mutually_recursive_returns_compose_through_argument_bodies() {
 /// 调用者参数存在，但不得泄漏给未绑定该参数的被展开宏。
 #[test]
 fn callee_cannot_implicitly_read_caller_parameters() {
-    let source = module(
+    let source = fixture(
         r#"<xs:param name="secret"/><xs:macro name="m:read"><R><xs:insert get="arg.secret"/></R></xs:macro><xs:expand ref="m:read"/>"#,
     );
     let options = CompileOptions {

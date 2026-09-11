@@ -16,7 +16,7 @@ fn processes_bom_without_counting_it() {
     let input = temp.path().join("bom.xml");
     let mut bytes = UTF8_BOM.to_vec();
     bytes.extend_from_slice(
-        b"<xs:module xmlns:xs=\"https://xmlsquish.moesegfault.dev/ns\" xmlns:m=\"urn:test\" entry=\"m:main\"><xs:macro name=\"m:main\"><a>  x </a></xs:macro></xs:module>",
+        b"<xs:entry xmlns:xs=\"https://xmlsquish.moesegfault.dev/ns\" xmlns:m=\"urn:test\"><a>  x </a></xs:entry>",
     );
     fs::write(&input, bytes).unwrap();
 
@@ -51,7 +51,7 @@ fn one_bad_file_does_not_prevent_another_file() {
     fs::write(&bad, b"\xff").unwrap();
     fs::write(
         &good,
-        r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test" entry="m:main"><xs:macro name="m:main"><b/></xs:macro></xs:module>"#,
+        r#"<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test"><b/></xs:entry>"#,
     )
     .unwrap();
     let mut out = Vec::new();
@@ -87,7 +87,7 @@ fn replaces_an_existing_output() {
     let output = temp.path().join("a.o.xml");
     fs::write(
         &input,
-        r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test" entry="m:main"><xs:macro name="m:main"><a/></xs:macro></xs:module>"#,
+        r#"<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test"><a/></xs:entry>"#,
     )
     .unwrap();
     fs::write(&output, "stale output that must disappear").unwrap();

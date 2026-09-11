@@ -1,10 +1,8 @@
-<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:s="https://example.com/macros/string" entry="s:main">
+<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:s="https://example.com/macros/string">
   <xs:import src="parts/hello.xml"/>
   <xs:import src="parts/another.xml"/>
-  <xs:macro name="s:main">
-    <Prompt>
-      <Greeting><xs:expand ref="s:greet"><xs:arg name="name" value="Klee &amp; friends"/></xs:expand></Greeting>
-      <Items><xs:expand ref="s:items"><xs:arg name="list" value="XML,macros,recursion"/></xs:expand></Items>
-    </Prompt>
-  </xs:macro>
-</xs:module>
+  <Prompt>
+    <Greeting><xs:expand ref="s:greet"><xs:arg name="name" value="Klee &amp; friends"/></xs:expand></Greeting>
+    <Items><xs:expand ref="s:items"><xs:arg name="list" value="XML,macros,recursion"/></xs:expand></Items>
+  </Prompt>
+</xs:entry>

@@ -29,7 +29,8 @@ const en = {
     "element": "Element",
     "contract": "Contract",
     "elements": [
-      "Declaration-only container; entry explicitly selects a named macro.",
+      "Library containing imports and named macro definitions only.",
+      "Independent build document: imports modules and constructs the final prompt.",
       "Load definitions without executing a frame.",
       "Define an immutable namespace-qualified macro.",
       "Declare a required Unicode-string parameter.",
@@ -173,7 +174,8 @@ const zh: typeof en = {
     "element": "元素",
     "contract": "契约",
     "elements": [
-      "仅容纳声明；entry 显式选择具名宏。",
+      "宏库，仅包含 import 与具名宏定义。",
+      "独立构建文档：导入模块并组织最终提示词。",
       "装载定义，不执行调用帧。",
       "定义不可重定义的命名宏。",
       "声明必需的 Unicode 字符串参数。",

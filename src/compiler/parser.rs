@@ -26,39 +26,34 @@ pub(super) fn parse(path: &Path, text: &str, next_id: &mut usize) -> Result<Unit
             .collect(),
         references: Vec::new(),
     };
-    if !builtin(root, "module") {
+    if !builtin(root, "module") && !builtin(root, "entry") {
         return Err(parser
             .loc(root)
-            .error("Syntax: source root must be xs:module"));
+            .error("Syntax: source root must be xs:entry or xs:module"));
     }
-    parser.attrs(root, &["entry"])?;
-    let entry = root
-        .has_attribute("entry")
-        .then(|| {
-            parser
-                .qname(root, "entry")
-                .map(|name| (name, parser.loc(root)))
-        })
-        .transpose()?;
+    parser.attrs(root, &[])?;
     let mut macros = Vec::new();
-    for child in root.children() {
-        if trivia(child) || child.pi().is_some() {
-            continue;
+    let entry = if builtin(root, "entry") {
+        Some(parser.entry(root)?)
+    } else {
+        for child in root.children() {
+            if trivia(child) || child.pi().is_some() {
+                continue;
+            }
+            if builtin(child, "import") {
+                parser.import(child)?;
+            } else if builtin(child, "macro") {
+                macros.push(parser.macro_def(child, next_id)?);
+            } else {
+                return Err(parser.loc(child).error(
+                    "Syntax: module contains only xs:import and explicit xs:macro declarations",
+                ));
+            }
         }
-        if builtin(child, "import") {
-            parser.attrs(child, &["src"])?;
-            parser.empty(child)?;
-            parser.source(child)?;
-        } else if builtin(child, "macro") {
-            macros.push(parser.macro_def(child, next_id)?);
-        } else {
-            return Err(parser.loc(child).error(
-                "Syntax: module contains only xs:import and explicit xs:macro declarations",
-            ));
-        }
-    }
+        None
+    };
     Ok(Unit {
-        path: path.into(),
+        loc: parser.loc(root),
         entry,
         macros,
         references: parser.references,
@@ -156,6 +151,49 @@ impl Parser<'_> {
             resolve_path(self.path, &src).map_err(|e| self.loc(n).error(format!("Source: {e}")))?;
         self.references.push((path.clone(), self.loc(n)));
         Ok(path)
+    }
+    /// Validate a declaration-only dependency. / 验证仅用于声明的依赖。
+    fn import(&mut self, n: Xml<'_, '_>) -> Result<(), CompileError> {
+        self.attrs(n, &["src"])?;
+        self.empty(n)?;
+        self.source(n)?;
+        Ok(())
+    }
+    /// Parse the executable source independently of macro definitions.
+    /// 独立于宏定义解析可执行源码；入口不能声明 slot。
+    fn entry(&mut self, n: Xml<'_, '_>) -> Result<Entry, CompileError> {
+        let mut entry = Entry {
+            loc: self.loc(n),
+            params: Vec::new(),
+            body: Vec::new(),
+        };
+        let mut slots = BTreeMap::new();
+        let mut content = false;
+        for child in n.children() {
+            if builtin(child, "import") || builtin(child, "param") {
+                if content {
+                    return Err(self
+                        .loc(child)
+                        .error("Syntax: entry declarations must precede output content"));
+                }
+                if builtin(child, "import") {
+                    self.import(child)?;
+                } else {
+                    self.param(child, &mut entry.params)?;
+                }
+            } else {
+                if !trivia(child) {
+                    content = true;
+                }
+                entry.body.push(self.node(child, &mut slots)?);
+            }
+        }
+        if !slots.is_empty() {
+            return Err(self
+                .loc(n)
+                .error("Signature: xs:entry cannot declare slots"));
+        }
+        Ok(entry)
     }
     /// 声明唯一参数。 / Declare a unique required parameter.
     fn param(&self, n: Xml<'_, '_>, params: &mut Vec<String>) -> Result<(), CompileError> {
@@ -561,9 +599,7 @@ mod tests {
     fn deep_full_compilation_and_error_unwinding_are_stack_safe() {
         let depth = 6000;
         let body = format!("{}leaf{}", "<a>".repeat(depth), "</a>".repeat(depth));
-        let source = format!(
-            r#"<xs:module xmlns:xs="{NS}" xmlns:m="urn:macros" entry="m:entry"><xs:macro name="m:entry">{body}</xs:macro></xs:module>"#
-        );
+        let source = format!(r#"<xs:entry xmlns:xs="{NS}">{body}</xs:entry>"#);
         let result = super::super::Compiler::default()
             .compile(Path::new("deep.xml"), &source, |_| unreachable!())
             .unwrap();

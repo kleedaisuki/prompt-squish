@@ -1,15 +1,13 @@
-<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:p="https://example.com/macros/sections" entry="p:main">
+<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:p="https://example.com/macros/sections">
   <xs:import src="parts/section.xml"/>
-  <xs:macro name="p:main">
-    <Prompt>
-      <xs:expand ref="p:section">
-        <xs:arg name="audience" value="researchers"/>
-        <xs:fill name="heading"><Title>Explicit data flow</Title></xs:fill>
-      </xs:expand>
-      <xs:expand ref="p:section">
-        <xs:arg name="audience" value="everyone"/>
-        <xs:fill name="heading"><Title>Independent frame</Title></xs:fill>
-      </xs:expand>
-    </Prompt>
-  </xs:macro>
-</xs:module>
+  <Prompt>
+    <xs:expand ref="p:section">
+      <xs:arg name="audience" value="researchers"/>
+      <xs:fill name="heading"><Title>Explicit data flow</Title></xs:fill>
+    </xs:expand>
+    <xs:expand ref="p:section">
+      <xs:arg name="audience" value="everyone"/>
+      <xs:fill name="heading"><Title>Independent frame</Title></xs:fill>
+    </xs:expand>
+  </Prompt>
+</xs:entry>

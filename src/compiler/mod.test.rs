@@ -1,26 +1,11 @@
 //! DSL contract and source-closure regressions. / DSL 契约与源码闭包回归测试。
 use super::*;
+use crate::compiler::test_support::TestCompiler as Compiler;
 const NS: &str = "https://xmlsquish.moesegfault.dev/ns";
-/// Wrap a module with stable test namespace. / 使用稳定测试命名空间包装模块。
-pub(super) fn module(body: &str) -> String {
-    let source = format!(r#"<xs:module xmlns:xs="{NS}" xmlns:m="urn:test">{body}</xs:module>"#);
-    let doc = roxmltree::Document::parse(&source).unwrap();
-    let mut declarations = String::new();
-    let mut content = String::new();
-    for node in doc.root_element().children() {
-        let target = if node.is_element()
-            && node.tag_name().namespace() == Some(NS)
-            && matches!(node.tag_name().name(), "macro" | "import")
-        {
-            &mut declarations
-        } else {
-            &mut content
-        };
-        target.push_str(&source[node.range()]);
-    }
-    format!(
-        r#"<xs:module xmlns:xs="{NS}" xmlns:m="urn:test" xmlns:test="urn:fixture-entry" entry="test:main">{declarations}<xs:macro name="test:main">{content}</xs:macro></xs:module>"#
-    )
+/// Build a compact fixture, materialized as entry plus imported definitions.
+/// 构造紧凑样例，实际生成入口与被导入的定义。
+pub(super) fn fixture(body: &str) -> String {
+    crate::compiler::test_support::fixture(body)
 }
 /// Wrap declarations without an executable entry. / 包装无可执行入口的声明。
 fn library(body: &str) -> String {
@@ -28,7 +13,7 @@ fn library(body: &str) -> String {
 }
 /// Compile a standalone source. / 编译独立源码。
 fn compile(body: &str) -> Result<CompileResult, CompileError> {
-    Compiler::default().compile(Path::new("entry.xml"), &module(body), |p| {
+    Compiler::default().compile(Path::new("entry.xml"), &fixture(body), |p| {
         Err(format!("unexpected load {}", p.display()))
     })
 }
@@ -40,7 +25,7 @@ fn named_macros_are_forward_resolved_and_scalar_escaped() {
 }
 #[test]
 fn root_arguments_are_explicit_and_required() {
-    let source = module(r#"<xs:param name="x"/><r><xs:insert get="arg.x"/></r>"#);
+    let source = fixture(r#"<xs:param name="x"/><r><xs:insert get="arg.x"/></r>"#);
     let opts = CompileOptions {
         args: BTreeMap::from([("x".into(), "hello".into())]),
         ..Default::default()
@@ -60,10 +45,10 @@ fn root_arguments_are_explicit_and_required() {
 }
 #[test]
 fn import_cycles_freeze_each_logical_source_once() {
-    let source = module(
+    let source = fixture(
         r#"<xs:import src="./lib/../lib.xml"/><xs:import src="lib.xml"/><r><xs:expand ref="m:x"/></r>"#,
     );
-    let lib = library(r#"<xs:import src="entry.xml"/><xs:macro name="m:x">ok</xs:macro>"#);
+    let lib = library(r#"<xs:import src="lib.xml"/><xs:macro name="m:x">ok</xs:macro>"#);
     let mut reads = 0;
     let result = Compiler::default()
         .compile(Path::new("entry.xml"), &source, |p| {
@@ -78,7 +63,7 @@ fn import_cycles_freeze_each_logical_source_once() {
 #[test]
 fn unused_import_is_discovered_and_invalid_expands_rejected() {
     let mut reads = 0;
-    let source = module(r#"<xs:macro name="m:unused"/><xs:import src="dead.xml"/><r/>"#);
+    let source = fixture(r#"<xs:macro name="m:unused"/><xs:import src="dead.xml"/><r/>"#);
     Compiler::default()
         .compile(Path::new("entry.xml"), &source, |_| {
             reads += 1;
@@ -118,7 +103,7 @@ fn output_erases_namespaces_after_macro_resolution() {
 }
 #[test]
 fn bounded_recursive_execution_fails_with_frame_chain() {
-    let source = module(
+    let source = fixture(
         r#"<xs:macro name="m:loop"><xs:expand ref="m:loop"/></xs:macro><r><xs:expand ref="m:loop"/></r>"#,
     );
     let options = CompileOptions {
@@ -134,7 +119,7 @@ fn bounded_recursive_execution_fails_with_frame_chain() {
 
 #[test]
 fn imported_macro_references_and_file_bindings_use_definition_site() {
-    let entry = module(r#"<xs:import src="lib/macros.xml"/><r><xs:expand ref="m:where"/></r>"#);
+    let entry = fixture(r#"<xs:import src="lib/macros.xml"/><r><xs:expand ref="m:where"/></r>"#);
     let library = library(
         r#"<xs:macro name="m:where"><xs:expand ref="m:helper"/></xs:macro><xs:import src="helper.xml"/>"#,
     );
@@ -158,7 +143,7 @@ fn imported_macro_references_and_file_bindings_use_definition_site() {
 
 #[test]
 fn invocation_reuses_definition_not_execution_frame() {
-    let source = module(
+    let source = fixture(
         r#"<xs:import src="child.xml"/><r><xs:expand ref="m:child"><xs:arg name="x" value="first"/></xs:expand><xs:expand ref="m:child"><xs:arg name="x" value="second"/></xs:expand></r>"#,
     );
     let child = library(
@@ -184,7 +169,7 @@ fn invocation_reuses_definition_not_execution_frame() {
 
 #[test]
 fn compiler_loads_dependencies_with_an_in_memory_loader() {
-    let source = module(r#"<xs:import src="child.xml"/><root><xs:expand ref="m:child"/></root>"#);
+    let source = fixture(r#"<xs:import src="child.xml"/><root><xs:expand ref="m:child"/></root>"#);
     let mut loaded = Vec::new();
     let compiled = Compiler::default()
         .compile(Path::new("virtual/main.xml"), &source, |path| {
