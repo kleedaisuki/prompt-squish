@@ -93,8 +93,27 @@ jobs:
         working-directory: source
         run: cargo +1.88.0 build --release --locked --target ${{ matrix.target }}
       - name: Run native release tests
+        if: runner.os != 'macOS'
         working-directory: source
         run: cargo +1.88.0 test --release --all-features --locked --target ${{ matrix.target }}
+      - name: Run native macOS tests with case-sensitive temporary files
+        if: runner.os == 'macOS'
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Historical tags assume Unix temporary files distinguish a.xml/a.XML.
+          # 历史标签假设 Unix 临时文件区分 a.xml/a.XML；仅调整测试临时目录。
+          image="$RUNNER_TEMP/xmlsquish-tests.sparseimage"
+          mount="$RUNNER_TEMP/xmlsquish-tests-volume"
+          hdiutil create -size 256m -type SPARSE -fs APFSX -volname xmlsquish-tests "$image"
+          mkdir -p "$mount"
+          hdiutil attach "$image" -mountpoint "$mount" -nobrowse
+          trap 'hdiutil detach "$mount" || hdiutil detach "$mount" -force' EXIT
+          mkdir "$mount/tmp"
+          touch "$mount/tmp/case-probe"
+          test ! -e "$mount/tmp/CASE-PROBE"
+          TMPDIR="$mount/tmp" cargo +1.88.0 test --release --all-features --locked --target ${{ matrix.target }}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.13'
