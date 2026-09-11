@@ -11,6 +11,13 @@ const example = '<xs:entry xmlns:xs="' + namespaceUri + '">\n  <xs:param name="n
 const budgets = [["--max-depth","1024"],["--max-expansions","100000"],["--max-output-bytes","67108864"]];
 const verify = "cargo fmt --all -- --check\ncargo test --all-features --locked\ncargo clippy --all-targets --all-features --locked -- -D warnings\ncargo +1.88.0 check --all-targets --locked\ncd site && npm ci && npm run test && npm run demo:check\nnpx playwright install chromium\nnpm run test:browser";
 const repo = "https://github.com/kleedaisuki/prompt-squish";
+/** Release asset names match the native Actions matrix. / 发布资产名称与原生构建矩阵一致。 */
+const platforms = [
+  { name: "Windows", targets: [["x64", "x86_64-pc-windows-msvc"], ["ARM64", "aarch64-pc-windows-msvc"]], extension: "zip" },
+  { name: "Linux", targets: [["x64", "x86_64-unknown-linux-gnu"], ["ARM64", "aarch64-unknown-linux-gnu"]], extension: "tar.gz" },
+  { name: "macOS", targets: [["Intel", "x86_64-apple-darwin"], ["Apple Silicon", "aarch64-apple-darwin"]], extension: "tar.gz" },
+];
+const downloads = repo + "/releases/download/v0.3.0/";
 ---
 <ReferenceLayout locale={locale} page="releases" title={m.title} description={m.description} product>
   <section class="release-hero" aria-labelledby="release-title">
@@ -33,8 +40,13 @@ const repo = "https://github.com/kleedaisuki/prompt-squish";
     <p class="release-eyebrow">{m.highlightsLabel}</p><h2 id="highlights-title">{m.highlightsTitle}</h2>
     <div class="release-highlights">{m.highlights.map(item => <article><span class="feature-number">{item.number}</span><h3>{item.title}</h3><p>{item.body}</p><code>{item.code}</code></article>)}</div>
   </section>
-  <section id="install" class="install-section release-section" aria-labelledby="install-title">
-    <div><p class="release-eyebrow">{m.sourceInstall}</p><h2 id="install-title">{m.installCta}</h2><p>{m.installBody}</p><p class="release-requirements">{m.installNote}</p><a href={repo + "/releases/tag/v0.3.0"}>{m.github} ↗</a></div>
+  <section id="install" class="release-section" aria-labelledby="download-title">
+    <p class="release-eyebrow">xmlsquish 0.3.0</p><h2 id="download-title">{m.downloadsTitle}</h2><p>{m.downloadsBody}</p>
+    <div class="download-grid">{platforms.map((platform, i) => <article><h3>{platform.name}</h3><p>{m.platformNotes[i]}</p><div class="download-actions">{platform.targets.map(([label, target]) => <a class="release-button secondary" data-binary-download href={`${downloads}xmlsquish-0.3.0-${target}.${platform.extension}`} aria-label={`${m.download} ${platform.name} ${label}`}>{label}<span aria-hidden="true">↓</span></a>)}</div></article>)}</div>
+    <p>{m.downloadHelp}</p><p><a data-checksums href={downloads + "SHA256SUMS"}>{m.checksum} ↗</a></p><p class="release-requirements">{m.unsignedNote}</p>
+  </section>
+  <section class="install-section release-section" aria-labelledby="install-title">
+    <div><h2 id="install-title">{m.sourceInstall}</h2><p>{m.installBody}</p><p class="release-requirements">{m.installNote}</p><a href={repo + "/releases/tag/v0.3.0"}>{m.github} ↗</a></div>
     <div class="install-terminal"><div class="terminal-header"><code>v0.3.0</code><button type="button" hidden data-install-copy data-copied={m.copied} data-failed={m.copyFailed}>{m.copy}</button></div><pre><code data-install-command>{install}</code></pre><div class="terminal-check"><code>xmlsquish --version<br />xmlsquish 0.3.0</code></div><span role="status" aria-live="polite" data-copy-status></span></div>
   </section>
   <section class="release-continuity"><h2>{m.pipelineTitle}</h2><p>{m.pipelineNote}</p></section>
@@ -102,6 +114,12 @@ const repo = "https://github.com/kleedaisuki/prompt-squish";
   .release-highlights h3 { margin-top: 1rem; font-size: 1.3rem; }
   .release-highlights p { font-size: .95rem; }
   .release-highlights code { display: block; margin-top: 1.5rem; font-size: .75rem; }
+  .download-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.25rem; margin-block: 2rem; }
+  .download-grid article { border: 1px solid var(--xs-line); border-radius: .75rem; padding: 1.5rem; }
+  .download-grid h3 { margin-top: 0; font-size: 1.4rem; }
+  .download-grid p { font-size: .9rem; }
+  .download-actions { display: flex; flex-wrap: wrap; gap: .65rem; }
+  .download-actions a { padding: .7rem .85rem; gap: .7rem; }
   .install-section { display: grid; grid-template-columns: .8fr 1.2fr; gap: 3rem; align-items: center; }
   .install-terminal { min-width: 0; border: 1px solid var(--xs-line); border-radius: .75rem; background: var(--xs-code); color: var(--xs-code-text); padding: 1.25rem; }
   .terminal-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; font-size: .8rem; }
@@ -128,7 +146,7 @@ const repo = "https://github.com/kleedaisuki/prompt-squish";
   @media (max-width: 800px) {
     .release-hero, .install-section { grid-template-columns: 1fr; gap: 2rem; }
     .release-hero { padding-block: 2rem; }
-    .release-highlights { grid-template-columns: 1fr; }
+    .release-highlights, .download-grid { grid-template-columns: 1fr; }
     .release-section { padding-block: 2rem; }
     .version-number { font-size: 5rem; padding-block: 1.5rem; }
     .release-continuity { padding: 1.25rem; }

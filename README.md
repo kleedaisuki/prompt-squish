@@ -12,9 +12,36 @@ xmlsquish 是 Rust 编写的 XML 结构预处理器：冻结源码模块，以�
 
 ## 安装与运行 / Install and run
 
-需要 Rust 1.88 或更高版本。从固定版本安装：
+直接下载对应系统和处理器的预编译二进制，无需安装 Rust。Linux 包在 Ubuntu 22.04 上构建，需要 glibc 2.35 或更新版本（不适用于 Alpine/musl）。
 
-Requires Rust 1.88 or newer. Install the pinned release:
+Download the prebuilt binary for your OS and CPU; Rust is not required. Linux packages are built on Ubuntu 22.04 and require glibc 2.35 or newer (not Alpine/musl).
+
+| 系统 / OS | 处理器 / CPU | 下载 / Download |
+| --- | --- | --- |
+| Windows 10 / 11 | x86-64 | [x86_64-pc-windows-msvc.zip](https://github.com/kleedaisuki/prompt-squish/releases/download/v0.3.0/xmlsquish-0.3.0-x86_64-pc-windows-msvc.zip) |
+| Windows 10 / 11 | ARM64 | [aarch64-pc-windows-msvc.zip](https://github.com/kleedaisuki/prompt-squish/releases/download/v0.3.0/xmlsquish-0.3.0-aarch64-pc-windows-msvc.zip) |
+| Linux · glibc ≥ 2.35 | x86-64 | [x86_64-unknown-linux-gnu.tar.gz](https://github.com/kleedaisuki/prompt-squish/releases/download/v0.3.0/xmlsquish-0.3.0-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux · glibc ≥ 2.35 | ARM64 | [aarch64-unknown-linux-gnu.tar.gz](https://github.com/kleedaisuki/prompt-squish/releases/download/v0.3.0/xmlsquish-0.3.0-aarch64-unknown-linux-gnu.tar.gz) |
+| macOS ≥ 11 | Intel | [x86_64-apple-darwin.tar.gz](https://github.com/kleedaisuki/prompt-squish/releases/download/v0.3.0/xmlsquish-0.3.0-x86_64-apple-darwin.tar.gz) |
+| macOS ≥ 11 | Apple Silicon | [aarch64-apple-darwin.tar.gz](https://github.com/kleedaisuki/prompt-squish/releases/download/v0.3.0/xmlsquish-0.3.0-aarch64-apple-darwin.tar.gz) |
+
+校验后解压，将 `xmlsquish`（Windows 为 `xmlsquish.exe`）所在目录加入 `PATH`，再运行 `xmlsquish --version` 和 `xmlsquish --help`；版本应为 `xmlsquish 0.3.0`。Windows 可用 `Expand-Archive` 解压 ZIP；Linux/macOS 可用 `tar -xzf <archive.tar.gz>`。未加入 `PATH` 时，可在解压目录运行 `./xmlsquish --version`，Windows PowerShell 使用 `.\xmlsquish.exe --version`。
+
+Verify and extract the archive, add the directory containing `xmlsquish` (`xmlsquish.exe` on Windows) to `PATH`, then run `xmlsquish --version` and `xmlsquish --help`. Expect `xmlsquish 0.3.0`. Extract ZIPs with `Expand-Archive` on Windows or tarballs with `tar -xzf <archive.tar.gz>` on Linux/macOS. Before updating `PATH`, run `./xmlsquish --version` from the extracted directory, or `.\xmlsquish.exe --version` in Windows PowerShell.
+
+下载同次发布的 [SHA256SUMS](https://github.com/kleedaisuki/prompt-squish/releases/download/v0.3.0/SHA256SUMS)，在解压前比对所下载压缩包的 SHA-256：Linux 使用 `sha256sum <archive>`，macOS 使用 `shasum -a 256 <archive>`，PowerShell 使用 `Get-FileHash -Algorithm SHA256 <archive>`。仅与清单中完全相同文件名的一行比较。校验和证明文件完整性，不证明发布者身份；二进制未做代码签名（code signing）或 Apple 公证（notarization），系统可能显示安全提示，不要关闭全局安全保护。
+
+Download [SHA256SUMS](https://github.com/kleedaisuki/prompt-squish/releases/download/v0.3.0/SHA256SUMS) from the same release and compare the archive's SHA-256 before extraction: `sha256sum <archive>` on Linux, `shasum -a 256 <archive>` on macOS, or `Get-FileHash -Algorithm SHA256 <archive>` in PowerShell. Compare only the row with the exact downloaded filename. Checksums establish integrity, not publisher identity. Binaries are unsigned and not Apple-notarized; OS security prompts may appear. Do not disable system-wide security protections.
+
+六个平台由 GitHub Actions 在原生架构上构建并进行基本运行验证（smoke test）。0.3.0 的二进制从既有 `v0.3.0` 标签补充构建，标签和源码快照不变；未发布到 crates.io。
+
+GitHub Actions builds and smoke-tests all six targets on native architectures. The 0.3.0 binaries are backfilled from the existing `v0.3.0` tag without moving the tag or changing its source snapshot. There is no crates.io publication.
+
+### 可选：源码安装 / Optional: build from source
+
+仅源码安装需要 Rust 1.88 或更高版本。使用固定标签和锁文件：
+
+Only source installation requires Rust 1.88 or newer. Use the pinned tag and lockfile:
 
 ```bash
 cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v0.3.0 --locked

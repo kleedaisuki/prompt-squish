@@ -246,6 +246,15 @@ for (const [path, locale, kind] of [
         assert.equal(await page.locator(".release-highlights article").count(), 3);
         assert.equal(await page.locator(".release-details").getAttribute("open"), null);
         assert.equal(await page.locator(".release-intro .primary").getAttribute("href"), "#install");
+        const targets = [
+          "x86_64-pc-windows-msvc.zip", "aarch64-pc-windows-msvc.zip",
+          "x86_64-unknown-linux-gnu.tar.gz", "aarch64-unknown-linux-gnu.tar.gz",
+          "x86_64-apple-darwin.tar.gz", "aarch64-apple-darwin.tar.gz",
+        ];
+        const downloadBase = "https://github.com/kleedaisuki/prompt-squish/releases/download/v0.3.0/";
+        assert.deepEqual(await page.locator("[data-binary-download]").evaluateAll(links => links.map(link => link.href)),
+          targets.map(target => downloadBase + "xmlsquish-0.3.0-" + target));
+        assert.equal(await page.locator("[data-checksums]").getAttribute("href"), downloadBase + "SHA256SUMS");
         assert((await page.locator("[data-install-command]").textContent()).includes("--tag v0.3.0 --locked"));
       }
       if (process.env.UI_SCREENSHOT_DIR) {

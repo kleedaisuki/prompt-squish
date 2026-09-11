@@ -218,7 +218,7 @@ const zh: Messages = {
     title: "检查展开结果，再交给 Agent。",
     intro:
       "接收文件、目录或 glob。跳过 .i.xml / .o.xml；目录与 glob 跳过 module 库文件，原子替换产物；一个文件失败，不阻止其他独立输入。",
-    install: "安装 v0.3.0",
+    install: "备选：从源码编译 v0.3.0（Rust 1.88+）",
     inspect: "只编译，保留中间表示",
     optimize: "展开、清理来源信息并压紧最终 XML",
     color: "纯文本诊断，也适合 CI",
@@ -372,7 +372,7 @@ const en: Messages = {
     title: "Inspect the expansion. Then feed your agent.",
     intro:
       "Accept files, directories, or globs. Discovery skips .i.xml / .o.xml and module libraries in directories/globs; output replacement is atomic, and one failed file does not stop independent inputs.",
-    install: "Install v0.3.0",
+    install: "Optional: build v0.3.0 from source (Rust 1.88+)",
     inspect: "Compile only; keep the intermediate",
     optimize: "Expand, lower provenance, and compact final XML",
     color: "Plain diagnostics, ready for CI",
