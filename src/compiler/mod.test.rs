@@ -81,17 +81,17 @@ fn scalar_body_cannot_carry_xml_nodes() {
     assert!(error.message.contains("non-text"));
 }
 #[test]
-fn namespace_bindings_survive_module_and_macro_removal() {
+fn output_erases_namespaces_after_macro_resolution() {
     let result=compile(r#"<xs:macro name="m:f"><u:item xmlns:u="urn:child"/></xs:macro><r xmlns="urn:root"><xs:call ref="m:f"/></r>"#).unwrap();
     let doc = roxmltree::Document::parse(&result.output).unwrap();
-    assert_eq!(doc.root_element().tag_name().namespace(), Some("urn:root"));
+    assert_eq!(doc.root_element().tag_name().namespace(), None);
     assert_eq!(
         doc.root_element()
             .first_element_child()
             .unwrap()
             .tag_name()
             .namespace(),
-        Some("urn:child")
+        None
     );
 }
 #[test]

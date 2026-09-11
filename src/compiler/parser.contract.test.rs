@@ -81,5 +81,5 @@ fn builtin_prefix_is_only_a_lexical_alias() {
         .compile(Path::new("main.xml"), source, |_| unreachable!())
         .unwrap();
     assert_eq!(text(&result.output), "main.xml");
-    assert!(result.output.contains("urn:user"));
+    assert!(!result.output.contains("urn:user"));
 }

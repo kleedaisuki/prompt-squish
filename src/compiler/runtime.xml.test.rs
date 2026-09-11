@@ -45,7 +45,7 @@ fn scalar_argument_rejects_comment_and_pi_nodes() {
 }
 
 #[test]
-fn fill_retains_its_namespace_when_inserted_below_another_default() {
+fn fill_output_erases_both_caller_and_callee_namespaces() {
     let result = compile(r#"<xs:macro name="m:panel"><panel xmlns="urn:panel"><xs:slot name="body"/></panel></xs:macro><root><xs:call ref="m:panel"><xs:fill name="body"><item/></xs:fill></xs:call></root>"#).unwrap();
     let parsed = roxmltree::Document::parse(&result.output).unwrap();
     let item = parsed
@@ -53,10 +53,7 @@ fn fill_retains_its_namespace_when_inserted_below_another_default() {
         .find(|node| node.has_tag_name("item"))
         .unwrap();
     assert_eq!(item.tag_name().namespace().unwrap_or_default(), "");
-    assert_eq!(
-        item.parent_element().unwrap().tag_name().namespace(),
-        Some("urn:panel")
-    );
+    assert_eq!(item.parent_element().unwrap().tag_name().namespace(), None);
 }
 
 #[test]
@@ -90,15 +87,30 @@ fn xml_invalid_entry_argument_fails_instead_of_emitting_invalid_output() {
 }
 
 #[test]
-fn module_namespace_bindings_survive_removing_the_declaration_container() {
+fn final_output_strips_namespaced_attributes_and_prefixes() {
     let result = compile(
         r#"<n:root xmlns:n="urn:node" xmlns:a="urn:attr" a:key="value"><n:child/></n:root>"#,
     )
     .unwrap();
     let parsed = roxmltree::Document::parse(&result.output).unwrap();
-    assert!(parsed.root_element().has_tag_name(("urn:node", "root")));
+    assert!(parsed.root_element().has_tag_name("root"));
+    assert_eq!(parsed.root_element().attribute(("urn:attr", "key")), None);
+}
+
+/// All ordinary metadata is removed, but the IR remains inspectable.
+/// 普通元数据全部移除，中间表示仍可检查。
+#[test]
+fn all_attributes_are_removed_without_reinterpreting_text() {
+    let result = compile(r#"<n:root xmlns:n="urn:node" id="discard" xml:space="preserve" xml:lang="en"><child title="&gt; &quot;"/><n:child> a="b" &amp; &lt;x id="v"/&gt; </n:child></n:root>"#).unwrap();
     assert_eq!(
-        parsed.root_element().attribute(("urn:attr", "key")),
-        Some("value")
+        result.output,
+        r#"<root><child></child><child> a="b" &amp; &lt;x id="v"/&gt; </child></root>"#
     );
+    let doc = roxmltree::Document::parse(&result.output).unwrap();
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        assert_eq!(node.attributes().len(), 0);
+        assert_eq!(node.tag_name().namespace(), None);
+    }
+    assert!(result.intermediate.contains("discard"));
+    assert!(result.intermediate.contains("urn:node"));
 }

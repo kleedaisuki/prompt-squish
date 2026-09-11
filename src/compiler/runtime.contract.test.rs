@@ -119,10 +119,10 @@ fn final_document_requires_exactly_one_element_root() {
 }
 
 #[test]
-fn user_namespaces_comments_and_processing_instructions_survive_lowering() {
+fn lowering_erases_namespaces_but_preserves_comments_and_processing_instructions() {
     let result =
         compile(r#"<?user keep?><u:R xmlns:u="urn:user" u:a="v"><!--keep--><u:C/></u:R>"#).unwrap();
-    assert!(result.output.contains("urn:user"));
+    assert!(!result.output.contains("urn:user"));
     assert!(result.output.contains("<?user keep?>"));
     assert!(result.output.contains("<!--keep-->"));
     assert!(!result.output.contains("xs:module"));

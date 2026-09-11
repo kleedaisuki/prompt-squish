@@ -613,7 +613,7 @@ frozen SourceUnits + SymbolTable
   ↓ expansion
 *.i.xml
   ↓ lowering / cleanup
-clean semantic XML
+attribute-free XML with local element names
   ↓ final product whitespace compression
 *.o.xml
 ```
@@ -645,14 +645,20 @@ clean semantic XML
 
 ### 11.3 Lowering 与 `*.o.xml`
 
-从 `*.i.xml` lowering 为干净的语义 XML 时必须：
+从 `*.i.xml` 降低（lowering）为最终提示词 XML 时必须：
 
-- 移除所有 xmlsquish 控制节点与内部属性；
+- 移除所有 xmlsquish 控制节点；
+- 移除**所有属性**，包括普通用户属性、内部属性、`xml:*` 属性，以及默认和带前缀的命名空间声明（namespace declaration）；
 - 移除 debug/provenance/file-frame metadata；
-- 保留用户 XML namespace、节点顺序和文本语义；
+- 元素名仅保留局部名（local name），移除前缀，不得产生未绑定的前缀；不同命名空间下的同名元素在产品输出中不再区分；
+- 保留节点顺序，且在最终空白压缩前保留文本内容；
 - 验证最终结果是格式良好的 XML 文档。
 
-**产品阶段说明：** 宏求值与 lowering 保留文本语义；随后最终产品阶段仍执行空白压缩，生成 `*.o.xml`。空白压缩是固定产品行为，不属于标量求值或 XML 结构展开，不得提前应用到参数 body、capture 或 fill。它可能改变混合内容中的空白，因此最终 `.o.xml` 不承诺 XML 文本语义等价；用户应仅在这些空白属于排版噪声时使用产品压缩。
+属性不属于最终提示词的产品语义，没有启用或保留属性的输出选项。此规则不禁用源码中 DSL 指令的 `name`、`ref`、`src`、`get` 等属性；它们仍用于编译和展开。源码命名空间仍用于解析符号，中间表示仍保留来源与诊断信息；这些信息不得泄漏到 `*.o.xml`。
+
+例如，`<p:task xmlns:p="urn:example" role="user" xml:space="preserve">Explain.</p:task>` 的最终输出为 `<task> Explain. </task>`。
+
+**产品阶段说明：** 最终产品阶段必须继续压缩空白，生成 `*.o.xml`；提示词中的空白按无意义的格式字符串处理，这是固定产品语义，不得关闭或因 `xml:space` 等属性而改变。空白压缩不属于标量求值或 XML 结构展开，不得提前应用到参数 body、capture 或 fill。最终输出有意丢弃属性、命名空间身份和格式空白，不承诺与输入 XML 的通用数据语义等价。
 
 `--debug` 与 `--explain` 表示同一诊断能力：它们可以保留或展示中间 provenance 和完整 frame chain，但不得改变正常 `.o.xml` 的语义输出。
 

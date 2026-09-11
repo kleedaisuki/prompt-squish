@@ -25,9 +25,9 @@ xmlsquish examples/site-demo/agent.xml
 xmlsquish --debug --max-depth 128 --max-expansions 10000 --max-output-bytes 1048576 examples/semantic/prompt.xml
 ```
 
-`--arg NAME=VALUE` 可重复，为入口模块提供字符串参数。`-I` 生成带来源信息（provenance）的 `.i.xml`；默认 `-O` 生成干净的 `.o.xml`。`--debug` 与 `--explain` 等价，保留诊断信息但不改变最终 XML 语义。编译与 lowering 保留文本语义；**最终产品阶段继续压缩空白**，因此 `.o.xml` 不保证混合内容的文本语义等价。仅用于确认空白属于排版噪声的提示词。输入文件不覆盖，失败不得提交部分成功输出。
+`--arg NAME=VALUE` 可重复，为入口模块提供字符串参数。`-I` 生成带来源信息（provenance）的 `.i.xml`；默认 `-O` 生成干净的 `.o.xml`。**最终 `.o.xml` 移除所有属性与命名空间声明（namespace declaration），元素仅保留局部名（local name），并继续压缩空白。** 属性不属于提示词产品语义；空白是无意义的格式字符串。这些行为不能通过输出选项或 `xml:space` 改变。`--debug` 与 `--explain` 等价，保留中间诊断信息但不改变最终产品行为。源码中的 DSL 指令属性仍用于编译和展开，标量求值仍保留字符串内容；最终提示词输出不承诺通用 XML 数据语义等价。输入文件不覆盖，失败不得提交部分成功输出。
 
-Repeat `--arg NAME=VALUE` for entry parameters. `-I` writes provenance-bearing `.i.xml`; default `-O` writes clean `.o.xml`. `--debug` and `--explain` are aliases and do not change final XML semantics. Compilation and lowering preserve text semantics; **the final product pass squishes whitespace**, so `.o.xml` is not guaranteed to preserve mixed-content meaning. Use it only when that whitespace is layout noise. Sources are never overwritten and failed expansion must not publish partial output.
+Repeat `--arg NAME=VALUE` for entry parameters. `-I` writes provenance-bearing `.i.xml`; default `-O` writes clean `.o.xml`. **Final `.o.xml` removes every attribute and namespace declaration, uses local element names, and squishes whitespace.** Attributes are not prompt product semantics; whitespace is formatting noise. Neither output options nor `xml:space` can override these rules. `--debug` and `--explain` are aliases that retain intermediate diagnostics without changing final product behavior. Source DSL directive attributes still drive compilation and expansion, and scalar evaluation still preserves string contents; final prompt output does not promise general XML data equivalence. Sources are never overwritten and failed expansion must not publish partial output.
 
 路径可为文件、目录或引号括起的 glob。无路径时显示帮助；生成的 `.i.xml` / `.o.xml` 不再作为输入。`--color auto|always|never` 控制终端颜色。独立文件可继续处理，但任一失败使退出码非零。具体选项以 `xmlsquish --help` 为准。
 
@@ -48,9 +48,9 @@ Paths accept files, directories, or quoted globs. No paths prints help. Generate
 xmlsquish --arg name=Klee hello.xml
 ```
 
-`insert` 产生转义后的文本，绝不把字符串重新解释为 XML。普通文本和属性没有 `$` 插值。
+`insert` 产生转义后的文本，绝不把字符串重新解释为 XML。普通文本和属性没有 `$` 插值；普通属性不会进入 `.o.xml`。
 
-`insert` emits escaped text, never reparsed markup. Ordinary text and attributes have no `$` interpolation.
+`insert` emits escaped text, never reparsed markup. Ordinary text and attributes have no `$` interpolation; ordinary attributes never reach `.o.xml`.
 
 ## 语言地图 / Language map
 

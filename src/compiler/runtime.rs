@@ -13,6 +13,32 @@ struct Token<'a> {
     loc: &'a Loc,
     frame: usize,
     kind: &'static str,
+    /// Source-qualified element name, only for opening/closing events.
+    /// 仅起止元素事件携带源码限定名称，最终输出只使用本地名称。
+    element: Option<&'a str>,
+}
+impl Token<'_> {
+    /// Product bytes, excluding attributes retained only by the diagnostic IR.
+    /// 产品字节数，不计仅供诊断 IR 保留的属性。
+    fn output_len(&self) -> usize {
+        self.element.map_or(self.xml.len(), |name| {
+            name.rsplit(':').next().unwrap().len() + 2 + usize::from(self.kind == "end")
+        })
+    }
+    /// Lower structured events without attributes or namespace declarations.
+    /// 从结构化事件降级，移除全部属性与命名空间声明；不重解析文本。
+    fn lower(&self, output: &mut String) {
+        let Some(name) = self.element else {
+            output.push_str(&self.xml);
+            return;
+        };
+        output.push('<');
+        if self.kind == "end" {
+            output.push('/');
+        }
+        output.push_str(name.rsplit(':').next().unwrap());
+        output.push('>');
+    }
 }
 /// A live lexical scope; captures do not cross calls. / 活跃词法作用域，捕获不跨调用。
 #[derive(Clone)]
@@ -143,7 +169,7 @@ impl<'a> Machine<'a> {
         loc: &Loc,
         frame: usize,
     ) -> Result<(), CompileError> {
-        let bytes = self.buffers[&out].bytes.checked_add(token.xml.len());
+        let bytes = self.buffers[&out].bytes.checked_add(token.output_len());
         if bytes.is_none_or(|b| b > self.options.max_output_bytes) {
             return Err(self.fail(loc, frame, "Expansion: max-output-bytes exceeded"));
         }
@@ -343,6 +369,10 @@ impl<'a> Machine<'a> {
                 loc: &node.loc,
                 frame: env.frame,
                 kind,
+                element: match &node.kind {
+                    Kind::Element { name, .. } => Some(name),
+                    _ => None,
+                },
             },
         )
     }
@@ -359,6 +389,7 @@ impl<'a> Machine<'a> {
                         loc: &node.loc,
                         frame: env.frame,
                         kind: "end",
+                        element: Some(name),
                     },
                 )?,
                 Task::Arg(mut call, index) => {
@@ -508,7 +539,10 @@ pub(super) fn expand(
     );
     machine.run()?;
     let tokens = &machine.buffers[&0].tokens;
-    let output: String = tokens.iter().map(|token| token.xml.as_ref()).collect();
+    let mut output = String::new();
+    for token in tokens {
+        token.lower(&mut output);
+    }
     roxmltree::Document::parse(&output).map_err(|error| {
         machine.fail(
             &root.loc,
