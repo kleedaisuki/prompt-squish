@@ -210,6 +210,46 @@ test("without JavaScript, all recorded sources and outputs remain readable", asy
   await page.close();
 });
 
+/** Namespace identity and release resources are part of the published contract.
+ * 命名空间身份与发布资源属于网站发布契约，不依赖客户端脚本。 */
+for (const path of ["/ns/", "/releases/"]) {
+  for (const width of [390, 1440]) {
+    test(path + ": canonical metadata and readable reference at " + width, async () => {
+      const page = await browser.newPage({ viewport: { width, height: 1000 }, javaScriptEnabled: false });
+      const errors = [];
+      page.on("pageerror", error => errors.push(error.message));
+      const response = await page.goto(base + path, { waitUntil: "networkidle" });
+      assert.equal(response.status(), 200);
+      assert.equal(await page.locator("main h1").count(), 1);
+      assert.equal(await page.locator('link[rel="canonical"]').getAttribute("href"),
+        "https://xmlsquish.moesegfault.dev" + (path === "/ns/" ? "/ns" : path));
+      assert(await page.locator("main").innerText().then(text => text.includes("0.2.0")));
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+      if (path === "/ns/") {
+        assert.equal(await page.locator("tbody tr").count(), 11);
+        assert.equal(await page.locator('link[rel="describedby"]').getAttribute("href"), "/ns/0.2.0/dsl.md");
+        assert((await page.locator(".identity code").textContent()).endsWith("/ns"));
+      } else {
+        assert(await page.locator("main").innerText().then(text => text.includes("--tag v0.2.0 --locked")));
+      }
+      if (process.env.UI_SCREENSHOT_DIR) {
+        await mkdir(process.env.UI_SCREENSHOT_DIR, { recursive: true });
+        await page.screenshot({ path: join(process.env.UI_SCREENSHOT_DIR, path.replaceAll("/", "") + "-" + width + ".png"), fullPage: true });
+      }
+      assert.deepEqual(errors, []);
+      await page.close();
+    });
+  }
+}
+
+test("published namespace specification is a byte-exact 0.2.0 snapshot", async () => {
+  const published = await readFile(join(root, "ns/0.2.0/dsl.md"), "utf8");
+  const source = await readFile(new URL("../../../docs/dsl.md", import.meta.url), "utf8");
+  assert.equal(published, source);
+  assert(published.includes("https://xmlsquish.moesegfault.dev/ns"));
+});
+
+
 test("theme controls work with blocked storage and reduced motion", async () => {
   const page = await browser.newPage({ reducedMotion: "reduce" });
   const errors = [];

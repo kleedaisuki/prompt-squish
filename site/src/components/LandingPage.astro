@@ -47,6 +47,8 @@ const stages = [
       <a href="#build">{m.nav.build}</a>
       <a href="#model">{m.nav.model}</a>
       <a href="#cli">{m.nav.cli}</a>
+      <a href="/releases/">v0.2.0</a>
+      <a href="/ns">XML namespace</a>
     </nav>
     <div class="header-actions">
       <a class="language-link" href={languageHref} lang={locale === "zh-CN" ? "en" : "zh-CN"} hreflang={locale === "zh-CN" ? "en" : "zh-CN"}>{m.nav.language}</a>
@@ -59,7 +61,7 @@ const stages = [
 <main id="main">
   <section class="hero page-width" aria-labelledby="hero-title">
     <div class="hero-copy">
-      <p class="eyebrow"><span class="spark" aria-hidden="true">✦</span> {m.hero.badge}</p>
+      <p class="eyebrow"><span class="spark" aria-hidden="true">✦</span> {m.hero.badge} · <a href="/releases/">v0.2.0</a></p>
       <h1 id="hero-title">{m.hero.title}<em>{m.hero.accent}</em></h1>
       <p class="hero-lead">{m.hero.lead}</p>
       <div class="hero-actions">
