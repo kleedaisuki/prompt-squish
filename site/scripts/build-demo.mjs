@@ -123,6 +123,9 @@ async function scenario(temporary, mode) {
   assert(output.includes("Explain the trade-offs."));
   assert(!output.includes("\n"), "Final product compacts XML whitespace");
   assert(!output.includes("<xs:") && !output.includes("<?xmlsquish"));
+  // Final element tags have only local names, never attributes or prefixes.
+  // 最终元素标签只含本地名称，不携带属性或前缀。
+  assert.equal(output, `<prompt> <Persona> <audience> ${audience} </audience> <voice> clear &amp; kind </voice> </Persona> <task> Explain the trade-offs. </task> </prompt>`);
   assert.notEqual(intermediate, output, "IR must retain provenance absent from output");
   assert(intermediate.includes("file:///examples/site-demo/persona.xml"));
   assert(intermediate.includes("frame="), "IR must retain invocation identity");

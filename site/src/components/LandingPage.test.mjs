@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { before, after, test } from "node:test";
 import { createServer } from "node:http";
+import { createHash } from "node:crypto";
 import { access, mkdir, readFile, stat } from "node:fs/promises";
 import { dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -288,8 +289,10 @@ for (const locale of ["zh-CN", "en"]) {
 
 test("published namespace specification is a byte-exact 0.2.0 snapshot", async () => {
   const published = await readFile(join(root, "ns/0.2.0/dsl.md"), "utf8");
-  const source = await readFile(new URL("../../../docs/dsl.md", import.meta.url), "utf8");
-  assert.equal(published, source);
+  // Pin the release snapshot, not the evolving working specification.
+  // 固定已发布快照，不与持续演进的工作规范比较。
+  assert.equal(createHash("sha256").update(published.replaceAll("\r\n", "\n")).digest("hex"),
+    "2a53e352223e393e3669c5e5ef47328bee459a3a6bbfd45b1b88ce2e73015fad");
   assert(published.includes("https://xmlsquish.moesegfault.dev/ns"));
 });
 
