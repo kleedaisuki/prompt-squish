@@ -7,3 +7,8 @@ license.workspace = true
 repository.workspace = true
 description = "IR linking domain for prompt-squish"
 
+[dependencies]
+regex = "1.12"
+squish-ir = { path = "../squish-ir" }
+squish-protocol = { path = "../squish-protocol" }
+squish-source = { path = "../squish-source" }

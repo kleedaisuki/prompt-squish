@@ -7,3 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "XML frontend for prompt-squish"
 
+[dependencies]
+regex = "=1.13.1"
+roxmltree = "=0.18.1"
+stacker = "0.1"
+squish-ir = { path = "../squish-ir" }
+squish-protocol = { path = "../squish-protocol" }
+squish-source = { path = "../squish-source" }

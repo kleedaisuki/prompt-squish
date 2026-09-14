@@ -7,3 +7,6 @@ license.workspace = true
 repository.workspace = true
 description = "Backend contracts for prompt-squish"
 
+[dependencies]
+squish-ir = { path = "../squish-ir" }
+squish-protocol = { path = "../squish-protocol" }
