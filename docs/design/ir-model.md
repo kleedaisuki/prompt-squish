@@ -16,7 +16,8 @@ exact XML bytes
   `-- XML front end
         -> RelocatableUnitIR (module or entry object)
         -> link(entry, resolved module closure)
-        -> LinkedImage + LinkTrace
+        -> non-executable LinkedImage metadata + LinkTrace
+        -> reconstruct session-only LinkedProgram from semantic unit blobs
         -> evaluate(arguments, budgets)
         -> LinkedDocumentIR + ExpansionTrace
         -> Backend
@@ -32,7 +33,7 @@ The architecture has four representation boundaries:
 | `LinkTrace` + `ExpansionTrace` | Explain resolution and dynamic execution | Import resolutions, symbol bindings, definition/call sites, every invocation frame, parentage, output-origin mappings, and diagnostics | Affect successful product bytes |
 | `LinkedDocumentIR` | Backend-independent result of linking and expansion | Ordered document structure and data after every DSL control operation has executed, with references into the trace | Contain unresolved symbols, macro operations, or XML serialization policy |
 
-`LinkedImage` is the executable result of linking. It is an internal companion to the link trace, not a fifth source representation: it contains direct portable definition references and the entry region needed by the evaluator. `LinkedDocumentIR` is the only normal backend input.
+`LinkedImage` is the persistable, non-executable metadata result of linking. It is an internal companion to the link trace, not a fifth source representation: it contains direct portable definition references and the entry region, but no unit bodies or process-local indexes. A session reconstructs the executable `LinkedProgram` from the image and its referenced semantic unit blobs. `LinkedProgram` is never serialized, and `LinkedDocumentIR` is the only normal backend input.
 
 This separation is mandatory. In particular:
 
@@ -150,7 +151,7 @@ The following identities are different and must never be substituted for one ano
 | `SemanticUnitDigest` | `D_unit(canonical semantic section)` | Identifies executable unit meaning under a declared IR ABI |
 | `DebugDigest` | `D_debug(canonical source/debug sections)` | Identifies exact source attachments and mappings |
 | `ObjectDigest` | `D_object(complete canonical container)` | Content-addressed storage key for a complete object |
-| `LinkedImageDigest` | `D_linked(canonical linked-image section)` | Identifies the resolved executable program |
+| `LinkedImageDigest` | `D_linked(canonical linked-image section)` | Identifies the metadata needed to reconstruct the resolved executable program |
 | `DocumentDigest` | `D_document(canonical LinkedDocumentIR)` | Identifies backend-independent expanded content |
 | `ArtifactDigest` | `D_artifact(product bytes)` | Identifies a final `*.prompt` byte sequence |
 
@@ -502,6 +503,10 @@ link(LinkRequest, ObjectStore)
     -> (LinkedImage, LinkTrace)
 ```
 
+Both results are portable metadata. Linking does not serialize an executable
+session object; evaluation first reconstructs a `LinkedProgram` from the image
+and the referenced semantic unit blobs.
+
 `ResolutionSnapshot` is supplied by the manager and contains both a canonical `SourceKey -> UnitRevision` map and import-edge bindings:
 
 ```text
@@ -574,6 +579,8 @@ LinkedImage {
 ```
 
 The relocation table is the portable equivalent of patched calls. An evaluator resolves a call operation through this verified table or an equivalent decoded index; it never repeats QName lookup during execution.
+
+`LinkedImage` is deliberately non-executable metadata. Its addresses and region references become usable only after `LinkedProgram` reconstruction has loaded and validated every referenced semantic unit blob and built any session-local indexes. `StaticLinkMap` and `LinkedImage` may be persisted; `LinkedProgram` may be memoized only within a process session and has no wire encoding or CAS identity.
 
 Each complete unit object publishes its canonical semantic section as a separately addressable `SemanticUnitBlob` under `SemanticUnitDigest`. `LinkedImage.units` includes the entry and all modules, so every `LinkedRegionRef` closes over an explicit semantic blob without choosing among multiple full objects that share semantics but carry different debug attachments. A portable export bundle includes the image and its transitive semantic blobs; a database build record additionally points to the exact full objects used for provenance. Missing referenced semantic blobs are storage corruption, not an unresolved language symbol.
 
@@ -1201,7 +1208,7 @@ The present compiler contains several good semantic invariants but its in-memory
 | The XML `intermediate()` view records frames and surviving tokens only | Keep it as an optional diagnostic renderer, not authoritative IR; it lacks discarded data, scalar/capture lineage, and post-squish byte mappings |
 | Runtime output-byte budgeting measures XML serialization | Replace it with backend-neutral expansion budgets plus backend emission budgets |
 
-An effective transition adapter may first lower current `Node/Kind/Value/MacroDef/Entry` values into pure owned live Core IR. `Rc`, `OnceCell`, compiled regex state, native paths, and output serialization remain outside the portable schema. The current `Program` then corresponds to `LinkedImage`, and `Token` evolves into backend-neutral document events plus trace references.
+An effective transition adapter may first lower current `Node/Kind/Value/MacroDef/Entry` values into pure owned live Core IR. `Rc`, `OnceCell`, compiled regex state, native paths, and output serialization remain outside the portable schema. The current `Program` then corresponds to the session-only `LinkedProgram` reconstructed from `LinkedImage`, and `Token` evolves into backend-neutral document events plus trace references.
 
 ## 16. Rejected alternatives
 
@@ -1246,12 +1253,13 @@ The implementation is conforming only if all of these remain true:
 4. An entry is an explicit link root, never a synthetic macro.
 5. Source cycles terminate by interning; call cycles remain runtime recursion.
 6. Linking validates the complete closure and produces order-independent symbol resolution.
-7. Every dynamic call creates a distinct frame with a complete parent/call/definition chain.
-8. The document IR contains all user document information and no DSL control operation.
-9. Backend loss is explicit in a versioned backend contract, never hidden in frontend lowering.
-10. The squish backend emits `*.prompt`; provenance remains available through the build record.
-11. Cache identity is computed from canonical specified bytes, not an incidental serializer.
-12. Semantic and debug digests are separate, but every field is classified by observability rather than convenience.
-13. Unknown semantic constructs are rejected, not ignored.
-14. Physical paths, timestamps, scheduler order, terminal color, and database row IDs cannot affect semantic identity.
-15. Cached and uncached execution are observationally equivalent under the same declared inputs.
+7. `StaticLinkMap` and non-executable `LinkedImage` metadata are persistable; the executable `LinkedProgram` is reconstructed for a session and never serialized.
+8. Every dynamic call creates a distinct frame with a complete parent/call/definition chain.
+9. The document IR contains all user document information and no DSL control operation.
+10. Backend loss is explicit in a versioned backend contract, never hidden in frontend lowering.
+11. The squish backend emits `*.prompt`; provenance remains available through the build record.
+12. Cache identity is computed from canonical specified bytes, not an incidental serializer.
+13. Semantic and debug digests are separate, but every field is classified by observability rather than convenience.
+14. Unknown semantic constructs are rejected, not ignored.
+15. Physical paths, timestamps, scheduler order, terminal color, and database row IDs cannot affect semantic identity.
+16. Cached and uncached execution are observationally equivalent under the same declared inputs.

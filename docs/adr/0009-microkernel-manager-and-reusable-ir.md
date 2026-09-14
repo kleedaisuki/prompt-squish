@@ -7,6 +7,17 @@
 - Preserves: [ADR 0007](0007-unified-macro-expansion.md) and the DSL primitives
   and semantics it defines
 
+## Reconciliation note
+
+This revision removes two accidental competing specifications from the original
+ADR. The detailed schemas and canonical container layout in
+[`docs/design/ir-model.md`](../design/ir-model.md) are the single normative IR
+format contract; this ADR defines architectural boundaries and lifetimes rather
+than restating wire fields. It also distinguishes persistable linkage metadata
+(`StaticLinkMap` and the non-executable `LinkedImage`) from the reconstructed,
+session-only executable `LinkedProgram`. The change aligns the decision record
+with the implemented types and does not change ADR 0007 language semantics.
+
 ## Context
 
 `xmlsquish` is being repositioned from a command-line compiler into the single
@@ -42,9 +53,9 @@ budgets remain the semantic contract.
    acyclic crate dependency graph. A context owns its invariants and cannot
    reach through another context's adapter or storage layout.
 3. The compilation model has four explicit representation domains: lossless
-   XML CST, relocatable `ModuleIR`, linkage/execution evidence
-   (`StaticLinkMap` plus `ExpansionTrace`), and backend-neutral
-   `LinkedDocumentIR`.
+   XML CST, relocatable `ModuleIR`, linkage/execution evidence (persistable
+   `StaticLinkMap` plus non-executable `LinkedImage` metadata, and per-run
+   `ExpansionTrace`), and backend-neutral `LinkedDocumentIR`.
 4. `ModuleIR` is a deterministic, versioned binary container. It retains all
    semantic, source, symbol, relocation, span, line-map, and debug information;
    it is not a dump of Rust structs.
@@ -225,7 +236,7 @@ question and has a different identity.
 | --- | --- | --- | --- |
 | Lossless XML CST | What exact source bytes and trivia did the author write? | tokens, trivia, entities, comments, CDATA, PI data, namespace spelling, byte ranges | editor/format action |
 | Relocatable `ModuleIR` | What does this source module declare and execute before imports are bound? | typed operations, symbols, unresolved imports, relocations, source/debug tables, dialect/features | reusable across builds |
-| Linkage/execution evidence | How was a module graph bound, and how did one entry invocation produce occurrences? | persistent `StaticLinkMap` with bindings/relocations; per-run `ExpansionTrace` with frames, spans, captures, counters and emitted ranges | link cache plus one instantiation/debug bundle |
+| Linkage/execution evidence | How was a module graph bound, and how did one entry invocation produce occurrences? | persistent `StaticLinkMap` with bindings/relocations; non-executable `LinkedImage` metadata closing over semantic units; per-run `ExpansionTrace` with frames, spans, captures, counters and emitted ranges | link cache plus one instantiation/debug bundle |
 | `LinkedDocumentIR` | What ordered backend-neutral document did evaluation produce? | elements, expanded names, attributes, text and structural events, provenance handles | one backend invocation |
 
 The lossless CST is not serialized as `ModuleIR` and `ModuleIR` cannot be used
@@ -236,28 +247,34 @@ module declarations or substitutes for a module. `LinkedDocumentIR` contains
 no XML serialization choices: prefixes, escaping, whitespace squishing, and
 final byte encoding are backend responsibilities.
 
-Across these schemas, provenance is an acyclic `Origin` graph with the closed
-node vocabulary `SourceSpan`, `Expansion`, `Import`, `Fused`, `Synthetic`, and
-`Unknown`. A module may contain only its unit-static subset; the static link map
-adds cross-module import/binding origins; the trace adds dynamic expansion
-origins; and document nodes reference the resulting origin IDs. `Unknown` is an
-explicit decoded fact for permitted information absence, never a fallback used
-to avoid recording provenance that is available.
+Complete provenance uses an acyclic `OriginNode` graph with the closed node
+vocabulary `SourceSpan`, `DecodedSegment`, `ExternalArgument`, `Expansion`,
+`Import`, `RegexCapture`, `Concat`, `BackendTransform`, `Fused`, `Synthetic`,
+and `Unknown`. Relocatable units instead carry unit-static `Origin` attachments
+and decoded-value segment maps. `LinkTrace` supplies cross-object import and
+symbol evidence; `ExpansionTrace` and backend mapping construct the occurrence
+graph, whose nodes are referenced by document and artifact mappings. `Unknown`
+is an explicit decoded fact for permitted information absence, never a fallback
+used to avoid recording provenance that is available.
 
 The semantic path is:
 
 ```text
 SourceEnvelope --XML frontend--> ModuleIR
-ModuleIR closure --relocate/verify--> StaticLinkMap
-ModuleIR closure + StaticLinkMap --reconstruct--> session-only LinkedProgram
+ModuleIR closure --relocate/verify--> StaticLinkMap + LinkedImage metadata
+ModuleIR closure + LinkedImage --reconstruct--> session-only LinkedProgram
 LinkedProgram + entry + args --instantiate--> LinkedDocumentIR + ExpansionTrace
 LinkedDocumentIR --squish backend--> *.prompt
 ```
 
-`LinkedProgram` is a session-only view reconstructed from `ModuleIR` plus
-`StaticLinkMap`. It may be memoized in process but is never a CAS artifact and
-is not a fifth public interchange representation. `K_link` names the persistent
-`StaticLinkMap`, not a serialized runtime object.
+`StaticLinkMap` and `LinkedImage` are persistable. `LinkedImage` contains only
+verified linkage metadata: entry and unit identities, definition addresses,
+feature/ABI information, and the static map. It contains no unit bodies or
+process-local indexes and is therefore not executable by itself. `LinkedProgram`
+is the session-only executable view reconstructed from `LinkedImage` plus the
+referenced semantic unit blobs. It may be memoized in process but is never a CAS
+artifact or a fifth public interchange representation. `K_link` identifies the
+persistent linkage result, never a serialized `LinkedProgram`.
 
 ## Relocatable Module IR
 
@@ -280,11 +297,10 @@ Every module retains:
 - complete source envelope(s), including exact bytes and digest, byte spans,
   line starts, lexical-to-semantic mappings, and provenance needed to
   reconstruct diagnostics;
-- a unit-static origin DAG. Its nodes are explicitly typed as `SourceSpan`,
-  `Import`, `Fused`, `Synthetic`, or `Unknown`, so lowering can combine origins
-  without inventing one misleading source location. `Expansion` nodes and
-  dynamic call/capture facts exist only in `ExpansionTrace`; cross-module
-  relocation facts exist only in `StaticLinkMap`;
+- unit-static `Origin` attachments for semantic entities plus decoded-value
+  segment maps. The full `OriginNode` DAG is built by trace/backend stages;
+  dynamic call/capture facts do not appear in relocatable units, and
+  cross-module relocation facts live in `StaticLinkMap`;
 - validation summaries and limits that affect interpretation; and
 - deterministic table order or explicit canonicalization rules.
 
@@ -295,47 +311,13 @@ for optional companions, never mutation of authoritative cached IR.
 
 ### Wire container and codec
 
-The `.xsir` storage container is specified independently from Rust data
-layouts. It begins with a fixed header:
-
-```text
-magic | container-schema | fixed-little-endian marker | dialect
-semantic-epoch | required-features | producer-metadata-offset
-section-directory-offset | container-checksum
-```
-
-The section directory gives typed section identifiers, schema revisions,
-offsets, lengths, alignment, compression codec, and per-section checksums.
-Required sections include identities, strings, symbols, operations,
-imports/relocations, sources/spans/line maps, and validation metadata. Unknown
-required features or sections are rejected with a typed diagnostic; unknown
-optional sections are preserved by inspection/copy tools where feasible and
-may be ignored only when their declared capability does not affect the
-requested link/backend semantics. Frontend and backend remain crate-independent,
-but interoperability is constrained explicitly by IR dialect and capability
-negotiation; the IR is not claimed to be a universal document language. All
-integer widths, byte order, normalization,
-sorting, and hash algorithms are named by the specification.
-
-All multi-byte numeric fields are little-endian; decoders do not accept a
-host-native alternative. `semantic-epoch` changes whenever compiler behavior
-that can affect meaning changes and participates in the relevant action key.
-Producer name/version/build metadata is diagnostic and reproducibility context
-in a separate section; it does not invalidate semantically identical artifacts
-merely because a build timestamp or revision label changed.
-
-Encoding the same logical module under the same codec/schema produces exactly
-the same bytes on Linux, macOS, and Windows. Rust enum discriminants, `usize`,
-`PathBuf`, map iteration order, struct padding, and implementation-specific
-serializer defaults never enter the wire format. Decoding is bounded, validates
-offsets before allocation, verifies checksums and typed references, and either
-returns a fully valid module or no module.
-
-Container schema, DSL dialect, feature set, semantic epoch, and producer
-metadata are independent dimensions. Schema migration is an explicit decode/upgrade
-operation. A newer compiler may read an older supported schema, but it never
-lies by relabeling incompatible bytes. `xmlsquish inspect` exposes a stable
-machine-readable view without asking tools to query cache internals.
+The sole normative container layout, primitive encoding, section
+classification, digest projection, and evolution rules are specified by
+[Core IR and Linking Model, § 10](../design/ir-model.md#10-canonical-binary-serialization).
+Implementations must use that exact layout rather than infer a second format
+from this ADR. The architectural requirements remain: portable canonical bytes,
+bounded all-or-nothing decoding, typed-reference validation, explicit
+compatibility checks, and no dependence on Rust or host-native layout.
 
 ## Project, workspace, resolution, and lock state
 
@@ -610,7 +592,8 @@ of it.
 ## CAS and SQLite state store
 
 The content-addressed store holds immutable source snapshots, dependency
-archives, `.xsir` containers, `StaticLinkMap` and `LinkedDocumentIR` artifacts where profitable,
+archives, `.xsir` containers, persistable `StaticLinkMap` and non-executable
+`LinkedImage` metadata, `LinkedDocumentIR` artifacts where profitable,
 backend products awaiting publication, and `.psdbg` components. A blob key is
 `algorithm:digest(bytes)`. Writes use a temporary file, streaming digest and
 length verification, durable close, and atomic placement. Concurrent insertion
@@ -647,9 +630,10 @@ may appear in logical source identity or canonical product bytes.
 
 Linking resolves imports and relocations against the frozen project/source
 snapshot, validates definitions and signatures over the complete closure, and
-persists a canonical `StaticLinkMap`. A session reconstructs its immutable
-`LinkedProgram` view from that map and the referenced modules; the view itself
-is not serialized. Instantiation evaluates ADR 0007 semantics
+persists a canonical `StaticLinkMap` plus non-executable `LinkedImage` metadata.
+A session reconstructs its immutable `LinkedProgram` view from that image and
+the referenced semantic unit blobs; the view itself is not serialized.
+Instantiation evaluates ADR 0007 semantics
 with isolated immutable inputs and explicit depth, expansion, and output
 budgets. It always produces `LinkedDocumentIR` and a complete occurrence-level
 `ExpansionTrace`; the trace is part of the action result and is retained in the
@@ -790,8 +774,10 @@ silently reported as wholly complete.
    information required for relocation, diagnostics, inspection, and future
    backends.
 7. **Representation separation.** CST edits source; `ModuleIR` represents a
-   unit; `StaticLinkMap` records binding; `ExpansionTrace` explains an
-   instantiation; `LinkedDocumentIR` feeds a backend. None impersonates another.
+   unit; `StaticLinkMap` records binding; non-executable `LinkedImage` metadata
+   closes the persistent link result; session-only `LinkedProgram` executes;
+   `ExpansionTrace` explains an instantiation; and `LinkedDocumentIR` feeds a
+   backend. None impersonates another.
 8. **Frontend/backend independence.** XML is the first frontend and squish the
    first backend. They have no direct dependency, but compatibility is checked
    through explicit IR dialects and capabilities rather than assumed universal.
@@ -991,7 +977,7 @@ Implementation of this accepted decision is complete only when evidence demonstr
   digest it names; and origin edges are acyclic and type-valid;
 - final prompt byte-range mappings are sorted, non-overlapping within each
   declared mapping layer, and cover every byte. Each leaf resolves to a valid
-  source/expansion chain or to `Synthetic { transform, parent_origins }`; an
+  source/expansion chain or to `Synthetic { reason, nearest }`; an
   `Unknown` leaf is accepted only where the schema explicitly permits and the
   producer proves that no stronger origin was available;
 - cold and warm builds produce byte-identical `*.prompt` and `.psdbg` results;
