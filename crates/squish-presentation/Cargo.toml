@@ -7,3 +7,8 @@ license.workspace = true
 repository.workspace = true
 description = "Terminal and machine-readable presentation domain for prompt-squish"
 
+[dependencies]
+serde_json = "1.0"
+squish-protocol = { path = "../squish-protocol" }
+unicode-segmentation = "1.12"
+unicode-width = "0.2"

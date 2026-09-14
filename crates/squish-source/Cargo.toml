@@ -7,3 +7,6 @@ license.workspace = true
 repository.workspace = true
 description = "Source identity and loading domain for prompt-squish"
 
+[dependencies]
+blake3 = "1.8"
+squish-protocol = { path = "../squish-protocol" }

@@ -7,3 +7,6 @@ license.workspace = true
 repository.workspace = true
 description = "Build planning and scheduling domain for prompt-squish"
 
+[dependencies]
+blake3 = "1.8"
+squish-protocol = { path = "../squish-protocol" }
