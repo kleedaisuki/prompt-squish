@@ -34,13 +34,13 @@ jobs:
           cargo +1.88.0 clippy --version
 
       - name: Check minimum supported Rust version
-        run: cargo +1.88.0 check --all-targets --locked
+        run: cargo +1.88.0 check --workspace --all-targets --locked
 
       - name: Check formatting
         run: cargo +1.88.0 fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo +1.88.0 clippy --all-targets --all-features --locked -- -D warnings
+        run: cargo +1.88.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   rust-test:
     name: Rust test (${{ matrix.name }}, MSRV 1.88)
@@ -69,10 +69,10 @@ jobs:
           cargo +1.88.0 --version
 
       - name: Build all targets
-        run: cargo +1.88.0 build --all-targets --all-features --locked
+        run: cargo +1.88.0 build --workspace --all-targets --all-features --locked
 
       - name: Run tests
-        run: cargo +1.88.0 test --all-features --locked
+        run: cargo +1.88.0 test --workspace --all-features --locked
 
   site:
     name: Site
