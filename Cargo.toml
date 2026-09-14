@@ -11,6 +11,10 @@ description = "Compile namespace-aware XML macros with explicit parameters and s
 # 仅发布 Rust 源码、语言测试样例和必要文档，不包含站点资产。
 include = ["/src/**", "/examples/**", "/docs/dsl.md", "/docs/releases/**", "/CHANGELOG.md", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
 
+[workspace]
+members = ["crates/squish-kernel", "crates/squish-protocol"]
+resolver = "3"
+
 [[test]]
 name = "diagnostics"
 path = "src/cli/diagnostics.integration.test.rs"
