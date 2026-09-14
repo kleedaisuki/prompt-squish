@@ -1,167 +1,138 @@
-//! prompt-squish 的领域无关微内核。 / Domain-neutral microkernel for prompt-squish.
-//!
-//! 能力通过一个显式静态切片注册。内核不发现动态插件，也不持有全局服务定位器；
-//! 每次调用所需的取消和事件通道都由 [`InvocationContext`] 明确传入。
-//! Capabilities are registered through one explicit static slice. The kernel
-//! neither discovers dynamic plugins nor owns a global service locator; each
-//! invocation receives cancellation and event channels through [`InvocationContext`].
+//! prompt-squish 的领域无关静态微内核。 / Domain-neutral static microkernel for prompt-squish.
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
+use squish_protocol::{
+    ActionId, ActionTotals, CapabilityId, Event, EventPayload, ExitStatus, InvocationId, JobId,
+    JobSummary, OperationKind, OperationRequest, Timing,
+};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{HashMap, HashSet},
     fmt,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::Instant,
 };
-
-use squish_protocol::{
-    CapabilityId, Diagnostic, DiagnosticId, Event, EventPayload, ExitStatus, InvocationId, Phase,
-    Severity,
-};
-
-/// 传给能力的领域无关命令。 / Domain-neutral command passed to a capability.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Command {
-    name: String,
-    arguments: BTreeMap<String, serde_json::Value>,
-}
-
-impl Command {
-    /// 构造具有稳定名称及结构化参数的命令。 / Creates a command with a stable name and structured arguments.
-    pub fn new(
-        name: impl Into<String>,
-        arguments: BTreeMap<String, serde_json::Value>,
-    ) -> Result<Self, InvalidCommand> {
-        let name = name.into();
-        if name.is_empty() {
-            return Err(InvalidCommand);
-        }
-        Ok(Self { name, arguments })
-    }
-
-    /// 返回稳定命令名称。 / Returns the stable command name.
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// 返回只读结构化参数。 / Returns the read-only structured arguments.
-    pub fn arguments(&self) -> &BTreeMap<String, serde_json::Value> {
-        &self.arguments
-    }
-}
-
-/// 命令名称为空。 / A command name was empty.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct InvalidCommand;
-
-impl fmt::Display for InvalidCommand {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("command name must not be empty")
-    }
-}
-
-impl std::error::Error for InvalidCommand {}
 
 /// 静态能力的可展示元数据。 / Display metadata for a static capability.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CapabilityDescriptor {
     /// 跨版本稳定的能力 ID。 / Capability ID stable across versions.
     pub id: &'static str,
-    /// 此能力处理的唯一命令名。 / Unique command name handled by this capability.
-    pub command: &'static str,
+    /// 此能力处理的类型化操作。 / Typed operations handled by this capability.
+    pub operations: &'static [OperationKind],
     /// 面向用户的一行说明。 / One-line user-facing summary.
     pub summary: &'static str,
 }
 
-/// 能力执行失败；内核会把它转换成诊断和失败状态。 / Capability failure converted by the kernel into a diagnostic and failed status.
+/// 能力对一次完整作业的声明结果。 / Capability-declared result for one complete job.
+///
+/// 内核会与实际事件归约结果逐项核对，因此能力不能自行选择退出码。
+/// The kernel compares every field with reduced events, so capabilities cannot
+/// choose their own exit code.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CapabilityFailure {
-    /// 稳定诊断代码。 / Stable diagnostic code.
-    pub code: String,
-    /// 面向用户的错误说明。 / User-facing error message.
-    pub message: String,
+pub struct OperationOutcome {
+    /// 作业 ID。 / Job ID.
+    pub job: JobId,
+    /// 所有动作的终态计数。 / Terminal counts for every action.
+    pub totals: ActionTotals,
+    /// 自身执行失败（非阻塞）的根失败数。 / Root execution failures, excluding blocked actions.
+    pub root_failures: u64,
+    /// 调用是否被取消。 / Whether the invocation was cancelled.
+    pub cancelled: bool,
 }
 
-impl CapabilityFailure {
-    /// 创建可被统一调度器报告的失败。 / Creates a failure reportable by the unified dispatcher.
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-        }
-    }
-}
-
-/// 编译期链接、启动时显式注册的领域能力。 / Domain capability linked at compile time and explicitly registered at startup.
+/// 编译期链接且启动时显式注册的能力。 / Capability linked at compile time and registered explicitly at startup.
 pub trait Capability: Sync {
-    /// 返回静态能力描述。 / Returns the static capability descriptor.
+    /// 返回静态描述。 / Returns the static descriptor.
     fn descriptor(&self) -> &'static CapabilityDescriptor;
-
-    /// 执行命令；长任务应周期性检查 `context.is_cancelled()`。 / Executes a command; long tasks should periodically check `context.is_cancelled()`.
+    /// 执行类型化操作并返回可验证结果。 / Executes a typed operation and returns a verifiable outcome.
     fn execute(
         &self,
-        command: &Command,
+        operation: &OperationRequest,
         context: &InvocationContext,
-    ) -> Result<ExitStatus, CapabilityFailure>;
+    ) -> OperationOutcome;
 }
 
-/// 线程安全的事件目的地。 / Thread-safe destination for invocation events.
+/// 线程安全事件目的地。 / Thread-safe event destination.
 pub trait EventSink: Send + Sync {
-    /// 按收到顺序保存或展示事件。 / Stores or presents an event in receive order.
+    /// 保存或展示事件。 / Stores or presents an event.
     fn emit(&self, event: Event) -> Result<(), SinkError>;
 }
 
-/// 事件目的地拒绝了事件。 / An event destination rejected an event.
+/// 事件目的地拒绝事件。 / Event destination rejected an event.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SinkError {
-    message: String,
-}
-
+pub struct SinkError(String);
 impl SinkError {
-    /// 创建保留底层原因的事件错误。 / Creates an event error preserving its underlying reason.
+    /// 保留底层错误说明。 / Preserves the underlying error message.
     pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
+        Self(message.into())
     }
 }
-
 impl fmt::Display for SinkError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.message.fmt(formatter)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }
-
 impl std::error::Error for SinkError {}
 
 /// 可克隆的协作式取消句柄。 / Cloneable cooperative cancellation handle.
 #[derive(Clone, Debug, Default)]
 pub struct CancellationToken(Arc<AtomicBool>);
-
 impl CancellationToken {
-    /// 请求取消；此操作是幂等的。 / Requests cancellation; this operation is idempotent.
+    /// 幂等地请求取消。 / Idempotently requests cancellation.
     pub fn cancel(&self) {
         self.0.store(true, Ordering::Release);
     }
-
-    /// 返回调用者是否已请求取消。 / Returns whether cancellation was requested.
+    /// 返回是否已请求取消。 / Returns whether cancellation was requested.
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
 }
 
-/// 单次命令调用的所有横切依赖。 / All cross-cutting dependencies for one command invocation.
+/// 非法动作生命周期。 / Invalid action lifecycle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LifecycleError(String);
+impl fmt::Display for LifecycleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl std::error::Error for LifecycleError {}
+
+/// 发布事件失败。 / Event publication failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EmitError {
+    /// 生命周期转换无效。 / Lifecycle transition was invalid.
+    Lifecycle(LifecycleError),
+    /// 下游目的地失败。 / Downstream sink failed.
+    Sink(SinkError),
+}
+impl fmt::Display for EmitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Lifecycle(e) => write!(f, "invalid lifecycle: {e}"),
+            Self::Sink(e) => write!(f, "event sink failed: {e}"),
+        }
+    }
+}
+impl std::error::Error for EmitError {}
+
+/// 单次操作的所有横切依赖。 / All cross-cutting dependencies for one operation.
 #[derive(Clone)]
 pub struct InvocationContext {
     id: InvocationId,
     cancellation: CancellationToken,
     events: Arc<dyn EventSink>,
-    sequence: Arc<Mutex<u64>>,
+    sequence: Arc<AtomicU64>,
+    delivery: Arc<Mutex<()>>,
+    lifecycle: Arc<Mutex<Lifecycle>>,
+    emission_failure: Arc<Mutex<Option<EmitError>>>,
 }
-
 impl InvocationContext {
-    /// 创建不依赖全局状态的调用上下文。 / Creates an invocation context independent of global state.
+    /// 创建无全局状态的调用上下文。 / Creates an invocation context without global state.
     pub fn new(
         id: InvocationId,
         cancellation: CancellationToken,
@@ -171,392 +142,699 @@ impl InvocationContext {
             id,
             cancellation,
             events,
-            sequence: Arc::new(Mutex::new(0)),
+            sequence: Arc::new(AtomicU64::new(0)),
+            delivery: Arc::new(Mutex::new(())),
+            lifecycle: Arc::new(Mutex::new(Lifecycle::default())),
+            emission_failure: Arc::new(Mutex::new(None)),
         }
     }
-
-    /// 返回本次调用的稳定 ID。 / Returns the stable ID of this invocation.
+    /// 返回调用 ID。 / Returns the invocation ID.
     pub fn id(&self) -> &InvocationId {
         &self.id
     }
-
-    /// 返回调用者是否请求取消。 / Returns whether the caller requested cancellation.
+    /// 返回是否取消。 / Returns whether cancellation was requested.
     pub fn is_cancelled(&self) -> bool {
         self.cancellation.is_cancelled()
     }
-
-    /// 返回用于向子任务传播取消的句柄。 / Returns a handle for propagating cancellation to child tasks.
+    /// 返回可传播的取消句柄。 / Returns a propagatable cancellation handle.
     pub fn cancellation(&self) -> CancellationToken {
         self.cancellation.clone()
     }
-
-    /// 发布负载并自动分配调用内序号。 / Publishes a payload and assigns its invocation-local sequence.
-    pub fn emit(&self, payload: EventPayload) -> Result<(), SinkError> {
-        let mut sequence = self
-            .sequence
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let next = sequence
-            .checked_add(1)
-            .ok_or_else(|| SinkError::new("invocation event sequence exhausted"))?;
-        self.events
-            .emit(Event::new(self.id.clone(), *sequence, payload))?;
-        *sequence = next;
-        Ok(())
-    }
-}
-
-/// 静态注册表构造或调度错误。 / Static registry construction or dispatch error.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum KernelError {
-    /// 两项能力声明了相同能力 ID。 / Two capabilities declared the same capability ID.
-    DuplicateCapability(String),
-    /// 两项能力声明了相同命令。 / Two capabilities declared the same command.
-    DuplicateCommand(String),
-    /// 能力描述包含空 ID 或命令。 / A capability descriptor contains an empty ID or command.
-    InvalidDescriptor,
-    /// 没有能力处理给定命令。 / No capability handles the requested command.
-    UnknownCommand(String),
-    /// 事件无法送达前端。 / An event could not be delivered to the frontend.
-    EventSink(SinkError),
-}
-
-impl fmt::Display for KernelError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::DuplicateCapability(id) => write!(formatter, "duplicate capability `{id}`"),
-            Self::DuplicateCommand(command) => write!(formatter, "duplicate command `{command}`"),
-            Self::InvalidDescriptor => {
-                formatter.write_str("capability id and command must not be empty")
+    /// 发布动作事件并验证状态转换。 / Publishes an action event after validating its transition.
+    ///
+    /// 一个独立交付门保证 sink 按序收到事件；生命周期锁与序号操作均在调用可能阻塞的
+    /// sink 前完成且不被持有。`JobFinished.sequence` 同时给出此前事件的准确数量。
+    /// A separate delivery gate guarantees ordered sink calls; neither the lifecycle
+    /// lock nor sequence operation is held while calling the potentially blocking sink.
+    /// `JobFinished.sequence` also gives the exact count of preceding events.
+    pub fn emit(&self, payload: EventPayload) -> Result<(), EmitError> {
+        let _delivery = lock(&self.delivery);
+        let sequence = {
+            let mut lifecycle = lock(&self.lifecycle);
+            if let Err(error) = lifecycle.observe(&payload).map_err(EmitError::Lifecycle) {
+                drop(lifecycle);
+                self.remember(error.clone());
+                return Err(error);
             }
-            Self::UnknownCommand(command) => write!(formatter, "unknown command `{command}`"),
-            Self::EventSink(error) => write!(formatter, "event sink failed: {error}"),
+            self.sequence.fetch_add(1, Ordering::Relaxed)
+        };
+        self.deliver(sequence, payload)
+    }
+    fn publish(&self, payload: EventPayload) -> Result<(), EmitError> {
+        let _delivery = lock(&self.delivery);
+        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
+        self.deliver(sequence, payload)
+    }
+    fn deliver(&self, sequence: u64, payload: EventPayload) -> Result<(), EmitError> {
+        let result = self
+            .events
+            .emit(Event::new(self.id.clone(), sequence, payload))
+            .map_err(EmitError::Sink);
+        if let Err(error) = &result {
+            self.remember(error.clone());
+        }
+        result
+    }
+    fn remember(&self, error: EmitError) {
+        let mut slot = lock(&self.emission_failure);
+        if slot.is_none() {
+            *slot = Some(error);
         }
     }
 }
 
-impl std::error::Error for KernelError {}
-
-impl From<SinkError> for KernelError {
-    fn from(value: SinkError) -> Self {
-        Self::EventSink(value)
+/// 注册或调度错误。 / Registration or dispatch error.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum KernelError {
+    /// 能力 ID 重复。 / Duplicate capability ID.
+    DuplicateCapability(String),
+    /// 操作处理器重复。 / Duplicate operation handler.
+    DuplicateOperation(OperationKind),
+    /// 描述含空 ID 或零操作。 / Descriptor has an empty ID or no operations.
+    InvalidDescriptor,
+    /// 没有处理器。 / No handler exists.
+    UnsupportedOperation(OperationKind),
+    /// 能力产生无效/未闭合生命周期。 / Capability produced invalid or unclosed lifecycle.
+    Lifecycle(LifecycleError),
+    /// 事件发布失败。 / Event publication failed.
+    Emit(EmitError),
+}
+impl fmt::Display for KernelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateCapability(id) => write!(f, "duplicate capability `{id}`"),
+            Self::DuplicateOperation(kind) => write!(f, "duplicate handler for `{kind:?}`"),
+            Self::InvalidDescriptor => {
+                f.write_str("capability id and operations must not be empty")
+            }
+            Self::UnsupportedOperation(kind) => write!(f, "unsupported operation `{kind:?}`"),
+            Self::Lifecycle(error) => write!(f, "invalid lifecycle: {error}"),
+            Self::Emit(error) => error.fmt(f),
+        }
     }
 }
+impl std::error::Error for KernelError {}
 
-/// 已完成调度的结构化结果。 / Structured result of a completed dispatch.
+/// 已完成调度的结构化结果。 / Structured completed-dispatch result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DispatchOutcome {
-    /// 处理命令的能力。 / Capability that handled the command.
+    /// 处理能力。 / Handling capability.
     pub capability: CapabilityId,
-    /// 终止状态。 / Terminal status.
-    pub status: ExitStatus,
+    /// 内核归约的作业摘要。 / Kernel-reduced job summary.
+    pub summary: JobSummary,
 }
 
-/// 对编译期能力切片的已验证视图。 / Validated view over a compile-time capability slice.
-///
-/// # 示例 / Example
-///
-/// ```
-/// use std::{collections::BTreeMap, sync::Arc};
-/// use squish_kernel::{
-///     CancellationToken, Capability, CapabilityDescriptor, CapabilityFailure, Command,
-///     EventSink, InvocationContext, Kernel, SinkError,
-/// };
-/// use squish_protocol::{Event, ExitStatus, InvocationId};
-///
-/// struct Build;
-/// static BUILD: Build = Build;
-/// static DESCRIPTION: CapabilityDescriptor = CapabilityDescriptor {
-///     id: "build",
-///     command: "build",
-///     summary: "build a project",
-/// };
-///
-/// impl Capability for Build {
-///     fn descriptor(&self) -> &'static CapabilityDescriptor { &DESCRIPTION }
-///     fn execute(
-///         &self,
-///         _command: &Command,
-///         _context: &InvocationContext,
-///     ) -> Result<ExitStatus, CapabilityFailure> {
-///         Ok(ExitStatus::Success)
-///     }
-/// }
-///
-/// struct IgnoreEvents;
-/// impl EventSink for IgnoreEvents {
-///     fn emit(&self, _event: Event) -> Result<(), SinkError> { Ok(()) }
-/// }
-///
-/// let capabilities: &[&dyn Capability] = &[&BUILD];
-/// let kernel = Kernel::new(capabilities)?;
-/// let context = InvocationContext::new(
-///     InvocationId::new("example")?,
-///     CancellationToken::default(),
-///     Arc::new(IgnoreEvents),
-/// );
-/// let outcome = kernel.dispatch(&Command::new("build", BTreeMap::new())?, &context)?;
-/// assert_eq!(outcome.status, ExitStatus::Success);
-/// # Ok::<(), Box<dyn std::error::Error>>(())
-/// ```
+/// 显式静态能力注册表。 / Explicit static capability registry.
 pub struct Kernel<'a> {
     capabilities: &'a [&'a dyn Capability],
 }
-
 impl<'a> Kernel<'a> {
-    /// 验证并创建显式静态注册表。 / Validates and creates an explicit static registry.
+    /// 验证静态注册表。 / Validates the static registry.
     pub fn new(capabilities: &'a [&'a dyn Capability]) -> Result<Self, KernelError> {
         validate(capabilities)?;
         Ok(Self { capabilities })
     }
-
-    /// 返回静态注册的能力，供帮助和补全界面使用。 / Returns statically registered capabilities for help and completion UIs.
+    /// 返回描述，用于帮助和补全。 / Returns descriptors for help and completion.
     pub fn capabilities(
         &self,
     ) -> impl ExactSizeIterator<Item = &'static CapabilityDescriptor> + '_ {
-        self.capabilities.iter().map(|item| item.descriptor())
+        self.capabilities.iter().map(|c| c.descriptor())
     }
-
-    /// 查找能力并通过统一生命周期执行命令。 / Finds a capability and executes a command through the unified lifecycle.
+    /// 执行类型化操作，验证事件闭合并统一归约退出状态。 / Executes a typed operation, validates lifecycle closure, and centrally reduces exit status.
     pub fn dispatch(
         &self,
-        command: &Command,
+        operation: &OperationRequest,
         context: &InvocationContext,
     ) -> Result<DispatchOutcome, KernelError> {
-        let capability = self.find(command.name())?;
-        let id = CapabilityId::new(capability.descriptor().id)
-            .expect("validated capability ID must remain non-empty");
-        context.emit(EventPayload::CommandStarted {
-            capability: id.clone(),
-            command: command.name().to_owned(),
-        })?;
-        let status = self.execute(capability, command, context)?;
-        context.emit(EventPayload::CommandFinished { status })?;
-        Ok(DispatchOutcome {
-            capability: id,
+        let capability = self.find(operation.kind())?;
+        let started = Instant::now();
+        let outcome = capability.execute(operation, context);
+        if let Some(error) = lock(&context.emission_failure).clone() {
+            return Err(KernelError::Emit(error));
+        }
+        let reduction = lock(&context.lifecycle)
+            .finish(&outcome, context.is_cancelled())
+            .map_err(KernelError::Lifecycle)?;
+        let status = if outcome.cancelled {
+            ExitStatus::Cancelled
+        } else if reduction.totals.failed > 0 {
+            ExitStatus::Failed
+        } else {
+            ExitStatus::Success
+        };
+        let summary = JobSummary {
+            job: outcome.job,
+            totals: reduction.totals,
+            root_failures: reduction.root_failures,
+            cache_hits: reduction.cache_hits,
+            timing: Timing {
+                elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            },
             status,
+        };
+        context
+            .publish(EventPayload::JobFinished(summary.clone()))
+            .map_err(KernelError::Emit)?;
+        Ok(DispatchOutcome {
+            capability: CapabilityId::new(capability.descriptor().id).expect("validated ID"),
+            summary,
         })
     }
-
-    fn find(&self, command: &str) -> Result<&'a dyn Capability, KernelError> {
+    fn find(&self, kind: OperationKind) -> Result<&'a dyn Capability, KernelError> {
         self.capabilities
             .iter()
             .copied()
-            .find(|item| item.descriptor().command == command)
-            .ok_or_else(|| KernelError::UnknownCommand(command.to_owned()))
-    }
-
-    fn execute(
-        &self,
-        capability: &dyn Capability,
-        command: &Command,
-        context: &InvocationContext,
-    ) -> Result<ExitStatus, KernelError> {
-        if context.is_cancelled() {
-            return Ok(ExitStatus::Cancelled);
-        }
-        match capability.execute(command, context) {
-            Ok(status) => Ok(status),
-            Err(failure) => {
-                emit_failure(context, failure)?;
-                Ok(ExitStatus::Failed)
-            }
-        }
+            .find(|c| c.descriptor().operations.contains(&kind))
+            .ok_or(KernelError::UnsupportedOperation(kind))
     }
 }
 
 fn validate(capabilities: &[&dyn Capability]) -> Result<(), KernelError> {
-    let mut ids = HashSet::with_capacity(capabilities.len());
-    let mut commands = HashSet::with_capacity(capabilities.len());
+    let mut ids = HashSet::new();
+    let mut operations = HashSet::new();
     for capability in capabilities {
-        let descriptor = capability.descriptor();
-        if descriptor.id.is_empty() || descriptor.command.is_empty() {
+        let d = capability.descriptor();
+        if d.id.is_empty() || d.operations.is_empty() {
             return Err(KernelError::InvalidDescriptor);
         }
-        if !ids.insert(descriptor.id) {
-            return Err(KernelError::DuplicateCapability(descriptor.id.to_owned()));
+        if !ids.insert(d.id) {
+            return Err(KernelError::DuplicateCapability(d.id.to_owned()));
         }
-        if !commands.insert(descriptor.command) {
-            return Err(KernelError::DuplicateCommand(descriptor.command.to_owned()));
+        for kind in d.operations {
+            if !operations.insert(*kind) {
+                return Err(KernelError::DuplicateOperation(*kind));
+            }
         }
     }
     Ok(())
 }
 
-fn emit_failure(
-    context: &InvocationContext,
-    failure: CapabilityFailure,
-) -> Result<(), KernelError> {
-    let diagnostic = Diagnostic {
-        id: DiagnosticId::new(format!("{}:{}", context.id(), failure.code))
-            .expect("invocation and diagnostic code produce a non-empty ID"),
-        code: failure.code,
-        severity: Severity::Error,
-        phase: Phase::Orchestrate,
-        message: failure.message,
-        primary: None,
-        related: Vec::new(),
-        help: None,
-    };
-    context.emit(EventPayload::Diagnostic(diagnostic))?;
-    Ok(())
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActionState {
+    Queued,
+    Started,
+    Succeeded,
+    Failed,
+    Blocked,
+    Cancelled,
+}
+impl ActionState {
+    fn terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Blocked | Self::Cancelled
+        )
+    }
+}
+#[derive(Clone, Debug)]
+struct ActionRecord {
+    dependencies: Vec<ActionId>,
+    state: ActionState,
+    cache_hit: bool,
+}
+#[derive(Default)]
+struct Lifecycle {
+    job: Option<JobId>,
+    planned: Option<u64>,
+    actions: HashMap<ActionId, ActionRecord>,
+    cache_hits: u64,
+}
+struct Reduction {
+    totals: ActionTotals,
+    root_failures: u64,
+    cache_hits: u64,
+}
+impl Lifecycle {
+    fn observe(&mut self, event: &EventPayload) -> Result<(), LifecycleError> {
+        match event {
+            EventPayload::PlanReady { job, actions } => self.plan(job, *actions),
+            EventPayload::ActionQueued {
+                job,
+                action,
+                dependencies,
+                ..
+            } => self.queue(job, action, dependencies),
+            EventPayload::ActionStarted { job, action } => {
+                self.transition(job, action, &[ActionState::Queued], ActionState::Started)
+            }
+            EventPayload::CacheHit { job, action, .. } => {
+                self.cache(job, action)?;
+                self.cache_hits += 1;
+                Ok(())
+            }
+            EventPayload::ActionSucceeded { job, action, .. } => {
+                self.transition(job, action, &[ActionState::Started], ActionState::Succeeded)
+            }
+            EventPayload::ActionFailed { job, action, .. } => {
+                self.transition(job, action, &[ActionState::Started], ActionState::Failed)
+            }
+            EventPayload::ActionBlocked {
+                job,
+                action,
+                blocked_by,
+            } => self.block(job, action, blocked_by),
+            EventPayload::ActionCancelled { job, action, .. } => self.transition(
+                job,
+                action,
+                &[ActionState::Queued, ActionState::Started],
+                ActionState::Cancelled,
+            ),
+            EventPayload::Diagnostic(_) => Ok(()),
+            EventPayload::JobFinished(_) => {
+                Err(LifecycleError("only the kernel may finish a job".into()))
+            }
+            _ => Err(LifecycleError(
+                "kernel does not understand this additive lifecycle event".into(),
+            )),
+        }
+    }
+    fn plan(&mut self, job: &JobId, actions: u64) -> Result<(), LifecycleError> {
+        if self.job.is_some() {
+            return Err(LifecycleError("plan-ready emitted more than once".into()));
+        }
+        self.job = Some(job.clone());
+        self.planned = Some(actions);
+        Ok(())
+    }
+    fn queue(
+        &mut self,
+        job: &JobId,
+        action: &ActionId,
+        dependencies: &[ActionId],
+    ) -> Result<(), LifecycleError> {
+        self.same_job(job)?;
+        let mut unique = HashSet::new();
+        for dependency in dependencies {
+            if dependency == action
+                || !unique.insert(dependency)
+                || !self.actions.contains_key(dependency)
+            {
+                return Err(LifecycleError(format!(
+                    "action `{action}` has invalid dependency `{dependency}`"
+                )));
+            }
+        }
+        if self
+            .actions
+            .insert(
+                action.clone(),
+                ActionRecord {
+                    dependencies: dependencies.to_vec(),
+                    state: ActionState::Queued,
+                    cache_hit: false,
+                },
+            )
+            .is_some()
+        {
+            return Err(LifecycleError(format!(
+                "action `{action}` queued more than once"
+            )));
+        }
+        Ok(())
+    }
+    fn transition(
+        &mut self,
+        job: &JobId,
+        action: &ActionId,
+        from: &[ActionState],
+        to: ActionState,
+    ) -> Result<(), LifecycleError> {
+        self.require(job, action, from)?;
+        self.actions.get_mut(action).expect("required action").state = to;
+        Ok(())
+    }
+    fn cache(&mut self, job: &JobId, action: &ActionId) -> Result<(), LifecycleError> {
+        self.require(job, action, &[ActionState::Started])?;
+        let record = self.actions.get_mut(action).expect("required action");
+        if record.cache_hit {
+            return Err(LifecycleError(format!(
+                "action `{action}` reported more than one cache hit"
+            )));
+        }
+        record.cache_hit = true;
+        Ok(())
+    }
+    fn block(
+        &mut self,
+        job: &JobId,
+        action: &ActionId,
+        blocked_by: &[ActionId],
+    ) -> Result<(), LifecycleError> {
+        if blocked_by.is_empty() {
+            return Err(LifecycleError(format!(
+                "blocked action `{action}` has no blocking predecessor"
+            )));
+        }
+        let dependencies = &self
+            .actions
+            .get(action)
+            .ok_or_else(|| LifecycleError(format!("action `{action}` was not queued")))?
+            .dependencies;
+        for predecessor in blocked_by {
+            if !dependencies.contains(predecessor) {
+                return Err(LifecycleError(format!(
+                    "action `{action}` was blocked by non-dependency `{predecessor}`"
+                )));
+            }
+            self.require(
+                job,
+                predecessor,
+                &[ActionState::Failed, ActionState::Blocked],
+            )?;
+        }
+        self.transition(job, action, &[ActionState::Queued], ActionState::Blocked)
+    }
+    fn require(
+        &self,
+        job: &JobId,
+        action: &ActionId,
+        states: &[ActionState],
+    ) -> Result<(), LifecycleError> {
+        self.same_job(job)?;
+        let record = self
+            .actions
+            .get(action)
+            .ok_or_else(|| LifecycleError(format!("action `{action}` was not queued")))?;
+        if states.contains(&record.state) {
+            Ok(())
+        } else {
+            Err(LifecycleError(format!(
+                "invalid transition for action `{action}` from {:?}",
+                record.state
+            )))
+        }
+    }
+    fn same_job(&self, job: &JobId) -> Result<(), LifecycleError> {
+        match &self.job {
+            Some(expected) if expected == job => Ok(()),
+            Some(expected) => Err(LifecycleError(format!(
+                "event job `{job}` differs from plan `{expected}`"
+            ))),
+            None => Err(LifecycleError("action event preceded plan-ready".into())),
+        }
+    }
+    fn finish(
+        &self,
+        outcome: &OperationOutcome,
+        cancellation_requested: bool,
+    ) -> Result<Reduction, LifecycleError> {
+        self.same_job(&outcome.job)?;
+        let planned = self.planned.expect("job implies planned count");
+        if planned != self.actions.len() as u64 {
+            return Err(LifecycleError(format!(
+                "plan declared {planned} actions but {} were queued",
+                self.actions.len()
+            )));
+        }
+        if self.actions.values().any(|r| !r.state.terminal()) {
+            return Err(LifecycleError("job ended with non-terminal actions".into()));
+        }
+        let mut totals = ActionTotals::default();
+        let mut root_failures = 0;
+        for record in self.actions.values() {
+            match record.state {
+                ActionState::Succeeded => totals.succeeded += 1,
+                ActionState::Failed => {
+                    totals.failed += 1;
+                    root_failures += 1;
+                }
+                ActionState::Blocked => totals.blocked += 1,
+                ActionState::Cancelled => totals.cancelled += 1,
+                ActionState::Queued | ActionState::Started => unreachable!(),
+            }
+        }
+        let cancelled = totals.cancelled > 0 || cancellation_requested;
+        if totals != outcome.totals
+            || root_failures != outcome.root_failures
+            || cancelled != outcome.cancelled
+        {
+            return Err(LifecycleError(
+                "declared outcome disagrees with reduced events".into(),
+            ));
+        }
+        Ok(Reduction {
+            totals,
+            root_failures,
+            cache_hits: self.cache_hits,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
-
-    static ECHO_DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
-        id: "test.echo",
-        command: "echo",
-        summary: "echo test command",
+    use squish_protocol::{
+        ActionKind, BuildRequest, Diagnostic, DiagnosticId, EmitKind, LockMode, Phase, ProfileName,
+        ProjectPath, Severity, WorkspaceScope,
     };
-
-    struct Echo;
-
-    impl Capability for Echo {
+    use std::sync::Mutex;
+    static DESC: CapabilityDescriptor = CapabilityDescriptor {
+        id: "build",
+        operations: &[OperationKind::Build],
+        summary: "build",
+    };
+    struct Build;
+    impl Capability for Build {
         fn descriptor(&self) -> &'static CapabilityDescriptor {
-            &ECHO_DESCRIPTOR
+            &DESC
         }
-
-        fn execute(
-            &self,
-            _command: &Command,
-            _context: &InvocationContext,
-        ) -> Result<ExitStatus, CapabilityFailure> {
-            Ok(ExitStatus::Success)
+        fn execute(&self, _: &OperationRequest, context: &InvocationContext) -> OperationOutcome {
+            let job = JobId::new("job").unwrap();
+            let action = ActionId::new("root").unwrap();
+            context
+                .emit(EventPayload::PlanReady {
+                    job: job.clone(),
+                    actions: 1,
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::ActionQueued {
+                    job: job.clone(),
+                    action: action.clone(),
+                    kind: ActionKind::Compile,
+                    dependencies: vec![],
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::ActionStarted {
+                    job: job.clone(),
+                    action: action.clone(),
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::ActionSucceeded {
+                    job: job.clone(),
+                    action,
+                    timing: Timing::default(),
+                    artifacts: vec![],
+                })
+                .unwrap();
+            OperationOutcome {
+                job,
+                totals: ActionTotals {
+                    succeeded: 1,
+                    ..ActionTotals::default()
+                },
+                root_failures: 0,
+                cancelled: false,
+            }
         }
     }
-
-    static FAIL_DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
-        id: "test.fail",
-        command: "fail",
-        summary: "fail test command",
-    };
-
-    struct Fail;
-
-    impl Capability for Fail {
-        fn descriptor(&self) -> &'static CapabilityDescriptor {
-            &FAIL_DESCRIPTOR
-        }
-
-        fn execute(
-            &self,
-            _command: &Command,
-            _context: &InvocationContext,
-        ) -> Result<ExitStatus, CapabilityFailure> {
-            Err(CapabilityFailure::new("test_failure", "expected failure"))
-        }
-    }
-
     #[derive(Default)]
-    struct RecordingSink(Mutex<Vec<Event>>);
-
-    impl EventSink for RecordingSink {
+    struct Sink(Mutex<Vec<Event>>);
+    impl EventSink for Sink {
         fn emit(&self, event: Event) -> Result<(), SinkError> {
-            self.0.lock().unwrap().push(event);
+            lock(&self.0).push(event);
             Ok(())
         }
     }
-
-    fn context(sink: Arc<RecordingSink>, cancellation: CancellationToken) -> InvocationContext {
-        InvocationContext::new(InvocationId::new("test-run").unwrap(), cancellation, sink)
+    fn operation() -> OperationRequest {
+        OperationRequest::Build(BuildRequest {
+            project: ProjectPath::new(".").unwrap(),
+            scope: WorkspaceScope::Current,
+            targets: vec![],
+            profile: ProfileName::new("dev").unwrap(),
+            arguments: Default::default(),
+            emit: vec![EmitKind::Prompt],
+            lock: LockMode::Update,
+        })
     }
-
     #[test]
-    fn dispatch_emits_ordered_lifecycle() {
-        static ECHO: Echo = Echo;
-        let sink = Arc::new(RecordingSink::default());
-        let capabilities: &[&dyn Capability] = &[&ECHO];
-        let kernel = Kernel::new(capabilities).unwrap();
-        let outcome = kernel
-            .dispatch(
-                &Command::new("echo", BTreeMap::new()).unwrap(),
-                &context(sink.clone(), CancellationToken::default()),
-            )
-            .unwrap();
-
-        assert_eq!(outcome.status, ExitStatus::Success);
-        let events = sink.0.lock().unwrap();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].sequence, 0);
-        assert_eq!(events[1].sequence, 1);
-    }
-
-    #[test]
-    fn cancellation_skips_capability_but_finishes_lifecycle() {
-        static ECHO: Echo = Echo;
-        let cancellation = CancellationToken::default();
-        cancellation.cancel();
-        let sink = Arc::new(RecordingSink::default());
-        let capabilities: &[&dyn Capability] = &[&ECHO];
+    fn dispatch_reduces_success_and_finishes() {
+        static BUILD: Build = Build;
+        let capabilities: &[&dyn Capability] = &[&BUILD];
+        let sink = Arc::new(Sink::default());
+        let context = InvocationContext::new(
+            InvocationId::new("i").unwrap(),
+            CancellationToken::default(),
+            sink.clone(),
+        );
         let outcome = Kernel::new(capabilities)
             .unwrap()
-            .dispatch(
-                &Command::new("echo", BTreeMap::new()).unwrap(),
-                &context(sink.clone(), cancellation),
-            )
+            .dispatch(&operation(), &context)
             .unwrap();
-
-        assert_eq!(outcome.status, ExitStatus::Cancelled);
+        assert_eq!(outcome.summary.status, ExitStatus::Success);
         assert!(matches!(
-            sink.0.lock().unwrap()[1].payload,
-            EventPayload::CommandFinished {
-                status: ExitStatus::Cancelled
-            }
+            lock(&sink.0).last().unwrap().payload,
+            EventPayload::JobFinished(_)
         ));
     }
-
-    #[test]
-    fn registry_rejects_duplicate_commands() {
-        static ECHO: Echo = Echo;
-        let capabilities: &[&dyn Capability] = &[&ECHO, &ECHO];
-        let error = Kernel::new(capabilities).err().unwrap();
-        assert!(matches!(error, KernelError::DuplicateCapability(_)));
+    struct Liar;
+    impl Capability for Liar {
+        fn descriptor(&self) -> &'static CapabilityDescriptor {
+            &DESC
+        }
+        fn execute(&self, _: &OperationRequest, context: &InvocationContext) -> OperationOutcome {
+            let job = JobId::new("job").unwrap();
+            context
+                .emit(EventPayload::PlanReady {
+                    job: job.clone(),
+                    actions: 0,
+                })
+                .unwrap();
+            OperationOutcome {
+                job,
+                totals: ActionTotals {
+                    failed: 1,
+                    ..ActionTotals::default()
+                },
+                root_failures: 1,
+                cancelled: false,
+            }
+        }
     }
-
     #[test]
-    fn capability_failure_becomes_diagnostic_and_failed_finish() {
-        static FAIL: Fail = Fail;
-        let sink = Arc::new(RecordingSink::default());
-        let capabilities: &[&dyn Capability] = &[&FAIL];
+    fn mismatch_is_rejected_without_finished_event() {
+        static LIAR: Liar = Liar;
+        let capabilities: &[&dyn Capability] = &[&LIAR];
+        let sink = Arc::new(Sink::default());
+        let context = InvocationContext::new(
+            InvocationId::new("i").unwrap(),
+            CancellationToken::default(),
+            sink.clone(),
+        );
+        assert!(matches!(
+            Kernel::new(capabilities)
+                .unwrap()
+                .dispatch(&operation(), &context),
+            Err(KernelError::Lifecycle(_))
+        ));
+        assert!(
+            !lock(&sink.0)
+                .iter()
+                .any(|e| matches!(e.payload, EventPayload::JobFinished(_)))
+        );
+    }
+    struct ChildFails;
+    impl Capability for ChildFails {
+        fn descriptor(&self) -> &'static CapabilityDescriptor {
+            &DESC
+        }
+        fn execute(&self, _: &OperationRequest, context: &InvocationContext) -> OperationOutcome {
+            let job = JobId::new("job").unwrap();
+            let first = ActionId::new("first").unwrap();
+            let child = ActionId::new("child").unwrap();
+            context
+                .emit(EventPayload::PlanReady {
+                    job: job.clone(),
+                    actions: 2,
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::ActionQueued {
+                    job: job.clone(),
+                    action: first.clone(),
+                    kind: ActionKind::Compile,
+                    dependencies: vec![],
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::ActionStarted {
+                    job: job.clone(),
+                    action: first.clone(),
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::ActionSucceeded {
+                    job: job.clone(),
+                    action: first.clone(),
+                    timing: Timing::default(),
+                    artifacts: vec![],
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::ActionQueued {
+                    job: job.clone(),
+                    action: child.clone(),
+                    kind: ActionKind::Link,
+                    dependencies: vec![first],
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::ActionStarted {
+                    job: job.clone(),
+                    action: child.clone(),
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::ActionFailed {
+                    job: job.clone(),
+                    action: child,
+                    timing: Timing::default(),
+                    diagnostic: Diagnostic {
+                        id: DiagnosticId::new("link-failed").unwrap(),
+                        code: "link_failed".into(),
+                        severity: Severity::Error,
+                        phase: Phase::Link,
+                        message: "link failed".into(),
+                        primary: None,
+                        related: vec![],
+                        help: None,
+                    },
+                })
+                .unwrap();
+            OperationOutcome {
+                job,
+                totals: ActionTotals {
+                    succeeded: 1,
+                    failed: 1,
+                    ..ActionTotals::default()
+                },
+                root_failures: 1,
+                cancelled: false,
+            }
+        }
+    }
+    #[test]
+    fn child_after_success_is_still_a_root_failure() {
+        static CAPABILITY: ChildFails = ChildFails;
+        let capabilities: &[&dyn Capability] = &[&CAPABILITY];
+        let sink = Arc::new(Sink::default());
+        let context = InvocationContext::new(
+            InvocationId::new("i").unwrap(),
+            CancellationToken::default(),
+            sink,
+        );
         let outcome = Kernel::new(capabilities)
             .unwrap()
-            .dispatch(
-                &Command::new("fail", BTreeMap::new()).unwrap(),
-                &context(sink.clone(), CancellationToken::default()),
-            )
+            .dispatch(&operation(), &context)
             .unwrap();
-
-        assert_eq!(outcome.status, ExitStatus::Failed);
-        let events = sink.0.lock().unwrap();
-        assert_eq!(events.len(), 3);
-        assert!(matches!(events[1].payload, EventPayload::Diagnostic(_)));
-        assert!(matches!(
-            events[2].payload,
-            EventPayload::CommandFinished {
-                status: ExitStatus::Failed
-            }
-        ));
+        assert_eq!(outcome.summary.status, ExitStatus::Failed);
+        assert_eq!(outcome.summary.root_failures, 1);
     }
-
     #[test]
-    fn unknown_command_does_not_emit_partial_lifecycle() {
-        static ECHO: Echo = Echo;
-        let sink = Arc::new(RecordingSink::default());
-        let capabilities: &[&dyn Capability] = &[&ECHO];
-        let error = Kernel::new(capabilities)
-            .unwrap()
-            .dispatch(
-                &Command::new("missing", BTreeMap::new()).unwrap(),
-                &context(sink.clone(), CancellationToken::default()),
-            )
-            .unwrap_err();
-
-        assert!(matches!(error, KernelError::UnknownCommand(_)));
-        assert!(sink.0.lock().unwrap().is_empty());
+    fn duplicate_operation_handler_is_rejected() {
+        static BUILD: Build = Build;
+        let capabilities: &[&dyn Capability] = &[&BUILD, &BUILD];
+        assert!(matches!(
+            Kernel::new(capabilities),
+            Err(KernelError::DuplicateCapability(_))
+        ));
     }
 }

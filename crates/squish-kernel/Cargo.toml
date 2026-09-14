@@ -8,5 +8,4 @@ repository = "https://github.com/kleedaisuki/prompt-squish"
 description = "Domain-neutral microkernel for prompt-squish commands"
 
 [dependencies]
-serde_json = "1.0"
 squish-protocol = { path = "../squish-protocol" }

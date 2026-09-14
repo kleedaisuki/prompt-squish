@@ -9,6 +9,4 @@ description = "Stable wire types shared by prompt-squish components"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-
-[dev-dependencies]
 serde_json = "1.0"
