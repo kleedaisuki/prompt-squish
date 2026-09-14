@@ -7,3 +7,7 @@ license.workspace = true
 repository.workspace = true
 description = "Source formatting domain for prompt-squish"
 
+[dev-dependencies]
+squish-ir = { path = "../squish-ir" }
+squish-source = { path = "../squish-source" }
+squish-xml-front = { path = "../squish-xml-front" }

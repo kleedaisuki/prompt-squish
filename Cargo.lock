@@ -807,6 +807,11 @@ dependencies = [
 [[package]]
 name = "squish-format"
 version = "0.1.0"
+dependencies = [
+ "squish-ir",
+ "squish-source",
+ "squish-xml-front",
+]
 
 [[package]]
 name = "squish-ir"
