@@ -12,8 +12,27 @@ description = "Compile namespace-aware XML macros with explicit parameters and s
 include = ["/src/**", "/examples/**", "/docs/dsl.md", "/docs/releases/**", "/CHANGELOG.md", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
 
 [workspace]
-members = ["crates/squish-kernel", "crates/squish-protocol"]
+members = [
+    "crates/squish-backend",
+    "crates/squish-build",
+    "crates/squish-format",
+    "crates/squish-ir",
+    "crates/squish-kernel",
+    "crates/squish-link",
+    "crates/squish-presentation",
+    "crates/squish-project",
+    "crates/squish-protocol",
+    "crates/squish-source",
+    "crates/squish-store",
+    "crates/squish-xml-front",
+]
 resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/kleedaisuki/prompt-squish"
 
 [[test]]
 name = "diagnostics"

@@ -599,6 +599,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
 
 [[package]]
+name = "squish-backend"
+version = "0.1.0"
+
+[[package]]
+name = "squish-build"
+version = "0.1.0"
+
+[[package]]
+name = "squish-format"
+version = "0.1.0"
+
+[[package]]
+name = "squish-ir"
+version = "0.1.0"
+
+[[package]]
 name = "squish-kernel"
 version = "0.1.0"
 dependencies = [
@@ -607,12 +623,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "squish-link"
+version = "0.1.0"
+
+[[package]]
+name = "squish-presentation"
+version = "0.1.0"
+
+[[package]]
+name = "squish-project"
+version = "0.1.0"
+
+[[package]]
 name = "squish-protocol"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "squish-source"
+version = "0.1.0"
+
+[[package]]
+name = "squish-store"
+version = "0.1.0"
+
+[[package]]
+name = "squish-xml-front"
+version = "0.1.0"
 
 [[package]]
 name = "stable_deref_trait"
