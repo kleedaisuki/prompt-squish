@@ -26,7 +26,7 @@ TARGETS = (
     "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc",
     "x86_64-apple-darwin", "aarch64-apple-darwin",
 )
-COMMANDS = ("build", "fmt", "add", "remove", "inspect")
+COMMANDS = ("new", "build", "fmt", "add", "remove", "inspect")
 
 
 def run(*args, cwd=None):
@@ -102,33 +102,36 @@ def package(source, dist, tag):
             if not re.search(rf"^  {command}\s", help_text, re.MULTILINE):
                 raise ValueError(f"binary help omits direct command: {command}")
             run(str(binary), command, "--help")
-        # Exercise the installed project-manager contract and public .prompt artifact.
-        # 验证安装后的项目管理契约与公开 .prompt 产物。
-        (staging / "src").mkdir()
-        (staging / ".xmlsquish").mkdir()
-        (staging / ".xmlsquish" / "config.toml").write_text(
+        # Exercise project creation and the public .prompt artifact through the installed binary.
+        # 通过已安装二进制验证项目创建与公开 .prompt 产物。
+        run(str(binary), "new", "release-smoke", "--vcs=none", cwd=staging)
+        project = staging / "release-smoke"
+        if not (project / "xmlsquish.toml").is_file() or not (project / "src" / "prompt.xml").is_file():
+            raise ValueError("native new smoke test omitted canonical project files")
+        if (project / ".git").exists() or (project / ".gitignore").exists():
+            raise ValueError("native new --vcs=none smoke test created Git state")
+        if (project / "xmlsquish.lock").exists():
+            raise ValueError("native new smoke test unexpectedly created a lockfile")
+        (project / ".xmlsquish").mkdir(exist_ok=True)
+        (project / ".xmlsquish" / "config.toml").write_text(
             '[source]\ncache-root = "cache/sources"\n[manager]\nstorage-root = "cache/state"\n',
             encoding="utf-8",
         )
-        (staging / "xmlsquish.toml").write_text(
-            'manifest-version = 1\n[package]\nname = "release-smoke"\nversion = "1.0.0"\n\n'
-            '[target.chat]\nentry = "src/main.xml"\n',
-            encoding="utf-8",
-        )
-        source_file = staging / "src" / "main.xml"
+        run(str(binary), "fmt", "--check", "--plain", cwd=project)
+        source_file = project / "src" / "prompt.xml"
         source_file.write_text(
             "<xs:entry  xmlns:xs = 'https://xmlsquish.moesegfault.dev/ns' >"
-            "<message>Hello   release</message></xs:entry >",
+            "<Prompt><System>Hello   release</System></Prompt></xs:entry >",
             encoding="utf-8",
         )
-        run(str(binary), "fmt", "--plain", cwd=staging)
-        run(str(binary), "build", "--plain", cwd=staging)
-        if not list((staging / "target" / "xmlsquish").rglob("*.prompt")):
+        run(str(binary), "fmt", "--plain", cwd=project)
+        run(str(binary), "build", "--offline", "--plain", cwd=project)
+        if not list((project / "target" / "xmlsquish").rglob("*.prompt")):
             raise ValueError("native bare build smoke test did not publish its default .prompt artifact")
-        run(str(binary), "build", "--emit=ir", "--plain", cwd=staging)
-        if not list((staging / "target" / "xmlsquish").rglob("*.xsir")):
+        run(str(binary), "build", "--emit=ir", "--offline", "--plain", cwd=project)
+        if not list((project / "target" / "xmlsquish").rglob("*.xsir")):
             raise ValueError("native explicit IR build smoke test did not publish an .xsir artifact")
-        inspected = json.loads(run(str(binary), "inspect", "link", "chat", "--format=json", cwd=staging))
+        inspected = json.loads(run(str(binary), "inspect", "link", "prompt", "--format=json", cwd=project))
         if inspected.get("view") != "link":
             raise ValueError("native inspect smoke test returned the wrong view")
         root = staging / f"xmlsquish-{version}-{target}"

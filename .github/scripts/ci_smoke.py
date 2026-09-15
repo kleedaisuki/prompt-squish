@@ -8,7 +8,7 @@ import sys
 import tempfile
 
 
-COMMANDS = ("build", "fmt", "add", "remove", "inspect")
+COMMANDS = ("new", "build", "fmt", "add", "remove", "inspect")
 
 
 def invoke(binary: Path, *arguments: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -43,7 +43,7 @@ def assert_help_contract(help_text: str) -> None:
 
 
 def smoke(binary: Path, scratch: Path) -> None:
-    """Format, build, and inspect a disposable project. / 格式化、构建并检查一次性项目。"""
+    """Create, format, build, and inspect a disposable project. / 创建、格式化、构建并检查一次性项目。"""
     if not re.fullmatch(r"xmlsquish \d+\.\d+\.\d+(?:[-+][^\s]+)?", run(binary, "--version").strip()):
         raise RuntimeError("unexpected version contract")
     assert_help_contract(run(binary))
@@ -61,24 +61,28 @@ def smoke(binary: Path, scratch: Path) -> None:
         raise RuntimeError("JSON usage terminal record omitted failure metadata")
 
     with tempfile.TemporaryDirectory(prefix="root-cli-", dir=scratch) as directory:
-        project = Path(directory)
-        (project / "src").mkdir()
-        (project / ".xmlsquish").mkdir()
+        container = Path(directory)
+        project = container / "ci-fixture"
+        run(binary, "new", project.name, "--vcs=none", cwd=container)
+        if not (project / "xmlsquish.toml").is_file() or not (project / "src" / "prompt.xml").is_file():
+            raise RuntimeError("new did not create its canonical manifest and prompt source")
+        if (project / ".git").exists() or (project / ".gitignore").exists():
+            raise RuntimeError("new --vcs=none created Git state")
+        if (project / "xmlsquish.lock").exists():
+            raise RuntimeError("new unexpectedly created a lockfile")
+
+        # Keep smoke-test caches inside the disposable project. / 将冒烟测试缓存限制在一次性项目内。
+        (project / ".xmlsquish").mkdir(exist_ok=True)
         (project / ".xmlsquish" / "config.toml").write_text(
             '[source]\ncache-root = "cache/sources"\n'
             '[manager]\nstorage-root = "cache/state"\n',
             encoding="utf-8",
         )
-        (project / "xmlsquish.toml").write_text(
-            'manifest-version = 1\n'
-            '[package]\nname = "ci-fixture"\nversion = "1.0.0"\n\n'
-            '[target.chat]\nentry = "src/main.xml"\n',
-            encoding="utf-8",
-        )
-        source = project / "src" / "main.xml"
+        run(binary, "fmt", "--check", "--plain", cwd=project)
+        source = project / "src" / "prompt.xml"
         source.write_text(
             "<xs:entry  xmlns:xs = 'https://xmlsquish.moesegfault.dev/ns' >"
-            "<message>Hello   CI</message></xs:entry >",
+            "<Prompt><System>Hello   CI</System></Prompt></xs:entry >",
             encoding="utf-8",
         )
 
@@ -86,14 +90,14 @@ def smoke(binary: Path, scratch: Path) -> None:
         if difference.returncode != 1 or "--- " not in difference.stdout or "+++ " not in difference.stdout:
             raise RuntimeError("human fmt --diff did not emit a unified diff on stdout")
         run(binary, "fmt", "--plain", cwd=project)
-        run(binary, "build", "--plain", cwd=project)
+        run(binary, "build", "--offline", "--plain", cwd=project)
         prompts = list((project / "target" / "xmlsquish").rglob("*.prompt"))
         if not prompts:
             raise RuntimeError("bare build did not publish its default .prompt artifact")
-        run(binary, "build", "--emit=ir", "--plain", cwd=project)
+        run(binary, "build", "--emit=ir", "--offline", "--plain", cwd=project)
         if not list((project / "target" / "xmlsquish").rglob("*.xsir")):
             raise RuntimeError("explicit IR build did not publish an .xsir artifact")
-        inspected = run(binary, "inspect", "link", "chat", "--format=json", cwd=project)
+        inspected = run(binary, "inspect", "link", "prompt", "--format=json", cwd=project)
         if json.loads(inspected).get("view") != "link":
             raise RuntimeError("inspect did not return the requested link view")
 

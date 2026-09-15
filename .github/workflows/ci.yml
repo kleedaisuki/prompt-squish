@@ -96,7 +96,10 @@ jobs:
           set -euo pipefail
           binary="$RUNNER_TEMP/xmlsquish-install/bin/xmlsquish"
           "$binary" --version | grep -E '^xmlsquish [0-9]+\.[0-9]+\.[0-9]+'
-          "$binary" | grep -E '^  (build|fmt|add|remove|inspect)[[:space:]]'
+          for command in new build fmt add remove inspect; do
+            "$binary" | grep -E "^  ${command}[[:space:]]"
+            "$binary" "$command" --help >/dev/null
+          done
 
   site:
     name: Site
