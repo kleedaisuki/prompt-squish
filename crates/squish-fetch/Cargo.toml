@@ -1,0 +1,25 @@
+[package]
+name = "squish-fetch"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Concrete sparse-registry, Git, and filesystem source host for xmlsquish"
+
+[dependencies]
+flate2 = "1.1"
+fs2 = "0.4"
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+semver = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+squish-project = { path = "../squish-project" }
+squish-resolver = { path = "../squish-resolver" }
+tar = "0.4"
+tempfile = "3.23"
+thiserror = "2.0"
+unicode-normalization = "0.1"
+url = "2.5"

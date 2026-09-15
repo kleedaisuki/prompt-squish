@@ -1,0 +1,1204 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use fs2::FileExt;
+use reqwest::blocking::Client;
+use reqwest::header::{
+    ACCEPT, AUTHORIZATION, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED,
+};
+use semver::{Version, VersionReq};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use url::Url;
+
+use crate::{
+    Access, ArchiveDigest, ContentDigest, FetchError, HostContext, ManifestDigest,
+    MaterializedPackage, Materializer, Sha256Digest, SourceEvent,
+};
+
+static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Registry credential provider; returned values are never persisted or observed. / Registry credential provider；返回值绝不持久化或进入事件。
+pub trait CredentialPort: Send + Sync {
+    fn authorization(&self, registry_id: &str, origin: &str) -> Option<String>;
+}
+/// 不提供认证信息。 / Supplies no credentials.
+#[derive(Default)]
+pub struct NoCredentials;
+impl CredentialPort for NoCredentials {
+    fn authorization(&self, _: &str, _: &str) -> Option<String> {
+        None
+    }
+}
+
+/// 一个 sparse registry 的稳定身份和可变端点。 / Stable identity and mutable endpoint of one sparse registry.
+#[derive(Clone, Debug)]
+pub struct RegistryConfig {
+    pub id: String,
+    pub index: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct RegistryArchive {
+    pub format: String,
+    pub size: u64,
+    pub digest: ArchiveDigest,
+    pub content_digest: ContentDigest,
+}
+
+/// 解析器投影以及精确归档身份。 / Resolver projection plus exact archive identity.
+#[derive(Clone, Debug)]
+pub struct SparseCandidate {
+    pub version: Version,
+    pub yanked: bool,
+    pub manifest: squish_project::Manifest,
+    pub archive: RegistryArchive,
+    pub manifest_digest: ManifestDigest,
+}
+
+#[derive(Deserialize)]
+struct WireConfig {
+    v: u32,
+    #[serde(rename = "registry-id")]
+    registry_id: String,
+    dl: String,
+    #[serde(default, rename = "auth-required")]
+    auth_required: bool,
+}
+#[derive(Deserialize)]
+struct Row {
+    v: u32,
+    name: String,
+    vers: Version,
+    package: RowPackage,
+    deps: Vec<RowDependency>,
+    archive: RowArchive,
+    #[serde(rename = "manifest-sha256")]
+    manifest_sha256: String,
+    yanked: bool,
+}
+#[derive(Deserialize)]
+struct RowPackage {
+    dialect: String,
+    #[serde(rename = "source-root")]
+    source_root: PathBuf,
+}
+#[derive(Deserialize)]
+struct RowArchive {
+    format: String,
+    size: u64,
+    sha256: String,
+    #[serde(rename = "content-sha256")]
+    content_sha256: String,
+}
+#[derive(Deserialize)]
+struct RowDependency {
+    alias: String,
+    package: String,
+    req: VersionReq,
+    #[serde(default, rename = "registry-id")]
+    registry_id: Option<String>,
+    #[serde(default)]
+    optional: bool,
+    #[serde(default, rename = "default-features")]
+    default_features: bool,
+    #[serde(default)]
+    features: BTreeSet<String>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct Cached {
+    etag: Option<String>,
+    last_modified: Option<String>,
+    body_sha256: String,
+}
+
+/// 支持 conditional cache 与严格 offline 的 sparse HTTP registry。 / Sparse HTTP registry with conditional caching and strict offline operation.
+pub struct SparseRegistry<C = NoCredentials> {
+    context: HostContext,
+    config: RegistryConfig,
+    credentials: C,
+    client: Client,
+}
+
+impl SparseRegistry<NoCredentials> {
+    /// 创建无认证 registry。 / Creates a registry without authentication.
+    pub fn new(context: HostContext, config: RegistryConfig) -> Result<Self, FetchError> {
+        Self::with_credentials(context, config, NoCredentials)
+    }
+}
+
+impl<C: CredentialPort> SparseRegistry<C> {
+    /// 创建带独立 credential port 的 registry。 / Creates a registry with a separate credential port.
+    pub fn with_credentials(
+        context: HostContext,
+        config: RegistryConfig,
+        credentials: C,
+    ) -> Result<Self, FetchError> {
+        validate_registry_config(&config)?;
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(8))
+            .build()
+            .map_err(http_error)?;
+        Ok(Self {
+            context,
+            config,
+            credentials,
+            client,
+        })
+    }
+
+    /// 获取并完整验证某包的 JSONL 投影。 / Fetches and fully validates one package JSONL projection.
+    pub fn candidates(
+        &self,
+        package: &str,
+        access: Access,
+    ) -> Result<Vec<SparseCandidate>, FetchError> {
+        validate_package_name(package)?;
+        let cfg_bytes = self.resource(
+            "config.json",
+            "application/vnd.xmlsquish.registry-config+json; version=1",
+            access,
+            false,
+            |body| validate_wire_config(body, &self.config.id).map(|_| ()),
+        )?;
+        let cfg: WireConfig = serde_json::from_slice(&cfg_bytes)?;
+        if cfg.v != 1 {
+            return Err(FetchError::Metadata(format!(
+                "unsupported registry config version {}",
+                cfg.v
+            )));
+        }
+        if cfg.registry_id != self.config.id {
+            return Err(FetchError::Config("registry identity mismatch".into()));
+        }
+        validate_download_template(&cfg.dl)?;
+        let shard = shard_path(package);
+        let body = self.resource(
+            &shard,
+            "application/vnd.xmlsquish.package-index+jsonl; version=1",
+            access,
+            cfg.auth_required,
+            |body| validate_metadata_body(body, package, &self.config.id, &self.context.limits),
+        )?;
+        if body.len() as u64 > self.context.limits.max_metadata_bytes {
+            return Err(FetchError::Metadata(
+                "metadata exceeds configured limit".into(),
+            ));
+        }
+        let mut result = Vec::new();
+        let mut versions = BTreeSet::new();
+        let mut supported = false;
+        for line in body.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+            if line.len() > self.context.limits.max_metadata_line {
+                return Err(FetchError::Metadata("metadata line exceeds limit".into()));
+            }
+            let generic: serde_json::Value = serde_json::from_slice(line)?;
+            if generic.get("v").and_then(|v| v.as_u64()) != Some(1) {
+                continue;
+            }
+            supported = true;
+            let row: Row = serde_json::from_value(generic)?;
+            debug_assert_eq!(row.v, 1, "wire version was checked before deserialization");
+            if !row.name.eq_ignore_ascii_case(package)
+                || row.vers.build != semver::BuildMetadata::EMPTY
+            {
+                return Err(FetchError::Metadata(
+                    "row package/version identity invalid".into(),
+                ));
+            }
+            if !versions.insert(row.vers.clone()) {
+                return Err(FetchError::Metadata("duplicate package version".into()));
+            }
+            if row.archive.format != "xspkg-tar-gzip/1" {
+                return Err(FetchError::Metadata("unsupported archive format".into()));
+            }
+            let dependencies = row
+                .deps
+                .into_iter()
+                .map(|d| {
+                    let detail = squish_project::DependencyDetail {
+                        version: Some(d.req),
+                        registry: d.registry_id.or_else(|| Some(self.config.id.clone())),
+                        package: Some(d.package),
+                        optional: d.optional,
+                        default_features: d.default_features,
+                        features: d.features,
+                        ..Default::default()
+                    };
+                    (
+                        d.alias,
+                        squish_project::DependencySpec::Detail(Box::new(detail)),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            let manifest = squish_project::Manifest {
+                manifest_version: 1,
+                workspace: None,
+                package: Some(squish_project::Package {
+                    name: row.name,
+                    version: row.vers.clone(),
+                    dialect: row.package.dialect,
+                    source_root: row.package.source_root,
+                }),
+                targets: BTreeMap::new(),
+                dependencies,
+                exports: BTreeMap::new(),
+                profiles: BTreeMap::new(),
+            };
+            manifest.validate()?;
+            result.push(SparseCandidate {
+                version: row.vers,
+                yanked: row.yanked,
+                manifest,
+                archive: RegistryArchive {
+                    format: row.archive.format,
+                    size: row.archive.size,
+                    digest: ArchiveDigest(Sha256Digest::parse(row.archive.sha256)?),
+                    content_digest: ContentDigest(Sha256Digest::parse(row.archive.content_sha256)?),
+                },
+                manifest_digest: ManifestDigest(Sha256Digest::parse(row.manifest_sha256)?),
+            });
+        }
+        if !supported && !body.is_empty() {
+            return Err(FetchError::Metadata(
+                "all package metadata rows use unsupported versions".into(),
+            ));
+        }
+        result.sort_by(|a, b| a.version.cmp(&b.version));
+        Ok(result)
+    }
+
+    /// 下载并校验精确归档字节，先写 staging 后发布到 CAS。 / Downloads and verifies exact archive bytes, staging before CAS publication.
+    pub fn archive(
+        &self,
+        package: &str,
+        candidate: &SparseCandidate,
+        access: Access,
+    ) -> Result<Vec<u8>, FetchError> {
+        let path = self.blob_path(&candidate.archive.digest.0.0);
+        if let Ok(bytes) = read_bounded(&path, self.context.limits.max_archive_bytes)
+            && bytes.len() as u64 == candidate.archive.size
+            && hex::encode(Sha256::digest(&bytes)) == candidate.archive.digest.0.0
+        {
+            return Ok(bytes);
+        }
+        if access == Access::LocalOnly {
+            return Err(FetchError::OfflineMiss(format!(
+                "registry archive {}",
+                candidate.archive.digest.0.0
+            )));
+        }
+        let cfg: WireConfig = serde_json::from_slice(&self.resource(
+            "config.json",
+            "application/vnd.xmlsquish.registry-config+json; version=1",
+            access,
+            false,
+            |body| validate_wire_config(body, &self.config.id).map(|_| ()),
+        )?)?;
+        let url = render_download(
+            &cfg.dl,
+            package,
+            &candidate.version,
+            &candidate.archive.digest.0.0,
+        )?;
+        let bytes = self
+            .get_url(
+                &url,
+                "archive",
+                cfg.auth_required,
+                None,
+                candidate
+                    .archive
+                    .size
+                    .min(self.context.limits.max_archive_bytes),
+            )?
+            .0;
+        if bytes.len() as u64 != candidate.archive.size
+            || hex::encode(Sha256::digest(&bytes)) != candidate.archive.digest.0.0
+        {
+            return Err(FetchError::Integrity(
+                "downloaded archive identity mismatch".into(),
+            ));
+        }
+        fs::create_dir_all(path.parent().expect("blob path parent"))?;
+        atomic_write(&path, &bytes)?;
+        Ok(bytes)
+    }
+
+    /// 获取、验证投影并通过统一 materializer 发布精确包。 / Acquires, verifies the projection, and publishes an exact package through the unified materializer.
+    pub fn materialize(
+        &self,
+        package: &str,
+        candidate: &SparseCandidate,
+        access: Access,
+        materializer: &Materializer,
+    ) -> Result<MaterializedPackage, FetchError> {
+        let archive = self.archive(package, candidate, access)?;
+        let tree = materializer.tree_from_xspkg(
+            &archive,
+            package,
+            &candidate.version,
+            &candidate.archive.digest,
+            candidate.archive.size,
+            &candidate.archive.content_digest,
+        )?;
+        let manifest_file = tree
+            .files
+            .iter()
+            .find(|f| f.path == "xmlsquish.toml")
+            .ok_or_else(|| FetchError::Integrity("root manifest missing".into()))?;
+        let digest = hex::encode(Sha256::digest(&manifest_file.bytes));
+        if digest != candidate.manifest_digest.0.0 {
+            return Err(FetchError::Integrity(
+                "manifest digest disagrees with registry row".into(),
+            ));
+        }
+        let actual = squish_project::Manifest::parse(
+            std::str::from_utf8(&manifest_file.bytes)
+                .map_err(|_| FetchError::Integrity("manifest is not UTF-8".into()))?,
+        )?;
+        if actual.package != candidate.manifest.package
+            || canonical_dependencies(&actual.dependencies, &self.config.id)?
+                != canonical_dependencies(&candidate.manifest.dependencies, &self.config.id)?
+        {
+            return Err(FetchError::Integrity(
+                "manifest projection disagrees with registry row".into(),
+            ));
+        }
+        let result = materializer.materialize(
+            &format!(
+                "registry:{}:{package}@{}",
+                self.config.id, candidate.version
+            ),
+            &tree,
+        )?;
+        let mapping = self
+            .context
+            .cache
+            .join("v1/registry-materialized")
+            .join(&candidate.archive.digest.0.0);
+        if let Some(parent) = mapping.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        atomic_write(&mapping, candidate.archive.content_digest.0.0.as_bytes())?;
+        Ok(result)
+    }
+
+    fn resource<F>(
+        &self,
+        resource: &str,
+        accept: &str,
+        access: Access,
+        authenticated: bool,
+        validate: F,
+    ) -> Result<Vec<u8>, FetchError>
+    where
+        F: Fn(&[u8]) -> Result<(), FetchError>,
+    {
+        let key = hex::encode(Sha256::digest(format!("{}\0{resource}", self.config.id)));
+        let dir = self
+            .context
+            .cache
+            .join("v1/sparse")
+            .join(hex::encode(Sha256::digest(&self.config.id)))
+            .join("bodies");
+        let meta_path = dir.join(format!("{key}.json"));
+        let cached: Option<Cached> = fs::read(&meta_path)
+            .ok()
+            .and_then(|v| serde_json::from_slice(&v).ok());
+        let old = cached
+            .as_ref()
+            .and_then(|c| {
+                read_bounded(
+                    &dir.join(format!("{}.body", c.body_sha256)),
+                    self.context.limits.max_metadata_bytes,
+                )
+                .ok()
+            })
+            .filter(|body| {
+                cached
+                    .as_ref()
+                    .is_some_and(|c| hex::encode(Sha256::digest(body)) == c.body_sha256)
+            });
+        if access == Access::LocalOnly {
+            let body = old
+                .ok_or_else(|| FetchError::OfflineMiss(format!("registry metadata {resource}")))?;
+            validate(&body)?;
+            return Ok(body);
+        }
+        let base = self
+            .config
+            .index
+            .strip_prefix("sparse+")
+            .expect("validated sparse endpoint");
+        let url = Url::parse(base)
+            .map_err(|e| FetchError::Config(e.to_string()))?
+            .join(resource)
+            .map_err(|e| FetchError::Config(e.to_string()))?;
+        if url.scheme() == "file" {
+            let path = url
+                .to_file_path()
+                .map_err(|_| FetchError::Config("invalid file registry URL".into()))?;
+            let body = read_bounded(&path, self.context.limits.max_metadata_bytes)?;
+            validate(&body)?;
+            self.store_body(&dir, &meta_path, &body, None, None)?;
+            return Ok(body);
+        }
+        let validator = old.as_ref().and(cached.as_ref()).and_then(|c| {
+            c.etag
+                .as_ref()
+                .map(|v| (IF_NONE_MATCH, v.as_str()))
+                .or_else(|| {
+                    c.last_modified
+                        .as_ref()
+                        .map(|v| (IF_MODIFIED_SINCE, v.as_str()))
+                })
+        });
+        let (body, headers, not_modified) = self.get_url_with_accept(
+            &url,
+            resource,
+            authenticated,
+            validator,
+            accept,
+            self.context.limits.max_metadata_bytes,
+        )?;
+        if not_modified {
+            let body = old.ok_or_else(|| {
+                FetchError::Metadata("server returned 304 without a cached body".into())
+            })?;
+            validate(&body)?;
+            return Ok(body);
+        }
+        validate(&body)?;
+        self.store_body(
+            &dir,
+            &meta_path,
+            &body,
+            headers.get(ETAG).and_then(|v| v.to_str().ok()),
+            headers.get(LAST_MODIFIED).and_then(|v| v.to_str().ok()),
+        )?;
+        Ok(body)
+    }
+
+    fn get_url(
+        &self,
+        url: &Url,
+        purpose: &str,
+        auth: bool,
+        validator: Option<(reqwest::header::HeaderName, &str)>,
+        max_bytes: u64,
+    ) -> Result<(Vec<u8>, reqwest::header::HeaderMap, bool), FetchError> {
+        self.get_url_with_accept(
+            url,
+            purpose,
+            auth,
+            validator,
+            "application/vnd.xmlsquish.package+gzip; version=1",
+            max_bytes,
+        )
+    }
+    fn get_url_with_accept(
+        &self,
+        url: &Url,
+        purpose: &str,
+        auth: bool,
+        validator: Option<(reqwest::header::HeaderName, &str)>,
+        accept: &str,
+        max_bytes: u64,
+    ) -> Result<(Vec<u8>, reqwest::header::HeaderMap, bool), FetchError> {
+        let origin = redacted_origin(url);
+        let mut authorization = auth
+            .then(|| self.credentials.authorization(&self.config.id, &origin))
+            .flatten();
+        let mut bootstrap_attempted = auth;
+        for attempt in 1..=3u8 {
+            let id = REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+            self.context
+                .observer
+                .emit(SourceEvent::NetworkRequestStarted {
+                    request_id: id,
+                    origin: origin.clone(),
+                    purpose: purpose.into(),
+                });
+            let mut request = self.client.get(url.clone()).header(ACCEPT, accept);
+            if let Some((ref name, value)) = validator {
+                request = request.header(name, value);
+            }
+            if let Some(value) = &authorization {
+                request = request.header(AUTHORIZATION, value);
+            }
+            let response = request.send().map_err(http_error)?;
+            let status = response.status();
+            let headers = response.headers().clone();
+            if status == reqwest::StatusCode::NOT_MODIFIED {
+                self.context
+                    .observer
+                    .emit(SourceEvent::NetworkRequestFinished {
+                        request_id: id,
+                        status: "304".into(),
+                        received_bytes: 0,
+                        validator_used: validator.is_some(),
+                    });
+                return Ok((Vec::new(), headers, true));
+            }
+            if status == reqwest::StatusCode::UNAUTHORIZED && !bootstrap_attempted {
+                bootstrap_attempted = true;
+                authorization = self.credentials.authorization(&self.config.id, &origin);
+                if authorization.is_some() {
+                    self.context
+                        .observer
+                        .emit(SourceEvent::SourceRetryScheduled {
+                            request_id: id,
+                            reason: "authentication-bootstrap".into(),
+                            attempt,
+                            delay_ms: 0,
+                        });
+                    continue;
+                }
+            }
+            let retryable = status == reqwest::StatusCode::REQUEST_TIMEOUT
+                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || status.is_server_error();
+            if retryable && attempt < 3 {
+                let delay_ms = u64::from(attempt) * 20 + id % 17;
+                self.context
+                    .observer
+                    .emit(SourceEvent::SourceRetryScheduled {
+                        request_id: id,
+                        reason: format!("http-{}xx", status.as_u16() / 100),
+                        attempt,
+                        delay_ms,
+                    });
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                continue;
+            }
+            if !status.is_success() {
+                return Err(FetchError::Metadata(format!(
+                    "HTTP status class {}",
+                    status.as_u16() / 100
+                )));
+            }
+            if response.content_length().is_some_and(|n| n > max_bytes) {
+                return Err(FetchError::Integrity(
+                    "HTTP response exceeds acquisition limit".into(),
+                ));
+            }
+            let mut body = Vec::new();
+            response.take(max_bytes + 1).read_to_end(&mut body)?;
+            if body.len() as u64 > max_bytes {
+                return Err(FetchError::Integrity(
+                    "HTTP response exceeds acquisition limit".into(),
+                ));
+            }
+            self.context
+                .observer
+                .emit(SourceEvent::NetworkRequestFinished {
+                    request_id: id,
+                    status: format!("{}xx", status.as_u16() / 100),
+                    received_bytes: body.len() as u64,
+                    validator_used: validator.is_some(),
+                });
+            return Ok((body, headers, false));
+        }
+        Err(FetchError::Metadata("HTTP retry budget exhausted".into()))
+    }
+
+    fn store_body(
+        &self,
+        dir: &Path,
+        meta: &Path,
+        body: &[u8],
+        etag: Option<&str>,
+        modified: Option<&str>,
+    ) -> Result<(), FetchError> {
+        fs::create_dir_all(dir)?;
+        let body_sha256 = hex::encode(Sha256::digest(body));
+        atomic_write(&dir.join(format!("{body_sha256}.body")), body)?;
+        atomic_write(
+            meta,
+            &serde_json::to_vec(&Cached {
+                etag: etag.map(str::to_owned),
+                last_modified: if etag.is_none() {
+                    modified.map(str::to_owned)
+                } else {
+                    None
+                },
+                body_sha256,
+            })?,
+        )
+    }
+    fn blob_path(&self, digest: &str) -> PathBuf {
+        self.context
+            .cache
+            .join("v1/blobs/sha256")
+            .join(&digest[..2])
+            .join(&digest[2..4])
+            .join(digest)
+    }
+}
+
+impl<C: CredentialPort> squish_resolver::RegistryPort for SparseRegistry<C> {
+    fn candidates(
+        &self,
+        _: &str,
+        package: &str,
+        access: squish_resolver::Access,
+    ) -> Result<Vec<squish_resolver::RegistryCandidate>, squish_resolver::SourceUnavailable> {
+        let access = if access == squish_resolver::Access::Online {
+            Access::Online
+        } else {
+            Access::LocalOnly
+        };
+        SparseRegistry::candidates(self, package, access)
+            .map(|rows| {
+                rows.into_iter()
+                    .filter(|r| !r.yanked)
+                    .map(|r| squish_resolver::RegistryCandidate {
+                        version: r.version,
+                        checksum: format!("sha256:{}", r.archive.digest.0.0),
+                        manifest: r.manifest,
+                    })
+                    .collect()
+            })
+            .map_err(|e| squish_resolver::SourceUnavailable {
+                identity: self.config.id.clone(),
+                detail: e.to_string(),
+            })
+    }
+    fn contains(&self, _: &str, _: &str, _: &Version, checksum: &str) -> bool {
+        let Some(archive) = checksum.strip_prefix("sha256:") else {
+            return false;
+        };
+        let Ok(content) = fs::read_to_string(
+            self.context
+                .cache
+                .join("v1/registry-materialized")
+                .join(archive),
+        ) else {
+            return false;
+        };
+        let Ok(digest) = Sha256Digest::parse(content) else {
+            return false;
+        };
+        Materializer::new(self.context.clone()).contains_complete(&ContentDigest(digest))
+    }
+}
+
+/// Cargo-compatible lowercase shard path. / Cargo 兼容的小写分片路径。
+pub fn shard_path(name: &str) -> String {
+    let n = name.to_ascii_lowercase();
+    match n.len() {
+        1 => format!("1/{n}"),
+        2 => format!("2/{n}"),
+        3 => format!("3/{}/{n}", &n[..1]),
+        _ => format!("{}/{}/{n}", &n[..2], &n[2..4]),
+    }
+}
+fn validate_package_name(name: &str) -> Result<(), FetchError> {
+    if !(1..=64).contains(&name.len())
+        || !name.as_bytes()[0].is_ascii_alphabetic()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(FetchError::Config("invalid package name".into()));
+    }
+    Ok(())
+}
+fn validate_registry_config(c: &RegistryConfig) -> Result<(), FetchError> {
+    let id = Url::parse(&c.id).map_err(|e| FetchError::Config(e.to_string()))?;
+    if id.scheme() != "https"
+        || id.username() != ""
+        || id.password().is_some()
+        || id.query().is_some()
+        || id.fragment().is_some()
+    {
+        return Err(FetchError::Config(
+            "registry id must be a credential-free absolute HTTPS URI".into(),
+        ));
+    }
+    let valid_index = c.index.ends_with('/')
+        && (c.index.starts_with("sparse+https://")
+            || c.index.starts_with("sparse+file://")
+            || (cfg!(test) && c.index.starts_with("sparse+http://")));
+    if !valid_index {
+        return Err(FetchError::Config(
+            "index must be sparse+https (or sparse+file for local tests) and end in /".into(),
+        ));
+    }
+    let u = Url::parse(c.index.strip_prefix("sparse+").unwrap())
+        .map_err(|e| FetchError::Config(e.to_string()))?;
+    if u.username() != "" || u.password().is_some() || u.query().is_some() || u.fragment().is_some()
+    {
+        return Err(FetchError::Config(
+            "index endpoint contains forbidden URL components".into(),
+        ));
+    }
+    Ok(())
+}
+fn validate_download_template(s: &str) -> Result<(), FetchError> {
+    let probe = s
+        .replace("{package}", "p")
+        .replace("{version}", "1.0.0")
+        .replace("{prefix}", "p")
+        .replace("{lowerprefix}", "p")
+        .replace("{archive-sha256}", &"a".repeat(64));
+    let u = Url::parse(&probe).map_err(|e| FetchError::Config(e.to_string()))?;
+    if u.scheme() != "https"
+        || u.username() != ""
+        || u.password().is_some()
+        || u.query().is_some()
+        || u.fragment().is_some()
+    {
+        return Err(FetchError::Config("invalid download template".into()));
+    }
+    Ok(())
+}
+
+fn validate_wire_config(bytes: &[u8], registry_id: &str) -> Result<WireConfig, FetchError> {
+    let cfg: WireConfig = serde_json::from_slice(bytes)?;
+    if cfg.v != 1 {
+        return Err(FetchError::Metadata(format!(
+            "unsupported registry config version {}",
+            cfg.v
+        )));
+    }
+    if cfg.registry_id != registry_id {
+        return Err(FetchError::Config("registry identity mismatch".into()));
+    }
+    validate_download_template(&cfg.dl)?;
+    Ok(cfg)
+}
+
+fn validate_metadata_body(
+    bytes: &[u8],
+    package: &str,
+    registry_id: &str,
+    limits: &crate::Limits,
+) -> Result<(), FetchError> {
+    if bytes.len() as u64 > limits.max_metadata_bytes {
+        return Err(FetchError::Metadata(
+            "metadata exceeds configured limit".into(),
+        ));
+    }
+    let mut versions = BTreeSet::new();
+    let mut supported = false;
+    for line in bytes.split(|b| *b == b'\n').filter(|line| !line.is_empty()) {
+        if line.len() > limits.max_metadata_line {
+            return Err(FetchError::Metadata("metadata line exceeds limit".into()));
+        }
+        let value: serde_json::Value = serde_json::from_slice(line)?;
+        if value.get("v").and_then(|v| v.as_u64()) != Some(1) {
+            continue;
+        }
+        supported = true;
+        let row: Row = serde_json::from_value(value)?;
+        if !row.name.eq_ignore_ascii_case(package)
+            || row.vers.build != semver::BuildMetadata::EMPTY
+            || !versions.insert(row.vers.clone())
+        {
+            return Err(FetchError::Metadata(
+                "row package/version identity invalid or duplicated".into(),
+            ));
+        }
+        if row.archive.format != "xspkg-tar-gzip/1" {
+            return Err(FetchError::Metadata("unsupported archive format".into()));
+        }
+        Sha256Digest::parse(row.archive.sha256)?;
+        Sha256Digest::parse(row.archive.content_sha256)?;
+        Sha256Digest::parse(row.manifest_sha256)?;
+        let dependencies = row
+            .deps
+            .into_iter()
+            .map(|d| {
+                (
+                    d.alias,
+                    squish_project::DependencySpec::Detail(Box::new(
+                        squish_project::DependencyDetail {
+                            version: Some(d.req),
+                            registry: d.registry_id.or_else(|| Some(registry_id.to_owned())),
+                            package: Some(d.package),
+                            optional: d.optional,
+                            default_features: d.default_features,
+                            features: d.features,
+                            ..Default::default()
+                        },
+                    )),
+                )
+            })
+            .collect();
+        squish_project::Manifest {
+            manifest_version: 1,
+            workspace: None,
+            package: Some(squish_project::Package {
+                name: row.name,
+                version: row.vers,
+                dialect: row.package.dialect,
+                source_root: row.package.source_root,
+            }),
+            targets: BTreeMap::new(),
+            dependencies,
+            exports: BTreeMap::new(),
+            profiles: BTreeMap::new(),
+        }
+        .validate()?;
+    }
+    if !supported && !bytes.is_empty() {
+        return Err(FetchError::Metadata(
+            "all package metadata rows use unsupported versions".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct CanonicalDependency {
+    alias: String,
+    package: String,
+    requirement: String,
+    registry: String,
+    optional: bool,
+    default_features: bool,
+    features: Vec<String>,
+}
+
+fn canonical_dependencies(
+    dependencies: &BTreeMap<String, squish_project::DependencySpec>,
+    registry_id: &str,
+) -> Result<Vec<CanonicalDependency>, FetchError> {
+    dependencies
+        .iter()
+        .map(|(alias, spec)| {
+            let (package, requirement, registry, optional, defaults, features) = match spec {
+                squish_project::DependencySpec::Version(req) => (
+                    alias.clone(),
+                    req.to_string(),
+                    registry_id.to_owned(),
+                    false,
+                    true,
+                    Vec::new(),
+                ),
+                squish_project::DependencySpec::Detail(detail) => {
+                    if detail.git.is_some() || detail.path.is_some() || detail.workspace {
+                        return Err(FetchError::Integrity(
+                            "published registry manifest contains a non-registry dependency".into(),
+                        ));
+                    }
+                    let req = detail.version.as_ref().ok_or_else(|| {
+                        FetchError::Integrity(
+                            "registry dependency has no version requirement".into(),
+                        )
+                    })?;
+                    (
+                        detail.package.clone().unwrap_or_else(|| alias.clone()),
+                        req.to_string(),
+                        detail
+                            .registry
+                            .clone()
+                            .unwrap_or_else(|| registry_id.to_owned()),
+                        detail.optional,
+                        detail.default_features,
+                        detail.features.iter().cloned().collect(),
+                    )
+                }
+            };
+            Ok(CanonicalDependency {
+                alias: alias.clone(),
+                package,
+                requirement,
+                registry,
+                optional,
+                default_features: defaults,
+                features,
+            })
+        })
+        .collect()
+}
+fn render_download(
+    template: &str,
+    package: &str,
+    version: &Version,
+    digest: &str,
+) -> Result<Url, FetchError> {
+    let shard = shard_path(package);
+    let prefix = shard.rsplit_once('/').map(|v| v.0).unwrap_or("");
+    let mut s = template.to_owned();
+    let replacements = [
+        ("{package}", package.to_owned()),
+        ("{version}", version.to_string()),
+        ("{prefix}", prefix.to_owned()),
+        ("{lowerprefix}", prefix.to_ascii_lowercase()),
+        ("{archive-sha256}", digest.to_owned()),
+    ];
+    let had = replacements.iter().any(|(m, _)| s.contains(m));
+    for (m, v) in replacements {
+        s = s.replace(m, &percent_path(&v));
+    }
+    if !had {
+        s.push_str(&format!(
+            "/{}/{}/download",
+            percent_path(package),
+            percent_path(&version.to_string())
+        ));
+    }
+    Url::parse(&s).map_err(|e| FetchError::Config(e.to_string()))
+}
+fn percent_path(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes())
+        .collect::<String>()
+        .replace('+', "%20")
+}
+fn redacted_origin(u: &Url) -> String {
+    format!(
+        "{}://{}{}{}",
+        u.scheme(),
+        u.host_str().unwrap_or("invalid"),
+        u.port().map(|p| format!(":{p}")).unwrap_or_default(),
+        u.path()
+    )
+}
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), FetchError> {
+    let parent = path.parent().ok_or_else(|| {
+        FetchError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cache path has no parent",
+        ))
+    })?;
+    fs::create_dir_all(parent)?;
+    let lock_path = path.with_extension("update.lock");
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    lock.lock_exclusive()?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::Write::write_all(&mut temporary, bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(path)
+        .map_err(|e| FetchError::Io(e.error))?;
+    Ok(())
+}
+
+fn http_error(error: reqwest::Error) -> FetchError {
+    let class = error
+        .status()
+        .map(|s| format!("status class {}xx", s.as_u16() / 100))
+        .unwrap_or_else(|| "transport failure".into());
+    FetchError::Http(class)
+}
+
+fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, FetchError> {
+    if fs::metadata(path)?.len() > limit {
+        return Err(FetchError::Integrity(
+            "cached object exceeds acquisition limit".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(limit + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(FetchError::Integrity(
+            "cached object exceeds acquisition limit".into(),
+        ));
+    }
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    #[test]
+    fn shard_vectors() {
+        assert_eq!(shard_path("A"), "1/a");
+        assert_eq!(shard_path("Ab"), "2/ab");
+        assert_eq!(shard_path("AbC"), "3/a/abc");
+        assert_eq!(shard_path("Common-Prompts"), "co/mm/common-prompts");
+    }
+
+    #[test]
+    fn invalid_replacement_preserves_last_validated_metadata() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.temp")
+            .join(format!("fetch-registry-{}", std::process::id()));
+        let index = root.join("index");
+        fs::create_dir_all(index.join("de/mo")).unwrap();
+        fs::write(index.join("config.json"), r#"{"v":1,"registry-id":"https://registry.example/v1","dl":"https://download.example/{package}/{version}/{archive-sha256}.xspkg"}"#).unwrap();
+        let row = r#"{"v":1,"name":"demo","vers":"1.0.0","package":{"dialect":"xmlsquish/1","source-root":"src"},"deps":[],"archive":{"format":"xspkg-tar-gzip/1","size":1,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","content-sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"manifest-sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","yanked":false}"#;
+        fs::write(index.join("de/mo/demo"), row).unwrap();
+        let registry = SparseRegistry::new(
+            HostContext::new(root.join("cache")).unwrap(),
+            RegistryConfig {
+                id: "https://registry.example/v1".into(),
+                index: format!(
+                    "sparse+{}",
+                    Url::from_directory_path(fs::canonicalize(&index).unwrap()).unwrap()
+                ),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            registry.candidates("demo", Access::Online).unwrap().len(),
+            1
+        );
+        fs::write(index.join("de/mo/demo"), b"{broken").unwrap();
+        assert!(registry.candidates("demo", Access::Online).is_err());
+        assert_eq!(
+            registry
+                .candidates("demo", Access::LocalOnly)
+                .unwrap()
+                .len(),
+            1
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dependency_projection_normalizes_shorthand_and_detail_forms() {
+        let req: VersionReq = "^1.2".parse().unwrap();
+        let shorthand = BTreeMap::from([(
+            "dep".into(),
+            squish_project::DependencySpec::Version(req.clone()),
+        )]);
+        let detailed = BTreeMap::from([(
+            "dep".into(),
+            squish_project::DependencySpec::Detail(Box::new(squish_project::DependencyDetail {
+                version: Some(req),
+                package: Some("dep".into()),
+                registry: Some("https://registry.example/v1".into()),
+                default_features: true,
+                ..Default::default()
+            })),
+        )]);
+        assert_eq!(
+            canonical_dependencies(&shorthand, "https://registry.example/v1").unwrap(),
+            canonical_dependencies(&detailed, "https://registry.example/v1").unwrap()
+        );
+    }
+
+    #[test]
+    fn corrupt_cached_body_forces_unconditional_http_request() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut conditional = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 1024];
+                loop {
+                    let n = stream.read(&mut chunk).unwrap();
+                    request.extend_from_slice(&chunk[..n]);
+                    if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                conditional.push(
+                    String::from_utf8_lossy(&request)
+                        .to_ascii_lowercase()
+                        .contains("if-none-match:"),
+                );
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nETag: \"v1\"\r\nConnection: close\r\n\r\ngood").unwrap();
+            }
+            conditional
+        });
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.temp")
+            .join(format!("fetch-http-{}", std::process::id()));
+        let registry = SparseRegistry::new(
+            HostContext::new(root.clone()).unwrap(),
+            RegistryConfig {
+                id: "https://registry.example/v1".into(),
+                index: format!("sparse+http://{address}/"),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            registry
+                .resource("body", "text/plain", Access::Online, false, |_| Ok(()))
+                .unwrap(),
+            b"good"
+        );
+        let bodies = root
+            .join("v1/sparse")
+            .join(hex::encode(Sha256::digest("https://registry.example/v1")))
+            .join("bodies");
+        let body = fs::read_dir(&bodies)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.extension().is_some_and(|e| e == "body"))
+            .unwrap();
+        fs::write(body, b"evil").unwrap();
+        assert_eq!(
+            registry
+                .resource("body", "text/plain", Access::Online, false, |_| Ok(()))
+                .unwrap(),
+            b"good"
+        );
+        assert_eq!(server.join().unwrap(), vec![false, false]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn http_content_length_limit_is_checked_before_body_allocation() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.temp")
+            .join(format!("fetch-http-limit-{}", std::process::id()));
+        let registry = SparseRegistry::new(
+            HostContext::new(root.clone()).unwrap(),
+            RegistryConfig {
+                id: "https://registry.example/v1".into(),
+                index: format!("sparse+http://{address}/"),
+            },
+        )
+        .unwrap();
+        let url = Url::parse(&format!("http://{address}/archive")).unwrap();
+        assert!(
+            matches!(registry.get_url(&url, "archive", false, None, 16), Err(FetchError::Integrity(message)) if message.contains("exceeds"))
+        );
+        server.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_sidecar_writers_publish_one_complete_value() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.temp")
+            .join(format!("fetch-atomic-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("mapping");
+        let writers = [vec![b'a'; 8192], vec![b'b'; 16384]]
+            .into_iter()
+            .map(|bytes| {
+                let path = path.clone();
+                std::thread::spawn(move || atomic_write(&path, &bytes).unwrap())
+            })
+            .collect::<Vec<_>>();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let result = fs::read(&path).unwrap();
+        assert!(result == vec![b'a'; 8192] || result == vec![b'b'; 16384]);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
