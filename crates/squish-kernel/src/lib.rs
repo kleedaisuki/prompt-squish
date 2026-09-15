@@ -4,9 +4,9 @@
 
 use squish_protocol::{
     ActionId, ActionKind, ActionTotals, CapabilityId, Event, EventPayload, ExitStatus,
-    InvocationId, JobId, JobSummary, OperationKind, OperationRequest, OperationResult,
-    PlanCloseReason, PlanId, PlanMode, PlanningAttemptId, PlanningIssueId, PlanningStepId,
-    SupersedeReason, Timing,
+    FinalizationId, InvocationId, JobId, JobSummary, OperationKind, OperationRequest,
+    OperationResult, PlanCloseReason, PlanId, PlanMode, PlanningAttemptId, PlanningIssueId,
+    PlanningStepId, SupersedeReason, Timing,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -42,8 +42,9 @@ pub struct OperationOutcome {
     pub result: OperationResult,
     /// 所有动作的终态计数。 / Terminal counts for every action.
     pub totals: ActionTotals,
-    /// 最终计划问题、独立动作失败或致命计划失败的根失败数。 /
-    /// Root failures from final-plan issues, independent action failures, or a fatal planning failure.
+    /// 最终计划问题、独立动作失败、收尾失败或致命计划失败的根失败数。 /
+    /// Root failures from final-plan issues, independent action failures,
+    /// finalization failures, or a fatal planning failure.
     pub root_failures: u64,
     /// 调用是否被取消。 / Whether the invocation was cancelled.
     pub cancelled: bool,
@@ -437,6 +438,12 @@ impl StepState {
         self != Self::Started
     }
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FinalizationState {
+    Started,
+    Succeeded,
+    Failed,
+}
 #[derive(Debug)]
 struct AttemptRecord {
     steps: HashMap<PlanningStepId, StepState>,
@@ -463,6 +470,8 @@ struct Lifecycle {
     attempts: HashMap<PlanningAttemptId, AttemptRecord>,
     plans: HashMap<PlanId, PlanRecord>,
     final_plan: Option<PlanId>,
+    finalizations: HashMap<FinalizationId, FinalizationState>,
+    active_finalization: Option<FinalizationId>,
     retry_allowed: bool,
     fatal_planning_failure: bool,
     planning_cancelled: bool,
@@ -588,6 +597,13 @@ impl Lifecycle {
                 )
             }
             EventPayload::PlanClosed { job, plan, reason } => self.close_plan(job, plan, *reason),
+            EventPayload::FinalizationStarted { job, id, .. } => self.start_finalization(job, id),
+            EventPayload::FinalizationSucceeded { job, id, .. } => {
+                self.finish_finalization(job, id, FinalizationState::Succeeded)
+            }
+            EventPayload::FinalizationFailed { job, id, .. } => {
+                self.finish_finalization(job, id, FinalizationState::Failed)
+            }
             EventPayload::Diagnostic(_) => Ok(()),
             EventPayload::OperationCompleted { .. } | EventPayload::JobFinished(_) => {
                 self.invalid("only the kernel may complete or finish a job")
@@ -1091,12 +1107,54 @@ impl Lifecycle {
         self.active = None;
         Ok(())
     }
+    fn start_finalization(
+        &mut self,
+        job: &JobId,
+        id: &FinalizationId,
+    ) -> Result<(), LifecycleError> {
+        self.same_job(job)?;
+        if self.final_plan.is_none() || self.active.is_some() || self.retry_allowed {
+            return self.invalid("finalization must follow the final closed plan");
+        }
+        if self.active_finalization.is_some() {
+            return self.invalid("finalization work may not overlap");
+        }
+        if self.finalizations.contains_key(id) {
+            return self.invalid(format!("finalization `{id}` was reused"));
+        }
+        self.finalizations
+            .insert(id.clone(), FinalizationState::Started);
+        self.active_finalization = Some(id.clone());
+        Ok(())
+    }
+    fn finish_finalization(
+        &mut self,
+        job: &JobId,
+        id: &FinalizationId,
+        terminal: FinalizationState,
+    ) -> Result<(), LifecycleError> {
+        self.same_job(job)?;
+        match &self.active_finalization {
+            Some(active) if active == id => {}
+            _ => return self.invalid(format!("finalization `{id}` is not active")),
+        }
+        let state = self
+            .finalizations
+            .get_mut(id)
+            .expect("active finalization exists");
+        if *state != FinalizationState::Started {
+            return self.invalid(format!("finalization `{id}` terminated more than once"));
+        }
+        *state = terminal;
+        self.active_finalization = None;
+        Ok(())
+    }
     fn complete(&mut self, job: &JobId) -> Result<(), LifecycleError> {
         self.same_job(job)?;
         if self.operation_completed {
             return self.invalid("operation-completed emitted more than once");
         }
-        if self.active.is_some() || self.retry_allowed {
+        if self.active.is_some() || self.retry_allowed || self.active_finalization.is_some() {
             return self.invalid("operation completed with an open lifecycle state");
         }
         self.operation_completed = true;
@@ -1115,8 +1173,8 @@ impl Lifecycle {
     }
     fn finish(&self, outcome: &OperationOutcome) -> Result<Reduction, LifecycleError> {
         self.same_job(&outcome.job)?;
-        if self.active.is_some() || self.retry_allowed {
-            return self.invalid("job ended with an open planning attempt or plan");
+        if self.active.is_some() || self.retry_allowed || self.active_finalization.is_some() {
+            return self.invalid("job ended with open planning, plan, or finalization work");
         }
         let mut totals = ActionTotals::default();
         let mut root_failures = 0;
@@ -1146,6 +1204,11 @@ impl Lifecycle {
         } else if !self.planning_cancelled {
             return self.invalid("job has neither a final plan nor a terminal planning outcome");
         }
+        root_failures += self
+            .finalizations
+            .values()
+            .filter(|state| **state == FinalizationState::Failed)
+            .count() as u64;
         if totals != outcome.totals
             || root_failures != outcome.root_failures
             || cancelled != outcome.cancelled
@@ -1165,9 +1228,9 @@ mod tests {
     use super::*;
     use squish_protocol::{
         ActionKind, BuildRequest, BuildResult, Diagnostic, DiagnosticId, Digest, DigestAlgorithm,
-        EmitKind, InspectRequest, InspectResult, InspectView, LockMode, OpaqueSourceId, Phase,
-        PlanDigest, PlanningStepKind, ProfileName, ProjectInspection, ProjectPath, Severity,
-        WorkspaceScope,
+        EmitKind, FinalizationKind, InspectRequest, InspectResult, InspectView, LockMode,
+        OpaqueSourceId, Phase, PlanDigest, PlanningStepKind, ProfileName, ProjectInspection,
+        ProjectPath, Severity, WorkspaceScope,
     };
     use std::sync::Mutex;
 
@@ -1753,6 +1816,121 @@ mod tests {
     }
 
     #[test]
+    fn finalization_is_sequential_terminal_work_after_the_final_plan() {
+        let id = FinalizationId::new("catalog").unwrap();
+        let mut illegal = Lifecycle::default();
+        let a = attempt("illegal-finalizer-attempt");
+        start(&mut illegal, &a);
+        assert!(
+            illegal
+                .observe(&EventPayload::FinalizationStarted {
+                    job: job(),
+                    id: id.clone(),
+                    kind: FinalizationKind::PersistBuildCatalog,
+                })
+                .is_err()
+        );
+
+        let mut lifecycle = Lifecycle::default();
+        let a = attempt("finalizer-attempt");
+        let p = plan("finalizer-plan");
+        start(&mut lifecycle, &a);
+        seal(&mut lifecycle, &a, &p, PlanMode::ReportOnly, 0, 0);
+        lifecycle
+            .observe(&EventPayload::PlanClosed {
+                job: job(),
+                plan: p,
+                reason: PlanCloseReason::Reported,
+            })
+            .unwrap();
+        lifecycle
+            .observe(&EventPayload::FinalizationStarted {
+                job: job(),
+                id: id.clone(),
+                kind: FinalizationKind::PersistBuildCatalog,
+            })
+            .unwrap();
+        assert!(
+            lifecycle
+                .observe(&EventPayload::FinalizationStarted {
+                    job: job(),
+                    id: FinalizationId::new("overlap").unwrap(),
+                    kind: FinalizationKind::PersistBuildCatalog,
+                })
+                .is_err()
+        );
+        assert!(
+            lifecycle
+                .finish(&outcome(ActionTotals::default(), 0, false))
+                .is_err()
+        );
+        lifecycle
+            .observe(&EventPayload::FinalizationSucceeded {
+                job: job(),
+                id: id.clone(),
+                timing: Timing::default(),
+            })
+            .unwrap();
+        assert!(
+            lifecycle
+                .observe(&EventPayload::FinalizationFailed {
+                    job: job(),
+                    id: id.clone(),
+                    timing: Timing::default(),
+                    diagnostic: diagnostic(),
+                })
+                .is_err()
+        );
+        assert!(
+            lifecycle
+                .observe(&EventPayload::FinalizationStarted {
+                    job: job(),
+                    id,
+                    kind: FinalizationKind::PersistBuildCatalog,
+                })
+                .is_err()
+        );
+        lifecycle
+            .finish(&outcome(ActionTotals::default(), 0, false))
+            .unwrap();
+    }
+
+    #[test]
+    fn failed_finalization_adds_a_root_failure_but_no_action_total() {
+        let mut lifecycle = Lifecycle::default();
+        let a = attempt("failed-finalizer-attempt");
+        let p = plan("failed-finalizer-plan");
+        let id = FinalizationId::new("catalog").unwrap();
+        start(&mut lifecycle, &a);
+        seal(&mut lifecycle, &a, &p, PlanMode::ReportOnly, 0, 0);
+        lifecycle
+            .observe(&EventPayload::PlanClosed {
+                job: job(),
+                plan: p,
+                reason: PlanCloseReason::Reported,
+            })
+            .unwrap();
+        lifecycle
+            .observe(&EventPayload::FinalizationStarted {
+                job: job(),
+                id: id.clone(),
+                kind: FinalizationKind::PersistBuildCatalog,
+            })
+            .unwrap();
+        lifecycle
+            .observe(&EventPayload::FinalizationFailed {
+                job: job(),
+                id,
+                timing: Timing::default(),
+                diagnostic: diagnostic(),
+            })
+            .unwrap();
+        lifecycle
+            .finish(&outcome(ActionTotals::default(), 1, false))
+            .unwrap();
+    }
+
+    #[test]
     fn inspect_result_identity_validation_is_preserved() {
         let request = OperationRequest::Inspect(InspectRequest {
             project: ProjectPath::new(".").unwrap(),
@@ -1913,6 +2091,21 @@ mod tests {
                     reason: PlanCloseReason::Executed,
                 })
                 .unwrap();
+            let finalization = FinalizationId::new("late-cancel-catalog").unwrap();
+            context
+                .emit(EventPayload::FinalizationStarted {
+                    job: job(),
+                    id: finalization.clone(),
+                    kind: FinalizationKind::PersistBuildCatalog,
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::FinalizationSucceeded {
+                    job: job(),
+                    id: finalization,
+                    timing: Timing::default(),
+                })
+                .unwrap();
             context.cancellation().cancel();
             OperationOutcome {
                 job: job(),
@@ -1953,6 +2146,110 @@ mod tests {
             .dispatch(&request, &context)
             .unwrap();
         assert_eq!(dispatched.summary.status, ExitStatus::Success);
+        let events = lock(&sink.0);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.payload, EventPayload::OperationCompleted { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.payload, EventPayload::JobFinished(_)))
+                .count(),
+            1
+        );
+    }
+
+    struct LateFailedFinalization;
+    impl Capability for LateFailedFinalization {
+        fn descriptor(&self) -> &'static CapabilityDescriptor {
+            &BUILD_DESCRIPTOR
+        }
+        fn execute(&self, _: &OperationRequest, context: &InvocationContext) -> OperationOutcome {
+            let attempt = attempt("failed-finalization-attempt");
+            let plan = plan("failed-finalization-plan");
+            context
+                .emit(EventPayload::PlanningStarted {
+                    job: job(),
+                    attempt: attempt.clone(),
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::PlanReady {
+                    job: job(),
+                    attempt,
+                    plan: plan.clone(),
+                    digest: plan_digest(),
+                    mode: PlanMode::ReportOnly,
+                    actions: 0,
+                    issues: 0,
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::PlanClosed {
+                    job: job(),
+                    plan,
+                    reason: PlanCloseReason::Reported,
+                })
+                .unwrap();
+            let finalization = FinalizationId::new("failed-catalog").unwrap();
+            context
+                .emit(EventPayload::FinalizationStarted {
+                    job: job(),
+                    id: finalization.clone(),
+                    kind: FinalizationKind::PersistBuildCatalog,
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::FinalizationFailed {
+                    job: job(),
+                    id: finalization,
+                    timing: Timing::default(),
+                    diagnostic: diagnostic(),
+                })
+                .unwrap();
+            context.cancellation().cancel();
+            OperationOutcome {
+                job: job(),
+                result: OperationResult::Build(BuildResult {
+                    published: vec![],
+                    build_record: None,
+                }),
+                totals: ActionTotals::default(),
+                root_failures: 1,
+                cancelled: false,
+            }
+        }
+    }
+
+    #[test]
+    fn late_advisory_cancellation_does_not_suppress_finalization_failure() {
+        static CAPABILITY: LateFailedFinalization = LateFailedFinalization;
+        let sink = Arc::new(Sink::default());
+        let context = InvocationContext::new(
+            InvocationId::new("late-failed-finalization").unwrap(),
+            CancellationToken::default(),
+            sink.clone(),
+        );
+        let request = OperationRequest::Build(BuildRequest {
+            project: ProjectPath::new(".").unwrap(),
+            scope: WorkspaceScope::Current,
+            targets: vec![],
+            profile: ProfileName::new("dev").unwrap(),
+            arguments: Default::default(),
+            emit: vec![EmitKind::Prompt],
+            lock: LockMode::Update,
+        });
+        let dispatched = Kernel::new(&[&CAPABILITY])
+            .unwrap()
+            .dispatch(&request, &context)
+            .unwrap();
+        assert_eq!(dispatched.summary.status, ExitStatus::Failed);
+        assert_eq!(dispatched.summary.root_failures, 1);
+        assert_eq!(dispatched.summary.totals, ActionTotals::default());
         let events = lock(&sink.0);
         assert_eq!(
             events
