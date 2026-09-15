@@ -17,7 +17,7 @@ pub use model::{
     Action, ActionEvent, ActionKey, ActionKind, ActionResult, ContentDigest, InputRef, KeyRecipe,
     Output, OutputName, OutputRef, ProducedOutput, ResourceClass, Resources, WorkerFailure,
 };
-pub use plan::{BuildPlan, PlanError};
+pub use plan::{BuildPlan, PlanError, SemanticGraphDigest};
 pub use ports::{ActionIndex, ActionRecord, ArtifactPublisher, BlobStore, Publication};
 pub use scheduler::{
     ActionState, CompletionError, Dispatch, ResultSource, ScheduleEvent, Scheduler, SchedulerError,

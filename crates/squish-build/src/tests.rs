@@ -460,3 +460,227 @@ fn persistent_cache_completion_is_structured_and_releases_resources() {
         }
     )));
 }
+
+#[test]
+fn semantic_digest_is_deterministic_under_action_and_option_insertion_order() {
+    let mut first = action("a", &[], Resources::new(1, 2, 3));
+    first.key = KeyRecipe::new(
+        "epoch",
+        vec![InputRef::Blob(digest("input"))],
+        BTreeMap::from([
+            ("alpha".to_owned(), "1".to_owned()),
+            ("beta".to_owned(), "2".to_owned()),
+        ]),
+    )
+    .unwrap();
+    let mut same = first.clone();
+    let mut reversed_options = BTreeMap::new();
+    reversed_options.insert("beta".to_owned(), "2".to_owned());
+    reversed_options.insert("alpha".to_owned(), "1".to_owned());
+    same.key = KeyRecipe::new(
+        "epoch",
+        vec![InputRef::Blob(digest("input"))],
+        reversed_options,
+    )
+    .unwrap();
+    let second = action("z", &[], Resources::new(4, 5, 6));
+
+    let left = BuildPlan::new([first, second.clone()]).unwrap();
+    let right = BuildPlan::new([second, same]).unwrap();
+    assert_eq!(left.semantic_digest(), right.semantic_digest());
+    assert_eq!(left.semantic_digest().algorithm(), "blake3");
+    assert_eq!(left.semantic_digest().as_bytes().len(), 32);
+}
+
+#[test]
+fn semantic_digest_canonicalizes_dependency_sets_and_removes_duplicates() {
+    let parents = [
+        action("a", &[], Resources::new(1, 0, 0)),
+        action("b", &[], Resources::new(1, 0, 0)),
+    ];
+    let canonical = action("child", &["a", "b"], Resources::new(1, 0, 0));
+    let repeated = action("child", &["b", "a", "b", "a"], Resources::new(1, 0, 0));
+    let left = BuildPlan::new([parents[0].clone(), parents[1].clone(), canonical]).unwrap();
+    let right = BuildPlan::new([parents[0].clone(), parents[1].clone(), repeated]).unwrap();
+
+    assert_eq!(left.semantic_digest(), right.semantic_digest());
+    assert_eq!(
+        right.action(&id("child")).unwrap().dependencies,
+        [id("a"), id("b")]
+    );
+}
+
+#[test]
+fn semantic_digest_is_sensitive_to_each_action_semantic_field() {
+    let base = action("node", &[], Resources::new(1, 2, 3));
+    let base_digest = BuildPlan::new([base.clone()]).unwrap().semantic_digest();
+    let assert_changed = |candidate: Action, field: &str| {
+        assert_ne!(
+            base_digest,
+            BuildPlan::new([candidate]).unwrap().semantic_digest(),
+            "semantic field was omitted: {field}"
+        );
+    };
+
+    let mut candidate = base.clone();
+    candidate.id = id("renamed");
+    assert_changed(candidate, "action id");
+    let mut candidate = base.clone();
+    candidate.kind = ActionKind::Link;
+    assert_changed(candidate, "action kind");
+    let mut candidate = base.clone();
+    candidate.class = ResourceClass::Io;
+    assert_changed(candidate, "resource class");
+    for (resources, field) in [
+        (Resources::new(9, 2, 3), "cpu resources"),
+        (Resources::new(1, 9, 3), "io resources"),
+        (Resources::new(1, 2, 9), "memory resources"),
+    ] {
+        let mut candidate = base.clone();
+        candidate.resources = resources;
+        assert_changed(candidate, field);
+    }
+    let mut candidate = base.clone();
+    candidate.key = KeyRecipe::new(
+        "changed-epoch",
+        vec![InputRef::Blob(digest("node"))],
+        BTreeMap::from([("mode".to_owned(), "test".to_owned())]),
+    )
+    .unwrap();
+    assert_changed(candidate, "semantic epoch");
+    let mut candidate = base.clone();
+    candidate.key = KeyRecipe::new(
+        "test-epoch",
+        vec![InputRef::Blob(digest("changed-input"))],
+        BTreeMap::from([("mode".to_owned(), "test".to_owned())]),
+    )
+    .unwrap();
+    assert_changed(candidate, "typed input");
+    let mut candidate = base.clone();
+    candidate.key = KeyRecipe::new(
+        "test-epoch",
+        vec![InputRef::Blob(
+            ContentDigest::new(
+                DigestAlgorithm::Other("different-algorithm".to_owned()),
+                b"node".to_vec(),
+            )
+            .unwrap(),
+        )],
+        BTreeMap::from([("mode".to_owned(), "test".to_owned())]),
+    )
+    .unwrap();
+    assert_changed(candidate, "input digest algorithm");
+    let mut candidate = base.clone();
+    candidate.key = KeyRecipe::new(
+        "test-epoch",
+        vec![InputRef::Blob(digest("node"))],
+        BTreeMap::from([("changed-option".to_owned(), "test".to_owned())]),
+    )
+    .unwrap();
+    assert_changed(candidate, "option name");
+    let mut candidate = base.clone();
+    candidate.key = KeyRecipe::new(
+        "test-epoch",
+        vec![InputRef::Blob(digest("node"))],
+        BTreeMap::from([("mode".to_owned(), "changed".to_owned())]),
+    )
+    .unwrap();
+    assert_changed(candidate, "option value");
+    let mut candidate = base.clone();
+    candidate.outputs[0].name = OutputName::new("renamed").unwrap();
+    assert_changed(candidate, "output name");
+    let mut candidate = base.clone();
+    candidate.outputs[0].kind = ArtifactKind::Prompt;
+    assert_changed(candidate, "output kind");
+    let mut candidate = base;
+    candidate.outputs.push(Output {
+        name: OutputName::new("debug").unwrap(),
+        kind: ArtifactKind::DebugInfo,
+    });
+    assert_changed(candidate, "output schema");
+
+    let mut ordered_outputs = action("ordered", &[], Resources::new(1, 0, 0));
+    ordered_outputs.outputs.push(Output {
+        name: OutputName::new("debug").unwrap(),
+        kind: ArtifactKind::DebugInfo,
+    });
+    let mut reversed_outputs = ordered_outputs.clone();
+    reversed_outputs.outputs.reverse();
+    assert_ne!(
+        BuildPlan::new([ordered_outputs]).unwrap().semantic_digest(),
+        BuildPlan::new([reversed_outputs])
+            .unwrap()
+            .semantic_digest(),
+        "semantic field was omitted: output order"
+    );
+
+    let parents = [
+        action("a", &[], Resources::new(1, 0, 0)),
+        action("b", &[], Resources::new(1, 0, 0)),
+    ];
+    let without_edge = action("child", &[], Resources::new(1, 0, 0));
+    let with_edge = action("child", &["a"], Resources::new(1, 0, 0));
+    assert_ne!(
+        BuildPlan::new([parents[0].clone(), parents[1].clone(), without_edge])
+            .unwrap()
+            .semantic_digest(),
+        BuildPlan::new([parents[0].clone(), parents[1].clone(), with_edge])
+            .unwrap()
+            .semantic_digest(),
+        "semantic field was omitted: dependency set"
+    );
+}
+
+#[test]
+fn semantic_digest_preserves_input_order_type_and_output_ref_identity() {
+    let blob_a = InputRef::Blob(digest("a"));
+    let blob_b = InputRef::Blob(digest("b"));
+    let mut ordered = action("node", &[], Resources::new(1, 0, 0));
+    ordered.key = KeyRecipe::new(
+        "epoch",
+        vec![blob_a.clone(), blob_b.clone()],
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let mut reversed = ordered.clone();
+    reversed.key = KeyRecipe::new("epoch", vec![blob_b, blob_a], BTreeMap::new()).unwrap();
+    assert_ne!(
+        BuildPlan::new([ordered]).unwrap().semantic_digest(),
+        BuildPlan::new([reversed]).unwrap().semantic_digest()
+    );
+
+    let producers = [
+        action("producer-a", &[], Resources::new(1, 0, 0)),
+        action("producer-b", &[], Resources::new(1, 0, 0)),
+    ];
+    let consumer = |producer: &str| {
+        let mut value = action(
+            "consumer",
+            &["producer-a", "producer-b"],
+            Resources::new(1, 0, 0),
+        );
+        value.key = KeyRecipe::new(
+            "epoch",
+            vec![InputRef::Output(OutputRef {
+                action: id(producer),
+                output: OutputName::new("main").unwrap(),
+            })],
+            BTreeMap::new(),
+        )
+        .unwrap();
+        value
+    };
+    let plan = |producer| {
+        BuildPlan::new([
+            producers[0].clone(),
+            producers[1].clone(),
+            consumer(producer),
+        ])
+        .unwrap()
+    };
+    assert_ne!(
+        plan("producer-a").semantic_digest(),
+        plan("producer-b").semantic_digest(),
+        "raw OutputRef identity must not be replaced by lossy/materialized metadata"
+    );
+}

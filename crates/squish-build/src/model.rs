@@ -108,6 +108,39 @@ impl KeyRecipe {
         &self.inputs
     }
 
+    /// 将未物化的完整配方写入计划语义哈希。 / Writes the complete, unmaterialized recipe into a plan-semantic hash.
+    ///
+    /// 与 [`Self::materialize`] 不同，这会保留 [`OutputRef`] 的生产者和输出名身份；计划指纹不得
+    /// 被运行时解析出的产物摘要替代。 / Unlike [`Self::materialize`], this preserves the producer
+    /// and output-name identity of every [`OutputRef`]; a plan fingerprint must not substitute a
+    /// runtime-resolved artifact digest.
+    pub(crate) fn hash_semantics(&self, hash: &mut blake3::Hasher) {
+        hash.update(b"key-recipe\0");
+        hash.update(b"semantic-epoch\0");
+        hash_field(hash, self.semantic_epoch.as_bytes());
+        hash.update(b"typed-inputs\0");
+        hash_count(hash, self.inputs.len());
+        for input in &self.inputs {
+            match input {
+                InputRef::Blob(digest) => {
+                    hash.update(b"input\0blob\0");
+                    hash_digest(hash, digest);
+                }
+                InputRef::Output(reference) => {
+                    hash.update(b"input\0output-ref\0");
+                    hash_field(hash, reference.action.as_str().as_bytes());
+                    hash_field(hash, reference.output.as_str().as_bytes());
+                }
+            }
+        }
+        hash.update(b"canonical-options\0");
+        hash_count(hash, self.options.len());
+        for (name, value) in &self.options {
+            hash_field(hash, name.as_bytes());
+            hash_field(hash, value.as_bytes());
+        }
+    }
+
     /// 解析具名输出并计算最终 BLAKE3 键。 / Resolves named outputs and computes the final BLAKE3 key.
     ///
     /// 前驱动作 key 和纯顺序依赖从不进入哈希，因而前驱重算但内容不变时可 early cutoff。
@@ -162,12 +195,21 @@ fn hash_kind(hash: &mut blake3::Hasher, kind: &ActionKind) {
         ActionKind::Link => b"link",
         ActionKind::Publish => b"publish",
         ActionKind::Format => b"format",
+        ActionKind::Inspect => b"inspect",
         ActionKind::ResolveCandidate => b"resolve-candidate",
         ActionKind::CommitTransaction => b"commit-transaction",
         ActionKind::Backend => b"backend",
     };
     hash.update(b"kind\0builtin\0");
     hash_field(hash, tag);
+}
+
+pub(crate) fn hash_action_kind(hash: &mut blake3::Hasher, kind: &ActionKind) {
+    hash_kind(hash, kind);
+}
+
+pub(crate) fn hash_output_kind(hash: &mut blake3::Hasher, kind: &ArtifactKind) {
+    hash_artifact_kind(hash, kind);
 }
 
 fn hash_artifact_kind(hash: &mut blake3::Hasher, kind: &ArtifactKind) {
@@ -186,10 +228,10 @@ fn hash_artifact_kind(hash: &mut blake3::Hasher, kind: &ArtifactKind) {
     hash_field(hash, tag);
 }
 
-fn hash_count(hash: &mut blake3::Hasher, count: usize) {
+pub(crate) fn hash_count(hash: &mut blake3::Hasher, count: usize) {
     hash.update(&(count as u64).to_le_bytes());
 }
-fn hash_field(hash: &mut blake3::Hasher, bytes: &[u8]) {
+pub(crate) fn hash_field(hash: &mut blake3::Hasher, bytes: &[u8]) {
     hash.update(&(bytes.len() as u64).to_le_bytes());
     hash.update(bytes);
 }
