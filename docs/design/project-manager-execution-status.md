@@ -6,7 +6,7 @@
 
 ## 1. Product Direction
 
-`xmlsquish` is being rebuilt as a Cargo-like project manager with direct `fmt`, `build`, `add`, `remove`, and `inspect` commands. The architecture is intentionally top-down rather than an adapter around the legacy compiler:
+`xmlsquish` has been rebuilt as a Cargo-like project manager with direct `fmt`, `build`, `add`, `remove`, and `inspect` commands. The architecture is intentionally top-down rather than an adapter around the legacy compiler:
 
 ```text
 CLI bootstrap
@@ -17,7 +17,7 @@ CLI bootstrap
     -> XML frontend -> reusable XSIR -> link root -> .prompt + .psdbg
 ```
 
-The cutover does not preserve the old internal architecture. It does preserve the current XML DSL and makes the external command and artifact contracts explicit before deleting legacy paths.
+The completed cutover did not preserve the old internal architecture. It preserved the XML DSL, made the external command and artifact contracts explicit, and deleted the legacy paths.
 
 ## 2. Durable Knowledge Map
 
@@ -25,8 +25,8 @@ The cutover does not preserve the old internal architecture. It does preserve th
 |---|---|---|
 | Why a microkernel manager and reusable IR? | [`../adr/0009-microkernel-manager-and-reusable-ir.md`](../adr/0009-microkernel-manager-and-reusable-ir.md) | Accepted, including the observable planning lifecycle amendment |
 | What is the complete IR, linking, provenance, and debug model? | [`ir-model.md`](ir-model.md) | Implemented through canonical IR, link trace, and self-contained debug bundle |
-| How does the old tree map to the new architecture? | [`refactor-map.md`](refactor-map.md) | Active cutover map |
-| What should each CLI command feel like and how is cutover accepted? | [`../product/cli-experience.md`](../product/cli-experience.md) | Command contract and executable K3/K4 gates defined |
+| How did the old tree map to the current architecture? | [`refactor-map.md`](refactor-map.md) | Historical/completed cutover map with verified current owners |
+| What does each CLI command feel like, and which proposals were accepted or superseded? | [`../product/cli-experience.md`](../product/cli-experience.md) | Current command contract plus evidence and supersession tables |
 | What is in and out of the project-manager product? | [`../product/project-manager-scope.md`](../product/project-manager-scope.md) | Product scope defined |
 | How do registry and Git dependencies work? | [`dependency-source-protocol.md`](dependency-source-protocol.md) | Protocol specified; fetch implementation and review fixes committed |
 | Which industry and academic systems informed the architecture? | [`../research/compiler-manager-ir-prior-art.md`](../research/compiler-manager-ir-prior-art.md) | Compiler/manager/IR synthesis complete |
@@ -36,7 +36,7 @@ The research is not an isolated literature dump. Each research artifact is conne
 
 ## 3. Implemented and Committed Foundations
 
-The remotely accepted production snapshot is `b870c84`. The documentation snapshot immediately before this ledger update is `bf3394f`; the only change from `b870c84` to `bf3394f` is a two-line correction in `docs/product/cli-experience.md`. The executable, tests, workflow, and `site/` inputs at `bf3394f` are therefore byte-for-byte those exercised at `b870c84`. Earlier foundation commits remain part of the evidence chain; this table emphasizes the final cutover and the defects closed after `c616fef`.
+The remotely accepted production snapshot is `b870c84`. Its first documentation-only descendants were `bf3394f`, a two-line correction in `docs/product/cli-experience.md`, and `f2a75f5`, this acceptance ledger. This reconciliation remains confined to the ledger and `docs/design/refactor-map.md`; executable sources, tests, workflow, lockfiles, and `site/` inputs remain byte-for-byte those exercised at `b870c84`. Earlier foundation commits remain part of the evidence chain; this table emphasizes the final cutover and the defects closed after `c616fef`.
 
 | Area | Committed evidence | Verified contract |
 |---|---|---|
@@ -224,4 +224,4 @@ The source-install steps are intentionally Linux-only in the workflow and were s
 
 The Cargo-like manager cutover is **complete for its stated milestone scope**. The remotely accepted production snapshot is `b870c84`, and all five jobs in run 34955324426 passed.
 
-`bf3394f` is a documentation-only descendant: `git diff --name-status b870c84..bf3394f` reports only `docs/product/cli-experience.md`, and the diff changes two documentation lines. It does not modify Rust sources, manifests, lockfiles, tests, `.github/`, or `site/`; consequently, it does not invalidate the executable, workflow, or site evidence from the accepted snapshot. This ledger update is also confined to `docs/design/project-manager-execution-status.md` and likewise does not alter those tested inputs.
+`bf3394f` is a documentation-only descendant: `git diff --name-status b870c84..bf3394f` reports only `docs/product/cli-experience.md`, and the diff changes two documentation lines. `f2a75f5` updates only this ledger. The present reconciliation changes only `docs/design/refactor-map.md` and this ledger; it does not modify Rust sources, manifests, lockfiles, tests, `.github/`, or `site/`. Consequently, these documentation changes do not invalidate the executable, workflow, or site evidence from the accepted snapshot.
