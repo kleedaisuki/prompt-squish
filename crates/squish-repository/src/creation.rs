@@ -1178,6 +1178,16 @@ mod tests {
         }
     }
 
+    struct LoseSourceAndPublishForeign;
+    impl DirectoryPublisher for LoseSourceAndPublishForeign {
+        fn publish_exclusive(&self, source: &Path, destination: &Path) -> io::Result<()> {
+            fs::remove_dir_all(source)?;
+            fs::create_dir(destination)?;
+            fs::write(destination.join("foreign-owned"), b"keep")?;
+            Err(io::Error::other("publication outcome unavailable"))
+        }
+    }
+
     fn request(destination: PathBuf) -> CreateProjectRequest {
         CreateProjectRequest {
             destination: normalize_new_destination(&destination).unwrap(),
@@ -1376,6 +1386,40 @@ mod tests {
     }
 
     #[test]
+    fn indeterminate_publication_preserves_journal_and_foreign_destination() {
+        let temp = tempdir().unwrap();
+        let destination = normalize_new_destination(&temp.path().join("new")).unwrap();
+        let error = create_project_with_publisher(
+            &request(destination.clone()),
+            &NoStagePreparation,
+            &NoFault,
+            &LoseSourceAndPublishForeign,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            RepositoryError::PublicationOutcomeUnknown { destination: path, .. }
+                if path == destination
+        ));
+        assert_eq!(
+            fs::read(destination.join("foreign-owned")).unwrap(),
+            b"keep"
+        );
+        let journals = temp.path().join(STATE_DIR).join(CREATIONS_DIR);
+        assert_eq!(fs::read_dir(&journals).unwrap().count(), 1);
+
+        assert!(matches!(
+            recover_project_creations(temp.path(), &NoFault),
+            Err(RepositoryError::Journal { message, .. }) if message.contains("outcome is unknown")
+        ));
+        assert_eq!(
+            fs::read(destination.join("foreign-owned")).unwrap(),
+            b"keep"
+        );
+        assert_eq!(fs::read_dir(journals).unwrap().count(), 1);
+    }
+
+    #[test]
     fn sibling_creators_replan_a_shared_missing_parent() {
         let temp = tempdir().unwrap();
         let left = normalize_new_destination(&temp.path().join("a/left")).unwrap();
@@ -1497,6 +1541,55 @@ mod tests {
             recover_project_creations(&root, &NoFault),
             Err(RepositoryError::WorkspaceConflict(message)) if message.contains("duplicate")
         ));
+        assert!(destination.is_dir());
+    }
+
+    #[test]
+    fn recovery_rejects_duplicate_in_an_explicitly_listed_other_member() {
+        let temp = tempdir().unwrap();
+        let existing = temp.path().join("packages/existing");
+        fs::create_dir_all(&existing).unwrap();
+        fs::write(
+            temp.path().join(MANIFEST_FILE_NAME),
+            "manifest-version = 1\n[workspace]\nmembers = [\"packages/existing\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            existing.join(MANIFEST_FILE_NAME),
+            "manifest-version = 1\n[package]\nname='existing'\nversion='0.1.0'\ndialect='xmlsquish/1'\nsource-root='src'\n",
+        )
+        .unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let root_manifest = root.join(MANIFEST_FILE_NAME);
+        let destination = normalize_new_destination(&root.join("packages/new")).unwrap();
+        let mut req = request(destination.clone());
+        req.workspace = Some(WorkspaceMembership {
+            root: root.clone(),
+            member: "packages/new".into(),
+        });
+        assert!(
+            create_project(
+                &req,
+                &NoStagePreparation,
+                &Fail(FaultPoint::CreationPublished)
+            )
+            .is_err()
+        );
+
+        fs::write(
+            existing.join(MANIFEST_FILE_NAME),
+            "manifest-version = 1\n[package]\nname='new'\nversion='0.1.0'\ndialect='xmlsquish/1'\nsource-root='src'\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            recover_project_creations(&root, &NoFault),
+            Err(RepositoryError::WorkspaceConflict(message)) if message.contains("duplicate")
+        ));
+        assert!(
+            !fs::read_to_string(root_manifest)
+                .unwrap()
+                .contains("packages/new")
+        );
         assert!(destination.is_dir());
     }
 
