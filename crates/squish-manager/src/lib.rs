@@ -1,7 +1,7 @@
 //! prompt-squish 的统一项目管理能力。 / Unified project-management capability for prompt-squish.
 //!
-//! 本 crate 把五种用户操作规划为同一种动作图；外部 I/O 仅通过 [`Services`] 进入。
-//! This crate plans all five user operations into one action graph; external I/O enters only
+//! 本 crate 把六种用户操作规划为同一种动作图；外部 I/O 仅通过 [`Services`] 进入。
+//! This crate plans all six user operations into one action graph; external I/O enters only
 //! through [`Services`].
 
 #![forbid(unsafe_code)]
@@ -113,7 +113,7 @@ impl Default for InvocationSettings {
     }
 }
 
-/// 同时拥有五种项目操作的唯一静态能力。 / Sole static capability owning all five project operations.
+/// 同时拥有六种项目操作的唯一静态能力。 / Sole static capability owning all six project operations.
 pub struct ManagerCapability<S> {
     services: S,
     settings: InvocationSettings,
