@@ -639,12 +639,16 @@ impl<C: CredentialPort> SparseRegistry<C> {
                 if let Some(value) = &authorization {
                     headers.insert("authorization".into(), value.clone());
                 }
-            let mut response = self.transport.execute(HttpRequest {
-                url: current_url.clone(),
-                headers,
-                max_bytes,
-            })?;
-            response.headers = response.headers.into_iter().map(|(name, value)| (name.to_ascii_lowercase(), value)).collect();
+                let mut response = self.transport.execute(HttpRequest {
+                    url: current_url.clone(),
+                    headers,
+                    max_bytes,
+                })?;
+                response.headers = response
+                    .headers
+                    .into_iter()
+                    .map(|(name, value)| (name.to_ascii_lowercase(), value))
+                    .collect();
                 let status = response.status;
                 if status == 304 {
                     self.context
