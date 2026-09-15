@@ -569,6 +569,10 @@ lifecycle detail on the selected renderer rather than a hidden stderr channel in
 - First Ctrl-C requests cooperative cancellation and stops new admission. Active work observes the
   shared cancellation token at supported boundaries; durable publication/repository decisions are
   completed or recovered rather than left ambiguous.
+- On a dynamic interactive terminal, publication of that state clears transient progress and emits
+  exactly `Cancelling; Ctrl-C again to force` on `stderr`. Later progress remains suppressed, making
+  the notice both actionable UI and a stable ordering boundary. Quiet, short, plain, non-TTY, and
+  NDJSON modes remain unchanged.
 - A second Ctrl-C performs the bounded emergency terminal reset and exits `130` immediately.
 - The native JSON lifecycle closes with typed cancellation/action facts and terminal
   `job_finished { status: "cancelled" }` while stdout remains writable.

@@ -2367,6 +2367,7 @@ version = "0.3.0"
 dependencies = [
  "blake3",
  "ctrlc",
+ "fs2",
  "portable-pty",
  "serde",
  "serde_json",

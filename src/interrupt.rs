@@ -77,6 +77,12 @@ impl InterruptCoordinator {
         self.cancellation.clone()
     }
 
+    /// 返回第一次回调是否已完整发布协作取消状态。 /
+    /// Returns whether the first callback has fully published cooperative cancellation.
+    pub(crate) fn cooperative_cancellation_started(&self) -> bool {
+        self.state.load(Ordering::Acquire) == CANCELLING
+    }
+
     /// 通过可注入安装端口注册此协调器。 / Registers this coordinator through an injectable installation port.
     ///
     /// 该边界让组合根能够把安装失败映射为稳定启动诊断，而测试无需篡改真实进程的
@@ -327,6 +333,16 @@ mod tests {
         coordinator.on_interrupt();
         assert!(cancellation.is_cancelled());
         assert!(exported.is_cancelled());
+    }
+
+    #[test]
+    fn cooperative_visibility_names_only_fully_published_first_interrupt() {
+        let (coordinator, _, _) = fixture();
+        assert!(!coordinator.cooperative_cancellation_started());
+        coordinator.on_interrupt();
+        assert!(coordinator.cooperative_cancellation_started());
+        coordinator.on_interrupt();
+        assert!(!coordinator.cooperative_cancellation_started());
     }
 
     #[test]

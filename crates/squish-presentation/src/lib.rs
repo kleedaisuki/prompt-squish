@@ -42,6 +42,12 @@ pub trait Renderer {
         Ok(())
     }
 
+    /// 呈现已发布的协作取消，并停止后续瞬态进度。 /
+    /// Presents published cooperative cancellation and suppresses later transient progress.
+    fn cancellation_requested(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
     /// 清理临时 UI 并刷新输出。 / Clears transient UI and flushes output.
     fn finish(&mut self) -> io::Result<()>;
 }
@@ -413,6 +419,7 @@ where
     progress: Option<ProgressState<C::Instant>>,
     jobs: BTreeMap<JobId, JobView>,
     rendered_diagnostics: BTreeSet<String>,
+    cancellation_requested: bool,
 }
 
 impl<W: Write> HumanRenderer<W, SystemClock, FixedTerminal> {
@@ -481,6 +488,7 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
             progress: None,
             jobs: BTreeMap::new(),
             rendered_diagnostics: BTreeSet::new(),
+            cancellation_requested: false,
         }
     }
 
@@ -548,7 +556,10 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
         completed: Option<u64>,
         total: Option<u64>,
     ) -> io::Result<()> {
-        if !self.dynamic || self.options.progress == ProgressMode::Never {
+        if self.cancellation_requested
+            || !self.dynamic
+            || self.options.progress == ProgressMode::Never
+        {
             return Ok(());
         }
         let now = self.clock.now();
@@ -1386,6 +1397,16 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
             self.draw_progress(self.clock.now())?;
         }
         Ok(())
+    }
+
+    fn cancellation_requested(&mut self) -> io::Result<()> {
+        if self.cancellation_requested {
+            return Ok(());
+        }
+        self.cancellation_requested = true;
+        self.stop_progress()?;
+        writeln!(self.writer, "Cancelling; Ctrl-C again to force")?;
+        self.writer.flush()
     }
 
     fn finish(&mut self) -> io::Result<()> {
@@ -2600,6 +2621,69 @@ mod tests {
             after_terminal
         );
         assert!(after_terminal.contains("\r\x1b[2K"));
+    }
+
+    #[test]
+    fn cancellation_notice_is_idempotent_and_suppresses_later_progress() {
+        let terminal = FixedTerminal::new(TerminalCapabilities {
+            is_terminal: true,
+            supports_ansi: true,
+            supports_dynamic: true,
+        })
+        .with_width(Some(96));
+        let mut renderer = HumanRenderer::with_clock_and_terminal(
+            Vec::new(),
+            terminal,
+            Environment::default(),
+            PresentationOptions {
+                color: ColorMode::Never,
+                progress: ProgressMode::Always,
+                ..PresentationOptions::default()
+            },
+            TestClock::default(),
+        );
+        let job = id::<JobId>("build-cli-1");
+        renderer
+            .render(&event(
+                0,
+                EventPayload::PlanningStarted {
+                    job: job.clone(),
+                    attempt: id::<PlanningAttemptId>("attempt-1"),
+                },
+            ))
+            .unwrap();
+
+        renderer.cancellation_requested().unwrap();
+        renderer.cancellation_requested().unwrap();
+        renderer
+            .render(&event(
+                1,
+                EventPayload::PlanningStepStarted {
+                    job,
+                    attempt: id::<PlanningAttemptId>("attempt-1"),
+                    step: id::<PlanningStepId>("scan"),
+                    kind: PlanningStepKind::Scan,
+                },
+            ))
+            .unwrap();
+        renderer.tick().unwrap();
+        renderer.finish().unwrap();
+
+        let output = String::from_utf8(renderer.into_inner()).unwrap();
+        assert_eq!(
+            output
+                .matches("Cancelling; Ctrl-C again to force\n")
+                .count(),
+            1
+        );
+        let after_notice = output
+            .split_once("Cancelling; Ctrl-C again to force\n")
+            .unwrap()
+            .1;
+        assert!(
+            after_notice.is_empty(),
+            "progress resumed: {after_notice:?}"
+        );
     }
 
     #[test]

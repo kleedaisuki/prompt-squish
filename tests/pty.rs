@@ -7,17 +7,18 @@
 //! test hooks nor simulated TTY capabilities.
 
 use std::{
-    fs,
+    fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicU16, Ordering},
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use fs2::FileExt;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 const INITIAL_SIZE: PtySize = PtySize {
@@ -33,16 +34,11 @@ const NARROW_SIZE: PtySize = PtySize {
     pixel_height: 0,
 };
 #[cfg(not(windows))]
-const CLEAR_LINE: &[u8] = b"\r\x1b[2K";
-// ConPTY consumes the application sequence and emits the equivalent minimal CSI form.
-// ConPTY 会消费应用序列，并输出语义等价的最短 CSI 形式。
-#[cfg(windows)]
-const CLEAR_LINE: &[u8] = b"\r\x1b[K";
-#[cfg(not(windows))]
 const EMERGENCY_RESET: &[u8] = b"\x1b[0m\x1b[?25h\r\x1b[2K";
 #[cfg(windows)]
 const EMERGENCY_RESET: &[u8] = b"\x1b[m\x1b[?25h\r\x1b[K";
-const TARGETS: usize = 2_000;
+const CANCELLATION_NOTICE: &str = "Cancelling; Ctrl-C again to force";
+const TARGETS: usize = 1;
 const WAIT: Duration = Duration::from_secs(30);
 
 /// 位于仓库 `.temp` 下、离开作用域即删除的唯一验收目录。 / A unique acceptance
@@ -91,6 +87,22 @@ impl Fixture {
     fn home(&self, name: &str) -> PathBuf {
         self.root.join(name)
     }
+
+    /// 持有真实发布器恢复锁，使内核停在已呈现的恢复步骤。 /
+    /// Holds the real publisher recovery lock so the kernel remains in a rendered recovery step.
+    fn hold_recovery_lock(&self) -> File {
+        let state = self.project.join("target/xmlsquish/.squish-publish");
+        fs::create_dir_all(&state).expect("create publisher state directory");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(state.join("lock"))
+            .expect("open publisher recovery lock");
+        lock.lock_exclusive().expect("hold publisher recovery lock");
+        lock
+    }
 }
 
 impl Drop for Fixture {
@@ -99,12 +111,19 @@ impl Drop for Fixture {
     }
 }
 
+/// 带通知的 PTY 字节快照。 / A PTY byte snapshot with arrival notification.
+#[derive(Default)]
+struct CapturedOutput {
+    bytes: Mutex<Vec<u8>>,
+    changed: Condvar,
+}
+
 /// 一个真实 PTY 子进程及其并发输出捕获。 / A real PTY child with concurrent output capture.
 struct PtySession {
     master: Option<Box<dyn MasterPty + Send>>,
     writer: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
     child: Option<Box<dyn Child + Send + Sync>>,
-    output: Arc<Mutex<Vec<u8>>>,
+    output: Arc<CapturedOutput>,
     columns: Arc<AtomicU16>,
     reader: Option<thread::JoinHandle<()>>,
 }
@@ -117,7 +136,13 @@ impl PtySession {
             .openpty(INITIAL_SIZE)
             .expect("open native PTY");
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_xmlsquish"));
-        command.args(["build", "--jobs=1", "--color=always", "--progress=always"]);
+        command.args([
+            "build",
+            "--jobs=1",
+            "--color=always",
+            "--progress=always",
+            "-v",
+        ]);
         command.cwd(project);
         command.env("XMLSQUISH_HOME", home);
         command.env("TERM", "xterm-256color");
@@ -131,7 +156,7 @@ impl PtySession {
         let writer = Arc::new(Mutex::new(
             pair.master.take_writer().expect("take PTY writer"),
         ));
-        let output = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::new(CapturedOutput::default());
         let captured = Arc::clone(&output);
         let terminal_input = Arc::clone(&writer);
         let columns = Arc::new(AtomicU16::new(INITIAL_SIZE.cols));
@@ -145,9 +170,11 @@ impl PtySession {
                     Ok(read) => {
                         let bytes = &buffer[..read];
                         captured
+                            .bytes
                             .lock()
                             .expect("PTY output lock")
                             .extend_from_slice(bytes);
+                        captured.changed.notify_all();
                         pending.extend_from_slice(bytes);
                         while let Some(position) = find_bytes(&pending, b"\x1b[6n") {
                             // ConPTY translates GetConsoleScreenBufferInfo synchronization into
@@ -187,28 +214,9 @@ impl PtySession {
         }
     }
 
-    /// 等待真实输出包含给定字节；超时时附上尾部转储。 / Waits for real output to
-    /// contain bytes, attaching a tail dump on timeout.
-    fn wait_for(&self, needle: &[u8], timeout: Duration) -> usize {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let bytes = self.bytes();
-            if let Some(position) = find_bytes(&bytes, needle) {
-                return position;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for {:?}; PTY tail: {:?}",
-                String::from_utf8_lossy(needle),
-                String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(2_000)..])
-            );
-            thread::sleep(Duration::from_millis(5));
-        }
-    }
-
     /// 返回当前输出快照。 / Returns the current output snapshot.
     fn bytes(&self) -> Vec<u8> {
-        self.output.lock().expect("PTY output lock").clone()
+        self.output.bytes.lock().expect("PTY output lock").clone()
     }
 
     /// 向终端输入一个控制字符并立即刷新。 / Writes and flushes one terminal control character.
@@ -292,14 +300,23 @@ impl Drop for PtySession {
 #[test]
 fn interactive_progress_resize_and_cooperative_interrupt_are_real() {
     let fixture = Fixture::create("cooperative");
+    let recovery_lock = fixture.hold_recovery_lock();
     let mut session = PtySession::spawn(&fixture.project, &fixture.home("home"));
 
-    session.wait_for(CLEAR_LINE, WAIT);
+    let wide = wait_for_blocked_recovery(&session, WAIT);
+    assert!(
+        visible_frame_width(&wide) > usize::from(NARROW_SIZE.cols - 1),
+        "wide frame did not require truncation after resize"
+    );
+    assert!(
+        !strip_ansi(&wide).contains("..."),
+        "wide frame was truncated"
+    );
     let before_resize = session.bytes().len();
     session.resize(NARROW_SIZE);
-    let frame = wait_for_frame_after(&session, before_resize, WAIT);
+    let frame = wait_for_recovery_frame_after(&session, before_resize, true, WAIT);
     assert!(
-        visible_frame_width(&frame) <= usize::from(NARROW_SIZE.cols),
+        visible_frame_width(&frame) <= usize::from(NARROW_SIZE.cols - 1),
         "dynamic frame exceeded resized width: {:?}",
         String::from_utf8_lossy(&frame)
     );
@@ -309,7 +326,10 @@ fn interactive_progress_resize_and_cooperative_interrupt_are_real() {
         String::from_utf8_lossy(&frame)
     );
 
+    let before_interrupt = session.bytes().len();
     session.control_c();
+    wait_for_notice_after(&session, before_interrupt, WAIT);
+    drop(recovery_lock);
     assert_eq!(session.wait(WAIT), 130);
     let raw = session.finish_output();
     assert!(
@@ -317,13 +337,19 @@ fn interactive_progress_resize_and_cooperative_interrupt_are_real() {
         "ANSI was absent"
     );
     let plain = strip_ansi(&raw);
-    let terminal_summaries = plain
-        .split(['\r', '\n'])
-        .filter(|line| line.contains("Cancelled build-cli-") && line.contains(" succeeded,"))
-        .count();
+    let terminal_summaries = plain.matches("Cancelled build-cli-").count();
     assert_eq!(
         terminal_summaries, 1,
         "cooperative cancellation must emit exactly one terminal summary: {plain}"
+    );
+    assert!(
+        plain.contains(" succeeded,"),
+        "cooperative terminal summary omitted totals: {plain}"
+    );
+    #[cfg(not(windows))]
+    assert!(
+        find_bytes(&raw[before_interrupt.min(raw.len())..], EMERGENCY_RESET).is_none(),
+        "one interrupt unexpectedly used the emergency restoration path"
     );
 }
 
@@ -332,11 +358,14 @@ fn interactive_progress_resize_and_cooperative_interrupt_are_real() {
 #[test]
 fn second_interrupt_emits_emergency_reset_before_exit() {
     let fixture = Fixture::create("emergency");
+    let _recovery_lock = fixture.hold_recovery_lock();
     let mut session = PtySession::spawn(&fixture.project, &fixture.home("home"));
 
-    session.wait_for(CLEAR_LINE, WAIT);
-    let before_interrupts = session.bytes().len();
+    wait_for_blocked_recovery(&session, WAIT);
+    let before_first = session.bytes().len();
     session.control_c();
+    wait_for_notice_after(&session, before_first, WAIT);
+    let before_interrupts = session.bytes().len();
     session.control_c();
     assert_eq!(session.wait(WAIT), 130);
     let raw = session.finish_output();
@@ -350,6 +379,11 @@ fn assert_emergency_restore(raw: &[u8], _before_interrupts: usize) {
         find_bytes(raw, EMERGENCY_RESET).is_some(),
         "second interrupt did not write the exact emergency reset; tail: {:?}",
         String::from_utf8_lossy(&raw[raw.len().saturating_sub(2_000)..])
+    );
+    let plain = strip_ansi(raw);
+    assert!(
+        !plain.contains(" succeeded,"),
+        "emergency exit unexpectedly emitted a cooperative terminal summary: {plain}"
     );
 }
 
@@ -373,31 +407,177 @@ fn assert_emergency_restore(raw: &[u8], before_interrupts: usize) {
         !plain.contains(" succeeded,"),
         "second interrupt unexpectedly followed the cooperative completion path: {plain}"
     );
+    assert!(
+        !plain.contains("Recovering"),
+        "a complete progress frame appeared after the emergency interrupt: {plain}"
+    );
 }
 
-/// 等待 resize 后生成一个非空动态帧。 / Waits for a non-empty dynamic frame after resize.
-fn wait_for_frame_after(session: &PtySession, offset: usize, timeout: Duration) -> Vec<u8> {
+/// 在发送偏移后等待呈现器拥有的完整取消提示行。 /
+/// Waits after the send offset for the renderer-owned complete cancellation notice line.
+fn wait_for_notice_after(session: &PtySession, offset: usize, timeout: Duration) {
     let deadline = Instant::now() + timeout;
+    let mut bytes = session.output.bytes.lock().expect("PTY output lock");
     loop {
-        let bytes = session.bytes();
-        if bytes.len() > offset
-            && let Some(start) = find_bytes(&bytes[offset..], CLEAR_LINE)
+        let plain = strip_ansi(&bytes[offset.min(bytes.len())..]);
+        if plain
+            .split_inclusive(['\r', '\n'])
+            .any(|line| line.trim() == CANCELLATION_NOTICE)
         {
-            let content = &bytes[offset + start + CLEAR_LINE.len()..];
-            let end = content
-                .iter()
-                .position(|byte| matches!(byte, b'\r' | b'\n'))
-                .unwrap_or(content.len());
-            if end > 0 {
-                return content[..end].to_vec();
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no complete cancellation notice after first interrupt; tail: {:?}",
+            &plain[plain.len().saturating_sub(2_000)..]
+        );
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        bytes = session
+            .output
+            .changed
+            .wait_timeout(bytes, remaining)
+            .expect("PTY output wait")
+            .0;
+    }
+}
+
+/// 等待已完成的 scan/validate 证据及其后的同作业恢复帧。 /
+/// Waits for completed scan/validate evidence and the same job's later recovery frame.
+fn wait_for_blocked_recovery(session: &PtySession, timeout: Duration) -> Vec<u8> {
+    let deadline = Instant::now() + timeout;
+    let mut bytes = session.output.bytes.lock().expect("PTY output lock");
+    loop {
+        let plain = strip_ansi(&bytes);
+        if let Some(frame) = ordered_recovery_frame(&plain) {
+            return frame.into_bytes();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no ordered recovery sequence; tail: {:?}",
+            &plain[plain.len().saturating_sub(2_000)..]
+        );
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        bytes = session
+            .output
+            .changed
+            .wait_timeout(bytes, remaining)
+            .expect("PTY output wait")
+            .0;
+    }
+}
+
+/// 从持久步骤终态和完整重绘语法中证明 open-build-state 恢复阶段。 /
+/// Proves the open-build-state recovery phase from persistent step terminals and a full repaint.
+fn ordered_recovery_frame(transcript: &str) -> Option<String> {
+    let (scan_end, job) = completed_step_after(transcript, 0, "scan")?;
+    let (validate_end, validated_job) =
+        completed_step_after(transcript, scan_end, "validate-plan")?;
+    if validated_job != job {
+        return None;
+    }
+    let suffix = &transcript[validate_end..];
+    let mut offset = 0;
+    while let Some(relative) = suffix[offset..].find("Recovering ") {
+        let start = offset + relative;
+        let end = start + suffix[start..].find("s)")? + 2;
+        let frame = &suffix[start..end];
+        if progress_job(frame, "Recovering") == Some(job) {
+            return Some(frame.to_owned());
+        }
+        offset = end;
+    }
+    None
+}
+
+/// 查找 CR/LF 定界的 verbose 步骤终态并返回结束偏移与 job。 /
+/// Finds a CR/LF-delimited verbose step terminal and returns its end offset and job.
+fn completed_step_after<'a>(
+    transcript: &'a str,
+    offset: usize,
+    step: &str,
+) -> Option<(usize, &'a str)> {
+    let prefix = format!("Planned step {step} (");
+    let relative = transcript[offset..].find(&prefix)?;
+    let start = offset + relative;
+    if start > 0 && !matches!(transcript.as_bytes()[start - 1], b'\r' | b'\n') {
+        return None;
+    }
+    let line_end = transcript[start..]
+        .find(['\r', '\n'])
+        .map_or(transcript.len(), |end| start + end);
+    let line = &transcript[start..line_end];
+    let body = line.strip_prefix(&prefix)?.strip_suffix(" ms)")?;
+    let (job, milliseconds) = body.rsplit_once(", ")?;
+    milliseconds.parse::<u64>().ok()?;
+    Some((line_end, job))
+}
+
+/// 解析完整的 `<phase> <job> (<seconds>s)` 帧并返回 job。 /
+/// Parses a complete `<phase> <job> (<seconds>s)` frame and returns its job.
+fn progress_job<'a>(frame: &'a str, phase: &str) -> Option<&'a str> {
+    let rest = frame.strip_prefix(phase)?.strip_prefix(' ')?;
+    let (job, elapsed) = rest.rsplit_once(" (")?;
+    let seconds = elapsed.strip_suffix("s)")?;
+    (job.starts_with("build-cli-") && seconds.parse::<f64>().is_ok()).then_some(job)
+}
+
+/// 等待一个由后继 CR 封闭、且语义完整的恢复帧；控制符片段绝不算帧。 /
+/// Waits for a recovery frame closed by a later CR; control-only fragments never count.
+fn wait_for_recovery_frame_after(
+    session: &PtySession,
+    offset: usize,
+    truncated: bool,
+    timeout: Duration,
+) -> Vec<u8> {
+    let deadline = Instant::now() + timeout;
+    let mut bytes = session.output.bytes.lock().expect("PTY output lock");
+    loop {
+        let suffix = &bytes[offset.min(bytes.len())..];
+        let plain = strip_ansi(suffix);
+        let mut searched = 0;
+        while let Some(relative) = plain[searched..].find("Recovering") {
+            let start = searched + relative;
+            if let Some(relative_end) = plain[start..].find("s)") {
+                let end = start + relative_end + 2;
+                let frame = &plain[start..end];
+                if complete_recovery_grammar(frame, truncated) {
+                    return frame.as_bytes().to_vec();
+                }
+                searched = end;
+            } else {
+                break;
             }
         }
         assert!(
             Instant::now() < deadline,
-            "no dynamic frame followed resize"
+            "no complete semantic recovery frame followed offset; tail: {:?}",
+            String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(2_000)..])
         );
-        thread::sleep(Duration::from_millis(5));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        bytes = session
+            .output
+            .changed
+            .wait_timeout(bytes, remaining)
+            .expect("PTY output wait")
+            .0;
     }
+}
+
+/// 验证 `Recovering <job> (<seconds>s)` 的完整终端语法。 /
+/// Validates the complete `Recovering <job> (<seconds>s)` terminal grammar.
+fn complete_recovery_grammar(frame: &str, truncated: bool) -> bool {
+    let Some((label, elapsed)) = frame.trim().rsplit_once(" (") else {
+        return false;
+    };
+    let Some(seconds) = elapsed.strip_suffix("s)") else {
+        return false;
+    };
+    let label_is_complete = if truncated {
+        label.starts_with("Recovering") && label.contains("...")
+    } else {
+        label.starts_with("Recovering build-cli-") && label.len() > "Recovering build-cli-".len()
+    };
+    label_is_complete && seconds.parse::<f64>().is_ok()
 }
 
 /// 计算动态帧的可见 ASCII 宽度；产品动作 ID 与计数均为 ASCII。 / Measures the visible

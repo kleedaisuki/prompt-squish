@@ -12,7 +12,8 @@ use std::{
     io::{self, Write},
     path::Path,
     process::ExitCode,
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
+    thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -35,9 +36,9 @@ use squish_manager::{
     DurabilityPorts, InspectSubject, InvocationSettings, ManagerCapability, StorageLayout,
 };
 use squish_presentation::{
-    ColorMode, Environment, HumanRenderer, InspectHumanRenderer, NdjsonRenderer,
-    PresentationOptions, ProgressMode, Renderer, SystemClock, SystemTerminal, TerminalProbe,
-    Verbosity,
+    ColorMode, DEFAULT_PROGRESS_REFRESH, Environment, HumanRenderer, InspectHumanRenderer,
+    NdjsonRenderer, PresentationOptions, ProgressMode, Renderer, SystemClock, SystemTerminal,
+    TerminalProbe, Verbosity,
 };
 use squish_protocol::{
     ActionKeyId, Event, EventPayload, ExitStatus, InvocationId, OperationRequest, OperationResult,
@@ -70,19 +71,169 @@ struct BootstrapRecord<'a> {
     exit_code: u8,
 }
 
+/// 可跨线程重建的输出故障。 / An output failure that can be reconstructed across threads.
+#[derive(Clone, Debug)]
+struct RendererError {
+    kind: io::ErrorKind,
+    message: String,
+}
+
+impl RendererError {
+    /// 保留错误类别和说明，而不要求 [`io::Error`] 可克隆。 /
+    /// Preserves the error kind and message without requiring [`io::Error`] to be cloneable.
+    fn capture(error: io::Error) -> Self {
+        Self {
+            kind: error.kind(),
+            message: error.to_string(),
+        }
+    }
+
+    /// 为每个观察者生成等价错误。 / Produces an equivalent error for each observer.
+    fn to_io_error(&self) -> io::Error {
+        io::Error::new(self.kind, self.message.clone())
+    }
+}
+
+/// 呈现器及其首个持久输出故障；同一把锁定义事件与时钟重绘的全序。 /
+/// Renderer plus its first persistent output failure; one lock totally orders events and ticks.
+struct RenderingState {
+    renderer: Box<dyn Renderer + Send>,
+    error: Option<RendererError>,
+    cancellation_announced: bool,
+}
+
+/// 周期泵的停止协议。 / Stop protocol for the periodic pump.
+#[derive(Default)]
+struct PumpStop {
+    stopped: Mutex<bool>,
+    wake: Condvar,
+}
+
 /// 将内核事件串行送入唯一呈现器。 / Serializes kernel events into the sole renderer.
 struct RenderingSink {
-    renderer: Mutex<Box<dyn Renderer + Send>>,
+    state: Arc<Mutex<RenderingState>>,
     omit_inspect_result: bool,
+    stop: Option<Arc<PumpStop>>,
+    pump: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl RenderingSink {
-    /// 完成临时 UI 并刷新目标流。 / Finishes transient UI and flushes the target stream.
+    /// 构造呈现宿主；仅动态 UI 获得周期线程。 /
+    /// Builds the rendering host; only dynamic UI receives a periodic thread.
+    fn new(
+        renderer: Box<dyn Renderer + Send>,
+        omit_inspect_result: bool,
+        dynamic: bool,
+        coordinator: Option<Arc<InterruptCoordinator>>,
+    ) -> io::Result<Self> {
+        let state = Arc::new(Mutex::new(RenderingState {
+            renderer,
+            error: None,
+            cancellation_announced: false,
+        }));
+        let (stop, pump) = if dynamic {
+            let stop = Arc::new(PumpStop::default());
+            let pump_state = Arc::clone(&state);
+            let pump_stop = Arc::clone(&stop);
+            let handle = thread::Builder::new()
+                .name("xmlsquish-renderer".into())
+                .spawn(move || renderer_pump(&pump_state, &pump_stop, coordinator))?;
+            (Some(stop), Some(handle))
+        } else {
+            (None, None)
+        };
+        Ok(Self {
+            state,
+            omit_inspect_result,
+            stop,
+            pump: Mutex::new(pump),
+        })
+    }
+
+    /// 停止并汇合周期泵，然后完成临时 UI 和刷新目标流。 /
+    /// Stops and joins the periodic pump, then finishes transient UI and flushes the stream.
     fn finish(&self) -> io::Result<()> {
-        self.renderer
+        self.stop_and_join()?;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prior = state.error.as_ref().map(RendererError::to_io_error);
+        let finished = state.renderer.finish();
+        prior.map_or(finished, Err)
+    }
+
+    /// 请求停止并显式汇合线程；可安全重复调用。 /
+    /// Requests shutdown and explicitly joins the thread; safe to call repeatedly.
+    fn stop_and_join(&self) -> io::Result<()> {
+        if let Some(stop) = &self.stop {
+            *stop
+                .stopped
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+            stop.wake.notify_one();
+        }
+        let handle = self
+            .pump
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .finish()
+            .take();
+        if handle.is_some_and(|handle| handle.join().is_err()) {
+            return Err(io::Error::other("renderer pump thread panicked"));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for RenderingSink {
+    fn drop(&mut self) {
+        // 提前返回也绝不遗留 detached thread。 / Early returns never leave a detached thread.
+        let _ = self.stop_and_join();
+    }
+}
+
+/// 在静默期按呈现契约推进动态 UI，输出失败后立即停止。 /
+/// Advances dynamic UI during quiet periods and stops immediately after an output failure.
+fn renderer_pump(
+    state: &Mutex<RenderingState>,
+    stop: &PumpStop,
+    coordinator: Option<Arc<InterruptCoordinator>>,
+) {
+    loop {
+        let stopped = stop
+            .wake
+            .wait_timeout_while(
+                stop.stopped
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                DEFAULT_PROGRESS_REFRESH,
+                |stopped| !*stopped,
+            )
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *stopped.0 {
+            return;
+        }
+        let mut state = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.error.is_some() {
+            return;
+        }
+        if !state.cancellation_announced
+            && coordinator
+                .as_ref()
+                .is_some_and(|coordinator| coordinator.cooperative_cancellation_started())
+        {
+            if let Err(error) = state.renderer.cancellation_requested() {
+                state.error = Some(RendererError::capture(error));
+                return;
+            }
+            state.cancellation_announced = true;
+        }
+        if let Err(error) = state.renderer.tick() {
+            state.error = Some(RendererError::capture(error));
+            return;
+        }
     }
 }
 
@@ -101,11 +252,22 @@ impl EventSink for RenderingSink {
         {
             return Ok(());
         }
-        self.renderer
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .render(&event)
-            .map_err(|error| SinkError::new(error.to_string()))
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(error) = &state.error {
+            return Err(SinkError::new(error.message.clone()));
+        }
+        match state.renderer.render(&event) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let error = RendererError::capture(error);
+                let message = error.message.clone();
+                state.error = Some(error);
+                Err(SinkError::new(message))
+            }
+        }
     }
 }
 
@@ -259,13 +421,27 @@ fn execute(
     };
 
     let query = matches!(invocation.request, OperationRequest::Inspect(_));
-    let sink = Arc::new(rendering_sink(
+    let sink = match rendering_sink(
         &invocation,
         &config,
         query,
         terminal,
         &emergency_terminal,
-    ));
+        Arc::clone(&coordinator),
+    ) {
+        Ok(sink) => Arc::new(sink),
+        Err(error) => {
+            let message = format!("could not initialize output renderer: {error}");
+            return Ok(bootstrap_failure(
+                operation_json,
+                "output",
+                "OUTPUT001",
+                &message,
+                1,
+                true,
+            ));
+        }
+    };
     let settings = InvocationSettings {
         excluded_packages: invocation.execution.excluded_packages,
         jobs: invocation
@@ -291,12 +467,21 @@ fn execute(
     let outcome = match kernel.dispatch(&invocation.request, &context) {
         Ok(outcome) => outcome,
         Err(KernelError::Emit(error)) => {
+            let _ = sink.finish();
             print_stderr(&format!(
                 "error[OUTPUT001] could not write output: {error}\n"
             ));
             return Ok(1);
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => {
+            if let Err(output_error) = sink.finish() {
+                print_stderr(&format!(
+                    "error[OUTPUT001] could not flush output: {output_error}\n"
+                ));
+                return Ok(1);
+            }
+            return Err(error.into());
+        }
     };
     if let Err(error) = sink.finish() {
         print_stderr(&format!(
@@ -448,7 +633,8 @@ fn rendering_sink(
     query: bool,
     terminal: SystemTerminal,
     emergency_terminal: &StderrEmergencyRestore,
-) -> RenderingSink {
+    coordinator: Arc<InterruptCoordinator>,
+) -> io::Result<RenderingSink> {
     let message_format = if query {
         MessageFormat::Human
     } else {
@@ -460,52 +646,52 @@ fn rendering_sink(
             }
         })
     };
-    let renderer: Box<dyn Renderer + Send> = if message_format == MessageFormat::Json {
-        Box::new(NdjsonRenderer::new(io::stdout()))
-    } else {
-        let stderr = io::stderr();
-        let options = PresentationOptions {
-            color: terminal_mode(
-                invocation.presentation.color,
-                config.term.color,
-                invocation.presentation.plain,
-            ),
-            progress: progress_mode(
-                invocation.presentation.progress,
-                config.term.progress,
-                invocation.presentation.plain || invocation.presentation.quiet,
-            ),
-            verbosity: if invocation.presentation.quiet || query {
-                Verbosity::Quiet
-            } else if message_format == MessageFormat::Short {
-                Verbosity::Short
-            } else if invocation.presentation.verbosity > 0 {
-                Verbosity::Verbose
-            } else {
-                match config.term.verbosity {
-                    squish_config::Verbosity::Quiet => Verbosity::Quiet,
-                    squish_config::Verbosity::Normal => Verbosity::Normal,
-                    squish_config::Verbosity::Verbose | squish_config::Verbosity::Trace => {
-                        Verbosity::Verbose
+    let (renderer, dynamic): (Box<dyn Renderer + Send>, bool) =
+        if message_format == MessageFormat::Json {
+            (Box::new(NdjsonRenderer::new(io::stdout())), false)
+        } else {
+            let stderr = io::stderr();
+            let options = PresentationOptions {
+                color: terminal_mode(
+                    invocation.presentation.color,
+                    config.term.color,
+                    invocation.presentation.plain,
+                ),
+                progress: progress_mode(
+                    invocation.presentation.progress,
+                    config.term.progress,
+                    invocation.presentation.plain || invocation.presentation.quiet,
+                ),
+                verbosity: if invocation.presentation.quiet || query {
+                    Verbosity::Quiet
+                } else if message_format == MessageFormat::Short {
+                    Verbosity::Short
+                } else if invocation.presentation.verbosity > 0 {
+                    Verbosity::Verbose
+                } else {
+                    match config.term.verbosity {
+                        squish_config::Verbosity::Quiet => Verbosity::Quiet,
+                        squish_config::Verbosity::Normal => Verbosity::Normal,
+                        squish_config::Verbosity::Verbose | squish_config::Verbosity::Trace => {
+                            Verbosity::Verbose
+                        }
                     }
-                }
-            },
-            ..PresentationOptions::default()
+                },
+                ..PresentationOptions::default()
+            };
+            let renderer = HumanRenderer::with_clock_and_terminal(
+                stderr,
+                terminal,
+                Environment::capture(),
+                options,
+                SystemClock,
+            );
+            let dynamic = renderer.uses_dynamic_progress();
+            (Box::new(renderer), dynamic)
         };
-        let renderer = HumanRenderer::with_clock_and_terminal(
-            stderr,
-            terminal,
-            Environment::capture(),
-            options,
-            SystemClock,
-        );
-        emergency_terminal.set_dynamic_presentation(renderer.uses_dynamic_progress());
-        Box::new(renderer)
-    };
-    RenderingSink {
-        renderer: Mutex::new(renderer),
-        omit_inspect_result: query,
-    }
+    let sink = RenderingSink::new(renderer, query, dynamic, dynamic.then_some(coordinator))?;
+    emergency_terminal.set_dynamic_presentation(dynamic);
+    Ok(sink)
 }
 
 /// 将 CLI 查询对象转换为管理器已类型化的补充设置。 / Converts the CLI query subject to the manager's typed supplement.
@@ -842,4 +1028,112 @@ fn print_stderr(message: &str) {
 /// 将稳定退出码交给操作系统。 / Returns the stable exit code to the operating system.
 fn main() -> ExitCode {
     ExitCode::from(run())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
+
+    use super::*;
+
+    /// 首次 tick 报错并通知测试线程的呈现器。 /
+    /// Renderer that reports an error on its first tick and notifies the test thread.
+    struct FailingTickRenderer {
+        ticked: mpsc::Sender<()>,
+        finishes: Arc<AtomicUsize>,
+    }
+
+    /// 保持活跃直到宿主停止它的呈现器。 / Renderer that remains active until its host stops it.
+    struct ActiveTickRenderer {
+        ticked: mpsc::Sender<()>,
+        finishes: Arc<AtomicUsize>,
+    }
+
+    impl Renderer for ActiveTickRenderer {
+        fn render(&mut self, _event: &Event) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn tick(&mut self) -> io::Result<()> {
+            let _ = self.ticked.send(());
+            Ok(())
+        }
+
+        fn finish(&mut self) -> io::Result<()> {
+            self.finishes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    impl Renderer for FailingTickRenderer {
+        fn render(&mut self, _event: &Event) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn tick(&mut self) -> io::Result<()> {
+            let _ = self.ticked.send(());
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "tick failed"))
+        }
+
+        fn finish(&mut self) -> io::Result<()> {
+            self.finishes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn tick_error_is_sticky_and_surfaced_by_finish() {
+        let (ticked_tx, ticked_rx) = mpsc::channel();
+        let finishes = Arc::new(AtomicUsize::new(0));
+        let sink = RenderingSink::new(
+            Box::new(FailingTickRenderer {
+                ticked: ticked_tx,
+                finishes: Arc::clone(&finishes),
+            }),
+            false,
+            true,
+            None,
+        )
+        .expect("start renderer pump");
+
+        ticked_rx
+            .recv_timeout(DEFAULT_PROGRESS_REFRESH * 5)
+            .expect("periodic tick occurred");
+        let error = sink.finish().expect_err("tick failure reaches host");
+
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(error.to_string(), "tick failed");
+        assert_eq!(finishes.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn finish_stops_and_joins_live_pump_before_renderer_finish() {
+        let (ticked_tx, ticked_rx) = mpsc::channel();
+        let finishes = Arc::new(AtomicUsize::new(0));
+        let sink = RenderingSink::new(
+            Box::new(ActiveTickRenderer {
+                ticked: ticked_tx,
+                finishes: Arc::clone(&finishes),
+            }),
+            false,
+            true,
+            None,
+        )
+        .expect("start renderer pump");
+
+        ticked_rx
+            .recv_timeout(DEFAULT_PROGRESS_REFRESH * 5)
+            .expect("periodic tick occurred");
+        sink.finish().expect("finish renderer host");
+
+        assert_eq!(finishes.load(Ordering::SeqCst), 1);
+        assert!(
+            sink.pump.lock().expect("pump handle lock").is_none(),
+            "finish must join and consume the pump handle before renderer.finish"
+        );
+    }
 }
