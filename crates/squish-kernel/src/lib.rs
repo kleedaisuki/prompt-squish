@@ -4,9 +4,9 @@
 
 use squish_protocol::{
     ActionId, ActionKind, ActionTotals, CapabilityId, Event, EventPayload, ExitStatus,
-    FinalizationId, InvocationId, JobId, JobSummary, OperationKind, OperationRequest,
-    OperationResult, PlanCloseReason, PlanId, PlanMode, PlanningAttemptId, PlanningIssueId,
-    PlanningStepId, SupersedeReason, Timing,
+    FinalizationId, FinalizationKind, InvocationId, JobId, JobSummary, OperationKind,
+    OperationRequest, OperationResult, PlanCloseReason, PlanId, PlanMode, PlanningAttemptId,
+    PlanningIssueId, PlanningStepId, SupersedeReason, Timing,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -444,6 +444,11 @@ enum FinalizationState {
     Succeeded,
     Failed,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FinalizationRecord {
+    kind: FinalizationKind,
+    state: FinalizationState,
+}
 #[derive(Debug)]
 struct AttemptRecord {
     steps: HashMap<PlanningStepId, StepState>,
@@ -470,7 +475,7 @@ struct Lifecycle {
     attempts: HashMap<PlanningAttemptId, AttemptRecord>,
     plans: HashMap<PlanId, PlanRecord>,
     final_plan: Option<PlanId>,
-    finalizations: HashMap<FinalizationId, FinalizationState>,
+    finalizations: HashMap<FinalizationId, FinalizationRecord>,
     active_finalization: Option<FinalizationId>,
     retry_allowed: bool,
     fatal_planning_failure: bool,
@@ -597,7 +602,9 @@ impl Lifecycle {
                 )
             }
             EventPayload::PlanClosed { job, plan, reason } => self.close_plan(job, plan, *reason),
-            EventPayload::FinalizationStarted { job, id, .. } => self.start_finalization(job, id),
+            EventPayload::FinalizationStarted { job, id, kind } => {
+                self.start_finalization(job, id, *kind)
+            }
             EventPayload::FinalizationSucceeded { job, id, .. } => {
                 self.finish_finalization(job, id, FinalizationState::Succeeded)
             }
@@ -1111,6 +1118,7 @@ impl Lifecycle {
         &mut self,
         job: &JobId,
         id: &FinalizationId,
+        kind: FinalizationKind,
     ) -> Result<(), LifecycleError> {
         self.same_job(job)?;
         if self.final_plan.is_none() || self.active.is_some() || self.retry_allowed {
@@ -1122,8 +1130,13 @@ impl Lifecycle {
         if self.finalizations.contains_key(id) {
             return self.invalid(format!("finalization `{id}` was reused"));
         }
-        self.finalizations
-            .insert(id.clone(), FinalizationState::Started);
+        self.finalizations.insert(
+            id.clone(),
+            FinalizationRecord {
+                kind,
+                state: FinalizationState::Started,
+            },
+        );
         self.active_finalization = Some(id.clone());
         Ok(())
     }
@@ -1142,10 +1155,10 @@ impl Lifecycle {
             .finalizations
             .get_mut(id)
             .expect("active finalization exists");
-        if *state != FinalizationState::Started {
+        if state.state != FinalizationState::Started {
             return self.invalid(format!("finalization `{id}` terminated more than once"));
         }
-        *state = terminal;
+        state.state = terminal;
         self.active_finalization = None;
         Ok(())
     }
@@ -1175,6 +1188,24 @@ impl Lifecycle {
         self.same_job(&outcome.job)?;
         if self.active.is_some() || self.retry_allowed || self.active_finalization.is_some() {
             return self.invalid("job ended with open planning, plan, or finalization work");
+        }
+        let executable_build = outcome.result.kind() == OperationKind::Build
+            && self
+                .final_plan
+                .as_ref()
+                .is_some_and(|plan| self.plans[plan].mode == PlanMode::Execute);
+        if executable_build {
+            let Some(finalization) = self.finalizations.values().next() else {
+                return self.invalid("executable build omitted build-catalog finalization");
+            };
+            if self.finalizations.len() != 1
+                || !matches!(finalization.kind, FinalizationKind::PersistBuildCatalog)
+                || finalization.state == FinalizationState::Started
+            {
+                return self.invalid(
+                    "executable build requires exactly one terminal build-catalog finalization",
+                );
+            }
         }
         let mut totals = ActionTotals::default();
         let mut root_failures = 0;
@@ -1207,7 +1238,7 @@ impl Lifecycle {
         root_failures += self
             .finalizations
             .values()
-            .filter(|state| **state == FinalizationState::Failed)
+            .filter(|record| record.state == FinalizationState::Failed)
             .count() as u64;
         if totals != outcome.totals
             || root_failures != outcome.root_failures
@@ -1228,9 +1259,9 @@ mod tests {
     use super::*;
     use squish_protocol::{
         ActionKind, BuildRequest, BuildResult, Diagnostic, DiagnosticId, Digest, DigestAlgorithm,
-        EmitKind, FinalizationKind, InspectRequest, InspectResult, InspectView, LockMode,
-        OpaqueSourceId, Phase, PlanDigest, PlanningStepKind, ProfileName, ProjectInspection,
-        ProjectPath, Severity, WorkspaceScope,
+        EmitKind, FinalizationKind, FormatResult, InspectRequest, InspectResult, InspectView,
+        LockMode, OpaqueSourceId, Phase, PlanDigest, PlanningStepKind, ProfileName,
+        ProjectInspection, ProjectPath, Severity, WorkspaceScope,
     };
     use std::sync::Mutex;
 
@@ -1314,6 +1345,23 @@ mod tests {
             })
             .unwrap();
     }
+    fn finalize_catalog(lifecycle: &mut Lifecycle, value: &str) {
+        let id = FinalizationId::new(value).unwrap();
+        lifecycle
+            .observe(&EventPayload::FinalizationStarted {
+                job: job(),
+                id: id.clone(),
+                kind: FinalizationKind::PersistBuildCatalog,
+            })
+            .unwrap();
+        lifecycle
+            .observe(&EventPayload::FinalizationSucceeded {
+                job: job(),
+                id,
+                timing: Timing::default(),
+            })
+            .unwrap();
+    }
     fn outcome(totals: ActionTotals, root_failures: u64, cancelled: bool) -> OperationOutcome {
         OperationOutcome {
             job: job(),
@@ -1386,6 +1434,7 @@ mod tests {
                 reason: PlanCloseReason::Executed,
             })
             .unwrap();
+        finalize_catalog(&mut lifecycle, "catalog");
         lifecycle
             .finish(&outcome(
                 ActionTotals {
@@ -1489,6 +1538,173 @@ mod tests {
     }
 
     #[test]
+    fn executable_build_requires_exactly_one_catalog_finalization() {
+        let mut lifecycle = Lifecycle::default();
+        let a = attempt("missing-catalog-attempt");
+        let p = plan("missing-catalog-plan");
+        start(&mut lifecycle, &a);
+        seal(&mut lifecycle, &a, &p, PlanMode::Execute, 0, 0);
+        lifecycle
+            .observe(&EventPayload::PlanClosed {
+                job: job(),
+                plan: p,
+                reason: PlanCloseReason::Executed,
+            })
+            .unwrap();
+        assert!(
+            lifecycle
+                .finish(&outcome(ActionTotals::default(), 0, false))
+                .is_err()
+        );
+        finalize_catalog(&mut lifecycle, "first-catalog");
+        finalize_catalog(&mut lifecycle, "duplicate-catalog");
+        assert!(
+            lifecycle
+                .finish(&outcome(ActionTotals::default(), 0, false))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn failed_and_cancelled_action_builds_still_require_catalog_finalization() {
+        let mut failed = Lifecycle::default();
+        let a = attempt("failed-action-attempt");
+        let p = plan("failed-action-plan");
+        let x = action("failed");
+        start(&mut failed, &a);
+        seal(&mut failed, &a, &p, PlanMode::Execute, 1, 0);
+        declare(&mut failed, &p, &x, vec![]);
+        failed
+            .observe(&EventPayload::ActionStarted {
+                job: job(),
+                plan: p.clone(),
+                action: x.clone(),
+            })
+            .unwrap();
+        failed
+            .observe(&EventPayload::ActionFailed {
+                job: job(),
+                plan: p.clone(),
+                action: x,
+                timing: Timing::default(),
+                diagnostic: diagnostic(),
+            })
+            .unwrap();
+        failed
+            .observe(&EventPayload::PlanClosed {
+                job: job(),
+                plan: p,
+                reason: PlanCloseReason::Executed,
+            })
+            .unwrap();
+        let failed_outcome = outcome(
+            ActionTotals {
+                failed: 1,
+                ..ActionTotals::default()
+            },
+            1,
+            false,
+        );
+        assert!(failed.finish(&failed_outcome).is_err());
+        finalize_catalog(&mut failed, "failed-action-catalog");
+        failed.finish(&failed_outcome).unwrap();
+
+        let mut cancelled = Lifecycle::default();
+        let a = attempt("cancelled-action-attempt");
+        let p = plan("cancelled-action-plan");
+        let x = action("cancelled");
+        start(&mut cancelled, &a);
+        seal(&mut cancelled, &a, &p, PlanMode::Execute, 1, 0);
+        declare(&mut cancelled, &p, &x, vec![]);
+        cancelled
+            .observe(&EventPayload::ActionCancelled {
+                job: job(),
+                plan: p.clone(),
+                action: x,
+                timing: Timing::default(),
+            })
+            .unwrap();
+        cancelled
+            .observe(&EventPayload::PlanClosed {
+                job: job(),
+                plan: p,
+                reason: PlanCloseReason::Executed,
+            })
+            .unwrap();
+        let id = FinalizationId::new("cancelled-action-catalog").unwrap();
+        cancelled
+            .observe(&EventPayload::FinalizationStarted {
+                job: job(),
+                id: id.clone(),
+                kind: FinalizationKind::PersistBuildCatalog,
+            })
+            .unwrap();
+        cancelled
+            .observe(&EventPayload::FinalizationFailed {
+                job: job(),
+                id,
+                timing: Timing::default(),
+                diagnostic: diagnostic(),
+            })
+            .unwrap();
+        cancelled
+            .finish(&outcome(
+                ActionTotals {
+                    cancelled: 1,
+                    ..ActionTotals::default()
+                },
+                1,
+                true,
+            ))
+            .unwrap();
+    }
+
+    #[test]
+    fn non_build_final_plans_need_no_catalog_finalization() {
+        let close = |name: &str| {
+            let mut lifecycle = Lifecycle::default();
+            let a = attempt(&format!("{name}-attempt"));
+            let p = plan(&format!("{name}-plan"));
+            start(&mut lifecycle, &a);
+            seal(&mut lifecycle, &a, &p, PlanMode::Execute, 0, 0);
+            lifecycle
+                .observe(&EventPayload::PlanClosed {
+                    job: job(),
+                    plan: p,
+                    reason: PlanCloseReason::Executed,
+                })
+                .unwrap();
+            lifecycle
+        };
+        close("format")
+            .finish(&OperationOutcome {
+                job: job(),
+                result: OperationResult::Format(FormatResult {
+                    selected: vec![],
+                    changed: vec![],
+                    check: false,
+                    diffs: vec![],
+                }),
+                totals: ActionTotals::default(),
+                root_failures: 0,
+                cancelled: false,
+            })
+            .unwrap();
+        close("inspect")
+            .finish(&OperationOutcome {
+                job: job(),
+                result: OperationResult::Inspect(InspectResult::Project(ProjectInspection {
+                    packages: vec![],
+                    targets: vec![],
+                })),
+                totals: ActionTotals::default(),
+                root_failures: 0,
+                cancelled: false,
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn pre_plan_failure_and_cancellation_have_zero_actions() {
         let mut failed = Lifecycle::default();
         let a = attempt("failure");
@@ -1578,6 +1794,7 @@ mod tests {
                 reason: PlanCloseReason::Executed,
             })
             .unwrap();
+        finalize_catalog(&mut lifecycle, "catalog");
         lifecycle
             .finish(&outcome(
                 ActionTotals {
@@ -1803,6 +2020,7 @@ mod tests {
                 reason: PlanCloseReason::Executed,
             })
             .unwrap();
+        finalize_catalog(&mut lifecycle, "catalog");
         lifecycle
             .finish(&outcome(
                 ActionTotals {
