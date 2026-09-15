@@ -5,7 +5,7 @@ use squish_cli::{
     BootstrapOutcome, InspectSubject, MessageFormat, ParsedInvocation, QueryFormat, parse_from,
     parse_from_with_version,
 };
-use squish_protocol::{DependencySource, InspectView, LockMode, OperationRequest};
+use squish_protocol::{DependencySource, EmitKind, InspectView, LockMode, OperationRequest};
 
 fn invocation<const N: usize>(arguments: [&str; N]) -> ParsedInvocation {
     parse_from(arguments)
@@ -25,6 +25,15 @@ fn operation_and_presentation_are_separate_contracts() {
         parsed.presentation.message_format,
         Some(MessageFormat::Short)
     );
+}
+
+#[test]
+fn build_without_emit_requests_the_primary_prompt_artifact() {
+    let parsed = invocation(["xmlsquish", "build"]);
+    let OperationRequest::Build(request) = parsed.request else {
+        panic!("build must produce BuildRequest")
+    };
+    assert_eq!(request.emit, vec![EmitKind::Prompt]);
 }
 
 #[test]

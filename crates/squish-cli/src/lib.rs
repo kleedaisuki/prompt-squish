@@ -973,6 +973,9 @@ fn emit_kinds(values: Vec<EmitArg>) -> Result<Vec<EmitKind>, clap::Error> {
             result.push(kind);
         }
     }
+    if result.is_empty() {
+        result.push(EmitKind::Prompt);
+    }
     if result == [EmitKind::DebugInfo] {
         return Err(usage("--emit=debug requires --emit=prompt or --emit=ir"));
     }
@@ -1164,6 +1167,15 @@ mod tests {
         assert!(parsed.presentation.plain);
         assert_eq!(parsed.presentation.color, Some(TerminalPolicy::Never));
         assert_eq!(parsed.presentation.progress, Some(TerminalPolicy::Never));
+    }
+
+    #[test]
+    fn bare_build_defaults_to_prompt_output() {
+        let parsed = invocation(["xmlsquish", "build"]);
+        let OperationRequest::Build(request) = parsed.request else {
+            panic!("expected build")
+        };
+        assert_eq!(request.emit, vec![EmitKind::Prompt]);
     }
 
     #[test]
