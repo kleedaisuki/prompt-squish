@@ -14,7 +14,7 @@ This file follows the experimental community `llms.txt` proposal. It is an addit
 
 - [English release page](https://xmlsquish.moesegfault.dev/en/releases/): Human-oriented v1.0 release and migration information.
 - [中文发布页](https://xmlsquish.moesegfault.dev/releases/): 面向用户的 v1.0 发布与迁移说明。
-- [Machine-readable release metadata](https://xmlsquish.moesegfault.dev/releases/1.0.0.json): Stable JSON contract; `releaseStatus` distinguishes prepared metadata from published GitHub assets.
+- [Machine-readable release metadata](https://xmlsquish.moesegfault.dev/releases/1.0.0.json): Stable JSON contract for the published v1.0.0 release and its native assets.
 
 ## Specifications
 
@@ -27,5 +27,5 @@ This file follows the experimental community `llms.txt` proposal. It is an addit
 
 - CLI commands: `new`, `fmt`, `build`, `add`, `remove`, `inspect`.
 - Source installation requires Rust 1.88 or newer and a locked Cargo workspace. xmlsquish is not published on crates.io.
-- Native release targets cover x86-64 and ARM64 on Linux, Windows, and macOS. Prepared asset URLs may not exist until the immutable `v1.0.0` Git tag is published.
+- v1.0.0 is published under the immutable `v1.0.0` Git tag, with native x86-64 and ARM64 assets for Linux, Windows, and macOS.
 - License: GPL-3.0-or-later.
