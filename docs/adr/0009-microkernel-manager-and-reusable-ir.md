@@ -6,6 +6,8 @@
   [ADR 0006](0006-binary-module-layout.md)'s organizational and package-boundary decision
 - Preserves: [ADR 0007](0007-unified-macro-expansion.md) and the DSL primitives
   and semantics it defines
+- Extended by: [ADR 0010](0010-transactional-new-project-creation.md) for the
+  prospective-project bootstrap and recoverable `new` operation
 
 ## Reconciliation note
 
@@ -17,6 +19,8 @@ than restating wire fields. It also distinguishes persistable linkage metadata
 (`StaticLinkMap` and the non-executable `LinkedImage`) from the reconstructed,
 session-only executable `LinkedProgram`. The change aligns the decision record
 with the implemented types and does not change ADR 0007 language semantics.
+ADR 0010 subsequently adds project creation without changing this ADR's
+microkernel, IR, or existing-project ownership decisions.
 
 ## Context
 

@@ -6,7 +6,7 @@
 
 ## 1. Product Direction
 
-`xmlsquish` has been rebuilt as a Cargo-like project manager with direct `fmt`, `build`, `add`, `remove`, and `inspect` commands. The architecture is intentionally top-down rather than an adapter around the legacy compiler:
+`xmlsquish` has been rebuilt as a Cargo-like project manager with direct `fmt`, `build`, `add`, `remove`, and `inspect` commands. Product decision `c6d26bb` adds a required sixth command, `new`; its contract and architecture are accepted, but its implementation has not yet passed the release gates recorded here. The architecture is intentionally top-down rather than an adapter around the legacy compiler:
 
 ```text
 CLI bootstrap
@@ -24,6 +24,7 @@ The completed cutover did not preserve the old internal architecture. It preserv
 | Question | Durable artifact | Status |
 |---|---|---|
 | Why a microkernel manager and reusable IR? | [`../adr/0009-microkernel-manager-and-reusable-ir.md`](../adr/0009-microkernel-manager-and-reusable-ir.md) | Accepted, including the observable planning lifecycle amendment |
+| How does `new` create a project, workspace membership, and VCS state coherently? | [`../adr/0010-transactional-new-project-creation.md`](../adr/0010-transactional-new-project-creation.md) | Accepted design; implementation and release evidence pending |
 | What is the complete IR, linking, provenance, and debug model? | [`ir-model.md`](ir-model.md) | Implemented through canonical IR, link trace, and self-contained debug bundle |
 | How did the old tree map to the current architecture? | [`refactor-map.md`](refactor-map.md) | Historical/completed cutover map with verified current owners |
 | What does each CLI command feel like, and which proposals were accepted or superseded? | [`../product/cli-experience.md`](../product/cli-experience.md) | Current command contract plus evidence and supersession tables |
@@ -33,6 +34,34 @@ The completed cutover did not preserve the old internal architecture. It preserv
 | Which mature project managers informed the product boundary? | [`../research/project-manager-prior-art.md`](../research/project-manager-prior-art.md) | Prior-art review complete |
 
 The research is not an isolated literature dump. Each research artifact is connected to an ADR, a code boundary, or an executable acceptance gate.
+
+### 2.1 Active `new` extension
+
+The earlier five-command milestone incorrectly treated the absence of project
+creation as outside its product boundary. Commit `c6d26bb` reverses that product
+decision. ADR 0010 now fixes the corresponding internal contract:
+
+```text
+typed New request
+  -> prospective-project bootstrap
+  -> observable location/scaffold/workspace/VCS planning
+  -> one CreateProject action
+  -> no-replace child publication (linearization point)
+  -> recoverable workspace roll-forward when required
+  -> truthful NewResult / cancellation disposition
+```
+
+Creation is staged beside the destination; deep missing parents are tracked and
+rolled back only while they remain manager-created and empty. A workspace edit
+uses a durable journal and revision validation so the complete child and its
+effective membership converge as one logical transaction. Git creation or reuse
+is an injected host effect performed before publication. Root composition must
+distinguish an existing project from a prospective destination and then
+reconverge at the same kernel/renderer path; `main` is not an alternate executor.
+
+This section is a design/status record, not implementation evidence. The
+canonical bytes, command grammar, output schema, and complete scenario matrix
+remain normative in CLI experience section 3.3.
 
 ## 3. Implemented and Committed Foundations
 
@@ -60,6 +89,12 @@ The remotely accepted production snapshot is `b870c84`. Its first documentation-
 | Cross-platform CI definition | `454b4af` | Locked MSRV 1.88 quality checks, full workspace tests on Ubuntu/Windows/macOS, composed-manager smoke, and Linux source-install smoke are encoded in GitHub Actions |
 | Product documentation and examples | `8b856f6` | README, changelog, DSL guide, product scope, and shipped example manifests describe the manager workflow and current artifact names |
 | Live website | `a9d29f7` | The current landing page, reference content, and build explorer present the project-manager workflow without rewriting historical namespace snapshots |
+
+The table above is the accepted five-command foundation. It does not establish
+that `new` exists merely because its product and architecture documents now do.
+For `new`, the current durable evidence is specification only: `c6d26bb` and
+ADR 0010. Code, focused tests, composed process tests, and cross-platform remote
+acceptance must be entered only after they exist and pass.
 
 ## 4. Integrated Product State
 
@@ -103,7 +138,11 @@ Remote execution was diagnostic evidence, not a ceremonial rerun. Two failing ru
 | [34948934092](https://github.com/kleedaisuki/prompt-squish/actions/runs/34948934092) | `a3d6d23` | **Failed** | The CAS build defect was closed. Ubuntu strict Clippy then exposed a Unix-unused Windows retry variable/never-loop in the Git fixture cleanup, and Linux/macOS PTY tests exposed renderer/interrupt behavior that depended on timing. This led to `911304b`, `a8084d6`, `be625af`, and `b870c84`. |
 | [34955324426](https://github.com/kleedaisuki/prompt-squish/actions/runs/34955324426) | `b870c84` | **Passed** | All five jobs completed successfully: Rust quality on Ubuntu, Rust tests on Linux/macOS/Windows, and Site. This is the supported-desktop acceptance run. |
 
-The remote gate is satisfied. No known milestone evidence gap remains. New work should be opened only when a failing test, observed production behavior, or explicit product decision provides concrete evidence; this statement does not claim that future requirements or defects are impossible.
+The remote gate is satisfied for the five-command snapshot exercised by this
+history. The explicit `new` product decision is newer and opens a concrete
+evidence gap; none of these runs exercised project creation. A future `new`
+acceptance entry must name the exact tested snapshot and all supported-platform
+job results rather than inheriting this status.
 
 ## 6. Cutover Gates
 
@@ -119,6 +158,7 @@ The remote gate is satisfied. No known milestone evidence gap remains. New work 
 | Real process death at the supported durable boundaries converges without manual repair | **Satisfied** | `17a08b8`; 6/6 composed recovery-process tests passed locally and the all-feature workspace suite passed in all three remote Rust-test jobs |
 | Strict MSRV Clippy passes | **Satisfied** | `5f52c25`, `911304b`; the strict Rust 1.88 job passed remotely in run 34955324426 |
 | The committed workflow passes on supported GitHub-hosted desktops | **Satisfied** | [Run 34955324426](https://github.com/kleedaisuki/prompt-squish/actions/runs/34955324426) passed all five jobs at production snapshot `b870c84` |
+| `new` creates the canonical project and optional workspace membership through the manager transaction | **Specified; not yet satisfied** | Product contract `c6d26bb`; ADR 0010; implementation, process-recovery, and supported-desktop evidence pending |
 
 ## 7. Evidence Discipline
 
@@ -157,6 +197,7 @@ This distinction prevents a design document, a green unit test, or an agent comp
 | `build` and reusable products | **Accepted on supported desktops** | Compile/link/instantiate/backend/publish/catalogue actions; default prompt; persistent cache; representative semantic `.psdbg` traceability (`c616fef`, `d5a7ea0`); workspace tests and composed smoke passed in run 34955324426 |
 | `add` / `remove` | **Accepted on supported desktops** | Coherent manifest/lock transaction, dry run, removal references, contention/replan, and root process round trip; the full workspace suite passed on all three hosted operating systems |
 | `inspect` | **Accepted on supported desktops** | Typed `ir`, `link`, `source`, `cache`, and `artifact` views; protocol-level artifact selectors; CAS/provenance validation; Windows path equivalence; quiet closed-pipe handling; workspace tests and composed JSON-link smoke passed in run 34955324426 |
+| `new` | **Specified; acceptance pending** | CLI experience section 3.3 and ADR 0010 define canonical scaffold, prospective bootstrap, VCS/workspace transaction, no-replace publication, cancellation, and recovery; no prior five-command run is evidence for this row |
 | Git packages | **Accepted on supported desktops** | Exact locked package-root return, owned materialization handle, documented child-process lifecycle, and platform-specific fixture cleanup (`8342d91`, `8455269`, `911304b`); workspace tests passed on Linux/macOS/Windows |
 | Storage and recovery mechanisms | **Accepted on supported desktops** | Verified CAS/action catalogues, EFS and long-path handling, per-project namespace, recoverable journals, Unix Rust 1.88 CAS portability, and 6/6 real child-death recovery cases (`3b77843`, `126e27d`, `628ee9a`, `17a08b8`, `a3d6d23`); the all-feature workspace suite passed remotely on all three operating systems |
 | Authenticated registries | **Accepted at component/composition scope** | Scoped environment lookup, redirect re-scoping, redaction, distinct missing/rejected outcomes, actionable variable names (`df5a8d8`, `a177c78`); their committed suites passed remotely on all three operating systems (the workflow does not contact a live authenticated registry) |
@@ -220,8 +261,17 @@ The source-install steps are intentionally Linux-only in the workflow and were s
 | Link completeness evidence used a tail scalar that could hide order sensitivity | `543b271` added a non-tail scalar witness; the full three-platform workspace suite passed in run 34955324426 |
 | Product/IR documents retained contracts not matching the implemented manager | `4fff0dc` reconciled the durable contracts; `bf3394f` removed the last stale `init` example |
 
-### 8.6 Milestone conclusion
+### 8.6 Milestone conclusion and successor scope
 
-The Cargo-like manager cutover is **complete for its stated milestone scope**. The remotely accepted production snapshot is `b870c84`, and all five jobs in run 34955324426 passed.
+The five-command Cargo-like manager cutover is **complete for the scope tested at
+its accepted snapshot**. The remotely accepted production snapshot is
+`b870c84`, and all five jobs in run 34955324426 passed. It is not complete for
+the successor six-command product scope: `new` is required and currently has
+specified, not accepted, status.
 
 `bf3394f` is a documentation-only descendant: `git diff --name-status b870c84..bf3394f` reports only `docs/product/cli-experience.md`, and the diff changes two documentation lines. `f2a75f5` updates only this ledger. The present reconciliation changes only `docs/design/refactor-map.md` and this ledger; it does not modify Rust sources, manifests, lockfiles, tests, `.github/`, or `site/`. Consequently, these documentation changes do not invalidate the executable, workflow, or site evidence from the accepted snapshot.
+
+Product decision `c6d26bb` and ADR 0010 likewise do not invalidate that
+historical executable evidence; they change what the next product milestone
+requires. The successor milestone closes only after the `new` acceptance
+boundaries in ADR 0010 and the product matrix pass at one exact remote snapshot.
