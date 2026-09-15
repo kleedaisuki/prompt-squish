@@ -1608,7 +1608,7 @@ mod tests {
                 .observe(&EventPayload::ActionFailed {
                     job: job(),
                     plan: plan.clone(),
-                    action: action("different-action"),
+                    action: ActionId::new("different-action").unwrap(),
                     timing: Timing::default(),
                     diagnostic: diagnostic(),
                 })
