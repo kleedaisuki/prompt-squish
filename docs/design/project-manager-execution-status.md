@@ -1,7 +1,7 @@
 # Project Manager Rework: Execution Status
 
 **Last updated:** 2026-09-15
-**Decision purpose:** Keep the `xmlsquish` compiler-to-project-manager rework inspectable while implementation proceeds in parallel.
+**Decision purpose:** Preserve the final, evidence-backed acceptance record for the `xmlsquish` compiler-to-project-manager rework.
 **Normative sources:** The linked ADR and design documents remain authoritative; this file is the durable coordination index and cutover ledger.
 
 ## 1. Product Direction
@@ -36,7 +36,7 @@ The research is not an isolated literature dump. Each research artifact is conne
 
 ## 3. Implemented and Committed Foundations
 
-The milestone snapshot is `17a08b8`. Earlier foundation commits remain part of the evidence chain; this table emphasizes the final cutover and the defects closed after `c616fef`.
+The remotely accepted production snapshot is `b870c84`. The documentation snapshot immediately before this ledger update is `bf3394f`; the only change from `b870c84` to `bf3394f` is a two-line correction in `docs/product/cli-experience.md`. The executable, tests, workflow, and `site/` inputs at `bf3394f` are therefore byte-for-byte those exercised at `b870c84`. Earlier foundation commits remain part of the evidence chain; this table emphasizes the final cutover and the defects closed after `c616fef`.
 
 | Area | Committed evidence | Verified contract |
 |---|---|---|
@@ -52,6 +52,11 @@ The milestone snapshot is `17a08b8`. Earlier foundation commits remain part of t
 | Interactive terminal process contract | `1137239` | A real PTY/ConPTY-compatible harness exercises progress, resize, cooperative first interrupt, destructive second interrupt, restoration bytes, and exit `130`; it passed five repeated local Windows runs and the workspace suite |
 | Process-death recovery | `17a08b8` and [`process-recovery-testing.md`](process-recovery-testing.md) | Feature-gated real child-process death covers both sides of repository, artifact-generation, and build-catalogue commit decisions; ordinary follow-up commands recover automatically (6/6 process tests) |
 | MSRV quality portability | `5f52c25` | Strict Clippy remains clean on Rust 1.88 after removing newer-lint assumptions from production code |
+| Unix CAS portability | `a3d6d23` | The Unix rename callback is expressed with the higher-ranked lifetime contract required by Rust 1.88, closing the Linux/macOS compilation failure exposed by the first remote run |
+| Unix fetch-test hygiene | `911304b` | Platform-specific fixture cleanup removes the Windows-only retry loop from Unix compilation, closing strict Clippy warnings and Unix cleanup failures without weakening Windows cleanup |
+| Dynamic terminal rendering | `a8084d6`, `be625af`, `b870c84` | Quiet work pumps the renderer; cancellation emits one structured notice only before a terminal event; the terminal ordering test waits on an explicit renderer barrier rather than timing |
+| Link scalar completeness | `543b271` | A non-tail scalar composition witness guards the linker against an order-sensitive false positive that tail-only fixtures could miss |
+| Contract reconciliation | `4fff0dc`, `bf3394f` | IR, CLI, and completeness documents describe implemented behavior; the stale `init` path example is removed rather than retained as an unimplemented product promise |
 | Cross-platform CI definition | `454b4af` | Locked MSRV 1.88 quality checks, full workspace tests on Ubuntu/Windows/macOS, composed-manager smoke, and Linux source-install smoke are encoded in GitHub Actions |
 | Product documentation and examples | `8b856f6` | README, changelog, DSL guide, product scope, and shipped example manifests describe the manager workflow and current artifact names |
 | Live website | `a9d29f7` | The current landing page, reference content, and build explorer present the project-manager workflow without rewriting historical namespace snapshots |
@@ -88,15 +93,17 @@ The following previously open integration findings are closed in committed code 
 
 The architecture and product material are also synchronized: shipped examples (`8b856f6`), the live site (`a9d29f7`), the workflow (`454b4af`), and root process tests use the direct manager commands and `.prompt`/`.xsir`/`.psdbg` vocabulary.
 
-## 5. Remaining Evidence Gaps
+## 5. Remote Acceptance History
 
-This is an acceptance gap, not a known P1 implementation defect.
+Remote execution was diagnostic evidence, not a ceremonial rerun. Two failing runs exposed platform-specific defects that local Windows validation could not reveal; the third run accepted their fixes and the complete product snapshot.
 
-| Gap | What is already known | Evidence still required |
-|---|---|---|
-| Remote three-platform execution | The Ubuntu/Windows/macOS jobs and composed CLI smoke are committed in `454b4af`. Local Windows workspace, PTY, recovery, and MSRV Clippy runs cannot predict hosted runner images or Unix filesystem behavior. | Observe a green GitHub Actions run of the committed workflow at `17a08b8` or a descendant on all three hosted operating systems. |
+| Run | Snapshot | Result | Diagnostic or acceptance evidence |
+|---|---|---|---|
+| [34947807569](https://github.com/kleedaisuki/prompt-squish/actions/runs/34947807569) | `270feb2` | **Failed** | Ubuntu quality and Linux/macOS builds rejected the Unix CAS rename callback because its `FnMut`/`FnOnce` lifetime implementation was not general enough on Rust 1.88. Windows Rust and Site passed. This led to `a3d6d23`. |
+| [34948934092](https://github.com/kleedaisuki/prompt-squish/actions/runs/34948934092) | `a3d6d23` | **Failed** | The CAS build defect was closed. Ubuntu strict Clippy then exposed a Unix-unused Windows retry variable/never-loop in the Git fixture cleanup, and Linux/macOS PTY tests exposed renderer/interrupt behavior that depended on timing. This led to `911304b`, `a8084d6`, `be625af`, and `b870c84`. |
+| [34955324426](https://github.com/kleedaisuki/prompt-squish/actions/runs/34955324426) | `b870c84` | **Passed** | All five jobs completed successfully: Rust quality on Ubuntu, Rust tests on Linux/macOS/Windows, and Site. This is the supported-desktop acceptance run. |
 
-No old MVP checklist is reopened here. New work should be added only when a failing test, an observed production behavior, or an explicit product decision supplies concrete evidence.
+The remote gate is satisfied. No known milestone evidence gap remains. New work should be opened only when a failing test, observed production behavior, or explicit product decision provides concrete evidence; this statement does not claim that future requirements or defects are impossible.
 
 ## 6. Cutover Gates
 
@@ -107,11 +114,11 @@ No old MVP checklist is reopened here. New work should be added only when a fail
 | A warm invocation restores cacheable transform outputs from the action index and CAS | **Satisfied** | Manager restoration tests and root warm-cache process regression |
 | Selected `.prompt`, `.xsir`, `.psdbg`, and build-record products publish through recoverable generations | **Satisfied** | `d5a7ea0`, manager build tests, publish crash-point tests |
 | Registry, Git, path, and workspace sources obey typed online/offline/locked/frozen boundaries; configured registry credentials are usable | **Satisfied at component/composition level** | Fetch/resolver/host suites; `df5a8d8`, `a177c78` |
-| Root stream, exit, format-diff, typed inspection, storage-namespace, exact Git package, and example provenance contracts pass on the local Windows host | **Satisfied locally** | 24 root process tests and local validation recorded in Section 8.3 |
-| Real PTY/ConPTY interaction covers resize and two-stage interrupt restoration | **Satisfied locally** | `1137239`; the PTY suite passed five consecutive local Windows runs and the workspace run |
-| Real process death at the supported durable boundaries converges without manual repair | **Satisfied locally** | `17a08b8`; `tests/recovery_process.rs` passed 6/6 against the composed binary |
-| Strict MSRV Clippy passes | **Satisfied locally** | `5f52c25`; local Rust 1.88 Clippy validation recorded in Section 8.3 |
-| The committed workflow passes on supported GitHub-hosted desktops | **Pending remote run** | Workflow exists in `454b4af`; configuration alone is not execution evidence |
+| Root stream, exit, format-diff, typed inspection, storage-namespace, exact Git package, and example provenance contracts pass | **Satisfied** | 24 root process regressions passed locally; the full workspace suite and composed smoke subsequently passed on all three hosted operating systems in run 34955324426 |
+| Real PTY/ConPTY interaction covers resize and two-stage interrupt restoration | **Satisfied** | `1137239`, `a8084d6`, `be625af`, `b870c84`; the PTY suite passed locally and in all three remote Rust-test jobs |
+| Real process death at the supported durable boundaries converges without manual repair | **Satisfied** | `17a08b8`; 6/6 composed recovery-process tests passed locally and the all-feature workspace suite passed in all three remote Rust-test jobs |
+| Strict MSRV Clippy passes | **Satisfied** | `5f52c25`, `911304b`; the strict Rust 1.88 job passed remotely in run 34955324426 |
+| The committed workflow passes on supported GitHub-hosted desktops | **Satisfied** | [Run 34955324426](https://github.com/kleedaisuki/prompt-squish/actions/runs/34955324426) passed all five jobs at production snapshot `b870c84` |
 
 ## 7. Evidence Discipline
 
@@ -125,40 +132,42 @@ Status terms in this ledger have precise meanings:
 
 This distinction prevents a design document, a green unit test, or an agent completion message from being mistaken for a finished product.
 
-## 8. Acceptance Evidence and Remaining Gates
+## 8. Acceptance Evidence
 
 **Audit date:** 2026-09-15
 
-**Committed snapshot:** `17a08b8`
+**Remotely accepted production snapshot:** `b870c84`
+
+**Documentation snapshot before this ledger update:** `bf3394f`
 
 **Scope:** the Cargo-like manager cutover: direct commands, scheduling and state management, XML to reusable binary IR to linked prompt, complete debug evidence, modern output behavior, dependency acquisition, and supported-desktop automation.
 
 ### 8.1 Evidence classes
 
-- **Committed evidence:** independently inspectable code, tests, documentation, or workflow in `HEAD`.
+- **Committed evidence:** independently inspectable code, tests, documentation, or workflow in the named snapshot.
 - **Local Windows execution:** a command was executed successfully in this workspace on Windows; it is evidence for this host only.
-- **Remote cross-platform execution:** a GitHub-hosted Ubuntu, Windows, and macOS workflow completed successfully. This evidence is still pending.
+- **Remote cross-platform execution:** the named GitHub-hosted workflow completed successfully; its individual jobs prove only the commands they ran.
 
 ### 8.2 Product acceptance matrix
 
 | Product dimension | Current judgment | Evidence |
 |---|---|---|
 | Architecture and cutover | **Committed and cut over** | Separate protocol/kernel/manager/service crates; direct root dispatch; legacy compiler entry removed |
-| `fmt` | **Committed; locally exercised** | Deterministic semantic formatting, batch preflight, stable unified diff, non-UTF-8 diagnostic, stdout/stderr and dirty-check exits (`d5a7ea0`, `95c4368`) |
-| `build` and reusable products | **Committed; locally exercised** | Compile/link/instantiate/backend/publish/catalogue actions; default prompt; persistent cache; representative semantic `.psdbg` traceability (`c616fef`, `d5a7ea0`) |
-| `add` / `remove` | **Committed; locally exercised for path workflow** | Coherent manifest/lock transaction, dry run, removal references, contention/replan, and root process round trip |
-| `inspect` | **Committed; locally exercised** | Typed `ir`, `link`, `source`, `cache`, and `artifact` views; protocol-level artifact selectors; CAS/provenance validation; Windows path equivalence; quiet closed-pipe handling; 24 root process tests (`d5a7ea0`, `95c4368`, `7e619af`) |
-| Git packages | **Committed; locally exercised** | Exact locked package-root return, owned materialization handle, and documented Git child-process lifecycle (`8342d91`, `8455269`) |
-| Storage and recovery mechanisms | **Committed; locally process-tested** | Verified CAS/action catalogues, EFS and long-path handling, per-project namespace, recoverable journals, and 6/6 real child-death recovery cases (`3b77843`, `126e27d`, `628ee9a`, `17a08b8`) |
-| Authenticated registries | **Committed; component/composition-tested** | Scoped environment lookup, redirect re-scoping, redaction, distinct missing/rejected outcomes, actionable variable names (`df5a8d8`, `a177c78`) |
-| Terminal behavior | **Committed; locally process-tested** | Live width probe, progress resize, first/second interrupt, emergency restoration, and exit `130` passed through the real PTY/ConPTY-compatible harness for five consecutive local Windows runs (`6d8df1a`, `2f7f46e`, `f6b9f1e`, `1137239`) |
-| MSRV quality | **Committed; locally exercised** | Strict workspace Clippy passed on Rust 1.88 after `5f52c25` |
-| Documentation and site | **Committed** | Current manager workflow and artifacts in `8b856f6` and `a9d29f7` |
-| Supported desktops | **Configured, not remotely accepted** | Three-OS MSRV workflow and manager smoke in `454b4af`; no remote run result is recorded in this snapshot |
+| `fmt` | **Accepted on supported desktops** | Deterministic semantic formatting, batch preflight, stable unified diff, non-UTF-8 diagnostic, stdout/stderr and dirty-check exits (`d5a7ea0`, `95c4368`); workspace tests and composed smoke passed in run 34955324426 |
+| `build` and reusable products | **Accepted on supported desktops** | Compile/link/instantiate/backend/publish/catalogue actions; default prompt; persistent cache; representative semantic `.psdbg` traceability (`c616fef`, `d5a7ea0`); workspace tests and composed smoke passed in run 34955324426 |
+| `add` / `remove` | **Accepted on supported desktops** | Coherent manifest/lock transaction, dry run, removal references, contention/replan, and root process round trip; the full workspace suite passed on all three hosted operating systems |
+| `inspect` | **Accepted on supported desktops** | Typed `ir`, `link`, `source`, `cache`, and `artifact` views; protocol-level artifact selectors; CAS/provenance validation; Windows path equivalence; quiet closed-pipe handling; workspace tests and composed JSON-link smoke passed in run 34955324426 |
+| Git packages | **Accepted on supported desktops** | Exact locked package-root return, owned materialization handle, documented child-process lifecycle, and platform-specific fixture cleanup (`8342d91`, `8455269`, `911304b`); workspace tests passed on Linux/macOS/Windows |
+| Storage and recovery mechanisms | **Accepted on supported desktops** | Verified CAS/action catalogues, EFS and long-path handling, per-project namespace, recoverable journals, Unix Rust 1.88 CAS portability, and 6/6 real child-death recovery cases (`3b77843`, `126e27d`, `628ee9a`, `17a08b8`, `a3d6d23`); the all-feature workspace suite passed remotely on all three operating systems |
+| Authenticated registries | **Accepted at component/composition scope** | Scoped environment lookup, redirect re-scoping, redaction, distinct missing/rejected outcomes, actionable variable names (`df5a8d8`, `a177c78`); their committed suites passed remotely on all three operating systems (the workflow does not contact a live authenticated registry) |
+| Terminal behavior | **Accepted on supported desktops** | Live width and resize, two-stage interrupt/restoration, quiet-work pumping, structured cancellation ordering, and explicit terminal barrier (`6d8df1a`, `2f7f46e`, `f6b9f1e`, `1137239`, `a8084d6`, `be625af`, `b870c84`); the PTY suite passed in all three remote Rust-test jobs |
+| MSRV quality | **Accepted remotely** | Rust 1.88 check, formatting, and strict all-target/all-feature Clippy passed in the Ubuntu quality job of run 34955324426 |
+| Documentation and site | **Accepted remotely** | Current manager workflow and artifacts in `8b856f6`, `a9d29f7`, and `4fff0dc`; Astro/TypeScript checks and the site build passed in run 34955324426 |
+| Supported desktops | **Complete for the milestone** | Run 34955324426 passed the full workspace build/test and composed manager smoke on hosted Linux, macOS, and Windows; Linux additionally passed source installation and installed-binary smoke |
 
 ### 8.3 Local Windows validation record
 
-At snapshot `17a08b8`, the following validation completed successfully on the local Windows workspace:
+At snapshot `17a08b8`, before the remote diagnostic cycle, the following validation completed successfully on the local Windows workspace:
 
 ```text
 cargo test --workspace --all-features --locked
@@ -170,9 +179,23 @@ cargo +1.88.0 clippy --workspace --all-targets --all-features --locked -- -D war
 
 The workspace run included 24 root process tests, typed inspect-selector coverage, the representative semantic provenance regression, formatter/inspect/storage/credential/terminal tests, the two real-PTY process tests, and all crate doc tests. The composed smoke checked the five-command help grammar, machine-readable usage failure, human unified diff, default `.prompt`, explicit `.xsir`, and JSON link inspection. The recovery suite independently killed real children at supported pre/post-commit boundaries and all six cases passed.
 
-This record does **not** imply that the GitHub-hosted Linux, macOS, or Windows jobs ran. The PTY evidence is real on this Windows host, but it is not a substitute for observing the committed harness on each remote runner. Site checks and `cargo +1.88.0 check` are likewise not claimed by this local record; strict Rust 1.88 Clippy is claimed because it was run explicitly.
+This local record is retained to distinguish what was known before remote execution. It did **not** predict the Unix defects found by runs 34947807569 and 34948934092. The later remote acceptance claims come exclusively from run 34955324426, not from extrapolating this Windows record.
 
-### 8.4 Closed findings trace
+### 8.4 Remote job evidence at `b870c84`
+
+[Run 34955324426](https://github.com/kleedaisuki/prompt-squish/actions/runs/34955324426) completed successfully with exactly five jobs:
+
+| Job | Commands represented by the successful job | What the result proves |
+|---|---|---|
+| Rust quality (Ubuntu, MSRV 1.88) | Rust 1.88 toolchain verification, `cargo check`, formatting check, strict Clippy | The workspace type-checks at the declared MSRV on Ubuntu, is formatted, and has no warnings under the committed strict Clippy scope |
+| Rust test (Linux, MSRV 1.88) | All-target/all-feature build, full workspace tests, composed root CLI smoke, source install, installed-binary smoke | Linux compilation and tests pass; the five-command manager surface works as a composed binary; a fresh locked source install produces a working binary |
+| Rust test (macOS, MSRV 1.88) | All-target/all-feature build, full workspace tests, composed root CLI smoke | macOS compilation, tests, PTY behavior, and composed manager CLI smoke pass |
+| Rust test (Windows, MSRV 1.88) | All-target/all-feature build, full workspace tests, composed root CLI smoke | Windows compilation, tests, ConPTY-compatible behavior, and composed manager CLI smoke pass |
+| Site | Dependency installation, Astro/TypeScript check, production build | The committed site sources type-check and produce the production static build |
+
+The source-install steps are intentionally Linux-only in the workflow and were skipped, not failed, on macOS and Windows. The run therefore does not claim source-install coverage on those two hosts.
+
+### 8.5 Closed findings trace
 
 | Former blocker | Closing evidence |
 |---|---|
@@ -191,11 +214,14 @@ This record does **not** imply that the GitHub-hosted Linux, macOS, or Windows j
 | PTY/ConPTY resize, first/second interrupt, and restoration existed only below the process boundary | `1137239`; five consecutive local Windows PTY runs plus the workspace suite |
 | Recovery claims stopped at component journals rather than real process termination | `17a08b8`; 6/6 composed recovery-process tests |
 | Strict Clippy used assumptions unavailable on the declared MSRV | `5f52c25`; local Rust 1.88 strict Clippy pass |
+| Unix CAS rename callback failed Rust 1.88 lifetime generalization | Run 34947807569 diagnosed it; `a3d6d23` fixed it; run 34955324426 passed Ubuntu check and Linux/macOS builds |
+| Unix compilation exposed a Windows-only fixture retry loop to strict Clippy | Run 34948934092 diagnosed it; `911304b` split cleanup by platform; run 34955324426 passed strict Clippy and all three test jobs |
+| Quiet work could starve dynamic rendering; terminal/cancellation output had a timing-sensitive order | Run 34948934092 exposed the Unix PTY failures; `a8084d6`, `be625af`, and `b870c84` added pumping, one structured pre-terminal notice, and an explicit ordering barrier; all three PTY suites passed in run 34955324426 |
+| Link completeness evidence used a tail scalar that could hide order sensitivity | `543b271` added a non-tail scalar witness; the full three-platform workspace suite passed in run 34955324426 |
+| Product/IR documents retained contracts not matching the implemented manager | `4fff0dc` reconciled the durable contracts; `bf3394f` removed the last stale `init` example |
 
-### 8.5 Remaining acceptance sequence
+### 8.6 Milestone conclusion
 
-Only one evidence step remains in this milestone ledger:
+The Cargo-like manager cutover is **complete for its stated milestone scope**. The remotely accepted production snapshot is `b870c84`, and all five jobs in run 34955324426 passed.
 
-1. **Run the committed GitHub Actions workflow remotely.** Record the run that passes MSRV quality checks, the full workspace suite, composed CLI smoke on Ubuntu/Windows/macOS, the Linux source install, and the site job.
-
-Until that run has evidence, the accurate judgment is: **the manager architecture and its process-boundary contracts are implemented and locally validated on Windows, while full supported-desktop acceptance remains pending only on the remote GitHub Actions result.**
+`bf3394f` is a documentation-only descendant: `git diff --name-status b870c84..bf3394f` reports only `docs/product/cli-experience.md`, and the diff changes two documentation lines. It does not modify Rust sources, manifests, lockfiles, tests, `.github/`, or `site/`; consequently, it does not invalidate the executable, workflow, or site evidence from the accepted snapshot. This ledger update is also confined to `docs/design/project-manager-execution-status.md` and likewise does not alter those tested inputs.
