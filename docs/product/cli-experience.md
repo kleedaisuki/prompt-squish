@@ -466,8 +466,9 @@ xmlsquish build [selection]
   safely.
 - `--frozen` is the compositional shorthand for immutable lock state plus no network access. It
   does not disable reads from a verified content store.
-- A successful build names every published `*.prompt`, cache reuse, and total elapsed time. A
-  failed build names failed and blocked targets separately; it never reports them as one count.
+- A successful build names every published `*.prompt`, reports aggregate cache reuse, and total
+  elapsed time. A failed build reports failed and blocked counts separately; it names a target or
+  source only when the diagnostic carries that authoritative subject.
 
 Example interactive transcript:
 
@@ -475,10 +476,7 @@ Example interactive transcript:
 $ xmlsquish build -t support-agent
   Resolving  14 packages (locked)
   Loading    38 sources
-  Cached     support-core (IR)
-  Compiling  support-agent
-  Linking    support-agent
-  Squishing  support-agent
+  Building   5 actions
   Published  target/prompts/support-agent.prompt
   Finished   1 target, 1 compiled, 1 cached in 1.84s
 ```
@@ -649,23 +647,26 @@ exercised in `crates/squish-config/tests/loading.rs` and composed in `src/main.r
 The ordinary CLI answers the user's task, not the scheduler's bookkeeping. Cryptographic digests,
 content-store keys, and job/plan/action IDs are necessary internal identities, but they are not
 ordinary progress information. Default human output therefore names packages, targets, source
-paths, artifact paths, phases, counts, elapsed time, and whether work was cached; it does not append
-SHA-256, BLAKE3, or opaque lifecycle IDs to successful status lines.
+paths, or artifact paths only when the typed payload carries that domain fact; otherwise it reports
+aggregate phases, counts, elapsed time, and whether work was cached. It does not append SHA-256,
+BLAKE3, or opaque lifecycle IDs to successful status lines.
 
 Removing an identity from a human projection must not remove the underlying fact. In particular,
-cache reuse remains visible as `Cached <target> (<kind>)` and as a cached count in the terminal
-summary. This lets a person distinguish reuse from compilation without reading or comparing hash
-strings. A cache miss may be stated at verbose levels when it explains performed work; ordinary
-mode simply reports the work that occurred.
+cache reuse remains visible as a cached count in the terminal summary. This lets a person
+distinguish reuse from compilation without reading or comparing hash strings. A named cache line
+is permitted only when the event or typed operation result itself carries an authoritative domain
+subject such as a package, target, source, or artifact; the renderer must not manufacture one from
+an action identity. A cache miss may be stated at verbose levels when it explains performed work;
+ordinary mode simply reports the work that occurred.
 
 The disclosure contract is:
 
 | Projection | Full digest or opaque key | Short fingerprint | Job/plan/action IDs | Cache presentation |
 | --- | --- | --- | --- | --- |
-| Human, normal | No, except one locator in an actionable error help command | No | No | Semantic target/kind line plus summary count |
-| Human, `-v` | No, except an actionable error locator | Yes, only beside a named cache or artifact fact when correlation is useful | No | Hit/miss class, named target/kind, reason when known, and counts |
+| Human, normal | No, except one locator in an actionable error help command | No | No | Aggregate phase/progress and terminal cached count; a named line only with an authoritative domain subject |
+| Human, `-v` | No, except an actionable error locator | Yes, only beside an authoritative cache or artifact subject when correlation is useful | No | Aggregate hit/miss detail by phase or kind, reason when known, and counts; named lines require authoritative subjects |
 | Human, `-vv` | Yes, for explicitly requested trace-level cache/artifact evidence | Yes | Yes, but only in lifecycle trace detail rather than replacing domain names | Complete cache decision and lifecycle evidence |
-| `--message-format=short` | No, except an actionable error locator | No | No | One append-only semantic `cached` record per reused target and terminal counts |
+| `--message-format=short` | No, except an actionable error locator | No | No | Append-only aggregate phase/count records and terminal cached count; named records require authoritative subjects |
 | `--message-format=json` | Yes, exactly as typed by the versioned protocol | Not substituted for full values | Yes | Lossless `cache_hit` payload including action key, digest, and output metadata |
 | `inspect ... --format=human` | Yes for the specifically inspected object and its declared relations | May additionally show one for scanning | Only if the selected subject explicitly describes lifecycle state | Labeled cache inputs, decision, outputs, and full identities |
 | `inspect ... --format=json` | Yes, exactly as typed by the inspect schema | Not substituted for full values | When part of the selected subject's schema | Lossless typed query result |
@@ -686,6 +687,22 @@ That locator is an intentional, local exception: it enables the next user action
 turning every successful build line into a database dump. Scheduler-only job, plan, and action IDs
 do not qualify as locators in normal output. `-vv` or JSON is the route for correlating scheduler
 events.
+
+This boundary follows the protocol's actual information content. Build planning knows source and
+target subjects, but the current action lifecycle carries only the action ID, action key, kind,
+and dependencies; `ActionDeclared` does not carry a display subject, and an `ActionId` is an opaque,
+one-way semantic identity. Consequently, normal and short renderers aggregate action lifecycle by
+phase, kind, and count. Published artifacts and `OperationCompleted` may name targets because their
+typed payloads carry that domain fact; diagnostics may name a failing source, target, or span for
+the same reason. `-vv` and JSON may expose the actual per-action identity without pretending that
+it is a user-facing target label.
+
+The renderer must never parse, truncate, or heuristically reverse an `ActionId` to invent a source
+or target. Nor may an implementation place a display label inside `ActionId`: action identities
+participate in the semantic plan digest, so that cosmetic change would alter plan identity and can
+invalidate build records or cache behavior. If per-action names become a product requirement, they
+must arrive as an additive typed `display_subject`-style protocol fact whose value is explicitly
+excluded from semantic identity and cache-key derivation.
 
 This is a presentation policy, not a build-identity migration. The native NDJSON envelope and
 fields, inspect JSON schemas, cache-key derivation, content-addressed store paths, artifact bytes,
