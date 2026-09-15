@@ -1526,6 +1526,7 @@ mod tests {
     use squish_build::{ActionIndex, ActionRecord, ProducedOutput};
     use squish_fetch::{GitInvocation, GitRunOutput, NoCredentials, NoopObserver};
     use squish_protocol::{ActionKeyId, ArtifactKind, Digest, DigestAlgorithm};
+    use squish_repository::{FaultPoint, ProjectFile};
     use std::sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -1585,6 +1586,17 @@ mod tests {
                 std::io::ErrorKind::NotFound,
                 "git executable missing",
             ))
+        }
+    }
+
+    struct FailAt(FaultPoint);
+
+    impl FaultInjector for FailAt {
+        fn check(&self, point: FaultPoint) -> std::io::Result<()> {
+            if point == self.0 {
+                return Err(std::io::Error::other("injected creation boundary failure"));
+            }
+            Ok(())
         }
     }
 
@@ -2426,5 +2438,33 @@ mod tests {
             .unwrap_err();
         assert_eq!(initialization.kind(), std::io::ErrorKind::NotFound);
         assert!(initialization.to_string().contains("--vcs=none"));
+    }
+
+    #[test]
+    fn post_publication_repository_failure_retains_committed_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("committed");
+        let host = ProjectCreationHost::new(GitExecution::Runner(Arc::new(MissingGit))).unwrap();
+        let request = CreateProjectRequest {
+            destination: destination.clone(),
+            files: vec![ProjectFile {
+                path: PathBuf::from("xmlsquish.toml"),
+                bytes: b"manifest-version = 1\n\n[workspace]\n".to_vec(),
+            }],
+            package_name: "committed".into(),
+            vcs: ProjectVcs::None,
+            workspace: None,
+        };
+
+        let status = host
+            .create_project(
+                &request,
+                squish_kernel::CancellationToken::default(),
+                Arc::new(FailAt(FaultPoint::CreationPublished)),
+            )
+            .unwrap();
+
+        assert!(matches!(status, ProjectCreationStatus::CommittedFailure(_)));
+        assert!(destination.exists());
     }
 }
