@@ -85,3 +85,51 @@ fn bare_invocation_is_help_not_a_usage_failure() {
     let outcome = parse_from(["xmlsquish"]).unwrap();
     assert!(matches!(outcome, BootstrapOutcome::BareHelp(_)));
 }
+
+#[test]
+fn repeated_global_config_overrides_retain_position_and_toml_text() {
+    let parsed = invocation([
+        "xmlsquish",
+        "--config",
+        "build.jobs=2",
+        "build",
+        "--config",
+        "term.message-format=\"short\"",
+        "--config=source.cache-root='cache=local'",
+    ]);
+    assert_eq!(parsed.config_overrides.len(), 3);
+    assert_eq!(parsed.config_overrides[0].key(), "build.jobs");
+    assert_eq!(parsed.config_overrides[0].value(), "2");
+    assert_eq!(
+        parsed.config_overrides[1]
+            .clone()
+            .into_assignment()
+            .as_str(),
+        "term.message-format=\"short\""
+    );
+    assert_eq!(parsed.config_overrides[2].key(), "source.cache-root");
+    assert_eq!(parsed.config_overrides[2].value(), "'cache=local'");
+}
+
+#[test]
+fn config_shape_validation_stops_at_the_loader_boundary() {
+    let parsed = invocation(["xmlsquish", "build", "--config", "build.jobs="]);
+    assert_eq!(parsed.config_overrides[0].value(), "");
+
+    for malformed in ["build.jobs", "=4", ".jobs=4", "build..jobs=4", "build.=4"] {
+        let failure = parse_from(["xmlsquish", "build", "--config", malformed]).unwrap_err();
+        assert_eq!(failure.kind(), ErrorKind::ValueValidation, "{malformed}");
+        assert_eq!(failure.exit_code(), 2, "{malformed}");
+    }
+}
+
+#[test]
+fn config_does_not_change_existing_global_conflicts_or_help() {
+    let conflict =
+        parse_from(["xmlsquish", "--config", "build.jobs=2", "-q", "build", "-v"]).unwrap_err();
+    assert_eq!(conflict.kind(), ErrorKind::ArgumentConflict);
+
+    let help = parse_from(["xmlsquish", "--help"]).unwrap_err();
+    assert_eq!(help.kind(), ErrorKind::DisplayHelp);
+    assert_eq!(help.exit_code(), 0);
+}

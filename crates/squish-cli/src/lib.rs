@@ -11,12 +11,21 @@
 //! use squish_protocol::OperationRequest;
 //!
 //! let BootstrapOutcome::Invocation(parsed) =
-//!     parse_from(["xmlsquish", "build", "-t", "chat", "--message-format=json"])?
+//!     parse_from([
+//!         "xmlsquish",
+//!         "--config",
+//!         "build.jobs=4",
+//!         "build",
+//!         "-t",
+//!         "chat",
+//!         "--message-format=json",
+//!     ])?
 //! else {
 //!     unreachable!("the argv contains a command")
 //! };
 //! assert!(matches!(parsed.request, OperationRequest::Build(_)));
 //! assert_eq!(parsed.presentation.message_format, Some(MessageFormat::Json));
+//! assert_eq!(parsed.config_overrides[0].key(), "build.jobs");
 //! # Ok::<(), squish_cli::ParseFailure>(())
 //! ```
 
@@ -97,6 +106,54 @@ pub struct ExecutionSettings {
     pub inspect_subject: Option<InspectSubject>,
 }
 
+/// 一个保持原始 TOML 值文本的命令行配置覆盖。 / A CLI configuration override retaining its raw TOML value text.
+///
+/// 解析器仅验证 `KEY=VALUE` 的结构；TOML 值及配置模式由配置加载器验证，以便错误仍能
+/// 指向正确的覆盖层与序号。 / The parser validates only the `KEY=VALUE` shape; the
+/// configuration loader validates the TOML value and schema so errors retain the correct layer
+/// and ordinal.
+///
+/// # 示例 / Example
+///
+/// ```
+/// use squish_cli::parse_from;
+///
+/// let parsed = parse_from([
+///     "xmlsquish",
+///     "build",
+///     "--config",
+///     "term.message-format=\"json\"",
+/// ])?
+/// .into_invocation()
+/// .expect("the argv contains a command");
+/// let value = &parsed.config_overrides[0];
+/// assert_eq!(value.key(), "term.message-format");
+/// assert_eq!(value.value(), "\"json\"");
+/// # Ok::<(), squish_cli::ParseFailure>(())
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigOverride {
+    key: String,
+    value: String,
+}
+
+impl ConfigOverride {
+    /// 返回非空的点分配置键。 / Returns the non-empty dotted configuration key.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// 返回未经 TOML 解析的值文本。 / Returns the value text without TOML parsing.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// 重新组成配置加载器接受的无损 `KEY=VALUE` 文本。 / Reassembles lossless `KEY=VALUE` text accepted by the configuration loader.
+    pub fn into_assignment(self) -> String {
+        format!("{}={}", self.key, self.value)
+    }
+}
+
 /// 带实参、无路径猜测的查询主体。 / Typed inspection subject with no path guessing.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InspectSubject {
@@ -121,6 +178,8 @@ pub struct ParsedInvocation {
     pub presentation: PresentationSettings,
     /// 调度或协议扩展所消费的保真执行设置。 / Lossless execution settings consumed by scheduling or a protocol extension.
     pub execution: ExecutionSettings,
+    /// 按用户给定顺序排列的命令行配置覆盖。 / CLI configuration overrides in exact user-supplied order.
+    pub config_overrides: Vec<ConfigOverride>,
 }
 
 /// 启动解析的成功结果。 / Successful bootstrap parse outcome.
@@ -215,10 +274,14 @@ where
         }));
     }
     let json_requested = exact_json_requested(&arguments);
-    let cli = Cli::try_parse_from(arguments).map_err(|error| ParseFailure {
+    let mut cli = Cli::try_parse_from(arguments.iter().cloned()).map_err(|error| ParseFailure {
         error,
         json_requested,
     })?;
+    // Clap propagates a global argument from the deepest subcommand and can therefore discard
+    // earlier root occurrences. / Clap 会从最深子命令传播全局参数，因此可能丢弃更早的根层
+    // 出现项。Clap 已完成类型与用法验证；这里只从原 argv 恢复跨边界的稳定顺序。
+    cli.config_overrides = ordered_config_overrides(&arguments);
     cli.into_invocation()
         .map(Box::new)
         .map(BootstrapOutcome::Invocation)
@@ -239,6 +302,15 @@ where
 struct Cli {
     #[command(flatten)]
     presentation: PresentationArgs,
+    /// 用 TOML 值覆盖一个配置键；重复项按顺序应用。 / Override one configuration key with a TOML value; repeat to apply in order.
+    #[arg(
+        long = "config",
+        global = true,
+        value_name = "KEY=VALUE",
+        value_parser = parse_config_override,
+        action = ArgAction::Append
+    )]
+    config_overrides: Vec<ConfigOverride>,
     #[command(subcommand)]
     command: Command,
 }
@@ -506,13 +578,15 @@ impl Cli {
             query_format: None,
         };
 
-        match self.command {
+        let mut invocation = match self.command {
             Command::Build(args) => build_invocation(args, presentation),
             Command::Fmt(args) => format_invocation(args, presentation),
             Command::Add(args) => add_invocation(args, presentation),
             Command::Remove(args) => remove_invocation(args, presentation),
             Command::Inspect(args) => inspect_invocation(args, presentation),
-        }
+        }?;
+        invocation.config_overrides = self.config_overrides;
+        Ok(invocation)
     }
 }
 
@@ -541,6 +615,7 @@ fn build_invocation(
             keep_going: !args.no_keep_going,
             inspect_subject: None,
         },
+        config_overrides: Vec::new(),
     })
 }
 
@@ -574,6 +649,7 @@ fn format_invocation(
             keep_going: true,
             inspect_subject: None,
         },
+        config_overrides: Vec::new(),
     })
 }
 
@@ -693,6 +769,7 @@ fn inspect_invocation(
             keep_going: true,
             inspect_subject: Some(subject),
         },
+        config_overrides: Vec::new(),
     })
 }
 
@@ -709,6 +786,7 @@ fn simple_invocation(
             keep_going: true,
             inspect_subject: None,
         },
+        config_overrides: Vec::new(),
     }
 }
 
@@ -887,6 +965,50 @@ fn parse_argument(value: &str) -> Result<(String, String), String> {
         return Err("TARGET and NAME must both be non-empty".to_owned());
     }
     Ok((name.to_owned(), value.to_owned()))
+}
+
+fn parse_config_override(value: &str) -> Result<ConfigOverride, String> {
+    let (key, value) = value
+        .split_once('=')
+        .ok_or_else(|| "expected KEY=VALUE".to_owned())?;
+    let key = key.trim();
+    if key.is_empty() || key.split('.').any(|part| part.trim().is_empty()) {
+        return Err("configuration key and each dotted component must be non-empty".to_owned());
+    }
+    Ok(ConfigOverride {
+        key: key.to_owned(),
+        value: value.to_owned(),
+    })
+}
+
+fn ordered_config_overrides(arguments: &[OsString]) -> Vec<ConfigOverride> {
+    let mut overrides = Vec::new();
+    let mut index = 1;
+    while index < arguments.len() {
+        let Some(argument) = arguments[index].to_str() else {
+            index += 1;
+            continue;
+        };
+        if argument == "--" {
+            break;
+        }
+        let value = if argument == "--config" {
+            index += 1;
+            arguments.get(index).and_then(|value| value.to_str())
+        } else {
+            argument.strip_prefix("--config=")
+        };
+        if let Some(value) = value {
+            // `Cli::try_parse_from` succeeded, so every recognized occurrence already passed this
+            // parser. / Clap 已成功完成同一解析器的校验，因此此处不会失败。
+            overrides.push(
+                parse_config_override(value)
+                    .expect("a successfully parsed --config must remain structurally valid"),
+            );
+        }
+        index += 1;
+    }
+    overrides
 }
 
 fn parse_feature(value: &str) -> Result<String, String> {
