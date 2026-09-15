@@ -45,8 +45,6 @@ impl ArtifactLocator {
 pub enum InspectSubject {
     /// 完整动作缓存键。 / Complete action-cache key.
     CacheKey(ActionKeyId),
-    /// 用户指定的产物路径。 / User-selected artifact path.
-    ArtifactPath(ArtifactLocator),
 }
 
 /// 动作对外部世界的影响类别。 / Kind of effect an action has on the external world.

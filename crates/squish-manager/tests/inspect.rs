@@ -274,6 +274,48 @@ fn capability_uses_v2_planning_and_one_inspect_execution_action() {
 }
 
 #[test]
+fn capability_resolves_artifact_path_before_kernel_result_matching() {
+    let root = project();
+    let services = FakeServices::default();
+    let bytes = b"opaque artifact selected by path";
+    insert_blob(&services, bytes);
+    let artifact = artifact(
+        "artifact:sha256:real-content-identity",
+        ArtifactKind::Other("vendor-object".into()),
+        bytes,
+    );
+    services.paths.lock().unwrap().insert(
+        ArtifactLocator::new("target/main.prompt").unwrap(),
+        artifact.clone(),
+    );
+    services.relations.lock().unwrap().insert(
+        artifact.id.clone(),
+        ProvenanceRelation::NotApplicable(ProvenanceNonApplicability::UnsupportedKind),
+    );
+    let manager = ManagerCapability::new(services, InvocationSettings::default());
+    let capabilities: [&dyn squish_kernel::Capability; 1] = [&manager];
+    let kernel = squish_kernel::Kernel::new(&capabilities).unwrap();
+    let context = squish_kernel::InvocationContext::new(
+        InvocationId::new("inspect-artifact-path").unwrap(),
+        squish_kernel::CancellationToken::default(),
+        Arc::new(Events::default()),
+    );
+    let operation = OperationRequest::Inspect(request(
+        &root,
+        InspectView::Artifact(ProjectPath::new("target/main.prompt").unwrap()),
+    ));
+
+    let outcome = kernel.dispatch(&operation, &context).unwrap();
+    let squish_protocol::OperationResult::Inspect(InspectResult::Provenance(result)) =
+        outcome.result
+    else {
+        panic!("artifact path must return provenance")
+    };
+    assert_eq!(result.artifact.id, artifact.id);
+    assert_eq!(outcome.summary.status, squish_protocol::ExitStatus::Success);
+}
+
+#[test]
 fn capability_rejects_storage_layout_for_another_project_during_locate() {
     let root = project();
     let services = FakeServices::default();
@@ -350,12 +392,19 @@ fn cache_is_sorted_filtered_and_every_blob_is_verified() {
     assert_eq!(selected_result.actions[0].action_key.as_str(), "b");
 
     let wrong_subject = InvocationSettings {
-        inspect_subject: Some(InspectSubject::ArtifactPath(
-            ArtifactLocator::new("target/main.prompt").unwrap(),
-        )),
+        inspect_subject: Some(InspectSubject::CacheKey(ActionKeyId::new("b").unwrap())),
         ..InvocationSettings::default()
     };
-    assert!(inspect_value(&req, &req.view, &services, &wrong_subject).is_err());
+    let project_request = request(&root, InspectView::Project);
+    assert!(
+        inspect_value(
+            &project_request,
+            &project_request.view,
+            &services,
+            &wrong_subject
+        )
+        .is_err()
+    );
 
     services.blobs.lock().unwrap().remove(&output.digest.hex());
     assert!(inspect_value(&req, &req.view, &services, &InvocationSettings::default()).is_err());
@@ -531,19 +580,33 @@ fn provenance_parses_build_record_and_rejects_empty_evidence() {
         .lock()
         .unwrap()
         .insert(locator.clone(), product.clone());
-    let path_settings = InvocationSettings {
-        inspect_subject: Some(InspectSubject::ArtifactPath(locator)),
-        ..InvocationSettings::default()
-    };
-    assert!(inspect_value(&req, &req.view, &services, &path_settings).is_ok());
+    let path_request = request(
+        &root,
+        InspectView::Artifact(ProjectPath::new("target/main.prompt").unwrap()),
+    );
+    assert!(
+        inspect_value(
+            &path_request,
+            &path_request.view,
+            &services,
+            &InvocationSettings::default()
+        )
+        .is_ok()
+    );
 
-    let escaping = InvocationSettings {
-        inspect_subject: Some(InspectSubject::ArtifactPath(
-            ArtifactLocator::new("../outside.prompt").unwrap(),
-        )),
-        ..InvocationSettings::default()
-    };
-    assert!(inspect_value(&req, &req.view, &services, &escaping).is_err());
+    let escaping = request(
+        &root,
+        InspectView::Artifact(ProjectPath::new("../outside.prompt").unwrap()),
+    );
+    assert!(
+        inspect_value(
+            &escaping,
+            &escaping.view,
+            &services,
+            &InvocationSettings::default()
+        )
+        .is_err()
+    );
 
     services
         .artifacts
@@ -658,17 +721,15 @@ fn provenance_accepts_only_kind_correct_typed_non_applicability() {
     let outside = tempfile::tempdir().unwrap();
     let outside_path = outside.path().join("artifact.bin");
     fs::write(&outside_path, b"outside").unwrap();
-    let outside_settings = InvocationSettings {
-        inspect_subject: Some(InspectSubject::ArtifactPath(
-            ArtifactLocator::new(outside_path).unwrap(),
-        )),
-        ..InvocationSettings::default()
-    };
+    let outside_request = request(
+        &root,
+        InspectView::Artifact(ProjectPath::new(outside_path.to_string_lossy()).unwrap()),
+    );
     let error = inspect_value(
-        &prompt_request,
-        &prompt_request.view,
+        &outside_request,
+        &outside_request.view,
         &services,
-        &outside_settings,
+        &InvocationSettings::default(),
     )
     .unwrap_err();
     assert_eq!(error.code(), "XS3424");
@@ -711,20 +772,31 @@ fn ordinary_absolute_artifact_matches_verbatim_project_root_but_missing_absolute
         artifact.id.clone(),
         ProvenanceRelation::NotApplicable(ProvenanceNonApplicability::UnsupportedKind),
     );
-    let request = request(&root, InspectView::Provenance(artifact.id.clone()));
-    let settings = InvocationSettings {
-        inspect_subject: Some(InspectSubject::ArtifactPath(
-            ArtifactLocator::new(ordinary).unwrap(),
-        )),
-        ..InvocationSettings::default()
-    };
-    assert!(inspect_value(&request, &request.view, &services, &settings).is_ok());
+    let selected_request = request(
+        &root,
+        InspectView::Artifact(ProjectPath::new(ordinary.to_string_lossy()).unwrap()),
+    );
+    assert!(
+        inspect_value(
+            &selected_request,
+            &selected_request.view,
+            &services,
+            &InvocationSettings::default()
+        )
+        .is_ok()
+    );
 
-    let missing = ArtifactLocator::new(root.path().join("missing.bin")).unwrap();
-    let missing_settings = InvocationSettings {
-        inspect_subject: Some(InspectSubject::ArtifactPath(missing)),
-        ..InvocationSettings::default()
-    };
-    let error = inspect_value(&request, &request.view, &services, &missing_settings).unwrap_err();
+    let missing = root.path().join("missing.bin");
+    let missing_request = request(
+        &root,
+        InspectView::Artifact(ProjectPath::new(missing.to_string_lossy()).unwrap()),
+    );
+    let error = inspect_value(
+        &missing_request,
+        &missing_request.view,
+        &services,
+        &InvocationSettings::default(),
+    )
+    .unwrap_err();
     assert_eq!(error.code(), "XS3424");
 }

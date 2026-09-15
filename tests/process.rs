@@ -1,8 +1,9 @@
 //! 根二进制的进程边界合同。 / Process-boundary contracts for the root binary.
 
 use std::{
+    collections::BTreeMap,
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -719,6 +720,357 @@ fn inspect_json_is_one_stdout_document_after_build() {
         assert!(!stderr.contains("OUTPUT001"), "{stderr}");
         assert!(!stderr.contains("internal error"), "{stderr}");
     }
+}
+
+/// 仅由公开进程输出发现的构建产物身份。 / Build identities discovered only through public process output.
+struct InspectFixture {
+    project: tempfile::TempDir,
+    ir_id: String,
+    prompt_id: String,
+    prompt_digest: String,
+    debug_digest: String,
+    cache_key: String,
+}
+
+/// 构建完整产物集并从规范 NDJSON 中提取后续查询句柄。 / Builds the complete artifact set and extracts subsequent query handles from canonical NDJSON.
+fn built_inspect_fixture(name: &str) -> InspectFixture {
+    let project = project(name);
+    let manifest = project.path().join("xmlsquish.toml");
+    let first = binary()
+        .current_dir(project.path())
+        .args([
+            "build",
+            "--manifest-path",
+            manifest.to_str().unwrap(),
+            "--emit=prompt",
+            "--emit=ir",
+            "--emit=debug",
+            "--message-format=json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(first.stderr.is_empty());
+    let first = ndjson_documents(&first.stdout);
+    let artifacts = first
+        .iter()
+        .find_map(|event| {
+            (event["payload"]["type"] == "operation_completed")
+                .then(|| {
+                    event["payload"]["data"]["result"]["result"]["published"][0]["artifacts"]
+                        .as_array()
+                })
+                .flatten()
+        })
+        .expect("successful build exposes published artifacts in operation_completed");
+    let artifact = |kind: &str| {
+        artifacts
+            .iter()
+            .find(|artifact| artifact["kind"]["type"] == kind)
+            .unwrap_or_else(|| panic!("build did not publish {kind}"))
+    };
+    let ir = artifact("binary_ir");
+    let prompt = artifact("prompt");
+    let debug = artifact("debug_info");
+
+    // A second identical build publicly reports the materialized action keys as cache-hit events.
+    // 第二次相同构建通过 cache-hit 事件公开已物化的动作键，无需读取私有 SQLite。
+    let second = binary()
+        .current_dir(project.path())
+        .args([
+            "build",
+            "--manifest-path",
+            manifest.to_str().unwrap(),
+            "--emit=prompt",
+            "--emit=ir",
+            "--emit=debug",
+            "--message-format=json",
+        ])
+        .output()
+        .unwrap();
+    assert!(second.status.success());
+    let second = ndjson_documents(&second.stdout);
+    let cache_key = second
+        .iter()
+        .find_map(|event| {
+            (event["payload"]["type"] == "cache_hit")
+                .then(|| event["payload"]["data"]["action_key"].as_str())
+                .flatten()
+        })
+        .expect("warm build exposes at least one cache action key")
+        .to_owned();
+
+    InspectFixture {
+        project,
+        ir_id: json_string(ir, "id"),
+        prompt_id: json_string(prompt, "id"),
+        prompt_digest: digest_string(prompt),
+        debug_digest: digest_string(debug),
+        cache_key,
+    }
+}
+
+fn ndjson_documents(bytes: &[u8]) -> Vec<serde_json::Value> {
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect()
+}
+
+fn json_string(value: &serde_json::Value, key: &str) -> String {
+    value[key]
+        .as_str()
+        .unwrap_or_else(|| panic!("missing string field {key} in {value}"))
+        .to_owned()
+}
+
+fn digest_string(artifact: &serde_json::Value) -> String {
+    format!(
+        "blake3:{}",
+        artifact["digest"]["hex"]
+            .as_str()
+            .expect("artifact has a digest hex")
+    )
+}
+
+fn inspect(
+    fixture: &InspectFixture,
+    subject: &str,
+    identifier: &str,
+    format: &str,
+) -> std::process::Output {
+    binary()
+        .current_dir(fixture.project.path())
+        .args([
+            "inspect",
+            "--manifest-path",
+            fixture
+                .project
+                .path()
+                .join("xmlsquish.toml")
+                .to_str()
+                .unwrap(),
+            subject,
+            identifier,
+            format,
+        ])
+        .output()
+        .unwrap()
+}
+
+fn assert_inspect_document(output: std::process::Output, view: &str) -> serde_json::Value {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["view"], view);
+    document
+}
+
+#[test]
+fn inspect_ir_link_source_and_cache_have_typed_human_and_single_json_views() {
+    let fixture = built_inspect_fixture("root-inspect-matrix-");
+    let subjects = [
+        ("ir", fixture.ir_id.as_str(), "ir", "IR\n"),
+        ("link", "chat", "link", "Link\n"),
+        (
+            "source",
+            "xmlsquish://fixture/src/main.xml",
+            "source",
+            "Source\n",
+        ),
+        ("cache", fixture.cache_key.as_str(), "cache", "Cache\n"),
+    ];
+    let mut documents = BTreeMap::new();
+    for (subject, identifier, view, heading) in subjects {
+        let human = inspect(&fixture, subject, identifier, "--format=human");
+        assert!(human.status.success());
+        assert!(human.stderr.is_empty());
+        assert!(
+            String::from_utf8(human.stdout)
+                .unwrap()
+                .starts_with(heading),
+            "{subject} did not use its typed human renderer"
+        );
+        let json = assert_inspect_document(
+            inspect(&fixture, subject, identifier, "--format=json"),
+            view,
+        );
+        documents.insert(subject, json);
+    }
+
+    assert_eq!(documents["ir"]["value"]["artifact"]["id"], fixture.ir_id);
+    assert_eq!(
+        documents["ir"]["value"]["artifact"]["kind"]["type"],
+        "binary_ir"
+    );
+    assert_eq!(documents["link"]["value"]["target"], "chat");
+    assert_eq!(
+        documents["link"]["value"]["link_map"]["kind"]["name"],
+        "static-link-map"
+    );
+    assert_eq!(
+        documents["source"]["value"]["source"],
+        "xmlsquish://fixture/src/main.xml"
+    );
+    assert_eq!(
+        documents["cache"]["value"]["actions"][0]["action_key"],
+        fixture.cache_key
+    );
+}
+
+#[test]
+fn inspect_artifact_resolves_the_public_path_and_exact_prompt_debug_relation() {
+    let fixture = built_inspect_fixture("root-inspect-artifact-");
+    let locator = "target/xmlsquish/chat.prompt";
+    let human = inspect(&fixture, "artifact", locator, "--format=human");
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    assert!(human.stderr.is_empty());
+    assert!(
+        String::from_utf8(human.stdout)
+            .unwrap()
+            .starts_with("Provenance\n")
+    );
+
+    let document = assert_inspect_document(
+        inspect(&fixture, "artifact", locator, "--format=json"),
+        "provenance",
+    );
+    let artifact = &document["value"]["artifact"];
+    assert_eq!(artifact["id"], fixture.prompt_id);
+    assert_eq!(artifact["kind"]["type"], "prompt");
+    assert_eq!(digest_string(artifact), fixture.prompt_digest);
+    let evidence = document["value"]["evidence"]
+        .as_array()
+        .expect("provenance evidence is an array");
+    let debug = evidence
+        .iter()
+        .find(|item| item["kind"]["type"] == "debug_info")
+        .expect("prompt provenance includes its psdbg artifact");
+    assert_eq!(digest_string(debug), fixture.debug_digest);
+}
+
+#[test]
+fn inspect_failures_are_read_only_and_never_emit_partial_query_documents() {
+    let fixture = built_inspect_fixture("root-inspect-invalid-");
+    let before_missing = project_bytes(fixture.project.path());
+    let missing = inspect(
+        &fixture,
+        "artifact",
+        "target/xmlsquish/missing.prompt",
+        "--format=json",
+    );
+    assert_inspect_failure(missing, "XS3420");
+    assert_eq!(project_bytes(fixture.project.path()), before_missing);
+
+    let before_wrong_kind = project_bytes(fixture.project.path());
+    let wrong_kind = inspect(&fixture, "ir", &fixture.prompt_id, "--format=json");
+    assert_inspect_failure(wrong_kind, "XS3421");
+    assert_eq!(project_bytes(fixture.project.path()), before_wrong_kind);
+
+    fs::write(
+        fixture.project.path().join("xmlsquish.lock"),
+        b"this is not a lockfile",
+    )
+    .unwrap();
+    let before_corrupt = project_bytes(fixture.project.path());
+    let corrupt = inspect(
+        &fixture,
+        "source",
+        "xmlsquish://fixture/src/main.xml",
+        "--format=json",
+    );
+    assert_inspect_failure(corrupt, "XS3402");
+    assert_eq!(project_bytes(fixture.project.path()), before_corrupt);
+}
+
+fn assert_inspect_failure(output: std::process::Output, code: &str) {
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        output.stdout.is_empty(),
+        "failed query leaked a partial document"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains(code));
+}
+
+fn project_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    walk(root)
+        .into_iter()
+        .map(|path| {
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            (relative, fs::read(path).unwrap())
+        })
+        .collect()
+}
+
+#[test]
+fn absolute_manifest_path_builds_and_inspects_the_same_project_from_outside() {
+    let project = project("root-absolute-manifest-");
+    let manifest = fs::canonicalize(project.path().join("xmlsquish.toml")).unwrap();
+    let outside = Path::new(env!("CARGO_MANIFEST_DIR")).join(".temp");
+    let built = binary()
+        .current_dir(&outside)
+        .args([
+            "build",
+            "--manifest-path",
+            manifest.to_str().unwrap(),
+            "--emit=prompt",
+            "--plain",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    assert!(
+        walk(&project.path().join("target/xmlsquish"))
+            .iter()
+            .any(|path| path.extension().and_then(|value| value.to_str()) == Some("prompt"))
+    );
+
+    let inspected = binary()
+        .current_dir(&outside)
+        .args([
+            "inspect",
+            "--manifest-path",
+            manifest.to_str().unwrap(),
+            "link",
+            "chat",
+            "--format=json",
+        ])
+        .output()
+        .unwrap();
+    let document = assert_inspect_document(inspected, "link");
+    assert_eq!(document["value"]["target"], "chat");
+
+    let artifact = binary()
+        .current_dir(&outside)
+        .args([
+            "inspect",
+            "--manifest-path",
+            manifest.to_str().unwrap(),
+            "artifact",
+            "target/xmlsquish/chat.prompt",
+            "--format=json",
+        ])
+        .output()
+        .unwrap();
+    let artifact = assert_inspect_document(artifact, "provenance");
+    assert_eq!(artifact["value"]["artifact"]["id"], "fixture:chat:prompt");
 }
 
 #[test]

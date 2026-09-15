@@ -338,13 +338,12 @@ fn inspect_at_repository<S: Services>(
         InspectView::Source(source_id) => {
             source(repository, source_id, services).map(InspectResult::Source)
         }
-        InspectView::Provenance(id) => provenance(
-            repository.root(),
-            id,
-            services,
-            settings.inspect_subject.as_ref(),
-        )
-        .map(InspectResult::Provenance),
+        InspectView::Provenance(id) => {
+            provenance(repository.root(), id, services).map(InspectResult::Provenance)
+        }
+        InspectView::Artifact(path) => {
+            artifact_provenance(repository.root(), path, services).map(InspectResult::Provenance)
+        }
     }
 }
 
@@ -360,8 +359,10 @@ fn inspect_at_root<S: Services>(
         InspectView::Ir(id) => ir(root, id, services).map(InspectResult::Ir),
         InspectView::Link(target) => link(root, target, services).map(InspectResult::Link),
         InspectView::Provenance(id) => {
-            provenance(root, id, services, settings.inspect_subject.as_ref())
-                .map(InspectResult::Provenance)
+            provenance(root, id, services).map(InspectResult::Provenance)
+        }
+        InspectView::Artifact(path) => {
+            artifact_provenance(root, path, services).map(InspectResult::Provenance)
         }
         InspectView::Project | InspectView::Source(_) => Err(ManagerError::new(
             "XS3407",
@@ -772,40 +773,55 @@ fn provenance<S: Services>(
     root: &Path,
     id: &squish_protocol::ArtifactId,
     services: &S,
-    subject: Option<&InspectSubject>,
 ) -> Result<ProvenanceInspection, ManagerError> {
-    let artifact = match subject {
-        Some(InspectSubject::ArtifactPath(locator)) => {
-            let canonical_locator = validate_locator(root, locator)?;
-            services
-                .artifact_at(root, &canonical_locator)
-                .map_err(|error| service_error_at(Phase::Cache, error))?
-                .ok_or_else(|| {
-                    ManagerError::new(
-                        "XS3420",
-                        Phase::Cache,
-                        format!(
-                            "artifact path `{}` was not found",
-                            locator.as_path().display()
-                        ),
-                    )
-                })?
-        }
-        _ => required_artifact(root, id, services)?,
-    };
-    if artifact.id != *id {
-        return Err(ManagerError::new(
-            "XS3423",
+    let artifact = required_artifact(root, id, services)?;
+    provenance_for_artifact(root, artifact, services)
+}
+
+/// 将项目路径选择器解析为权威产物，再以真实身份查询证据。 /
+/// Resolves a project-path selector to an authoritative artifact, then queries evidence with
+/// the artifact's real identity.
+fn artifact_provenance<S: Services>(
+    root: &Path,
+    path: &squish_protocol::ProjectPath,
+    services: &S,
+) -> Result<ProvenanceInspection, ManagerError> {
+    let locator = ArtifactLocator::new(path.as_str()).map_err(|error| {
+        manager_error(
+            "XS3424",
             Phase::Cache,
-            format!(
-                "artifact catalog returned `{}` for requested identity `{id}`",
-                artifact.id
-            ),
-        ));
-    }
+            "invalid artifact path selector",
+            error,
+        )
+    })?;
+    let canonical_locator = validate_locator(root, &locator)?;
+    let artifact = services
+        .artifact_at(root, &canonical_locator)
+        .map_err(|error| service_error_at(Phase::Cache, error))?
+        .ok_or_else(|| {
+            ManagerError::new(
+                "XS3420",
+                Phase::Cache,
+                format!(
+                    "artifact path `{}` was not found",
+                    locator.as_path().display()
+                ),
+            )
+        })?;
+    provenance_for_artifact(root, artifact, services)
+}
+
+/// 验证已解析产物并按其内容身份加载来源证据。 /
+/// Validates a resolved artifact and loads provenance evidence by its content identity.
+fn provenance_for_artifact<S: Services>(
+    root: &Path,
+    artifact: Artifact,
+    services: &S,
+) -> Result<ProvenanceInspection, ManagerError> {
+    let id = artifact.id.clone();
     let product = validate_artifact(root, &artifact, services)?;
     let relation = services
-        .provenance_evidence(root, id)
+        .provenance_evidence(root, &id)
         .map_err(|error| service_error_at(Phase::Analyze, error))?;
     let mut evidence = match relation {
         ProvenanceRelation::Evidence(evidence) => evidence,
@@ -846,12 +862,7 @@ fn validate_subject(
 ) -> Result<(), ManagerError> {
     let valid = matches!(
         (view, subject),
-        (_, None)
-            | (InspectView::Cache, Some(InspectSubject::CacheKey(_)))
-            | (
-                InspectView::Provenance(_),
-                Some(InspectSubject::ArtifactPath(_))
-            )
+        (_, None) | (InspectView::Cache, Some(InspectSubject::CacheKey(_)))
     );
     if valid {
         Ok(())
@@ -1192,6 +1203,7 @@ fn view_key(view: &InspectView) -> String {
         InspectView::Link(id) => format!("link:{id}"),
         InspectView::Source(id) => format!("source:{id}"),
         InspectView::Provenance(id) => format!("provenance:{id}"),
+        InspectView::Artifact(path) => format!("artifact:{}", path.as_str()),
     }
 }
 

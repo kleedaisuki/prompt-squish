@@ -168,8 +168,6 @@ pub enum InspectSubject {
     Source(OpaqueSourceId),
     /// 缓存动作键。 / Cache action key.
     Cache(String),
-    /// 显式产物路径。 / Explicit artifact path.
-    Artifact(ProjectPath),
 }
 
 /// 启动解析的完整成功值。 / Complete successful bootstrap parse.
@@ -766,33 +764,32 @@ fn inspect_invocation(
     let (view, subject) = match args.subject {
         InspectCommand::Ir { identifier } => {
             let value = id(identifier, ArtifactId::new, "IR identifier")?;
-            (InspectView::Ir(value.clone()), InspectSubject::Ir(value))
+            (
+                InspectView::Ir(value.clone()),
+                Some(InspectSubject::Ir(value)),
+            )
         }
         InspectCommand::Link { identifier } => {
             let value = id(identifier, TargetName::new, "link identifier")?;
             (
                 InspectView::Link(value.clone()),
-                InspectSubject::Link(value),
+                Some(InspectSubject::Link(value)),
             )
         }
         InspectCommand::Source { identifier } => {
             let value = id(identifier, OpaqueSourceId::new, "source identifier")?;
             (
                 InspectView::Source(value.clone()),
-                InspectSubject::Source(value),
+                Some(InspectSubject::Source(value)),
             )
         }
         InspectCommand::Cache { action_key } => {
             require_nonempty(&action_key, "action key")?;
-            (InspectView::Cache, InspectSubject::Cache(action_key))
+            (InspectView::Cache, Some(InspectSubject::Cache(action_key)))
         }
         InspectCommand::Artifact { path } => {
-            let project_path = id(path.clone(), ProjectPath::new, "artifact path")?;
-            let artifact = id(path, ArtifactId::new, "artifact path")?;
-            (
-                InspectView::Provenance(artifact),
-                InspectSubject::Artifact(project_path),
-            )
+            let path = id(path, ProjectPath::new, "artifact path")?;
+            (InspectView::Artifact(path), None)
         }
     };
     Ok(ParsedInvocation {
@@ -805,7 +802,7 @@ fn inspect_invocation(
             excluded_packages: Vec::new(),
             jobs: None,
             keep_going: true,
-            inspect_subject: Some(subject),
+            inspect_subject: subject,
         },
         config_overrides: Vec::new(),
     })
@@ -1276,15 +1273,13 @@ mod tests {
             "--format=json",
         ]);
         assert_eq!(parsed.presentation.query_format, Some(QueryFormat::Json));
-        assert!(
-            matches!(parsed.execution.inspect_subject, Some(InspectSubject::Artifact(ref path)) if path.as_str() == "missing.prompt")
-        );
+        assert!(parsed.execution.inspect_subject.is_none());
         assert!(matches!(
             parsed.request,
             OperationRequest::Inspect(InspectRequest {
-                view: InspectView::Provenance(_),
+                view: InspectView::Artifact(ref path),
                 ..
-            })
+            }) if path.as_str() == "missing.prompt"
         ));
     }
 

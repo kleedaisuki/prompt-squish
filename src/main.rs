@@ -29,9 +29,7 @@ use squish_host::{
 use squish_kernel::{
     CancellationToken, EventSink, InvocationContext, Kernel, KernelError, SinkError,
 };
-use squish_manager::{
-    ArtifactLocator, InspectSubject, InvocationSettings, ManagerCapability, StorageLayout,
-};
+use squish_manager::{InspectSubject, InvocationSettings, ManagerCapability, StorageLayout};
 use squish_presentation::{
     ColorMode, Environment, HumanRenderer, InspectHumanRenderer, NdjsonRenderer,
     PresentationOptions, ProgressMode, Renderer, SystemClock, SystemTerminal, TerminalProbe,
@@ -483,9 +481,6 @@ fn manager_inspect_subject(
         Some(CliInspectSubject::Cache(value)) => {
             Some(InspectSubject::CacheKey(ActionKeyId::new(value)?))
         }
-        Some(CliInspectSubject::Artifact(path)) => Some(InspectSubject::ArtifactPath(
-            ArtifactLocator::new(path.as_str())?,
-        )),
         Some(
             CliInspectSubject::Ir(_) | CliInspectSubject::Link(_) | CliInspectSubject::Source(_),
         )

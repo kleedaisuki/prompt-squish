@@ -404,6 +404,13 @@ pub enum InspectView {
     Source(OpaqueSourceId),
     /// 产物来源证明。 / Artifact provenance.
     Provenance(ArtifactId),
+    /// 按项目内路径定位产物并查询其来源证明。 / Locates an artifact by its project path and inspects its provenance.
+    ///
+    /// 路径是用户选择器（selector），不是 [`ArtifactId`]。管理器必须通过
+    /// 权威产物目录将它解析为真实产物身份。 / The path is a user selector,
+    /// not an [`ArtifactId`]; the manager must resolve it through the authoritative
+    /// artifact catalog to the real artifact identity.
+    Artifact(ProjectPath),
 }
 /// 查询请求。 / Inspection request.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1097,6 +1104,10 @@ impl InspectResult {
             (Self::Provenance(result), InspectView::Provenance(requested)) => {
                 &result.artifact.id == requested
             }
+            // A path selects an artifact but does not prescribe its content identity. The
+            // manager validates the catalog mapping before returning this typed result. /
+            // 路径只选择产物，不预设其内容身份；管理器在返回类型化结果前验证目录映射。
+            (Self::Provenance(_), InspectView::Artifact(_)) => true,
             _ => false,
         }
     }
@@ -2071,6 +2082,33 @@ mod tests {
             OperationResult::Unavailable {
                 kind: OperationKind::Inspect
             }
+            .matches_request(&request)
+        );
+    }
+    #[test]
+    fn artifact_path_selector_matches_resolved_provenance_by_result_type() {
+        let request = OperationRequest::Inspect(InspectRequest {
+            project: ProjectPath::new(".").unwrap(),
+            view: InspectView::Artifact(ProjectPath::new("target/main.prompt").unwrap()),
+        });
+        let artifact = Artifact {
+            id: ArtifactId::new("prompt:sha256:content-identity").unwrap(),
+            kind: ArtifactKind::Prompt,
+            uri: "cas://sha256/content-identity".into(),
+            digest: Digest::new(DigestAlgorithm::Sha256, vec![7; 32]).unwrap(),
+            size: 42,
+        };
+        let result = OperationResult::Inspect(InspectResult::Provenance(ProvenanceInspection {
+            artifact,
+            evidence: Vec::new(),
+        }));
+
+        assert!(result.matches_request(&request));
+        assert!(
+            !OperationResult::Inspect(InspectResult::Project(ProjectInspection {
+                packages: Vec::new(),
+                targets: Vec::new(),
+            }))
             .matches_request(&request)
         );
     }

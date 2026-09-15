@@ -38,7 +38,7 @@ pub struct InvocationSettings {
     pub jobs: usize,
     /// 独立动作失败后是否继续。 / Whether independent work continues after failure.
     pub keep_going: bool,
-    /// 协议尚未类型化的查询对象。 / Inspection subject not yet represented by the typed protocol.
+    /// 协议尚未类型化的查询对象（当前仅缓存键）。 / Inspection subject not yet represented by the typed protocol (currently only a cache key).
     pub inspect_subject: Option<InspectSubject>,
 }
 

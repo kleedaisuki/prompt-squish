@@ -91,6 +91,25 @@ fn inspect_subject_prevents_identifier_path_guessing() {
 }
 
 #[test]
+fn inspect_artifact_path_is_carried_once_by_the_protocol_selector() {
+    let parsed = invocation([
+        "xmlsquish",
+        "inspect",
+        "artifact",
+        "target/prompts/main.prompt",
+        "--format=json",
+    ]);
+    let OperationRequest::Inspect(request) = parsed.request else {
+        panic!("inspect must produce InspectRequest")
+    };
+    assert!(matches!(
+        request.view,
+        InspectView::Artifact(ref path) if path.as_str() == "target/prompts/main.prompt"
+    ));
+    assert!(parsed.execution.inspect_subject.is_none());
+}
+
+#[test]
 fn bare_invocation_is_help_not_a_usage_failure() {
     let outcome = parse_from(["xmlsquish"]).unwrap();
     assert!(matches!(outcome, BootstrapOutcome::BareHelp(_)));
