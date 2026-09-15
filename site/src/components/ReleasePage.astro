@@ -20,6 +20,10 @@ const platforms = [
   { name: "Linux", note: m.platformNotes[1], targets: [["x64", "x86_64-unknown-linux-gnu"], ["ARM64", "aarch64-unknown-linux-gnu"]], ext: "tar.gz" },
   { name: "macOS", note: m.platformNotes[2], targets: [["Intel", "x86_64-apple-darwin"], ["Apple Silicon", "aarch64-apple-darwin"]], ext: "tar.gz" },
 ];
+/** Derive structured download URLs from the same matrix that renders the buttons.
+ * 结构化下载 URL 与页面按钮共用同一矩阵，避免两份资产清单漂移。 */
+const assetUrls = platforms.flatMap(platform => platform.targets.map(([, target]) =>
+  `${downloads}xmlsquish-${version}-${target}.${platform.ext}`));
 /** Keep published metadata factual and rating-free; asset URLs follow the release matrix.
  * 正式发布元数据保持可核实且不伪造评分；资产 URL 与发布矩阵一致。 */
 const releaseUrl = new URL(Astro.url.pathname, Astro.site).href;
@@ -35,7 +39,7 @@ const structuredData = JSON.stringify({
   isAccessibleForFree: true,
   license: "https://www.gnu.org/licenses/gpl-3.0.html",
   sameAs: repo,
-  downloadUrl: `${repo}/releases/tag/${tag}`,
+  downloadUrl: assetUrls,
   releaseNotes: releaseUrl,
   inLanguage: locale,
   creativeWorkStatus: "Published",
