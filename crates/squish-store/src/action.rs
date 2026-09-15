@@ -4,14 +4,21 @@ use std::{
     fs::OpenOptions,
     path::{Path, PathBuf},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-use crate::BlobDigest;
+use squish_build::{
+    ActionIndex as BuildIndex, ActionKey as BuildKey, ActionRecord, ContentDigest, OutputName,
+    ProducedOutput,
+};
+use squish_protocol::{ArtifactKind, DigestAlgorithm};
+
+use crate::{BlobDigest, Cas, CasError};
 
 static REBUILD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -73,6 +80,11 @@ impl std::error::Error for IndexError {}
 impl From<rusqlite::Error> for IndexError {
     fn from(error: rusqlite::Error) -> Self {
         Self(format!("action index failed: {error}"))
+    }
+}
+impl From<CasError> for IndexError {
+    fn from(error: CasError) -> Self {
+        Self(format!("action record blob validation failed: {error}"))
     }
 }
 
@@ -165,17 +177,31 @@ impl SqliteActionIndex {
             std::fs::create_dir_all(parent)
                 .map_err(|error| IndexError(format!("create index directory: {error}")))?;
         }
-        let connection = Connection::open(path)?;
+        let mut connection = Connection::open(path)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
+        retry_locked(|| connection.pragma_update(None, "journal_mode", "WAL"))?;
         connection.pragma_update(None, "foreign_keys", true)?;
-        connection.execute_batch(
+        retry_locked(|| {
+            connection.execute_batch(
             "BEGIN;
              CREATE TABLE IF NOT EXISTS actions (
                  action_key BLOB PRIMARY KEY CHECK(length(action_key) = 32),
-                 last_used_unix_ms INTEGER NOT NULL
+                 last_used_unix_ms INTEGER NOT NULL,
+                 record_kind TEXT NOT NULL DEFAULT 'digest-only'
+                     CHECK(record_kind IN ('digest-only', 'manifest'))
              ) STRICT;
              CREATE TABLE IF NOT EXISTS action_results (
+                 action_key BLOB NOT NULL REFERENCES actions(action_key) ON DELETE CASCADE,
+                 ordinal INTEGER NOT NULL,
+                 digest BLOB NOT NULL CHECK(length(digest) = 32),
+                 output_name TEXT NOT NULL CHECK(output_name <> ''),
+                 artifact_kind TEXT NOT NULL CHECK(artifact_kind IN ('binary-ir', 'prompt', 'debug-info', 'metadata', 'other')),
+                 artifact_other TEXT,
+                 size INTEGER NOT NULL CHECK(size >= 0),
+                 CHECK((artifact_kind = 'other') = (artifact_other IS NOT NULL)),
+                 PRIMARY KEY(action_key, ordinal)
+             ) STRICT;
+             CREATE TABLE IF NOT EXISTS digest_results (
                  action_key BLOB NOT NULL REFERENCES actions(action_key) ON DELETE CASCADE,
                  ordinal INTEGER NOT NULL,
                  digest BLOB NOT NULL CHECK(length(digest) = 32),
@@ -191,7 +217,9 @@ impl SqliteActionIndex {
              ) STRICT;
              CREATE INDEX IF NOT EXISTS actions_lru ON actions(last_used_unix_ms, action_key);
              COMMIT;",
-        )?;
+        )
+        })?;
+        migrate_schema(&mut connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
             path: path.to_path_buf(),
@@ -228,17 +256,24 @@ impl SqliteActionIndex {
             .expect("SQLite action index poisoned");
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute(
-            "INSERT INTO actions(action_key, last_used_unix_ms) VALUES (?1, ?2)
-             ON CONFLICT(action_key) DO UPDATE SET last_used_unix_ms=excluded.last_used_unix_ms",
+            "INSERT INTO actions(action_key, last_used_unix_ms, record_kind)
+             VALUES (?1, ?2, 'digest-only')
+             ON CONFLICT(action_key) DO UPDATE SET
+                 last_used_unix_ms=excluded.last_used_unix_ms,
+                 record_kind='digest-only'",
             params![key.digest().as_bytes().as_slice(), entry.last_used_unix_ms],
         )?;
         transaction.execute(
             "DELETE FROM action_results WHERE action_key=?1",
             [key.digest().as_bytes().as_slice()],
         )?;
+        transaction.execute(
+            "DELETE FROM digest_results WHERE action_key=?1",
+            [key.digest().as_bytes().as_slice()],
+        )?;
         for (ordinal, digest) in entry.results.iter().enumerate() {
             transaction.execute(
-                "INSERT INTO action_results(action_key, ordinal, digest) VALUES (?1, ?2, ?3)",
+                "INSERT INTO digest_results(action_key, ordinal, digest) VALUES (?1, ?2, ?3)",
                 params![
                     key.digest().as_bytes().as_slice(),
                     ordinal as i64,
@@ -263,7 +298,8 @@ impl SqliteActionIndex {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let exists = transaction
             .query_row(
-                "SELECT 1 FROM actions WHERE action_key=?1",
+                "SELECT 1 FROM actions
+                 WHERE action_key=?1 AND record_kind='digest-only'",
                 [key.digest().as_bytes().as_slice()],
                 |_| Ok(()),
             )
@@ -278,7 +314,7 @@ impl SqliteActionIndex {
         )?;
         let results = {
             let mut statement = transaction.prepare(
-                "SELECT digest FROM action_results WHERE action_key=?1 ORDER BY ordinal",
+                "SELECT digest FROM digest_results WHERE action_key=?1 ORDER BY ordinal",
             )?;
             statement
                 .query_map([key.digest().as_bytes().as_slice()], |row| {
@@ -366,11 +402,365 @@ impl SqliteActionIndex {
     /// 清空所有可重建协调状态，但不接触 CAS。 / Clears all rebuildable coordination state without touching the CAS.
     pub fn clear(&self) -> Result<(), IndexError> {
         self.connection.lock().expect("SQLite action index poisoned").execute_batch(
-            "BEGIN; DELETE FROM action_results; DELETE FROM actions; DELETE FROM run_events; COMMIT;",
+            "BEGIN; DELETE FROM action_results; DELETE FROM digest_results; DELETE FROM actions; DELETE FROM run_events; COMMIT;",
         )?;
         Ok(())
     }
 }
+
+/// 为构建端口绑定 CAS 的动作索引适配器。 / Action-index adapter binding the build port to a CAS.
+///
+/// 构造时强制注入 CAS，因此每次命中都能验证完整输出清单，而不会存在“忘记配置
+/// 验证器”的运行时模式。缺失、摘要损坏或大小不符的输出会使整个动作成为 miss，并
+/// 丢弃可重建索引行；随后成功执行可用 [`BuildIndex::record`] 正常修复。
+/// Construction requires a CAS, so every hit validates its complete output manifest
+/// without an optional verifier mode. A missing, corrupt, or incorrectly-sized output
+/// turns the whole action into a miss and drops the rebuildable row; a subsequent
+/// successful execution repairs it through [`BuildIndex::record`].
+pub struct VerifiedActionIndex {
+    index: SqliteActionIndex,
+    cas: Arc<Cas>,
+}
+
+impl VerifiedActionIndex {
+    /// 打开 SQLite 索引并绑定权威 CAS。 / Opens a SQLite index and binds its authoritative CAS.
+    pub fn open(path: impl AsRef<Path>, cas: Arc<Cas>) -> Result<Self, IndexError> {
+        Ok(Self {
+            index: SqliteActionIndex::open(path)?,
+            cas,
+        })
+    }
+
+    /// 从已打开索引与 CAS 构造适配器。 / Constructs the adapter from an open index and CAS.
+    #[must_use]
+    pub fn from_parts(index: SqliteActionIndex, cas: Arc<Cas>) -> Self {
+        Self { index, cas }
+    }
+
+    /// 返回底层领域索引。 / Returns the underlying domain index.
+    #[must_use]
+    pub fn index(&self) -> &SqliteActionIndex {
+        &self.index
+    }
+}
+
+impl BuildIndex for VerifiedActionIndex {
+    type Error = IndexError;
+
+    fn lookup(&self, key: &BuildKey) -> Result<Option<ActionRecord>, Self::Error> {
+        let stored_key = parse_build_key(key)?;
+        let Some(outputs) = self.load_manifest(stored_key)? else {
+            return Ok(None);
+        };
+        for output in &outputs {
+            let digest = blob_digest(&output.digest)?;
+            let Some(bytes) = self.cas.get(digest)? else {
+                self.remove(stored_key)?;
+                return Ok(None);
+            };
+            if u64::try_from(bytes.len()).ok() != Some(output.size) {
+                self.remove(stored_key)?;
+                return Ok(None);
+            }
+        }
+        self.touch(stored_key, now_unix_ms())?;
+        Ok(Some(ActionRecord {
+            key: key.clone(),
+            outputs,
+        }))
+    }
+
+    fn record(&self, record: &ActionRecord) -> Result<(), Self::Error> {
+        let key = parse_build_key(&record.key)?;
+        let mut connection = self
+            .index
+            .connection
+            .lock()
+            .expect("SQLite action index poisoned");
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "INSERT INTO actions(action_key, last_used_unix_ms, record_kind)
+             VALUES (?1, ?2, 'manifest')
+             ON CONFLICT(action_key) DO UPDATE SET
+                 last_used_unix_ms=excluded.last_used_unix_ms,
+                 record_kind='manifest'",
+            params![key.digest().as_bytes().as_slice(), now_unix_ms()],
+        )?;
+        transaction.execute(
+            "DELETE FROM action_results WHERE action_key=?1",
+            [key.digest().as_bytes().as_slice()],
+        )?;
+        transaction.execute(
+            "DELETE FROM digest_results WHERE action_key=?1",
+            [key.digest().as_bytes().as_slice()],
+        )?;
+        for (ordinal, output) in record.outputs.iter().enumerate() {
+            let digest = blob_digest(&output.digest)?;
+            let (kind, other) = encode_kind(&output.kind)?;
+            let size = i64::try_from(output.size)
+                .map_err(|_| IndexError("output size exceeds SQLite INTEGER".into()))?;
+            transaction.execute(
+                "INSERT INTO action_results(action_key, ordinal, digest, output_name, artifact_kind, artifact_other, size)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    key.digest().as_bytes().as_slice(),
+                    i64::try_from(ordinal).map_err(|_| IndexError("too many action outputs".into()))?,
+                    digest.as_bytes().as_slice(),
+                    output.name.as_str(),
+                    kind,
+                    other,
+                    size,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+}
+
+impl VerifiedActionIndex {
+    fn load_manifest(&self, key: ActionKey) -> Result<Option<Vec<ProducedOutput>>, IndexError> {
+        let connection = self
+            .index
+            .connection
+            .lock()
+            .expect("SQLite action index poisoned");
+        // 单条 LEFT JOIN 在一个 SQLite statement snapshot 中同时判定记录类型与读取
+        // 清单。这样并发 clear 不可能落在“存在性检查”和结果读取之间制造假空清单。
+        // One LEFT JOIN determines the record kind and reads the manifest from one
+        // SQLite statement snapshot. A concurrent clear therefore cannot fabricate
+        // an empty manifest between a separate existence check and result query.
+        let mut statement = connection.prepare(
+            "SELECT a.record_kind, r.digest, r.output_name, r.artifact_kind,
+                    r.artifact_other, r.size
+             FROM actions AS a
+             LEFT JOIN action_results AS r ON r.action_key = a.action_key
+             WHERE a.action_key=?1
+             ORDER BY r.ordinal",
+        )?;
+        let rows = statement.query_map([key.digest().as_bytes().as_slice()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<Vec<u8>>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+            ))
+        })?;
+        let mut outputs = Vec::new();
+        let mut saw_action = false;
+        for row in rows {
+            saw_action = true;
+            let (record_kind, digest, name, kind, other, size) = row?;
+            if record_kind != "manifest" {
+                return Ok(None);
+            }
+            let Some(digest) = digest else {
+                // LEFT JOIN 的全 NULL 右侧唯一表示一个合法的零输出 manifest。
+                // An all-NULL right side is the sole representation of a valid
+                // zero-output manifest produced by the LEFT JOIN.
+                if name.is_none() && kind.is_none() && other.is_none() && size.is_none() {
+                    continue;
+                }
+                return Err(IndexError("partial output manifest row".into()));
+            };
+            let digest = digest_from_sql(&digest)?;
+            let name = OutputName::new(
+                name.ok_or_else(|| IndexError("missing output name in manifest".into()))?,
+            )
+            .map_err(|_| IndexError("empty output name in rebuildable index".into()))?;
+            let kind = decode_kind(
+                &kind.ok_or_else(|| IndexError("missing artifact kind in manifest".into()))?,
+                other,
+            )?;
+            let size = u64::try_from(
+                size.ok_or_else(|| IndexError("missing output size in manifest".into()))?,
+            )
+            .map_err(|_| IndexError("negative output size in rebuildable index".into()))?;
+            outputs.push(ProducedOutput {
+                name,
+                kind,
+                digest: content_digest(digest),
+                size,
+            });
+        }
+        if !saw_action {
+            return Ok(None);
+        }
+        Ok(Some(outputs))
+    }
+
+    fn touch(&self, key: ActionKey, time: i64) -> Result<(), IndexError> {
+        self.index
+            .connection
+            .lock()
+            .expect("SQLite action index poisoned")
+            .execute(
+                "UPDATE actions SET last_used_unix_ms=?2 WHERE action_key=?1",
+                params![key.digest().as_bytes().as_slice(), time],
+            )?;
+        Ok(())
+    }
+
+    fn remove(&self, key: ActionKey) -> Result<(), IndexError> {
+        self.index
+            .connection
+            .lock()
+            .expect("SQLite action index poisoned")
+            .execute(
+                "DELETE FROM actions WHERE action_key=?1",
+                [key.digest().as_bytes().as_slice()],
+            )?;
+        Ok(())
+    }
+}
+
+fn parse_build_key(key: &BuildKey) -> Result<ActionKey, IndexError> {
+    let hex = key
+        .as_str()
+        .strip_prefix("blake3:")
+        .ok_or_else(|| IndexError("action key must use canonical blake3:<hex> form".into()))?;
+    let digest = hex
+        .parse::<BlobDigest>()
+        .map_err(|_| IndexError("action key must use canonical blake3:<hex> form".into()))?;
+    if key.as_str() != format!("blake3:{}", digest.to_hex()) {
+        return Err(IndexError(
+            "action key must use canonical lowercase blake3:<hex> form".into(),
+        ));
+    }
+    Ok(ActionKey::from_digest(digest))
+}
+
+fn blob_digest(digest: &ContentDigest) -> Result<BlobDigest, IndexError> {
+    if digest.algorithm() != &DigestAlgorithm::Blake3 {
+        return Err(IndexError("CAS action output must use BLAKE3".into()));
+    }
+    let bytes: [u8; 32] = digest
+        .bytes()
+        .try_into()
+        .map_err(|_| IndexError("invalid BLAKE3 output digest length".into()))?;
+    Ok(BlobDigest::from_bytes(bytes))
+}
+
+fn content_digest(digest: BlobDigest) -> ContentDigest {
+    ContentDigest::new(DigestAlgorithm::Blake3, digest.as_bytes().to_vec())
+        .expect("BLAKE3 has the protocol's canonical digest length")
+}
+
+fn encode_kind(kind: &ArtifactKind) -> Result<(&'static str, Option<&str>), IndexError> {
+    Ok(match kind {
+        ArtifactKind::BinaryIr => ("binary-ir", None),
+        ArtifactKind::Prompt => ("prompt", None),
+        ArtifactKind::DebugInfo => ("debug-info", None),
+        ArtifactKind::Metadata => ("metadata", None),
+        ArtifactKind::Other(name) if !name.is_empty() => ("other", Some(name)),
+        ArtifactKind::Other(_) => {
+            return Err(IndexError("custom artifact kind must not be empty".into()));
+        }
+    })
+}
+
+fn decode_kind(kind: &str, other: Option<String>) -> Result<ArtifactKind, IndexError> {
+    match (kind, other) {
+        ("binary-ir", None) => Ok(ArtifactKind::BinaryIr),
+        ("prompt", None) => Ok(ArtifactKind::Prompt),
+        ("debug-info", None) => Ok(ArtifactKind::DebugInfo),
+        ("metadata", None) => Ok(ArtifactKind::Metadata),
+        ("other", Some(name)) if !name.is_empty() => Ok(ArtifactKind::Other(name)),
+        _ => Err(IndexError(
+            "invalid artifact kind in rebuildable index".into(),
+        )),
+    }
+}
+
+fn now_unix_ms() -> i64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    i64::try_from(millis).unwrap_or(i64::MAX)
+}
+
+/// 重试 SQLite 不受 busy timeout 约束的 schema-lock 竞态。 / Retries SQLite schema-lock races not covered by the busy timeout.
+fn retry_locked<T>(mut operation: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::Result<T> {
+    const ATTEMPTS: usize = 250;
+    for attempt in 0..ATTEMPTS {
+        match operation() {
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if matches!(
+                    error.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                ) && attempt + 1 < ATTEMPTS =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+    unreachable!("the final retry always returns")
+}
+
+fn migrate_schema(connection: &mut Connection) -> Result<(), IndexError> {
+    // BEGIN IMMEDIATE serializes the inspect-and-alter sequence across processes.
+    // Without it, two first-open callers can both observe a missing column and race ALTER.
+    // BEGIN IMMEDIATE 会跨进程序列化“检查后修改”；否则两个首次打开者可能同时
+    // 看到缺列并竞态执行 ALTER。
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let action_columns = transaction
+        .prepare("PRAGMA table_info(actions)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !action_columns.iter().any(|column| column == "record_kind") {
+        transaction.execute_batch(
+            "ALTER TABLE actions ADD COLUMN record_kind TEXT NOT NULL
+                 DEFAULT 'digest-only'
+                 CHECK(record_kind IN ('digest-only', 'manifest'));",
+        )?;
+    }
+    let columns = transaction
+        .prepare("PRAGMA table_info(action_results)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let additions = [
+        ("output_name", "TEXT NOT NULL DEFAULT ''"),
+        ("artifact_kind", "TEXT NOT NULL DEFAULT ''"),
+        ("artifact_other", "TEXT"),
+        ("size", "INTEGER NOT NULL DEFAULT 0 CHECK(size >= 0)"),
+    ];
+    for (name, declaration) in additions {
+        if !columns.iter().any(|column| column == name) {
+            transaction.execute_batch(&format!(
+                "ALTER TABLE action_results ADD COLUMN {name} {declaration}"
+            ))?;
+        }
+    }
+    // 旧 schema 只有摘要，没有重建完整输出清单所需的字段。它是可丢弃缓存，
+    // 因此迁移时删除这些不完整动作，避免把伪造的默认元数据暴露为命中。
+    // The old schema held digests only. Drop those incomplete rebuildable actions
+    // during migration rather than exposing fabricated default metadata as hits.
+    transaction.execute_batch(
+        "DROP TABLE IF EXISTS temp.incomplete_manifest_keys;
+         CREATE TEMP TABLE incomplete_manifest_keys AS
+             SELECT DISTINCT action_key FROM action_results
+             WHERE output_name = '' OR artifact_kind = '';
+         DELETE FROM action_results WHERE action_key IN (
+             SELECT action_key FROM incomplete_manifest_keys
+         );
+         DELETE FROM digest_results WHERE action_key IN (
+             SELECT action_key FROM incomplete_manifest_keys
+         );
+         DELETE FROM actions WHERE action_key IN (
+             SELECT action_key FROM incomplete_manifest_keys
+         );
+         DROP TABLE incomplete_manifest_keys;",
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// 旧名称的兼容别名。 / Compatibility alias for the former name.
+pub type BuildActionIndex = VerifiedActionIndex;
 
 fn digest_from_sql(bytes: &[u8]) -> rusqlite::Result<BlobDigest> {
     let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
@@ -558,5 +948,210 @@ mod tests {
         assert!(path.exists());
         assert!(active.get(original, 21).unwrap().is_some());
         assert!(fresh.get(original, 21).unwrap().is_none());
+    }
+
+    #[test]
+    fn verified_index_validates_every_blob_and_repairs_a_miss() {
+        let (directory, path) = database_path();
+        let cas = Arc::new(Cas::open(directory.path().join("cas")).unwrap());
+        let bytes = b"verified output";
+        let digest = cas.put(bytes).unwrap();
+        let key = BuildKey::new(format!("blake3:{}", BlobDigest::of(b"action").to_hex())).unwrap();
+        let record = ActionRecord {
+            key: key.clone(),
+            outputs: vec![ProducedOutput {
+                name: OutputName::new("main").unwrap(),
+                kind: ArtifactKind::Prompt,
+                digest: content_digest(digest),
+                size: bytes.len() as u64,
+            }],
+        };
+        let index = VerifiedActionIndex::open(path, Arc::clone(&cas)).unwrap();
+
+        BuildIndex::record(&index, &record).unwrap();
+        assert_eq!(
+            BuildIndex::lookup(&index, &key).unwrap(),
+            Some(record.clone())
+        );
+
+        fs::write(cas.path_for(digest), b"corrupt").unwrap();
+        assert_eq!(BuildIndex::lookup(&index, &key).unwrap(), None);
+        assert_eq!(BuildIndex::lookup(&index, &key).unwrap(), None);
+
+        cas.put(bytes).unwrap();
+        BuildIndex::record(&index, &record).unwrap();
+        assert_eq!(
+            BuildIndex::lookup(&index, &key).unwrap(),
+            Some(record.clone())
+        );
+
+        fs::remove_file(cas.path_for(digest)).unwrap();
+        assert_eq!(BuildIndex::lookup(&index, &key).unwrap(), None);
+        cas.put(bytes).unwrap();
+        BuildIndex::record(&index, &record).unwrap();
+        assert_eq!(BuildIndex::lookup(&index, &key).unwrap(), Some(record));
+    }
+
+    #[test]
+    fn build_boundary_rejects_noncanonical_action_keys() {
+        let (directory, path) = database_path();
+        let cas = Arc::new(Cas::open(directory.path().join("cas")).unwrap());
+        let index = VerifiedActionIndex::open(path, cas).unwrap();
+        let uppercase = BuildKey::new(format!(
+            "blake3:{}",
+            BlobDigest::of(b"action").to_hex().to_uppercase()
+        ))
+        .unwrap();
+
+        assert!(BuildIndex::lookup(&index, &uppercase).is_err());
+    }
+
+    #[test]
+    fn digest_only_schema_migrates_to_an_explicit_miss() {
+        let (_directory, path) = database_path();
+        let key = ActionKey::of(b"legacy action");
+        let digest = BlobDigest::of(b"legacy output");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE actions (
+                     action_key BLOB PRIMARY KEY,
+                     last_used_unix_ms INTEGER NOT NULL
+                 );
+                 CREATE TABLE action_results (
+                     action_key BLOB NOT NULL REFERENCES actions(action_key),
+                     ordinal INTEGER NOT NULL,
+                     digest BLOB NOT NULL,
+                     PRIMARY KEY(action_key, ordinal)
+                 );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO actions VALUES (?1, 1)",
+                [key.digest().as_bytes().as_slice()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO action_results VALUES (?1, 0, ?2)",
+                params![
+                    key.digest().as_bytes().as_slice(),
+                    digest.as_bytes().as_slice()
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let migrated = SqliteActionIndex::open(path).unwrap();
+        assert_eq!(migrated.get(key, 2).unwrap(), None);
+    }
+
+    #[test]
+    fn digest_only_record_is_never_a_verified_manifest_hit() {
+        let (directory, path) = database_path();
+        let stored_key = ActionKey::of(b"same key");
+        let build_key = BuildKey::new(format!("blake3:{}", stored_key.digest().to_hex())).unwrap();
+        let raw = SqliteActionIndex::open(path).unwrap();
+        raw.put(
+            stored_key,
+            &ActionEntry {
+                results: vec![BlobDigest::of(b"digest only")],
+                last_used_unix_ms: 1,
+            },
+        )
+        .unwrap();
+        let cas = Arc::new(Cas::open(directory.path().join("cas")).unwrap());
+        let verified = VerifiedActionIndex::from_parts(raw, cas);
+
+        assert_eq!(BuildIndex::lookup(&verified, &build_key).unwrap(), None);
+    }
+
+    #[test]
+    fn zero_output_manifest_is_distinct_from_an_absent_action() {
+        let (directory, path) = database_path();
+        let cas = Arc::new(Cas::open(directory.path().join("cas")).unwrap());
+        let key = BuildKey::new(format!(
+            "blake3:{}",
+            BlobDigest::of(b"zero output").to_hex()
+        ))
+        .unwrap();
+        let record = ActionRecord {
+            key: key.clone(),
+            outputs: Vec::new(),
+        };
+        let verified = VerifiedActionIndex::open(path, cas).unwrap();
+
+        assert_eq!(BuildIndex::lookup(&verified, &key).unwrap(), None);
+        BuildIndex::record(&verified, &record).unwrap();
+        assert_eq!(BuildIndex::lookup(&verified, &key).unwrap(), Some(record));
+    }
+
+    #[test]
+    fn concurrent_clear_never_fabricates_an_empty_manifest() {
+        let (directory, path) = database_path();
+        let cas = Arc::new(Cas::open(directory.path().join("cas")).unwrap());
+        let bytes = b"one output";
+        let digest = cas.put(bytes).unwrap();
+        let key = BuildKey::new(format!("blake3:{}", BlobDigest::of(b"race").to_hex())).unwrap();
+        let record = ActionRecord {
+            key: key.clone(),
+            outputs: vec![ProducedOutput {
+                name: OutputName::new("main").unwrap(),
+                kind: ArtifactKind::Prompt,
+                digest: content_digest(digest),
+                size: bytes.len() as u64,
+            }],
+        };
+        let reader = VerifiedActionIndex::open(&path, Arc::clone(&cas)).unwrap();
+        BuildIndex::record(&reader, &record).unwrap();
+        let clearer = VerifiedActionIndex::open(&path, cas).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let clear_barrier = Arc::clone(&barrier);
+        let clear_thread = std::thread::spawn(move || {
+            clear_barrier.wait();
+            clearer.index().clear().unwrap();
+        });
+
+        barrier.wait();
+        let observed = BuildIndex::lookup(&reader, &key).unwrap();
+        clear_thread.join().unwrap();
+        assert!(observed.is_none() || observed == Some(record));
+    }
+
+    #[test]
+    fn concurrent_first_open_serializes_legacy_migration() {
+        let (_directory, path) = database_path();
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE actions (
+                     action_key BLOB PRIMARY KEY,
+                     last_used_unix_ms INTEGER NOT NULL
+                 );
+                 CREATE TABLE action_results (
+                     action_key BLOB NOT NULL REFERENCES actions(action_key),
+                     ordinal INTEGER NOT NULL,
+                     digest BLOB NOT NULL,
+                     PRIMARY KEY(action_key, ordinal)
+                 );",
+            )
+            .unwrap();
+        drop(connection);
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    SqliteActionIndex::open(path)
+                })
+            })
+            .collect();
+
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
     }
 }

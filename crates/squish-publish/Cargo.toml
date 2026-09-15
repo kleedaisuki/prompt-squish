@@ -1,0 +1,22 @@
+[package]
+name = "squish-publish"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/kleedaisuki/prompt-squish"
+description = "Crash-recoverable filesystem artifact publisher for prompt-squish"
+
+[dependencies]
+blake3 = "1.8"
+fs2 = "0.4"
+same-file = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+squish-build = { path = "../squish-build" }
+squish-protocol = { path = "../squish-protocol" }
+tempfile = "3.27"
+
+[dev-dependencies]
+tempfile = "3.27"

@@ -1,0 +1,22 @@
+[package]
+name = "squish-repository"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Filesystem repository adapter for prompt-squish projects"
+
+[dependencies]
+blake3 = "1.8"
+fs2 = "0.4"
+glob = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+squish-ir = { path = "../squish-ir" }
+squish-project = { path = "../squish-project" }
+squish-source = { path = "../squish-source" }
+thiserror = "2.0"
+
+[dev-dependencies]
+tempfile = "3.23"

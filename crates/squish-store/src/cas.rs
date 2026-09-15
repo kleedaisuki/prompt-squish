@@ -1,7 +1,7 @@
 use std::{
     fmt,
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     str::FromStr,
     sync::{
@@ -106,6 +106,8 @@ pub enum CasError {
     Io(io::Error),
     /// 摘要文本不是 64 位十六进制 BLAKE3 值。 / Digest text was not a 64-digit hexadecimal BLAKE3 value.
     InvalidDigest,
+    /// 构建端口请求了 CAS 不支持的摘要算法。 / The build port requested a digest algorithm unsupported by this CAS.
+    UnsupportedAlgorithm,
 }
 
 impl fmt::Display for CasError {
@@ -113,6 +115,9 @@ impl fmt::Display for CasError {
         match self {
             Self::Io(error) => write!(formatter, "content store I/O failed: {error}"),
             Self::InvalidDigest => formatter.write_str("invalid BLAKE3 digest"),
+            Self::UnsupportedAlgorithm => {
+                formatter.write_str("content store supports only BLAKE3 digests")
+            }
         }
     }
 }
@@ -120,7 +125,7 @@ impl std::error::Error for CasError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            Self::InvalidDigest => None,
+            Self::InvalidDigest | Self::UnsupportedAlgorithm => None,
         }
     }
 }
@@ -236,6 +241,41 @@ impl Cas {
         Ok(digest)
     }
 
+    /// 流式写入内容并返回摘要，不把完整 blob 保存在内存中。 / Streams content into the CAS without retaining the complete blob in memory.
+    pub fn put_reader(&self, source: &mut dyn Read) -> Result<BlobDigest, CasError> {
+        let staging = self.root.join("blobs").join(FORMAT_VERSION).join(ALGORITHM);
+        let temporary = staging.join(format!(
+            ".incoming-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            let mut hash = blake3::Hasher::new();
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let count = source.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                hash.update(&buffer[..count]);
+                file.write_all(&buffer[..count])?;
+            }
+            file.sync_all()?;
+            drop(file);
+            let digest = BlobDigest::from_bytes(*hash.finalize().as_bytes());
+            self.publish_temporary(&temporary, digest)?;
+            Ok(digest)
+        })();
+        if result.is_err() {
+            fs::remove_file(&temporary).ok();
+        }
+        result
+    }
+
     /// 读取并校验 blob；缺失或损坏均返回 `None`，损坏另有观测事件。 / Reads and verifies a blob; missing or corrupt content returns `None`, with a separate corruption event.
     pub fn get(&self, digest: BlobDigest) -> Result<Option<Vec<u8>>, CasError> {
         let bytes = match fs::read(self.path_for(digest)) {
@@ -251,9 +291,51 @@ impl Cas {
         Ok(Some(bytes))
     }
 
+    fn publish_temporary(&self, temporary: &Path, digest: BlobDigest) -> Result<(), CasError> {
+        let destination = self.path_for(digest);
+        fs::create_dir_all(destination.parent().expect("CAS path has a bucket parent"))?;
+        if self.valid_file(&destination, digest)? {
+            fs::remove_file(temporary).ok();
+            self.emit(CasEventKind::Reused, digest, None);
+            return Ok(());
+        }
+        match fs::rename(temporary, &destination) {
+            Ok(()) => {
+                sync_parent(&destination)?;
+                self.emit(CasEventKind::Written, digest, None);
+                Ok(())
+            }
+            Err(_error) if destination.exists() && self.valid_file(&destination, digest)? => {
+                fs::remove_file(temporary).ok();
+                self.emit(CasEventKind::Reused, digest, None);
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn copy_verified(&self, digest: BlobDigest, sink: &mut dyn Write) -> Result<bool, CasError> {
+        let mut file = match fs::File::open(self.path_for(digest)) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let (actual, _size) = digest_reader(&mut file)?;
+        if actual != digest {
+            self.emit(CasEventKind::CorruptMiss, digest, Some(actual));
+            return Ok(false);
+        }
+        file.seek(SeekFrom::Start(0))?;
+        io::copy(&mut file, sink)?;
+        Ok(true)
+    }
+
     fn valid_file(&self, path: &Path, digest: BlobDigest) -> Result<bool, CasError> {
-        match fs::read(path) {
-            Ok(bytes) => Ok(BlobDigest::of(&bytes) == digest),
+        match fs::File::open(path) {
+            Ok(mut file) => {
+                let (actual, _size) = digest_reader(&mut file)?;
+                Ok(actual == digest)
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error.into()),
         }
@@ -265,6 +347,58 @@ impl Cas {
             actual,
         });
     }
+}
+
+impl squish_build::BlobStore for Cas {
+    type Error = CasError;
+
+    fn copy_to(
+        &self,
+        digest: &squish_build::ContentDigest,
+        sink: &mut dyn Write,
+    ) -> Result<bool, Self::Error> {
+        self.copy_verified(build_digest(digest)?, sink)
+    }
+
+    fn write_from(
+        &self,
+        source: &mut dyn Read,
+    ) -> Result<squish_build::ContentDigest, Self::Error> {
+        let digest = self.put_reader(source)?;
+        Ok(squish_build::ContentDigest::new(
+            squish_protocol::DigestAlgorithm::Blake3,
+            digest.as_bytes().to_vec(),
+        )
+        .expect("BLAKE3 has the protocol's canonical digest length"))
+    }
+}
+
+fn build_digest(digest: &squish_build::ContentDigest) -> Result<BlobDigest, CasError> {
+    if digest.algorithm() != &squish_protocol::DigestAlgorithm::Blake3 {
+        return Err(CasError::UnsupportedAlgorithm);
+    }
+    let bytes: [u8; 32] = digest
+        .bytes()
+        .try_into()
+        .map_err(|_| CasError::InvalidDigest)?;
+    Ok(BlobDigest::from_bytes(bytes))
+}
+
+fn digest_reader(source: &mut dyn Read) -> Result<(BlobDigest, u64), CasError> {
+    let mut hash = blake3::Hasher::new();
+    let mut size = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = source.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+        size = size
+            .checked_add(count as u64)
+            .ok_or_else(|| io::Error::other("blob size exceeds u64"))?;
+    }
+    Ok((BlobDigest::from_bytes(*hash.finalize().as_bytes()), size))
 }
 
 fn temporary_path(destination: &Path) -> PathBuf {
@@ -290,6 +424,7 @@ fn sync_parent(_destination: &Path) -> Result<(), CasError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use squish_build::BlobStore;
     use std::sync::{Barrier, Mutex};
 
     #[derive(Default)]
@@ -361,6 +496,48 @@ mod tests {
         assert_eq!(
             store.get(digests[0]).unwrap().unwrap(),
             b"one immutable object"
+        );
+    }
+
+    #[test]
+    fn build_port_streams_and_enforces_digest_algorithm() {
+        let directory = test_dir();
+        let store = Cas::open(directory.path()).unwrap();
+        let mut source = std::io::Cursor::new(b"port bytes");
+        let digest = BlobStore::write_from(&store, &mut source).unwrap();
+        let mut sink = Vec::new();
+
+        assert!(BlobStore::copy_to(&store, &digest, &mut sink).unwrap());
+        assert_eq!(sink, b"port bytes");
+
+        let wrong =
+            squish_build::ContentDigest::new(squish_protocol::DigestAlgorithm::Sha256, vec![0; 32])
+                .unwrap();
+        assert!(BlobStore::copy_to(&store, &wrong, &mut sink).is_err());
+    }
+
+    #[test]
+    fn large_reader_reuse_is_streamed_and_observable() {
+        let directory = test_dir();
+        let events = Arc::new(Events::default());
+        let store = Cas::with_observer(directory.path(), events.clone()).unwrap();
+        let bytes: Vec<u8> = (0..8 * 1024 * 1024)
+            .map(|index| (index % 251) as u8)
+            .collect();
+
+        let first = store.put_reader(&mut std::io::Cursor::new(&bytes)).unwrap();
+        let second = store.put_reader(&mut std::io::Cursor::new(&bytes)).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(
+            events
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|event| event.kind)
+                .collect::<Vec<_>>(),
+            vec![CasEventKind::Written, CasEventKind::Reused]
         );
     }
 }

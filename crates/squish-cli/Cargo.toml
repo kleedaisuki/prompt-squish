@@ -1,0 +1,12 @@
+[package]
+name = "squish-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/kleedaisuki/prompt-squish"
+description = "Filesystem-free bootstrap parser for the xmlsquish manager"
+
+[dependencies]
+clap = { version = "4.6.6", features = ["derive"] }
+squish-protocol = { path = "../squish-protocol" }

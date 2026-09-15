@@ -12,6 +12,7 @@ mod action;
 mod cas;
 
 pub use action::{
-    ActionEntry, ActionKey, IndexError, MemoryActionIndex, RunEvent, SqliteActionIndex,
+    ActionEntry, ActionKey, BuildActionIndex, IndexError, MemoryActionIndex, RunEvent,
+    SqliteActionIndex, VerifiedActionIndex,
 };
 pub use cas::{BlobDigest, Cas, CasError, CasEvent, CasEventKind, CasObserver, NoopObserver};
