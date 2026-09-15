@@ -1,0 +1,15 @@
+[package]
+name = "squish-config"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic layered configuration for the xmlsquish manager"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+toml = "0.9"
+toml_edit = "0.23"
+url = "2.5"
