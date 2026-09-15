@@ -423,7 +423,12 @@ impl Cas {
         destination: &Path,
         digest: BlobDigest,
     ) -> Result<CasEventKind, CasError> {
-        self.copy_and_publish_bucket_local(temporary, destination, digest, &mut fs::rename)
+        self.copy_and_publish_bucket_local(
+            temporary,
+            destination,
+            digest,
+            &mut |source: &Path, destination: &Path| fs::rename(source, destination),
+        )
     }
 
     fn copy_verified(&self, digest: BlobDigest, sink: &mut dyn Write) -> Result<bool, CasError> {
@@ -755,10 +760,11 @@ mod tests {
             )
             .unwrap();
 
-        #[cfg(windows)]
-        assert_eq!(calls.get(), 1);
-        #[cfg(not(windows))]
-        assert_eq!(calls.get(), 2);
+        assert_eq!(
+            calls.get(),
+            1,
+            "the injected rename handles only the initial staging publication"
+        );
         assert!(!staging.exists());
         assert_eq!(store.get(digest).unwrap().unwrap(), bytes);
         assert_eq!(
