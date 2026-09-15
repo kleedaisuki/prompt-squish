@@ -1,6 +1,6 @@
 # Project Manager Product Scope
 
-- **Status:** Production scope; `new` implementation and acceptance evidence pending
+- **Status:** Production scope; `new` implemented and locally exercised, remote CI pending
 - **Date:** 2026-09-15
 - **Supersedes:** the former MVP and compatibility-period assumptions in this file
 - **Authority:** [ADR 0009](../adr/0009-microkernel-manager-and-reusable-ir.md), [CLI experience](cli-experience.md), and the unchanged [XML DSL](../dsl.md)
@@ -191,7 +191,7 @@ This map is an evidence index, not a substitute for executable tests:
 
 | Contract | Primary implementation/evidence |
 | --- | --- |
-| Transactional package creation | `docs/product/cli-experience.md` Section 3.3 is the accepted contract; implementation and cross-platform process evidence are required before release |
+| Transactional package creation | `crates/squish-project/src/scaffold.rs`, `crates/squish-repository/src/creation.rs`, `crates/squish-manager/src/new.rs`, `crates/squish-manager/tests/new.rs`, and the root process/recovery creation cases; remote cross-platform workflow evidence remains required before release |
 | Direct command grammar and typed selectors | `crates/squish-cli/src/lib.rs`, `crates/squish-cli/tests/cli_contract.rs` |
 | Composition, layered configuration, streams, exits | `src/main.rs`, `tests/process.rs`, `crates/squish-config/` |
 | Manifest/workspace/dependency model and edits | `crates/squish-project/src/{manifest,model,edit,transaction}.rs` |

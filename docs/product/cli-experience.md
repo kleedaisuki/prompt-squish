@@ -1,6 +1,6 @@
 # Product CLI and Terminal Experience
 
-- Status: Production contract; `new` implementation and acceptance evidence pending
+- Status: Production contract; `new` implemented and locally exercised, remote CI pending
 - Date: 2026-09-14
 - Scope: the `xmlsquish` executable, its command grammar, observable terminal behavior,
   automation contract, and recovery experience
@@ -666,26 +666,29 @@ stderr capability decisions are independent.
 line on stdout. It writes no ANSI or carriage-return repaint sequences; after successful CLI,
 project, configuration, and host bootstrap, stderr remains empty.
 
-The native envelope is `squish_protocol::Event` at protocol version `2.0`:
+The native envelope is `squish_protocol::Event` at protocol version `2.1`. Minor version 1 adds
+the `new` operation request/result and the `cancellation_deferred` event without changing v2's
+envelope or existing variants:
 
 ```json
-{"version":{"major":2,"minor":0},"invocation":"cli-123","sequence":0,"payload":{"type":"planning_started","data":{"job":"build-cli-123","attempt":"attempt-1"}}}
-{"version":{"major":2,"minor":0},"invocation":"cli-123","sequence":1,"payload":{"type":"planning_step_started","data":{"job":"build-cli-123","attempt":"attempt-1","step":"locate","kind":"locate"}}}
-{"version":{"major":2,"minor":0},"invocation":"cli-123","sequence":2,"payload":{"type":"planning_step_succeeded","data":{"job":"build-cli-123","attempt":"attempt-1","step":"locate","timing":{"elapsed_ms":0}}}}
+{"version":{"major":2,"minor":1},"invocation":"cli-123","sequence":0,"payload":{"type":"planning_started","data":{"job":"build-cli-123","attempt":"attempt-1"}}}
+{"version":{"major":2,"minor":1},"invocation":"cli-123","sequence":1,"payload":{"type":"planning_step_started","data":{"job":"build-cli-123","attempt":"attempt-1","step":"locate","kind":"locate"}}}
+{"version":{"major":2,"minor":1},"invocation":"cli-123","sequence":2,"payload":{"type":"planning_step_succeeded","data":{"job":"build-cli-123","attempt":"attempt-1","step":"locate","timing":{"elapsed_ms":0}}}}
 ```
 
 Required envelope fields are:
 
 | Field | Contract |
 | --- | --- |
-| `version` | Object `{major, minor}`; native emission currently uses `{2, 0}` |
+| `version` | Object `{major, minor}`; native emission currently uses `{2, 1}` |
 | `invocation` | Stable identifier shared by all events in one dispatched invocation |
 | `sequence` | Invocation-local, gapless observation order starting at zero |
 | `payload.type` | Snake-case typed discriminator owned by `EventPayload` |
 | `payload.data` | Variant-specific typed data; there is no flattened `reason` field |
 
 The v2 vocabulary is the algebra in `crates/squish-protocol/src/lib.rs`: planning attempts and
-steps, immutable plan declaration/closure, action lifecycle and cache hits, post-plan
+steps, immutable plan declaration/closure, action lifecycle, cache hits, an additive
+`cancellation_deferred` fact for an action already past its commit decision, post-plan
 finalization, diagnostics, one typed `operation_completed` result, and the terminal
 `job_finished` summary. `job_finished` is the final native event while stdout remains writable;
 its `sequence` equals the number of preceding events. Unknown additive `payload.type` values may
@@ -706,7 +709,8 @@ Executable evidence is exact rather than aspirational:
 
 | Contract | Executable evidence |
 | --- | --- |
-| v2 envelope, current version, typed discriminator, unknown-event policy | `crates/squish-protocol/src/lib.rs`: `CURRENT_VERSION`, `Event`, `EventPayload`, `unknown_additive_event_is_skipped`, `known_event_round_trips` |
+| v2.1 envelope, current version, typed discriminator, additive-event policy | `crates/squish-protocol/src/lib.rs`: `CURRENT_VERSION`, `Event`, `EventPayload`, `unknown_additive_event_is_skipped`, `known_event_round_trips`, `cancellation_deferred_is_a_native_v2_1_typed_event` |
+| Typed creation request/result identity and cross-platform path wire format | `crates/squish-protocol/src/lib.rs`: `new_request_and_result_round_trip_with_truthful_identity_matching`, `project_destination_wire_round_trips_non_utf8_unix_bytes_losslessly`, `project_destination_wire_round_trips_unpaired_utf16_losslessly` |
 | Legal sequencing and terminal reduction | `crates/squish-kernel/src/lib.rs` lifecycle tests, including `finalization_is_sequential_terminal_work_after_the_final_plan` |
 | One canonical object and immediate flush per line | `crates/squish-presentation/src/lib.rs`: `NdjsonRenderer::render`, `ndjson_is_one_canonical_object_per_line` |
 | Composed stdout-only operation stream | `tests/process.rs::json_build_is_canonical_ndjson_on_stdout` |
@@ -793,10 +797,10 @@ user-selectable Unicode mode in the production renderer.
 `.github/workflows/ci.yml` is the only cross-platform release workflow for this contract. Its
 Ubuntu, Windows, and macOS jobs build and test the workspace and run the composed manager smoke;
 quality jobs also enforce formatting, the declared Rust 1.88 minimum, strict Clippy, and the site
-build. The currently committed `.github/scripts/ci_smoke.py` still checks the prior five-command
-surface plus machine-readable usage failure, human unified diff, default `.prompt`, explicit
-`.xsir`, and JSON inspection; it must add the Section 3.3 creation workflow before the six-command
-contract is releasable.
+build. `.github/scripts/ci_smoke.py` checks the six-command help surface and canonical
+`new --vcs=none` scaffold, plus machine-readable usage failure, human unified diff, default
+`.prompt`, explicit `.xsir`, and JSON inspection. Passing this locally is not a substitute for a
+completed remote workflow on the committed revision.
 
 CI receives append-only output and may archive NDJSON as ordinary job evidence. The program does
 not emit GitHub workflow commands or annotations, and `CI` affects only automatic progress
@@ -965,10 +969,10 @@ Status terms are intentionally narrow:
 
 | Product contract | Status | Authoritative executable evidence |
 | --- | --- | --- |
-| Bare help/version, unknown-command rejection, five typed commands | **Implemented and exercised** | `crates/squish-cli/tests/cli_contract.rs`; `tests/process.rs::{version_reports_the_installed_root_package_version,parse_failure_is_stderr_with_usage_exit_status}` |
+| Bare help/version, unknown-command rejection, six typed commands | **Implemented and exercised** | `crates/squish-cli/tests/cli_contract.rs`, including `help_exposes_exact_six_manager_commands`; `tests/process.rs::{version_reports_the_installed_root_package_version,parse_failure_is_stderr_with_usage_exit_status}` |
 | One CLI -> kernel -> manager route; domains do not render | **Implemented and exercised** | `src/main.rs`, `crates/squish-kernel/src/lib.rs`, `crates/squish-manager/src/lib.rs`; kernel lifecycle tests and root process suite |
 | Human/short stream separation, quiet and append-only non-TTY output | **Implemented and exercised** | `tests/process.rs::{format_check_and_write_preserve_stream_contract,quiet_is_silent_and_non_tty_human_output_is_linear}`; presentation renderer tests |
-| Native v2 NDJSON envelope and stdout-only operation stream | **Implemented and exercised** | Section 5.2 evidence table; `Event { version, invocation, sequence, payload }` and `payload.type` are the schema |
+| Native v2.1 NDJSON envelope and stdout-only operation stream | **Implemented and exercised** | Section 5.2 evidence table; `Event { version, invocation, sequence, payload }` and `payload.type` are the schema |
 | Typed bootstrap failure stream before kernel dispatch | **Implemented and exercised** | `src/main.rs::BootstrapRecord`; the two JSON bootstrap process tests named in Section 5.2 |
 | Default keep-going, dependency blocking, cancellation and truthful terminal reduction | **Implemented and exercised** | `crates/squish-build/src/tests.rs`; `crates/squish-kernel/src/lib.rs` lifecycle tests |
 | XML -> canonical `.xsir` -> link/instantiate -> squish -> `.prompt`, with `.psdbg` provenance | **Implemented and exercised** | `crates/squish-manager/tests/build.rs::{complete_build_publishes_prompt_debug_and_ir_from_cas,semantic_example_publishes_fully_traceable_debug_bundle}`; `tests/process.rs::build_warms_cache_and_publishes_all_selected_artifact_kinds` |
@@ -978,7 +982,7 @@ Status terms are intentionally narrow:
 | TTY width/resize, bounded progress, two-stage interruption and restoration | **Implemented and exercised** | `crates/squish-presentation/src/lib.rs` progress/resize tests; `tests/pty.rs` real PTY/ConPTY process tests |
 | Repository, artifact-generation, and build-catalog process-death recovery | **Implemented and exercised** | `tests/recovery_process.rs`; `docs/design/process-recovery-testing.md` |
 | Ubuntu, Windows, and macOS acceptance of the same composed binary | **Workflow gate** | `.github/workflows/ci.yml`; only a completed run recorded in the execution-status ledger satisfies this row |
-| Transactional `new`, canonical scaffold, workspace placement, VCS policy, and recovery | **Required product contract; implementation evidence pending** | Section 3.3 acceptance matrix; release requires parser/protocol, process, fault-injection, recovery, and cross-platform workflow evidence |
+| Transactional `new`, canonical scaffold, workspace placement, VCS policy, and recovery | **Implemented and locally exercised; remote workflow pending** | `crates/squish-manager/tests/new.rs`; the creation cases in `tests/process.rs` (32-test root process suite); `tests/recovery_process.rs::{new_creation_prepared_death_rolls_back_then_retry_creates_once,new_postpublication_deaths_roll_forward_via_ordinary_project_discovery}` (8-test recovery suite); `.github/scripts/ci_smoke.py` |
 
 These rows preserve the required observable behavior without asserting that every old test sketch
 was implemented verbatim. The repository's focused tests may reorganize; when they do, this table
