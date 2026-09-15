@@ -61,4 +61,5 @@ squish-store = { path = "crates/squish-store" }
 url = "2.5"
 
 [dev-dependencies]
+portable-pty = "=0.9.0"
 tempfile = "3.23"
