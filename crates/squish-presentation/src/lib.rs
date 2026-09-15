@@ -841,38 +841,14 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
             }
             EventPayload::ActionStarted { job, plan, action } => {
                 self.set_action_state(job, plan, action, ActionState::Running);
-                self.write_persistent(&format!(
-                    "run:{}",
-                    action_kind_name(self.action_kind(job, plan, action))
-                ))
+                Ok(())
             }
-            EventPayload::CacheHit {
-                job,
-                plan,
-                action,
-                cache,
-                outputs,
-                ..
-            } => self.write_persistent(&format!(
-                "cache:{} {} outputs={}",
-                cache_name(*cache),
-                action_kind_name(self.action_kind(job, plan, action)),
-                outputs.len()
-            )),
+            EventPayload::CacheHit { .. } => Ok(()),
             EventPayload::ActionSucceeded {
-                job,
-                plan,
-                action,
-                timing,
-                ..
+                job, plan, action, ..
             } => {
-                let kind = self.action_kind(job, plan, action);
                 self.set_action_state(job, plan, action, ActionState::Terminal);
-                self.write_persistent(&format!(
-                    "ok:{} {}ms",
-                    action_kind_name(kind),
-                    timing.elapsed_ms
-                ))
+                Ok(())
             }
             EventPayload::ActionFailed {
                 job,
@@ -2581,7 +2557,10 @@ mod tests {
         assert!(!verbose.contains("0606060606060606"));
 
         let short = render_with_verbosity(&events, Verbosity::Short);
-        assert!(short.contains("cache:local compile outputs=1"));
+        assert_eq!(
+            short,
+            "plan\nplan:ready mode=execute actions=1 issues=0\ndone status=success ok=1 failed=0 blocked=0 cancelled=0 cached=1 11ms\n"
+        );
         assert!(!short.contains("sha256"));
         assert!(!short.contains("blake3"));
         assert!(!short.contains("0123456789abcdef"));
