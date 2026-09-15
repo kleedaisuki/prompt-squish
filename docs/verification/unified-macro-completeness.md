@@ -86,11 +86,46 @@ Final whitespace compression and attribute removal preserve the witness alphabet
 计算完备性见证只需要递归状态转移；它**不能单独证明非尾递归的返回值组合正确**。另需测试把一个宏的纯文本展开放入另一展开的 `xs:arg` body，再在递归结果之后拼接字符。例如递归反转 `abcd`，让递归结果先返回，再拼接首字符，最终得到 `dcba`。
 The universality witness needs recursive state transitions; it **does not alone establish non-tail return composition**. Separately test a text-producing expansion inside another expansion's argument body, followed by a character appended after the recursive result. Recursive reversal of `abcd` should yield `dcba`.
 
-核查时，`src/compiler/runtime.rs` 的 `Task::ArgDone` 在 body 任务之后恢复，以 token 的解码文本拼接字符串并拒绝非文本节点；`enter` 构造新的参数映射并清空捕获环境；`schedule` 反序入栈维持源码执行顺序。这些是与上述模型一致的源码证据，不是对整个实现的形式化验证。
-At audit time, `Task::ArgDone` resumes after body tasks, concatenates decoded text, and rejects non-text nodes. `enter` installs new arguments and an empty capture environment. `schedule` pushes in reverse to execute source order. These source observations support the model but are not a formal verification of the whole implementation.
+当前实现证据位于 `crates/squish-link/src/instantiate.rs`：`Task::Arg` 先压入
+`Task::ArgDone`，再压入参数 body 的 `Task::Region`，因此显式 LIFO 工作栈先完成 body；
+`Task::ArgDone` 只连接文本 occurrence，并以 `RUN005` 拒绝结构节点。`enter` 把已求值的
+参数/fill 移入新 `Env`，以空 `captures` 创建独立调用帧；`Task::Region` 对 op 反序压栈，
+从而保持源码顺序。这些源码事实与上述模型一致，但不是整个实现的形式化验证。
+
+The current evidence is `crates/squish-link/src/instantiate.rs`: `Task::Arg` pushes
+`Task::ArgDone` before the argument body's `Task::Region`, so the explicit LIFO work stack
+finishes the body first; `Task::ArgDone` concatenates text occurrences and rejects structural
+nodes with `RUN005`. `enter` moves evaluated arguments/fills into a new `Env` with empty
+`captures`, and `Task::Region` reverse-pushes operations to preserve source order. These source
+facts support the model but are not a formal verification of the whole implementation.
 
 具体回归覆盖应包含：两计数器交换/转移、零与非零分支、互递归、非尾返回组合、callee 不能读取 caller capture、可配置资源上限失败。任何有限测试集合都只核验这些实例；普适性来自上面的有效翻译与归纳不变量。
 Regression coverage should include counter transfer, both branches, mutual recursion, non-tail result composition, inaccessible caller captures, and configured resource failures. Finite tests check instances; universality follows from the translation and invariant.
 
-当前独立 `xs:entry` 实现已执行 `cargo test --all-features --locked`：121 项单元测试、10 项进程测试通过，其中覆盖入口与宏帧身份、递归返回值、按值参数与捕获隔离。严格 Clippy 和 Rust 1.88 检查通过。这些结果是实现回归证据，不替代上述抽象模拟论证。
-The separate-entry implementation passes 121 unit tests and 10 process tests with `cargo test --all-features --locked`, covering entry/macro identity, recursive returns, value passing and capture isolation. Strict Clippy and Rust 1.88 checks also pass. These are implementation regression results, not substitutes for the abstract simulation argument.
+可执行回归不再用易过期的总测试数描述。`crates/squish-xml-front/src/tests.rs::entry_lowers_all_operation_families_and_round_trips`
+验证入口、调用、参数/fill 与正则操作进入可重定位 IR；
+`crates/squish-link/src/tests.rs::import_cycles_link_and_runtime_preserves_scope_slot_regex_and_file_bindings`
+验证导入环、调用帧、slot、捕获与定义位置 `file.*`；同文件的
+`recursion_uses_explicit_frames_and_reports_the_complete_budget_chain` 验证递归预算及完整帧链。
+`crates/squish-manager/tests/build.rs::semantic_example_publishes_fully_traceable_debug_bundle`
+再通过真实多模块递归 XML 工程验证管理器构建与来源链。它们是具体实例的实现证据；
+两计数器机的一般性仍来自上面的有效翻译与不变量，而不是测试数量。
+这些具名测试没有单独实现上文 `abcd -> dcba` 的非尾标量 body 见证；当前对此行为的
+证据仍是 `Task::Arg`/`Task::ArgDone` 执行路径。本文明确保留这一测试覆盖缺口，而不把
+相邻递归测试或总数冒充为直接回归。
+
+Executable regressions are no longer summarized by a stale aggregate count.
+`crates/squish-xml-front/src/tests.rs::entry_lowers_all_operation_families_and_round_trips`
+covers entry/call/argument/fill/regex lowering into relocatable IR;
+`crates/squish-link/src/tests.rs::import_cycles_link_and_runtime_preserves_scope_slot_regex_and_file_bindings`
+covers import cycles, frames, slots, captures, and definition-site `file.*`; and
+`recursion_uses_explicit_frames_and_reports_the_complete_budget_chain` covers recursive budgets
+and the complete frame chain. The manager-level
+`crates/squish-manager/tests/build.rs::semantic_example_publishes_fully_traceable_debug_bundle`
+runs a real multi-module recursive XML project through build and provenance publication. These
+are implementation witnesses for concrete instances; universality still follows from the
+effective translation and invariant above, not from a test count.
+The named tests do not separately implement the `abcd -> dcba` non-tail scalar-body witness above;
+current evidence for that behavior remains the `Task::Arg`/`Task::ArgDone` execution path. This
+document keeps that coverage gap explicit rather than treating a neighboring recursion test or
+an aggregate count as a direct regression.

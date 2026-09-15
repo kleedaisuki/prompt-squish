@@ -1,13 +1,15 @@
 # Core IR and Linking Model
 
-- Status: Proposed normative design
+- Status: Implemented normative design
+- Implementation authority: `crates/squish-ir`, `crates/squish-xml-front`,
+  `crates/squish-link`, `crates/squish-backend`, and the manager build pipeline
 - Scope: XML front end, relocatable IR, linker, evaluator, provenance, cache identity, and backend contract
 - Related language specification: [`docs/dsl.md`](../dsl.md)
 - Product artifact suffix: `*.prompt`
 
 ## 1. Decision summary
 
-xmlsquish will use a small family of explicit representations rather than treating one XML-shaped tree as source syntax, executable program, debug record, and product at the same time.
+xmlsquish uses a small family of explicit representations rather than treating one XML-shaped tree as source syntax, executable program, debug record, and product at the same time.
 
 ```text
 exact XML bytes
@@ -1139,76 +1141,82 @@ Property-based generators must cover extreme nesting, empty strings and sequence
 
 ### 13.3 Semantic preservation tests
 
-The current DSL conformance corpus becomes a differential oracle:
+The manager route is now the authoritative executable semantics; the deleted monolithic compiler
+is not retained as a differential oracle:
 
 ```text
-existing frontend + evaluator + squish
-                ==
-new XML frontend -> unit IR -> link -> evaluate -> squish backend
+XML source
+  -> squish-xml-front RelocatableUnitIr
+  -> squish-link StaticLinker / LinkedProgram / Instantiator
+  -> LinkedDocumentIr + ExpansionTrace
+  -> squish-backend
+  -> .prompt + optional self-contained .psdbg
 ```
 
-Expected failures compare structured diagnostic code, primary/related origins, and complete frame relationships rather than unstable prose. Once equivalence is established, the new path becomes authoritative and the old implementation is removed rather than maintained as a compatibility architecture.
+Semantic preservation is checked at the durable boundaries instead:
 
-## 14. Implementation architecture
+- `crates/squish-xml-front/src/tests.rs` covers module/entry distinction, all operation families,
+  static imports, decoded scalar provenance, and canonical IR round trips;
+- `crates/squish-link/src/tests.rs` covers complete-closure validation, import cycles, symbolic
+  relocation, frame/capture/slot/file scope, stage-key boundaries, recursion, and budgets;
+- `crates/squish-backend/src/tests.rs` covers document lowering, exact emission budgets, byte maps,
+  and iterative deep documents;
+- `crates/squish-manager/tests/build.rs::semantic_example_publishes_fully_traceable_debug_bundle`
+  exercises the shipped multi-module XML example through publication and verifies every published
+  output origin reaches a source archive; and
+- `crates/squish-format/tests/semantic_oracle.rs` proves formatter rewrites preserve the current
+  frontend semantics without routing formatting through semantic IR.
 
-The internal component graph follows domain boundaries:
+Expected failures compare typed codes and origins where those are protocol data, not unstable human
+prose. These tests are implementation evidence; they do not replace the language argument in
+`docs/verification/unified-macro-completeness.md` or make unsupported performance claims.
 
-```text
-frontend_xml
-  owns: lossless tape adapter, semantic parse, source origins
+## 14. Implemented architecture
 
-ir
-  owns: immutable schemas, canonical codec, verifier, digests
+The production component graph follows the domain boundaries defined above:
 
-linker
-  owns: closure, symbol table, signature validation, relocations, link trace
+| Boundary | Implementation | Owned values/operations |
+| --- | --- | --- |
+| Lossless formatting syntax | `crates/squish-format/src/syntax.rs` | `LosslessXml`, token spans, semantic-preserving rewrite input |
+| XML frontend | `crates/squish-xml-front/src/{parser,lower}.rs` | DSL validation and lowering to `RelocatableUnitIr` |
+| Portable schemas and codecs | `crates/squish-ir/src/{model,codec,wire,persistent,link_wire,document_wire,trace_wire,debug_bundle,validate}.rs` | canonical unit containers, link/document/trace payloads, `.psdbg`, validation and digests |
+| Static linking and live reconstruction | `crates/squish-link/src/{linker,program,key}.rs` | complete closure, `StaticLinkMap`, `LinkedImage`, session-only `LinkedProgram`, stage keys |
+| Instantiation | `crates/squish-link/src/instantiate.rs` | explicit task stack, immutable call inputs, frames, budgets, `LinkedDocumentIr`, `ExpansionTrace` |
+| Squish backend | `crates/squish-backend/src/lib.rs` | backend validation, prompt bytes, backend origin nodes and artifact byte map |
+| Store/publication | `crates/squish-store`, `crates/squish-publish` | verified CAS/action records and recoverable target generations |
+| Planning/composition | `crates/squish-manager/src/build.rs`, `crates/squish-manager/src/orchestrator.rs` | action graph, cache restore, link/instantiate/backend execution, build catalog finalization |
 
-evaluator
-  owns: explicit work stack, frames, budgets, expansion trace, document IR
+Dependencies point inward toward immutable IR contracts. The manager composes stages, but IR and
+compiler stages do not import CLI or terminal types. `LinkedProgram` is reconstructed from the
+persisted image and semantic unit blobs and is never serialized. Formatting uses its lossless tape,
+not `RelocatableUnitIr`. Backend code consumes `LinkedDocumentIr`, not XML parser nodes.
 
-backend_squish
-  owns: document lowering, serialization, whitespace squish, byte map
+This table replaces the former implementation-order plan. Schema, codec, verifier, frontend,
+linker, evaluator, backend, store, and manager integration are production code now. Cross-platform
+workflow execution and ongoing golden/corruption coverage remain release evidence tracked in
+`project-manager-execution-status.md`; they are not reasons to describe this normative model as a
+proposal.
 
-store
-  owns: CAS, action cache, build records, transactions, GC
+## 15. Implementation reconciliation
 
-manager
-  owns: project resolution, scheduling, action construction, reporting
-```
+The old monolithic types named in earlier revisions no longer exist. Their architectural risks are
+resolved at explicit current boundaries:
 
-Dependencies point inward toward immutable IR contracts. The manager may call every stage, but no compiler stage imports CLI/terminal types. Backends depend on `LinkedDocumentIR`, not on XML parser nodes or evaluator frames. Formatting depends on `LosslessXmlTape`, not on module IR.
-
-Implementation proceeds top down by establishing the schemas, codec, verifier, action equations, and golden corpus before replacing execution components. This is a dependency order, not a reduced product scope: all four representation boundaries, complete provenance, the store, the squish backend, and cross-platform determinism are parts of the same production architecture.
-
-Recommended order:
-
-1. specify executable Rust types matching this document and freeze numeric tags in a schema registry;
-2. implement canonical codec, verifier, digest domains, and cross-platform golden vectors;
-3. lower the XML frontend into relocatable module/entry objects while retaining the lossless formatter tape separately;
-4. implement closure linking, global validation, relocations, and link trace;
-5. implement the iterative evaluator producing document IR and complete expansion trace;
-6. implement the squish backend and source-to-product byte map;
-7. introduce CAS/action/build-record storage and connect manager scheduling;
-8. run differential, property, fuzz, corruption, relocation, and GitHub Actions platform tests;
-9. remove the old monolithic semantic/execution path once the new architecture is authoritative.
-
-## 15. Current implementation gap
-
-The present compiler contains several good semantic invariants but its in-memory types are not a persistent IR:
-
-| Current observation | Consequence for the new architecture |
+| Former risk | Current implementation and evidence |
 | --- | --- |
-| `parser::parse` assigns macro IDs through a compilation-global mutable `usize`, and `discover` registers definitions while traversing a `VecDeque` | IDs inherit import traversal order and would become nondeterministic under parallel discovery; replace them with per-unit local IDs and canonical linked addresses |
-| `Loc` stores native `PathBuf` plus offsets | Split portable logical `SourceKey`/span from manager-resolved physical display locators |
-| `Target::Linked(usize)` indexes `Program.defs` | Treat this as a process-local prototype of `DefAddr`, not a serialized identity |
-| `Kind::If` owns `regex::Regex` | Serialize pattern plus `RegexAbiId`; compile an accelerator only in live IR |
-| `Node` owns `OnceCell<Rc<Payload>>` | Keep this as an in-memory memoization technique; neither pointer sharing nor lazy-cell state belongs in wire IR |
-| Runtime `Token` already separates shared payload from `frame` occurrence | Preserve this valuable definition/occurrence distinction in document items and trace frames |
-| `Token::lower` strips attributes/namespaces and localizes names inside the evaluator | Move this loss policy into the squish backend |
-| The XML `intermediate()` view records frames and surviving tokens only | Keep it as an optional diagnostic renderer, not authoritative IR; it lacks discarded data, scalar/capture lineage, and post-squish byte mappings |
-| Runtime output-byte budgeting measures XML serialization | Replace it with backend-neutral expansion budgets plus backend emission budgets |
+| Compilation-global traversal-order IDs | `LocalDefId`, `RegionId`, and `OpId` are unit-local; the linker produces portable `DefAddr` values and canonical ordered link data (`squish-ir::model`, `squish-link::linker`). |
+| Native `PathBuf` in portable provenance | `SourceKey` and protocol source IDs are logical values; physical project paths stay in repository/host adapters. Codec and relocation tests use canonical logical identities. |
+| Process-local indexes serialized as targets | Unit IR keeps symbolic `SymbolKey` references; `StaticLinker` emits relocations and `LinkedImage`; only live `LinkedProgram` owns session indexes. |
+| Compiled regex engine state in wire objects | IR stores patterns, named captures, and `RegexAbiId`; `Instantiator` compiles/uses live accelerators outside the canonical encoding. |
+| Pointer sharing or lazy-cell state leaking into persistence | Wire types are owned deterministic values. `Rc` is confined to the live evaluator environment and is absent from the persistent schema. |
+| Frontend/evaluator silently applying squish loss | `LinkedDocumentIr` retains document data; namespace/local-name and whitespace loss occurs in `squish-backend` with provenance edges and an artifact byte map. |
+| Diagnostic intermediate containing only surviving tokens | `.xsir` retains complete unit semantic/source attachments and `.psdbg` packages link trace, expansion trace, source archives, document IR, backend mapping, prompt digest, and build metadata. `debug_bundle` validation rejects incomplete or inconsistent relations. |
+| Output budgeting coupled to XML serialization | `Budgets` constrain backend-neutral instantiation and are part of `InstantiateKeyProjection`; backend emission has its own exact byte budget. Link/backend boundary tests cover both. |
 
-An effective transition adapter may first lower current `Node/Kind/Value/MacroDef/Entry` values into pure owned live Core IR. `Rc`, `OnceCell`, compiled regex state, native paths, and output serialization remain outside the portable schema. The current `Program` then corresponds to the session-only `LinkedProgram` reconstructed from `LinkedImage`, and `Token` evolves into backend-neutral document events plus trace references.
+No adapter from the deleted compiler is authoritative. Conformance now means that the current
+schema/types, canonical encoders, validators, linker/evaluator, backend, and published artifacts
+satisfy the invariants in Section 18. Evidence may reveal a defect in one of those implementations,
+but it must be fixed against this model rather than reviving the old architecture.
 
 ## 16. Rejected alternatives
 
