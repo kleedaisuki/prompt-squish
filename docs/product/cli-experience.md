@@ -1,6 +1,6 @@
 # Product CLI and Terminal Experience
 
-- Status: Implemented production contract
+- Status: Production contract; `new` implementation and acceptance evidence pending
 - Date: 2026-09-14
 - Scope: the `xmlsquish` executable, its command grammar, observable terminal behavior,
   automation contract, and recovery experience
@@ -19,7 +19,7 @@ xmlsquish <command> [command options] [selectors]
 ```
 
 There is no legacy path-dispatch grammar and no heuristic that treats an unknown command as a
-file. `build`, `fmt`, `add`, and `remove` are reserved commands. All commands enter the same
+file. `new`, `build`, `fmt`, `add`, and `remove` are reserved commands. All commands enter the same
 manager kernel, which provides project discovery, configuration, scheduling, cancellation,
 structured events, presentation, and exit-status reduction. A command domain supplies typed
 intent and domain operations; it does not own the terminal.
@@ -145,14 +145,16 @@ pure reduction over the final non-superseded plan, finalization outcome, and roo
 
 | Command | User goal | Primary result |
 | --- | --- | --- |
+| `xmlsquish new PATH` | Create a buildable package at a new filesystem destination | A coherent manifest, canonical starter source, optional workspace membership, and VCS setup |
 | `xmlsquish build` | Compile XML source into complete binary IR, link selected entries, and run the `squish` backend | Published `*.prompt` artifacts and build records |
 | `xmlsquish fmt` | Format project-owned source without changing DSL semantics | Updated source files, or a check/diff result |
 | `xmlsquish add SPEC` | Add or change a typed dependency requirement | Coherent manifest and lock state |
 | `xmlsquish remove ALIAS` | Remove a direct dependency by its local alias | Coherent manifest and lock state |
+| `xmlsquish inspect SUBJECT` | Query one typed manager object without mutation | A human description or one versioned JSON document |
 
 ### 3.2 Direct manager commands only
 
-The production command set is exactly `build`, `fmt`, `add`, `remove`, and `inspect`. Bare
+The production command set is exactly `new`, `build`, `fmt`, `add`, `remove`, and `inspect`. Bare
 `xmlsquish` prints concise help to stdout and exits `0`; an unknown command exits `2` and is never
 reinterpreted as a path. `-h`/`--help` and `-V`/`--version` do not load a project.
 
@@ -160,13 +162,245 @@ reinterpreted as a path. `-h`/`--help` and `-V`/`--version` do not load a projec
 `--message-format`. `fmt --diff` remains an operation: human/short modes place the requested
 unified diff on stdout, while JSON mode carries diff artifacts in the typed operation result.
 
-Earlier drafts listed `init`, `new`, `check`, `update`, `tree`, `metadata`, `clean`, `doctor`,
-`config explain`, and `completions`. They are not commands in the production grammar and are not
-release gates. Adding one requires a separate product decision, a typed protocol request, and
-process-level acceptance evidence; this document does not reserve an unimplemented second
-surface.
+The earlier decision that grouped `init/new` with optional maintenance commands was incorrect and
+is reversed here. Creation is the first operation in the ordinary package lifecycle, so `new` is a
+production command with the contract below. This decision does not silently introduce `init`:
+adopting an existing populated directory has different collision and source-discovery semantics
+and still requires its own product decision. `check`, `update`, `tree`, `metadata`, `clean`,
+`doctor`, `config explain`, and `completions` likewise remain outside the current grammar.
 
-### 3.3 Consistent selection grammar
+### 3.3 New
+
+#### 3.3.1 User contract and syntax
+
+```text
+xmlsquish new PATH
+    [--name NAME]
+    [--vcs git|none]
+    [--message-format human|short|json]
+```
+
+`new` creates one package at a destination that does not yet exist. It is deliberately
+non-interactive: the dominant invocation is `xmlsquish new my-prompt`, and it either creates a
+complete, immediately buildable project or creates no visible project. There is no questionnaire,
+remote template execution, implicit dependency resolution, build, or initial commit.
+
+Only two creation-specific options are justified by common use:
+
+- `--name NAME` separates stable package identity from a directory name that cannot or should not
+  be used verbatim.
+- `--vcs git|none` selects Git management or no VCS files. The default is the typed `new.vcs`
+  configuration value and, when unset, `git`.
+
+`--force`, `--template`, `--registry`, `--workspace`, `--dry-run`, and `--yes` are not accepted.
+They would respectively weaken collision safety, introduce a template acquisition/runtime
+protocol, conflate creation with publication, duplicate automatic workspace placement, preview a
+small deterministic tree without resolving risk, or answer questions that the command never asks.
+
+#### 3.3.2 Path and package-name rules
+
+The manager resolves `PATH` from the current working directory without interpreting it as a
+project selector. Absolute and relative paths are accepted. Missing intermediate directories are
+created as part of the same operation; on failure, manager-created ancestors are removed again
+only while they remain empty. These conditions are checked before publication:
+
+1. The final destination must not already exist as a file, directory, symlink, junction, or other
+   filesystem object. Even an empty directory is rejected. `new` never merges or overwrites.
+2. The destination must have a final normal path component. Filesystem roots, `.` and `..` are not
+   package destinations.
+3. Every existing ancestor must be traversable as a directory. Workspace and VCS discovery use
+   the actual nearest existing ancestor, including ordinary platform symlink resolution, while
+   the reported destination preserves the user's spelling.
+4. Without `--name`, the package name is the final path component exactly as encoded; it is not
+   lowercased, transliterated, or silently rewritten. A non-UTF-8 or invalid component produces a
+   diagnostic that names `--name` as the correction.
+5. `NAME` uses the manifest's package-name grammar: a non-empty sequence of ASCII letters, ASCII
+   digits, `-`, or `_`. The creator and manifest parser must share one validator. A duplicate
+   package identity in an enclosing workspace is rejected before any visible commit.
+6. Platform-invalid destination components and paths that cannot be represented or created fail
+   as filesystem domain errors; the tool does not claim that a path accepted by one operating
+   system is portable to every other operating system.
+
+An explicitly malformed `--name` is an invocation error (exit `2`). An invalid inferred name,
+existing destination, permission error, workspace conflict, or VCS failure is an operation failure
+(exit `1`). This distinction keeps pure argument validation independent of filesystem state.
+
+#### 3.3.3 Canonical generated project
+
+For `xmlsquish new hello`, the public tree is:
+
+```text
+hello/
+|-- .gitignore             # present when the effective VCS is Git
+|-- xmlsquish.toml
+`-- src/
+    `-- prompt.xml
+```
+
+`xmlsquish.lock`, `target/`, `.xmlsquish/`, a license, a README, and dependency tables are not
+generated. A lockfile represents exact resolved state and is first materialized by the ordinary
+resolution lifecycle; manager state and build output likewise do not belong in a source scaffold.
+
+`xmlsquish.toml` is UTF-8 without a BOM, uses LF line endings on every platform, and contains:
+
+```toml
+manifest-version = 1
+
+[package]
+name = "hello"
+version = "0.1.0"
+dialect = "xmlsquish/1"
+source-root = "src"
+
+[target.prompt]
+entry = "src/prompt.xml"
+backend = "squish"
+```
+
+The package name is TOML-escaped even though the initial grammar is ASCII. Semantic defaults are
+written explicitly so the scaffold teaches the frontend/backend split and does not silently change
+meaning if a later manifest version chooses new defaults.
+
+`src/prompt.xml` is also UTF-8/LF and contains the formatter-canonical starter document:
+
+```xml
+<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns">
+  <Prompt>
+    <System>You are a helpful assistant.</System>
+  </Prompt>
+</xs:entry>
+```
+
+The starter uses only the existing DSL primitives: one explicit link root and ordinary XML output.
+It does not invent a template-only language layer. A successful scaffold must pass
+`xmlsquish fmt --check` unchanged and build offline, with no dependency lookup, into the logical
+product `target/xmlsquish/prompt.prompt`.
+
+When Git is effective, `.gitignore` contains exactly `/target/` plus a trailing LF. If an enclosing
+Git work tree already owns the destination, `new` reuses it and does not create a nested `.git`.
+Otherwise the manager initializes a repository in the staged destination. `new` never stages files
+or creates a commit. `--vcs=none` creates neither `.git` nor `.gitignore`. Git initialization reads
+the user's ordinary Git policy (for example the initial branch); if Git cannot be initialized, the
+whole operation fails and recommends the copyable alternative `--vcs=none`.
+
+#### 3.3.4 Enclosing workspace behavior
+
+Workspace placement is automatic because a package created beneath a workspace but left unusable
+is not a complete project-manager operation. Discovery starts at the destination's nearest existing
+parent and follows the same nearest-manifest/upward rules as other commands:
+
+- If no enclosing `xmlsquish` workspace is discovered, the new package is standalone.
+- If the normalized package directory is already an effective member, no root edit is needed.
+- Otherwise the manager appends the normalized workspace-relative directory to `workspace.members`
+  while preserving unrelated TOML formatting and comments.
+- A matching `workspace.exclude`, a destination outside the workspace root, a duplicate package
+  name, or an ambiguous/nested workspace relation fails before commit. The tool does not override
+  an explicit exclusion.
+
+The child tree and any workspace-manifest edit are one recoverable logical transaction. A
+concurrent workspace revision causes validation against the new revision and a bounded re-plan; it
+never loses the other writer's change. A concurrent creator that wins the destination path causes
+this invocation to fail without overwriting it. `new` does not create or update a lockfile merely
+to record an otherwise dependency-free member.
+
+#### 3.3.5 Output, structured result, and cancellation
+
+Human and short modes reserve stdout and render lifecycle status on stderr. A normal human run is
+brief; it does not show a spinner for four bounded local steps:
+
+```text
+$ xmlsquish new prompts/support
+  Creating  package `support` at `prompts/support`
+  Adding    member `prompts/support` to workspace
+  Reusing   enclosing Git repository
+  Created   package `support` with target `prompt`
+```
+
+Lines that do not apply are omitted. `--quiet` suppresses these success/status lines but not
+diagnostics. Color may distinguish status verbs but carries no additional meaning. Absolute paths
+are used in diagnostics when needed to disambiguate; routine success prefers the user-relative
+path.
+
+JSON mode uses the native v2 operation lifecycle, not a command-specific JSON blob. Its typed
+`operation_completed` result has kind `new` and contains:
+
+```text
+NewResult {
+    package: PackageName,
+    path: absolute destination ProjectPath,
+    manifest: absolute manifest ProjectPath,
+    target: TargetName("prompt"),
+    created: [".gitignore", "xmlsquish.toml", "src/prompt.xml"],
+    workspace: null | { manifest, member },
+    vcs: { kind: "git", disposition: "created" | "reused" }
+       | { kind: "none", disposition: "disabled" }
+}
+```
+
+`created` lists public scaffold files in lexical order and omits `.git` implementation contents.
+Native events remain one canonical NDJSON object per line on stdout and end with
+`operation_completed` followed by `job_finished`; successful JSON mode leaves stderr empty.
+Argument/configuration failures that occur before kernel dispatch retain the existing two-record
+bootstrap JSON contract.
+
+Creation is staged outside the final destination. On the first Ctrl-C:
+
+- before the durable commit decision, the staged tree is removed, no workspace edit becomes
+  visible, and the command exits `130`;
+- after the decision, the manager completes or recovers the child/workspace transaction to one
+  coherent state before reporting cancellation; it explicitly reports whether creation committed;
+- after an emergency second Ctrl-C, the next ordinary manager invocation reconciles the durable
+  journal without asking the user to delete files or hand-edit the workspace.
+
+No cancellation path may expose a half-written manifest/source pair, a destination without its
+required workspace membership, or a workspace member pointing at a missing destination.
+
+#### 3.3.6 Acceptance matrix
+
+| Scenario | Required observable result |
+| --- | --- |
+| Standalone `new hello` outside VCS | Exact canonical tree; new Git repository; exit `0`; a following offline build publishes `prompt.prompt` |
+| `new hello --vcs=none` | Exact tree without `.git` or `.gitignore`; exit `0` |
+| New package inside an enclosing Git work tree | `.gitignore` is generated, enclosing repository is reused, and no nested `.git` exists |
+| New package beneath an enclosing workspace | Child and missing `workspace.members` entry commit together; package is immediately selectable by `-p` |
+| Already-effective workspace member | No duplicate member entry and no unrelated root-manifest diff |
+| Excluded or duplicate-name workspace package | Diagnostic names the conflicting workspace rule/package; no destination or root-manifest change; exit `1` |
+| Destination is an existing empty directory, file, symlink, or junction | No merge or overwrite; diagnostic names the object; exit `1` |
+| Deep destination with missing parents | Parents and project are created; injected failure removes only still-empty manager-created ancestors |
+| Invalid explicit vs inferred package name | Explicit malformed `--name` exits `2`; invalid inferred leaf exits `1` and suggests `--name` |
+| `fmt --check` immediately after creation | No diff and exit `0` on Linux, macOS, and Windows |
+| `build --offline` immediately after creation | No network attempt; valid `.prompt`; exit `0` on Linux, macOS, and Windows |
+| Human/short/quiet/JSON presentation | Correct stream ownership; no ANSI in JSON; `NewResult` is complete; quiet still reports failures |
+| Failure before commit, including Git/permission fault | No visible destination, no workspace mutation, and no orphaned non-empty staging tree |
+| First interruption at every durable boundary | Either coherent old state or coherent committed new state; exit `130`; result identifies commit outcome |
+| Process death after durable decision | Next ordinary invocation recovers child and workspace to the decided state without manual repair |
+| Concurrent destination/workspace writer | Never overwrites a winner or loses a manifest update; retry/re-plan remains bounded |
+
+Release evidence requires parser/protocol round trips, filesystem fault injection, process-level
+stream and exit tests, real process-death recovery points, and the same composed-binary workflow on
+Ubuntu, macOS, and Windows. A unit test that only compares template strings is insufficient.
+
+#### 3.3.7 Production precedent and deliberate differences
+
+Cargo separates `new` (a new directory) from `init` (an existing directory), creates a manifest,
+sample source and VCS ignore, and defaults to Git unless already inside a VCS repository. That is
+the closest lifecycle precedent and supports keeping collision-free creation distinct from future
+adoption semantics ([Cargo `new`](https://doc.rust-lang.org/cargo/commands/cargo-new.html),
+[Cargo `init`](https://doc.rust-lang.org/cargo/commands/cargo-init.html)).
+
+npm can initialize existing packages, prompt for fields, execute third-party initializer packages,
+and update workspace membership. Its workspace coherence is useful precedent, but interactive
+questions and ambient initializer execution are intentionally rejected because they make identical
+`xmlsquish new` arguments non-deterministic and introduce an unnecessary execution boundary
+([npm `init`](https://docs.npmjs.com/cli/v11/commands/npm-init/)). Go's `go mod init` demonstrates
+the value of explicit module identity and a small human/machine-writable manifest, but it creates
+only module metadata; that does not satisfy the `xmlsquish` promise of an immediately formattable
+and buildable prompt package ([Go modules reference](https://go.dev/ref/mod#go-mod-init)).
+
+These are production precedents, not compatibility targets. The normative behavior is the
+contract and acceptance matrix above.
+
+### 3.4 Consistent selection grammar
 
 Selection uses named concepts, never positional path guessing:
 
@@ -187,7 +421,7 @@ Selectors are names, not filesystem paths. Commands that legitimately accept pat
 type explicitly: `fmt --path PATH`, `add --path PATH`, `--manifest-path PATH`, and `inspect
 artifact PATH` (where the typed `artifact` subject removes path/identity ambiguity).
 
-### 3.4 Build
+### 3.5 Build
 
 ```text
 xmlsquish build [selection]
@@ -238,7 +472,7 @@ $ xmlsquish build -t support-agent
 Status verbs have stable meanings. They are not log levels and are never abbreviated in plain
 mode.
 
-### 3.5 Format
+### 3.6 Format
 
 ```text
 xmlsquish fmt [selection] [--path PATH]...
@@ -259,7 +493,7 @@ xmlsquish fmt [selection] [--path PATH]...
 - When `--path` selects a file outside project ownership, the command explains the ownership
   boundary rather than formatting it opportunistically.
 
-### 3.6 Add and remove
+### 3.7 Add and remove
 
 ```text
 xmlsquish add SPEC
@@ -301,7 +535,7 @@ $ xmlsquish add prompt-common@^2 -p support --rename common
   Committed  xmlsquish.toml, xmlsquish.lock
 ```
 
-### 3.7 Inspect
+### 3.8 Inspect
 
 `inspect` is the supported way to understand manager state and products. It is not a raw database
 or Rust-structure dump:
@@ -331,7 +565,7 @@ access-visible semantic state, or treats a stale file as a successful build. Rec
 explicit manager lifecycle responsibility during ordinary startup/planning, not a side effect of
 inspection.
 
-### 3.8 Resolution-mode contract
+### 3.9 Resolution-mode contract
 
 Commands that may resolve packages (`build`, `add`, and `remove`) share one
 mode algebra. `fmt` never fetches dependencies, and `inspect` observes an already named object, so
@@ -545,8 +779,10 @@ user-selectable Unicode mode in the production renderer.
 `.github/workflows/ci.yml` is the only cross-platform release workflow for this contract. Its
 Ubuntu, Windows, and macOS jobs build and test the workspace and run the composed manager smoke;
 quality jobs also enforce formatting, the declared Rust 1.88 minimum, strict Clippy, and the site
-build. `.github/scripts/ci_smoke.py` checks the five-command help surface, machine-readable usage
-failure, human unified diff, default `.prompt`, explicit `.xsir`, and JSON inspection.
+build. The currently committed `.github/scripts/ci_smoke.py` still checks the prior five-command
+surface plus machine-readable usage failure, human unified diff, default `.prompt`, explicit
+`.xsir`, and JSON inspection; it must add the Section 3.3 creation workflow before the six-command
+contract is releasable.
 
 CI receives append-only output and may archive NDJSON as ordinary job evidence. The program does
 not emit GitHub workflow commands or annotations, and `CI` affects only automatic progress
@@ -698,7 +934,7 @@ localized. Machine interfaces never contain a localized value where an enum is e
 
 This section replaces the unchecked aspirational K3/K4 checklist that preceded the manager
 cutover. A checkbox without a named executable witness is not evidence. The production release
-contract is now the five-command scope in `docs/product/project-manager-scope.md`, ADR 0009, the
+contract is now the six-command scope in `docs/product/project-manager-scope.md`, ADR 0009, the
 current protocol types, and the tests below.
 
 Status terms are intentionally narrow:
@@ -728,6 +964,7 @@ Status terms are intentionally narrow:
 | TTY width/resize, bounded progress, two-stage interruption and restoration | **Implemented and exercised** | `crates/squish-presentation/src/lib.rs` progress/resize tests; `tests/pty.rs` real PTY/ConPTY process tests |
 | Repository, artifact-generation, and build-catalog process-death recovery | **Implemented and exercised** | `tests/recovery_process.rs`; `docs/design/process-recovery-testing.md` |
 | Ubuntu, Windows, and macOS acceptance of the same composed binary | **Workflow gate** | `.github/workflows/ci.yml`; only a completed run recorded in the execution-status ledger satisfies this row |
+| Transactional `new`, canonical scaffold, workspace placement, VCS policy, and recovery | **Required product contract; implementation evidence pending** | Section 3.3 acceptance matrix; release requires parser/protocol, process, fault-injection, recovery, and cross-platform workflow evidence |
 
 These rows preserve the required observable behavior without asserting that every old test sketch
 was implemented verbatim. The repository's focused tests may reorganize; when they do, this table
@@ -742,12 +979,12 @@ current production scope:
 | --- | --- |
 | GitHub workflow-command/annotation renderer | Not in the CLI. CI consumes ordinary plain/NDJSON output; environment detection must not create a second protocol. |
 | A separate bounded queue for slow JSON consumers | `NdjsonRenderer` writes and flushes synchronously. There is no unbounded internal JSON queue; root output-loss behavior is the relevant contract. |
-| `metadata`, `tree`, `completions`, `doctor`, `config explain`, `init/new`, `check`, `update`, `clean` | Not production commands. The current pure query is typed `inspect`; automatic startup recovery replaces deletion-oriented repair instructions. |
+| `metadata`, `tree`, `completions`, `doctor`, `config explain`, `init`, `check`, `update`, `clean` | Not production commands. `new` is now required by Section 3.3; the current pure query is typed `inspect`; automatic startup recovery replaces deletion-oriented repair instructions. |
 | `--unicode`, `--hyperlinks`, `--no-input`, `--diagnostic-format`, `--trace-file`, `--lock-timeout`, `--deny-warnings` | Not accepted flags. Color, progress, plain mode, verbosity, message format, and typed `--config` are the shipped controls. |
 | Rich multi-edit suggestion objects and stored display line/column fields | Not fields of the v2 `Diagnostic` wire type. Current spans are typed source identities plus UTF-8 byte ranges; human projection is presentation-only. |
 | Full-stream snapshot equality under concurrent completion | Rejected because it would encode scheduler timing. Per-invocation sequence and legal per-plan/action partial order are required instead. |
 
-These removals narrow neither ADR 0009 nor the user-visible five-command product. They remove
+These removals narrow neither ADR 0009 nor the user-visible six-command product. They remove
 unimplemented inventions that had become accidental “mandatory” gates. Reintroducing any item is
 a new product change requiring protocol/CLI ownership and executable acceptance evidence, not a
 box to tick in this historical document.

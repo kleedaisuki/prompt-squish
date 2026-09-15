@@ -1,6 +1,6 @@
 # Project Manager Product Scope
 
-- **Status:** Production scope after the manager cutover
+- **Status:** Production scope; `new` implementation and acceptance evidence pending
 - **Date:** 2026-09-15
 - **Supersedes:** the former MVP and compatibility-period assumptions in this file
 - **Authority:** [ADR 0009](../adr/0009-microkernel-manager-and-reusable-ir.md), [CLI experience](cli-experience.md), and the unchanged [XML DSL](../dsl.md)
@@ -10,7 +10,7 @@
 `xmlsquish` is one command-first project manager, not a loose-file compiler with optional project behavior:
 
 ```text
-xmlsquish <build|fmt|add|remove|inspect> ...
+xmlsquish <new|build|fmt|add|remove|inspect> ...
 ```
 
 Every operation uses the same project discovery, typed manifest and lock state, immutable source snapshot, manager kernel, event protocol, presentation policy, cancellation path, and exit reduction. The old proposal for a separate compatibility-period project mode, sibling generated XML files, and direct path compilation is superseded by ADR 0009 and is not a compatibility requirement.
@@ -21,6 +21,7 @@ The XML DSL remains source compatible. `xs:entry` is an explicit link root; `xs:
 
 | User | Job to be done | Product evidence |
 | --- | --- | --- |
+| New user | Reach a buildable, version-controlled prompt package without hand-authoring manager metadata | canonical `new` scaffold, workspace placement, immediate format/build acceptance |
 | Prompt author | Build named prompt products without repeating paths, arguments, and budgets in shell scripts | manifest targets, profiles, `.prompt` publication |
 | Package author | Share exported macro modules without exposing checkout/cache layout | typed package identity, exports, resolver bindings |
 | Workspace maintainer | Apply one format/build contract across selected packages | workspace membership and package selectors |
@@ -29,7 +30,22 @@ The XML DSL remains source compatible. `xs:entry` is an explicit link root; `xs:
 
 ## 3. In-scope production model
 
-### 3.1 Project and workspace
+### 3.1 Creation
+
+`xmlsquish new PATH [--name NAME] [--vcs git|none]` is the production entry into the project
+lifecycle. It atomically creates a canonical package manifest, `src/prompt.xml`, and Git policy at
+a destination that does not exist. The generated source uses only the current DSL, is already in
+canonical format, and builds offline into a `.prompt` product. When the destination belongs to an
+enclosing workspace, package creation and any missing `workspace.members` edit are one recoverable
+transaction.
+
+The previous decision that dismissed `init/new` together is explicitly reversed for `new`.
+Adopting a populated existing directory (`init`) remains a distinct, unresolved product operation;
+`new` never merges, overwrites, asks questions, executes remote templates, or hides an implicit
+build. The complete syntax, files, workspace/VCS policy, output protocol, cancellation semantics,
+and acceptance matrix are normative in [CLI experience Section 3.3](cli-experience.md#33-new).
+
+### 3.2 Project and workspace
 
 A project is discovered by searching upward for `xmlsquish.toml`, or selected explicitly by `--manifest-path`. Manifest schema version and XML dialect are independent. A manifest may contain a package, a workspace, or both.
 
@@ -44,7 +60,7 @@ The production manifest supports:
 
 Target entries and exports are package-relative logical paths. Outputs are target-directory relative, use `.prompt`, cannot escape the target root, and cannot collide after lexical normalization.
 
-### 3.2 Dependency sources and exact state
+### 3.3 Dependency sources and exact state
 
 A dependency selects exactly one source:
 
@@ -59,7 +75,7 @@ The resolver owns version choice; the fetch layer owns verified acquisition and 
 
 Adding a dependency only makes exports resolvable. It never inserts, removes, or rewrites `xs:import`.
 
-### 3.3 Build and artifact model
+### 3.4 Build and artifact model
 
 ```text
 manifest + exact dependency graph
@@ -76,13 +92,13 @@ A selected target publishes a `.prompt` product. Repeated `--emit` selections ma
 
 The scheduler may run independent work concurrently up to `--jobs`. The default is keep-going: a root failure blocks only dependent work. `--no-keep-going` stops admitting new work after the first failure. Invalid plans, output collisions, unresolved dependencies, or failed generations do not publish partial success for the affected target.
 
-### 3.4 Formatting and mutation
+### 3.5 Formatting and mutation
 
 `fmt` selects project-owned sources, selected packages, or explicit `--path` values. Its lossless XML CST policy preserves compiler-relevant semantics, protects scalar and mixed-content whitespace, validates before committing, and is idempotent. `--check` reports dirty inputs without writing and returns domain failure; `--diff` implies check.
 
 `add` is a typed dependency upsert and `remove` deletes an exact direct alias in the selected dependency class. Both preserve unrelated TOML comments and formatting, validate candidates and lock coherence before commit, and support no-write `--dry-run`.
 
-### 3.5 Inspection, presentation, and configuration
+### 3.6 Inspection, presentation, and configuration
 
 `inspect ir|link|source|cache|artifact` reads one typed manager object and returns one human or versioned JSON document. It does not mutate project state. Operational commands use human, short, or versioned newline-delimited JSON events. Human/short status and diagnostics use stderr; NDJSON uses stdout.
 
@@ -94,7 +110,7 @@ defaults < user config < workspace config < environment < CLI
 
 User configuration is `$XMLSQUISH_HOME/config.toml` or the platform config directory; workspace configuration is `<project>/.xmlsquish/config.toml`. Repeatable `--config KEY=VALUE` applies TOML-typed CLI overrides in order. Explicit presentation and execution flags have CLI precedence.
 
-### 3.6 Stable process contract
+### 3.7 Stable process contract
 
 | Exit | Meaning |
 | ---: | --- |
@@ -140,6 +156,11 @@ There is no compatibility shim that guesses whether a command word is a file. Hi
 
 ### Correctness
 
+- A successful `new` publishes the complete canonical scaffold and any required workspace
+  membership as one coherent transaction; a following `fmt --check` and offline `build` succeed.
+- An existing destination, workspace conflict, pre-commit failure, or pre-commit cancellation
+  overwrites nothing and publishes no partial project. A post-decision process death is recovered
+  by the next ordinary invocation.
 - All selected targets observe one authoritative frozen snapshot and exact resolved package graph.
 - Entry linking validates the complete static source closure, including import cycles and unreachable definitions according to DSL rules.
 - Equivalent declared inputs produce byte-identical canonical IR and prompt products under the same tool/schema/backend identities.
@@ -165,6 +186,7 @@ This map is an evidence index, not a substitute for executable tests:
 
 | Contract | Primary implementation/evidence |
 | --- | --- |
+| Transactional package creation | `docs/product/cli-experience.md` Section 3.3 is the accepted contract; implementation and cross-platform process evidence are required before release |
 | Direct command grammar and typed selectors | `crates/squish-cli/src/lib.rs`, `crates/squish-cli/tests/cli_contract.rs` |
 | Composition, layered configuration, streams, exits | `src/main.rs`, `tests/process.rs`, `crates/squish-config/` |
 | Manifest/workspace/dependency model and edits | `crates/squish-project/src/{manifest,model,edit,transaction}.rs` |
@@ -184,5 +206,7 @@ This map is an evidence index, not a substitute for executable tests:
 - [Core IR model](../design/ir-model.md)
 - [Dependency source protocol](../design/dependency-source-protocol.md)
 - [Product CLI and terminal experience](cli-experience.md)
+- Cargo, [`new`](https://doc.rust-lang.org/cargo/commands/cargo-new.html) and [`init`](https://doc.rust-lang.org/cargo/commands/cargo-init.html)
+- npm, [`init`](https://docs.npmjs.com/cli/v11/commands/npm-init/); Go, [`go mod init`](https://go.dev/ref/mod#go-mod-init)
 - Cargo, [Configuration](https://doc.rust-lang.org/cargo/reference/config.html) and [External tools](https://doc.rust-lang.org/cargo/reference/external-tools.html)
 - Mokhov, Mitchell, and Peyton Jones, [Build Systems à la Carte](https://doi.org/10.1145/3236774), PACMPL/ICFP 2018
