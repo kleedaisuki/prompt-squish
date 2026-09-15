@@ -15,9 +15,10 @@ use squish_build::{
 use squish_kernel::{CancellationToken, InvocationContext, OperationOutcome};
 use squish_protocol::{
     ActionId, ActionKeyId, ActionTotals, Artifact, CacheKind, Diagnostic, DiagnosticId, Digest,
-    DigestAlgorithm, EventPayload, JobId, OperationKind, OperationResult, Phase, PlanCloseReason,
-    PlanDigest, PlanId, PlanInspection, PlanMode, PlanScopeId, PlannedAction, PlanningAttemptId,
-    PlanningIssueId, PlanningStepId, PlanningStepKind, Severity, SupersedeReason, Timing,
+    DigestAlgorithm, EventPayload, FinalizationId, FinalizationKind, JobId, OperationKind,
+    OperationResult, Phase, PlanCloseReason, PlanDigest, PlanId, PlanInspection, PlanMode,
+    PlanScopeId, PlannedAction, PlanningAttemptId, PlanningIssueId, PlanningStepId,
+    PlanningStepKind, Severity, SupersedeReason, Timing,
 };
 
 use crate::{Effect, InvocationSettings, ManagerError, PlannedWork, PreparedPlan};
@@ -180,6 +181,87 @@ pub enum PlanningFailure {
     Failed(ManagerError),
     /// 协作式取消。 / Cooperative cancellation.
     Cancelled,
+}
+
+/// 必须计作一个根失败的收尾失败。 / Finalization failure that contributes one root failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FinalizationFailure {
+    error: ManagerError,
+}
+
+impl FinalizationFailure {
+    /// 返回结构化管理器错误。 / Returns the structured manager error.
+    pub fn error(&self) -> &ManagerError {
+        &self.error
+    }
+
+    /// 返回内核归约所需的根失败增量。 / Returns the root-failure increment required by kernel reduction.
+    pub const fn root_failures(&self) -> u64 {
+        1
+    }
+
+    /// 消耗包装并返回管理器错误。 / Consumes the wrapper and returns the manager error.
+    pub fn into_error(self) -> ManagerError {
+        self.error
+    }
+}
+
+impl std::fmt::Display for FinalizationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, formatter)
+    }
+}
+
+impl std::error::Error for FinalizationFailure {}
+
+/// 在最终计划关闭后执行一项不可取消的终态收尾工作。 / Runs one non-cancellable terminal finalization after the final plan closes.
+pub fn finalize<T>(
+    job: &JobId,
+    id: FinalizationId,
+    kind: FinalizationKind,
+    context: &InvocationContext,
+    operation: impl FnOnce() -> Result<T, ManagerError>,
+) -> Result<T, FinalizationFailure> {
+    emit(
+        context,
+        EventPayload::FinalizationStarted {
+            job: job.clone(),
+            id: id.clone(),
+            kind,
+        },
+    )
+    .map_err(finalization_failure)?;
+    let started = Instant::now();
+    match operation() {
+        Ok(value) => {
+            emit(
+                context,
+                EventPayload::FinalizationSucceeded {
+                    job: job.clone(),
+                    id,
+                    timing: elapsed(started),
+                },
+            )
+            .map_err(finalization_failure)?;
+            Ok(value)
+        }
+        Err(error) => {
+            let diagnostic_id = DiagnosticId::new(format!("finalization-{id}-failed"))
+                .expect("non-empty finalization ID");
+            let payload = EventPayload::FinalizationFailed {
+                job: job.clone(),
+                id,
+                timing: elapsed(started),
+                diagnostic: error.diagnostic(diagnostic_id),
+            };
+            emit(context, payload).map_err(finalization_failure)?;
+            Err(finalization_failure(error))
+        }
+    }
+}
+
+fn finalization_failure(error: ManagerError) -> FinalizationFailure {
+    FinalizationFailure { error }
 }
 
 impl<'a> PlanningRecorder<'a> {

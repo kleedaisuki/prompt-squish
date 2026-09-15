@@ -7,6 +7,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use squish_build::{OutputName, ProducedOutput, Publication};
 use squish_kernel::{CancellationToken, EventSink, InvocationContext, Kernel, SinkError};
 use squish_manager::{
     ArtifactLocator, Effect, InvocationSettings, ManagerCapability, PlannedWork,
@@ -39,6 +40,23 @@ impl EventSink for CancelOnPlanReady {
         if matches!(event.payload, EventPayload::PlanReady { .. }) {
             self.0.cancel();
         }
+        Ok(())
+    }
+}
+
+struct BreakCatalogOnPlanClosed {
+    catalog_root: std::path::PathBuf,
+    events: Mutex<Vec<Event>>,
+}
+
+impl EventSink for BreakCatalogOnPlanClosed {
+    fn emit(&self, event: Event) -> Result<(), SinkError> {
+        if matches!(event.payload, EventPayload::PlanClosed { .. }) {
+            let lock = self.catalog_root.join(".squish-publish/lock");
+            fs::remove_file(&lock).unwrap();
+            fs::create_dir(&lock).unwrap();
+        }
+        self.events.lock().unwrap().push(event);
         Ok(())
     }
 }
@@ -158,6 +176,74 @@ fn prepared_plan_has_one_compile_per_sealed_source_and_effectful_publish() {
             .filter(|work| work.effect() != Effect::Transform)
             .all(|work| !work.effect().cacheable())
     );
+}
+
+#[test]
+fn emit_set_is_order_insensitive_and_plan_sensitive() {
+    let (_temp, mut request) = fixture();
+    request.emit = vec![EmitKind::Prompt, EmitKind::DebugInfo];
+    let first_request = request.clone();
+    let first = build::prepare(&request, &LocalServices)
+        .unwrap()
+        .plan()
+        .graph()
+        .semantic_digest();
+    request.emit = vec![EmitKind::DebugInfo, EmitKind::Prompt, EmitKind::Prompt];
+    let reordered_request = request.clone();
+    let reordered = build::prepare(&request, &LocalServices)
+        .unwrap()
+        .plan()
+        .graph()
+        .semantic_digest();
+    assert_eq!(first, reordered);
+    request.emit = vec![EmitKind::Prompt];
+    let prompt_request = request.clone();
+    let prompt_only = build::prepare(&request, &LocalServices)
+        .unwrap()
+        .plan()
+        .graph()
+        .semantic_digest();
+    request.emit = vec![EmitKind::Prompt, EmitKind::BinaryIr];
+    let ir_request = request.clone();
+    let with_ir = build::prepare(&request, &LocalServices)
+        .unwrap()
+        .plan()
+        .graph()
+        .semantic_digest();
+    assert_ne!(first, prompt_only);
+    assert_ne!(prompt_only, with_ir);
+    let first_plan = observed_plan_digest(&first_request, "emit-plan-a");
+    let reordered_plan = observed_plan_digest(&reordered_request, "emit-plan-b");
+    let prompt_plan = observed_plan_digest(&prompt_request, "emit-plan-c");
+    let ir_plan = observed_plan_digest(&ir_request, "emit-plan-d");
+    assert_eq!(first_plan, reordered_plan);
+    assert_ne!(first_plan, prompt_plan);
+    assert_ne!(prompt_plan, ir_plan);
+}
+
+fn observed_plan_digest(request: &BuildRequest, invocation: &str) -> squish_protocol::PlanDigest {
+    let events = Arc::new(RecordingEvents::default());
+    let manager = ManagerCapability::new(LocalServices, InvocationSettings::default());
+    let capabilities: [&dyn squish_kernel::Capability; 1] = [&manager];
+    let kernel = Kernel::new(&capabilities).unwrap();
+    let context = InvocationContext::new(
+        InvocationId::new(invocation).unwrap(),
+        CancellationToken::default(),
+        events.clone(),
+    );
+    kernel
+        .dispatch(&OperationRequest::Build(request.clone()), &context)
+        .unwrap();
+    events
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|event| match &event.payload {
+            EventPayload::PlanReady { digest, .. } => Some(digest.clone()),
+            _ => None,
+        })
+        .unwrap()
 }
 
 #[test]
@@ -299,6 +385,57 @@ fn build_catalog_distinguishes_absence_from_corruption_and_rejects_traversal() {
     };
     assert_eq!(result.published.len(), 1);
     let snapshot = build::read_current_build_catalog(&layout).unwrap().unwrap();
+    let target = &snapshot.record.targets[0];
+    fs::remove_file(layout.publication_root().join(&target.manifest)).unwrap();
+    assert!(matches!(
+        build::read_current_build_catalog(&layout),
+        Err(build::BuildCatalogError::MissingCurrent { .. })
+    ));
+    let publications: Vec<_> = target
+        .artifacts
+        .iter()
+        .map(|item| Publication {
+            output: ProducedOutput {
+                name: OutputName::new(item.artifact.id.as_str()).unwrap(),
+                kind: item.artifact.kind.clone(),
+                digest: item.artifact.digest.clone(),
+                size: item.artifact.size,
+            },
+            destination: item.destination.clone(),
+        })
+        .collect();
+    let publisher = FileArtifactPublisher::open(
+        layout.publication_root(),
+        Cas::open(layout.cas_root()).unwrap(),
+    )
+    .unwrap();
+    publisher
+        .publish_generation(&target.target_id, &publications)
+        .unwrap();
+    assert!(
+        build::read_current_build_catalog(&layout)
+            .unwrap()
+            .is_some()
+    );
+    fs::write(
+        layout.publication_root().join(&target.manifest),
+        b"corrupt-current",
+    )
+    .unwrap();
+    assert!(matches!(
+        build::read_current_build_catalog(&layout),
+        Err(build::BuildCatalogError::Corrupt(_))
+    ));
+    publisher
+        .publish_generation(&target.target_id, &publications)
+        .unwrap();
+    publisher
+        .publish_generation(&target.target_id, &publications[..1])
+        .unwrap();
+    assert!(matches!(
+        build::read_current_build_catalog(&layout),
+        Err(build::BuildCatalogError::Historical { .. })
+    ));
     let wire = serde_json::to_value(&snapshot.record).unwrap();
     for invalid in [
         "../escape",
@@ -491,6 +628,50 @@ fn cancellation_after_plan_seal_persists_cancelled_action_facts() {
 }
 
 #[test]
+fn catalog_finalization_failure_is_typed_and_counted() {
+    let (temp, request) = fixture();
+    let layout = StorageLayout::project_local_for_tests(temp.path());
+    let events = Arc::new(BreakCatalogOnPlanClosed {
+        catalog_root: layout.catalog_root().to_path_buf(),
+        events: Mutex::new(Vec::new()),
+    });
+    let manager = ManagerCapability::new(LocalServices, InvocationSettings::default());
+    let capabilities: [&dyn squish_kernel::Capability; 1] = [&manager];
+    let kernel = Kernel::new(&capabilities).unwrap();
+    let context = InvocationContext::new(
+        InvocationId::new("catalog-finalization-failure").unwrap(),
+        CancellationToken::default(),
+        events.clone(),
+    );
+    let outcome = kernel
+        .dispatch(&OperationRequest::Build(request), &context)
+        .unwrap();
+    assert!(matches!(
+        outcome.result,
+        OperationResult::Unavailable {
+            kind: squish_protocol::OperationKind::Build
+        }
+    ));
+    assert_eq!(outcome.summary.root_failures, 1);
+    let events = events.events.lock().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.payload, EventPayload::FinalizationStarted { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.payload, EventPayload::FinalizationFailed { .. }))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.payload, EventPayload::FinalizationSucceeded { .. }))
+    );
+}
+
+#[test]
 fn failed_and_cancelled_attempts_retain_the_previous_target_generation() {
     let (temp, request) = fixture();
     let layout = StorageLayout::project_local_for_tests(temp.path());
@@ -607,6 +788,113 @@ fn same_semantic_targets_restore_single_flight_results_for_each_owner() {
             .iter()
             .all(|target| !target.artifacts.is_empty())
     );
+}
+
+#[test]
+fn prompt_collision_restores_matching_backend_evidence_for_follower() {
+    let (temp, mut request) = fixture();
+    fs::write(
+        temp.path().join("src/ma.xml"),
+        r#"<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:test"><xs:macro name="m:f"><message>Hello world</message></xs:macro></xs:module>"#,
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("src/a.xml"),
+        r#"<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><xs:import src="ma.xml"/><message>Hello world</message></xs:entry>"#,
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("src/b.xml"),
+        r#"<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><message>Hello world</message></xs:entry>"#,
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("xmlsquish.toml"),
+        r#"manifest-version = 1
+[package]
+name = "fixture"
+version = "1.0.0"
+
+[target.a]
+entry = "src/a.xml"
+output = "a.prompt"
+
+[target.b]
+entry = "src/b.xml"
+output = "b.prompt"
+
+[target.c]
+entry = "src/b.xml"
+output = "c.prompt"
+"#,
+    )
+    .unwrap();
+    request.emit = vec![EmitKind::Prompt, EmitKind::DebugInfo];
+    let manager = ManagerCapability::new(
+        LocalServices,
+        InvocationSettings {
+            jobs: 4,
+            ..Default::default()
+        },
+    );
+    let capabilities: [&dyn squish_kernel::Capability; 1] = [&manager];
+    let kernel = Kernel::new(&capabilities).unwrap();
+    let context = InvocationContext::new(
+        InvocationId::new("backend-evidence-collision").unwrap(),
+        CancellationToken::default(),
+        Arc::new(IgnoreEvents),
+    );
+    kernel
+        .dispatch(&OperationRequest::Build(request), &context)
+        .unwrap();
+    let layout = StorageLayout::project_local_for_tests(temp.path());
+    let catalog = build::read_current_build_catalog(&layout).unwrap().unwrap();
+    assert_eq!(
+        catalog.record.targets.len(),
+        3,
+        "collision fixture action facts: {:?}",
+        catalog.record.actions
+    );
+    let debug = |target: &str| {
+        let artifact = catalog
+            .record
+            .targets
+            .iter()
+            .find(|generation| generation.target_id == target)
+            .unwrap()
+            .artifacts
+            .iter()
+            .map(|item| &item.artifact)
+            .find(|artifact| matches!(artifact.kind, squish_protocol::ArtifactKind::DebugInfo))
+            .unwrap();
+        fs::read(layout.publication_root().join(&artifact.uri)).unwrap()
+    };
+    let a = debug("fixture:a");
+    let b = debug("fixture:b");
+    let c = debug("fixture:c");
+    assert_ne!(a, b, "different entry identities have distinct provenance");
+    assert_eq!(b, c, "single-flight follower C must retain B's evidence");
+    let link_map = |target: &str| {
+        let artifact = catalog
+            .record
+            .targets
+            .iter()
+            .find(|generation| generation.target_id == target)
+            .unwrap()
+            .artifacts
+            .iter()
+            .map(|item| &item.artifact)
+            .find(|artifact| {
+                matches!(&artifact.kind, squish_protocol::ArtifactKind::Other(name) if name == "static-link-map")
+            })
+            .unwrap();
+        fs::read(layout.publication_root().join(&artifact.uri)).unwrap()
+    };
+    let a_map = link_map("fixture:a");
+    let b_map = link_map("fixture:b");
+    let c_map = link_map("fixture:c");
+    assert_ne!(a_map, b_map, "different imports have distinct static maps");
+    assert_eq!(b_map, c_map, "C must retain B's restored static map");
 }
 
 #[test]

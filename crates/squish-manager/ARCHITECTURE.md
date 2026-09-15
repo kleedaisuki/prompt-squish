@@ -20,6 +20,14 @@ item, or a mismatch between `Action.kind` and `PlannedWork::kind()`. Therefore
 graph nodes and executable domain work have an exact one-to-one identity and
 kind relationship. `tests/core.rs` covers each rejected shape.
 
+Plan identity is behavioral rather than invocation-specific. The build graph's
+canonical key recipes include the requested emit set, backend/result schema,
+named output schemas, and logical publication destinations. Formatting recipes
+include selected source identity and digest, style edition, diff policy, and the
+Commit action's check/diff/write behavior. These recipes enter
+`BuildPlan::semantic_digest()` and therefore `PlanDigest`; invocation, job,
+attempt, timing, and presentation identities do not.
+
 ## Effects and caching
 
 `Effect` distinguishes pure `Transform` work from `ReadEffect`, `WriteEffect`,
@@ -33,6 +41,12 @@ prerequisite closure, not merely direct dependencies. A worker can consequently
 hydrate target-local state from CAS even when any producer was a persistent
 cache hit or a same-run single-flight follower. `tests/core.rs` exercises a
 same-key follower whose dependent receives the follower's logical outputs.
+
+A Publish follower restores its owner only from that owner's exact, complete
+named Backend outputs: both `prompt` and `backend-result`, with each output's
+kind, digest, and size verified. It also uses that same owner's link map. A
+prompt digest alone is insufficient because it does not identify the complete
+backend result or the owner-specific link state.
 
 ## Bounded orchestration and lifecycle
 
@@ -107,9 +121,27 @@ so target graph inspection does not reconstruct them from transient state.
 `BuildCatalogSnapshot` is the fully verified view of the current catalog. Its
 loader verifies the catalog publication generation, record artifact, CAS digest
 and size, typed record schema, target publication manifests, generation IDs,
-destinations, and artifact membership before exposing queries. A missing current
-catalog is represented as `None`; malformed, missing, or inconsistent bytes are
-typed corruption/errors and never collapse to absence.
+destinations, and artifact membership before exposing queries. Absence means
+only that the build-catalog publisher has no current generation and is returned
+as `None`. `MissingCurrent` means a present catalog names a target generation
+whose target publisher has no current pointer. `Historical` means that pointer
+exists but has advanced to a generation different from the one recorded by the
+catalog. `Corrupt` covers malformed, missing, or inconsistent catalog bytes,
+CAS objects, manifests, identities, and memberships. None of these three typed
+states collapses to absence.
+
+Successful action manifests preserve the complete declared named-output set,
+including the backend result rather than only user-published files. Every
+behavior-changing option participates in the corresponding action recipe, so a
+cache hit cannot silently reuse different semantics. Catalog reads validate the
+publisher's authoritative current-generation pointer instead of trusting only a
+record that happens to exist in CAS.
+
+Persisting the aggregate build catalog is observable terminal work after
+`PlanClosed`. It runs only through `orchestrator::finalize`, which emits
+`FinalizationStarted` followed by exactly one timed success or structured
+failure event. Once started this finalization is intentionally non-cancellable;
+a failure contributes one root failure to the caller's kernel outcome.
 
 Artifact ID/path, plan, static link-map, and provenance queries are projections
 of this snapshot. Provenance is closed and typed: prompt and target-record

@@ -23,15 +23,15 @@ use squish_manager::{
     StorageLayout,
     orchestrator::{
         ExecutionState, PlanningRecorder, ResolvedInputs, SealedPlan, WorkDisposition,
-        WorkExecutor, run,
+        WorkExecutor, finalize, run,
     },
 };
 use squish_project::{Lockfile, ResolutionMode};
 use squish_protocol::{
     ActionId, ActionTotals, ArtifactKind, Digest, DigestAlgorithm, Event, EventPayload,
-    FormatRequest, FormatResult, FormatSelection, InvocationId, JobId, OperationKind,
-    OperationRequest, OperationResult, Phase, PlanMode, PlanningAttemptId, PlanningStepId,
-    PlanningStepKind, ProjectPath, StyleEdition, SupersedeReason, WorkspaceScope,
+    FinalizationId, FinalizationKind, FormatRequest, FormatResult, FormatSelection, InvocationId,
+    JobId, OperationKind, OperationRequest, OperationResult, Phase, PlanMode, PlanningAttemptId,
+    PlanningStepId, PlanningStepKind, ProjectPath, StyleEdition, SupersedeReason, WorkspaceScope,
 };
 use squish_repository::PackageLocation;
 
@@ -959,4 +959,72 @@ fn execution_facts_preserve_failure_blocking_and_optional_keys() {
     assert!(failed.key.is_some());
     assert!(matches!(blocked.state, ExecutionState::Blocked { .. }));
     assert!(blocked.key.is_none());
+}
+
+struct FailedFinalization;
+
+impl Capability for FailedFinalization {
+    fn descriptor(&self) -> &'static CapabilityDescriptor {
+        &TEST_DESCRIPTOR
+    }
+
+    fn execute(
+        &self,
+        _operation: &OperationRequest,
+        context: &InvocationContext,
+    ) -> OperationOutcome {
+        let job = JobId::new("finalization-job").unwrap();
+        let report = run(
+            seal(
+                job.clone(),
+                one_plan("compile", ActionKind::Compile, Effect::Transform),
+                context,
+            ),
+            &Executor,
+            context,
+            &InvocationSettings::default(),
+        )
+        .unwrap();
+        let failure = finalize(
+            &job,
+            FinalizationId::new("persist-build-catalog").unwrap(),
+            FinalizationKind::PersistBuildCatalog,
+            context,
+            || -> Result<(), ManagerError> {
+                Err(ManagerError::new(
+                    "catalog_write_failed",
+                    Phase::Cache,
+                    "catalog could not be persisted",
+                ))
+            },
+        )
+        .unwrap_err();
+        OperationOutcome {
+            job,
+            result: OperationResult::Unavailable {
+                kind: OperationKind::Format,
+            },
+            totals: report.totals,
+            root_failures: report.root_failures + failure.root_failures(),
+            cancelled: report.cancelled,
+        }
+    }
+}
+
+#[test]
+fn failed_finalization_is_a_kernel_visible_root_failure() {
+    let context = InvocationContext::new(
+        InvocationId::new("finalization").unwrap(),
+        CancellationToken::default(),
+        Arc::new(Events::default()),
+    );
+    let capability = FailedFinalization;
+    let capabilities: [&dyn Capability; 1] = [&capability];
+    let outcome = Kernel::new(&capabilities)
+        .unwrap()
+        .dispatch(&format_request(), &context)
+        .unwrap();
+    assert_eq!(outcome.summary.totals.succeeded, 1);
+    assert_eq!(outcome.summary.root_failures, 1);
+    assert_eq!(outcome.summary.status.code(), 1);
 }

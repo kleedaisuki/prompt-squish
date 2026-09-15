@@ -197,8 +197,11 @@ impl FormatBatch {
                 ActionKind::Format,
                 Vec::new(),
                 vec![InputRef::Blob(digest)],
-                Some(&self.style.to_string()),
-                Some(source.as_str()),
+                BTreeMap::from([
+                    ("diff".into(), self.diff.to_string()),
+                    ("source".into(), source.as_str().to_owned()),
+                    ("style".into(), self.style.to_string()),
+                ]),
             )?);
             work.insert(
                 id.clone(),
@@ -215,8 +218,11 @@ impl FormatBatch {
             ActionKind::CommitTransaction,
             dependencies,
             Vec::new(),
-            None,
-            None,
+            BTreeMap::from([
+                ("check".into(), self.check.to_string()),
+                ("diff".into(), self.diff.to_string()),
+                ("write".into(), (!self.check).to_string()),
+            ]),
         )?);
         work.insert(commit, FormatWork::CommitTransaction { write: !self.check });
         let graph = BuildPlan::new(actions).map_err(|error| {
@@ -846,16 +852,8 @@ fn action(
     kind: ActionKind,
     dependencies: Vec<ActionId>,
     inputs: Vec<InputRef>,
-    style: Option<&str>,
-    source: Option<&str>,
+    options: BTreeMap<String, String>,
 ) -> Result<Action, ManagerError> {
-    let mut options = BTreeMap::new();
-    if let Some(style) = style {
-        options.insert("style".into(), style.into());
-    }
-    if let Some(source) = source {
-        options.insert("source".into(), source.into());
-    }
     let key = KeyRecipe::new("xmlsquish-format-v1", inputs, options).map_err(|error| {
         manager_error("XS3109", Phase::Manage, "invalid format action key", error)
     })?;

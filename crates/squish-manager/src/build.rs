@@ -32,8 +32,9 @@ use squish_project::{
 };
 use squish_protocol::{
     ActionId, Artifact, ArtifactId, ArtifactKind, BuildRequest, BuildResult, DigestAlgorithm,
-    EmitKind, JobId, OperationKind, OperationResult, Phase, PlanMode, PlanningAttemptId,
-    PlanningStepId, PlanningStepKind, PublishedTarget, TargetName, WorkspaceScope,
+    EmitKind, FinalizationId, FinalizationKind, JobId, OperationKind, OperationResult, Phase,
+    PlanMode, PlanningAttemptId, PlanningStepId, PlanningStepKind, PublishedTarget, TargetName,
+    WorkspaceScope,
 };
 use squish_publish::FileArtifactPublisher;
 use squish_publish::{PublishError, PublishedGeneration};
@@ -383,6 +384,22 @@ pub enum BuildCatalogError {
     Storage(String),
     /// current generation 存在但内容损坏。 / A current generation exists but is corrupt.
     Corrupt(String),
+    /// 记录声明的 target current generation 已缺失。 / A target current generation declared by the record is missing.
+    MissingCurrent {
+        /// 完整 target 身份。 / Complete target identity.
+        target: String,
+        /// catalog 所记录的 generation。 / Generation recorded by the catalog.
+        generation: String,
+    },
+    /// target current 指针已前移，catalog 记录成为历史快照。 / The target current pointer advanced, making the catalog record historical.
+    Historical {
+        /// 完整 target 身份。 / Complete target identity.
+        target: String,
+        /// catalog 的历史 generation。 / Historical catalog generation.
+        recorded: String,
+        /// publication 当前 generation。 / Current publication generation.
+        current: String,
+    },
 }
 
 impl fmt::Display for BuildCatalogError {
@@ -390,6 +407,18 @@ impl fmt::Display for BuildCatalogError {
         match self {
             Self::Storage(message) => write!(formatter, "build catalog storage error: {message}"),
             Self::Corrupt(message) => write!(formatter, "corrupt build catalog: {message}"),
+            Self::MissingCurrent { target, generation } => write!(
+                formatter,
+                "target `{target}` current generation `{generation}` is missing"
+            ),
+            Self::Historical {
+                target,
+                recorded,
+                current,
+            } => write!(
+                formatter,
+                "target `{target}` catalog generation `{recorded}` is historical; current is `{current}`"
+            ),
         }
     }
 }
@@ -439,6 +468,12 @@ pub fn read_current_build_catalog(
         .map_err(|error| BuildCatalogError::Corrupt(error.to_string()))?;
     let cas = Cas::open(layout.cas_root())
         .map_err(|error| BuildCatalogError::Storage(error.to_string()))?;
+    let publication_publisher = FileArtifactPublisher::open(
+        layout.publication_root(),
+        Cas::open(layout.cas_root())
+            .map_err(|error| BuildCatalogError::Storage(error.to_string()))?,
+    )
+    .map_err(|error| BuildCatalogError::Storage(error.to_string()))?;
     let record_digest = blob_digest(&artifact.digest)
         .map_err(|error| BuildCatalogError::Corrupt(error.to_string()))?;
     let stored_record = cas
@@ -472,6 +507,52 @@ pub fn read_current_build_catalog(
                 "immutable publication `{}` differs from CAS",
                 item.artifact.uri
             )));
+        }
+    }
+    for target in &record.targets {
+        let Some(current) = publication_publisher
+            .current_generation(&target.target_id)
+            .map_err(|error| BuildCatalogError::Corrupt(error.to_string()))?
+        else {
+            return Err(BuildCatalogError::MissingCurrent {
+                target: target.target_id.clone(),
+                generation: target.generation_id.clone(),
+            });
+        };
+        if current.generation_id != target.generation_id {
+            return Err(BuildCatalogError::Historical {
+                target: target.target_id.clone(),
+                recorded: target.generation_id.clone(),
+                current: current.generation_id,
+            });
+        }
+        let artifacts: Vec<_> = target
+            .artifacts
+            .iter()
+            .map(|item| item.artifact.clone())
+            .collect();
+        if current.target_id != target.target_id
+            || current.manifest != target.manifest
+            || current.artifacts != artifacts
+        {
+            return Err(BuildCatalogError::Corrupt(format!(
+                "target `{}` current manifest differs from the recorded generation",
+                target.target_id
+            )));
+        }
+        for item in &target.artifacts {
+            let suffix = format!("/artifacts/{}", item.destination);
+            if !item.artifact.uri.ends_with(&suffix)
+                || !item
+                    .artifact
+                    .uri
+                    .contains(&format!("/{}/", target.generation_id))
+            {
+                return Err(BuildCatalogError::Corrupt(format!(
+                    "artifact `{}` URI does not encode its generation and logical destination",
+                    item.artifact.id
+                )));
+            }
         }
     }
     Ok(Some(BuildCatalogSnapshot {
@@ -747,6 +828,7 @@ pub struct PreparedBuild {
     emit: Vec<EmitKind>,
     locations: Vec<squish_repository::PackageLocation>,
     storage: StorageLayout,
+    prior_record: Option<BuildRecordV2>,
 }
 
 impl PreparedBuild {
@@ -806,6 +888,8 @@ fn prepare_excluding(
     let storage = services
         .storage_layout(repository.root())
         .map_err(|e| ManagerError::new(e.code(), Phase::Cache, e.message()))?;
+    let prior_record = read_current_build_record(&storage)
+        .map_err(|e| ManagerError::new("MGB124", Phase::Cache, e.to_string()))?;
     let mode = resolution_mode(request);
     let bare = repository.snapshot();
     let initial_locations = match &bare {
@@ -846,7 +930,7 @@ fn prepare_excluding(
         .map_err(|e| error("MGB004", Phase::Discover, e))?;
     let sources = freeze_sources(&snapshot, &resolved.packages)?;
     let targets = select_targets(request, &snapshot, &sources, excluded)?;
-    let plan = build_plan(&snapshot, &sources, &targets)?;
+    let plan = build_plan(&snapshot, &sources, &targets, &request.emit)?;
     Ok(PreparedBuild {
         plan,
         repository,
@@ -856,6 +940,7 @@ fn prepare_excluding(
         emit: request.emit.clone(),
         locations: resolved.packages,
         storage,
+        prior_record,
     })
 }
 
@@ -882,6 +967,11 @@ fn prepare_recorded(
             .storage_layout(repository.root())
             .map_err(|e| ManagerError::new(e.code(), Phase::Cache, e.message()))
     })?;
+    let prior_record =
+        planning.step(step("read-build-catalog"), PlanningStepKind::Fetch, || {
+            read_current_build_record(&storage)
+                .map_err(|e| ManagerError::new("MGB124", Phase::Cache, e.to_string()))
+        })?;
     let mode = resolution_mode(request);
     let workspace = planning.step(step("snapshot-initial"), PlanningStepKind::Snapshot, || {
         planning_not_cancelled(context)?;
@@ -949,7 +1039,7 @@ fn prepare_recorded(
         PlanningStepKind::ValidatePlan,
         || {
             planning_not_cancelled(context)?;
-            build_plan(&snapshot, &sources, &targets)
+            build_plan(&snapshot, &sources, &targets, &request.emit)
         },
     )?;
     Ok(PreparedBuild {
@@ -961,6 +1051,7 @@ fn prepare_recorded(
         emit: request.emit.clone(),
         locations: resolved.packages,
         storage,
+        prior_record,
     })
 }
 
@@ -1020,16 +1111,22 @@ pub fn execute(
     let inspection = sealed.inspection();
     match orchestrator::run(sealed, &executor, context, settings) {
         Ok(report) => {
-            let build_record = match executor.persist_terminal_record(&inspection, &report) {
+            let build_record = match orchestrator::finalize(
+                &job,
+                FinalizationId::new("persist-build-catalog").expect("static finalization ID"),
+                FinalizationKind::PersistBuildCatalog,
+                context,
+                || executor.persist_terminal_record(&inspection, &report),
+            ) {
                 Ok(record) => record,
-                Err(_) => {
+                Err(failure) => {
                     return OperationOutcome {
                         job,
                         result: OperationResult::Unavailable {
                             kind: OperationKind::Build,
                         },
                         totals: report.totals,
-                        root_failures: report.root_failures,
+                        root_failures: report.root_failures + failure.root_failures(),
                         cancelled: report.cancelled,
                     };
                 }
@@ -1163,17 +1260,18 @@ impl BuildExecutor {
         inspection: &squish_protocol::PlanInspection,
         report: &ExecutionReport,
     ) -> Result<Artifact, ManagerError> {
-        let previous = read_current_build_catalog(&self.prepared.storage)
-            .map_err(|cause| ManagerError::new("MGB124", Phase::Publish, cause.to_string()))?;
         let state = self
             .state
             .lock()
             .expect("build state mutex is not poisoned");
         let current = state.generations.clone();
         drop(state);
-        let mut targets: BTreeMap<_, _> = previous
+        let mut targets: BTreeMap<_, _> = self
+            .prepared
+            .prior_record
+            .clone()
             .into_iter()
-            .flat_map(|snapshot| snapshot.record.targets)
+            .flat_map(|record| record.targets)
             .map(|generation| (generation.target_id.clone(), generation))
             .collect();
         for generation in current {
@@ -1514,14 +1612,34 @@ impl BuildExecutor {
         let source_target = if state.backend.contains_key(target_name) {
             target_name.to_owned()
         } else {
-            let expected = expected_output(inputs, "prompt").ok_or_else(|| {
-                ManagerError::new("MGB104", Phase::Publish, "backend product input is absent")
-            })?;
+            let expected = inputs
+                .iter()
+                .map(|(_, outputs)| outputs)
+                .find(|outputs| {
+                    outputs.len() == 2
+                        && outputs
+                            .iter()
+                            .any(|output| output.name.as_str() == "prompt")
+                        && outputs
+                            .iter()
+                            .any(|output| output.name.as_str() == "backend-result")
+                })
+                .ok_or_else(|| {
+                    ManagerError::new(
+                        "MGB104",
+                        Phase::Publish,
+                        "complete backend output manifest is absent",
+                    )
+                })?;
             state
                 .backend
                 .iter()
                 .find_map(|(name, value)| {
-                    (protocol_blake3(&value.output.bytes) == expected).then(|| name.clone())
+                    let actual = [
+                        produced("prompt", ArtifactKind::Prompt, &value.output.bytes),
+                        produced("backend-result", ArtifactKind::DebugInfo, &value.debug),
+                    ];
+                    (actual.as_slice() == expected).then(|| name.clone())
                 })
                 .ok_or_else(|| {
                     ManagerError::new(
@@ -2223,6 +2341,7 @@ fn build_plan(
     snapshot: &ProjectSnapshot,
     sources: &[FrozenSource],
     targets: &[TargetBuild],
+    emit: &[EmitKind],
 ) -> Result<PreparedPlan<BuildWork>, ManagerError> {
     let mut actions = Vec::new();
     let mut work = BTreeMap::new();
@@ -2371,10 +2490,13 @@ fn build_plan(
             vec![],
             (
                 publish_inputs,
-                BTreeMap::from([(
-                    "destination".into(),
-                    target.resolved.output.to_string_lossy().into_owned(),
-                )]),
+                BTreeMap::from([
+                    (
+                        "destination".into(),
+                        target.resolved.output.to_string_lossy().into_owned(),
+                    ),
+                    ("emit".into(), canonical_emit_set(emit)),
+                ]),
             ),
         )?;
     }
@@ -2998,6 +3120,19 @@ fn output_name(name: &str) -> OutputName {
 }
 fn has_emit(values: &[EmitKind], requested: EmitKind) -> bool {
     values.contains(&requested)
+}
+fn canonical_emit_set(values: &[EmitKind]) -> String {
+    let mut tags: Vec<_> = values
+        .iter()
+        .map(|value| match value {
+            EmitKind::BinaryIr => "binary-ir",
+            EmitKind::Prompt => "prompt",
+            EmitKind::DebugInfo => "debug-info",
+        })
+        .collect();
+    tags.sort_unstable();
+    tags.dedup();
+    tags.join(",")
 }
 fn protocol_blake3(bytes: &[u8]) -> squish_protocol::Digest {
     squish_protocol::Digest::new(

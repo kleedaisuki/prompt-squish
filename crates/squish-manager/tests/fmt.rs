@@ -9,14 +9,14 @@ use std::{
 use squish_kernel::{CancellationToken, EventSink, InvocationContext, Kernel, SinkError};
 use squish_manager::{
     InvocationSettings, ManagerCapability, ResolveRequest, ResolvedDependencies, ServiceError,
-    Services, StorageLayout,
+    Services, StorageLayout, fmt,
 };
 use squish_project::{Lockfile, ResolutionMode};
 use squish_protocol::{
     Event, EventPayload, FormatRequest, FormatSelection, InvocationId, OperationRequest,
     ProjectPath, WorkspaceScope,
 };
-use squish_repository::PackageLocation;
+use squish_repository::{Discovery, PackageLocation, ProjectRepository};
 use squish_xml_front::DSL_NAMESPACE;
 
 #[derive(Default)]
@@ -284,5 +284,113 @@ fn format_workers_cross_barrier_and_one_failure_prevents_batch_write() {
     assert_eq!(
         std::fs::read_to_string(invalid).unwrap(),
         "<plain   value = \"not-an-entry\"/>"
+    );
+}
+
+fn plan_digest(
+    project: &Path,
+    check: bool,
+    diff: bool,
+    invocation: &str,
+) -> squish_protocol::PlanDigest {
+    let request = OperationRequest::Format(FormatRequest {
+        project: ProjectPath::new(project.to_string_lossy()).unwrap(),
+        scope: WorkspaceScope::Current,
+        selection: FormatSelection::All,
+        style: None,
+        check,
+        diff,
+    });
+    let events = Arc::new(Events::default());
+    let context = InvocationContext::new(
+        InvocationId::new(invocation).unwrap(),
+        CancellationToken::default(),
+        events.clone(),
+    );
+    let manager = ManagerCapability::with_default_settings(UnusedServices);
+    let capabilities: [&dyn squish_kernel::Capability; 1] = [&manager];
+    Kernel::new(&capabilities)
+        .unwrap()
+        .dispatch(&request, &context)
+        .unwrap();
+    events
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|event| match &event.payload {
+            EventPayload::PlanReady { digest, .. } => Some(digest.clone()),
+            _ => None,
+        })
+        .expect("format planning seals one plan")
+}
+
+fn graph_digest(project: &Path, check: bool, diff: bool) -> squish_build::SemanticGraphDigest {
+    let request = FormatRequest {
+        project: ProjectPath::new(project.to_string_lossy()).unwrap(),
+        scope: WorkspaceScope::Current,
+        selection: FormatSelection::All,
+        style: None,
+        check,
+        diff,
+    };
+    let repository =
+        ProjectRepository::discover(Discovery::Explicit(project.to_path_buf())).unwrap();
+    let snapshot = repository.snapshot_workspace().unwrap();
+    let storage = StorageLayout::project_local_for_tests(repository.root());
+    fmt::prepare(&request, &snapshot, &[], &storage)
+        .unwrap()
+        .plan()
+        .unwrap()
+        .graph()
+        .semantic_digest()
+}
+
+#[test]
+fn plan_digest_is_job_independent_and_sensitive_to_check_and_diff() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("xmlsquish.toml"),
+        "manifest-version = 1\n[package]\nname = \"app\"\nversion = \"1.0.0\"\nsource-root = \"src\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir(directory.path().join("src")).unwrap();
+    std::fs::write(
+        directory.path().join("src/main.xml"),
+        format!("<xs:entry xmlns:xs=\"{DSL_NAMESPACE}\">ok</xs:entry>"),
+    )
+    .unwrap();
+
+    let baseline = plan_digest(directory.path(), true, false, "digest-a");
+    let baseline_graph = graph_digest(directory.path(), true, false);
+    assert_eq!(
+        baseline,
+        plan_digest(directory.path(), true, false, "digest-b"),
+        "invocation/job identity is not plan semantics"
+    );
+    assert_eq!(
+        baseline_graph,
+        graph_digest(directory.path(), true, false),
+        "equal format semantics produce a stable graph digest"
+    );
+    assert_ne!(
+        baseline,
+        plan_digest(directory.path(), false, false, "digest-write"),
+        "check versus write changes commit behavior"
+    );
+    assert_ne!(
+        baseline_graph,
+        graph_digest(directory.path(), false, false),
+        "check versus write changes graph semantics"
+    );
+    assert_ne!(
+        baseline,
+        plan_digest(directory.path(), true, true, "digest-diff"),
+        "diff generation changes format and aggregation behavior"
+    );
+    assert_ne!(
+        baseline_graph,
+        graph_digest(directory.path(), true, true),
+        "diff generation changes graph semantics"
     );
 }
