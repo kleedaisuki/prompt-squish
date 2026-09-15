@@ -54,127 +54,71 @@ const en = {
     "history": "Historical 0.2.0 specification"
   },
   "release": {
-    "title": "xmlsquish 0.3.0 release notes",
-    "description": "Installation, breaking changes, migration and resource limits for xmlsquish 0.3.0.",
-    "eyebrow": "A new language for your prompts",
-    "heroTitle": "Macros for reuse.",
-    "heroAccent": "Entries for building.",
-    "heroBody": "Meet xmlsquish 0.3.0. Keep reusable macros in libraries, compose each prompt in an explicit entry, and ship only the structure and text your agent needs.",
-    "installCta": "Get 0.3.0",
-    "changesCta": "Explore what’s new",
-    "sourceInstall": "Prefer to build from source?",
-    "downloadsTitle": "Download. Extract. Run.",
-    "downloadsBody": "Choose your operating system and CPU architecture. Each archive includes the executable and license. No Rust toolchain required.",
-    "download": "Download",
+    "title": "xmlsquish v1.0.0 — Prompt project manager",
+    "description": "xmlsquish v1.0.0 turns the XML Prompt compiler into a Cargo-like project manager with creation, formatting, builds, dependencies, workspaces, and inspectable artifacts.",
+    "date": "September 15, 2026",
+    "heroTitle": "Your prompts are projects.",
+    "heroAccent": "Manage them like code.",
+    "heroBody": "xmlsquish v1.0.0 is a local-first, deterministic project manager for XML Prompts. Create a project, manage dependencies, build linked artifacts, and inspect how every result was made.",
+    "releaseActions": "Release actions",
+    "installCta": "Get the v1.0.0 candidate",
+    "exploreCta": "See the workflow",
+    "platformLine": "Release candidate · Windows, Linux, and macOS assets arrive with the v1.0.0 GitHub Release",
+    "pipelineTitle": "The v1 product model",
+    "pipeline": [
+      { "title": "Project", "body": "Workspace, manifest, XML sources, and locked dependencies" },
+      { "title": "XSIR", "body": "Validated, canonical binary intermediate representation" },
+      { "title": "Link", "body": "Resolve imports, symbols, and relocations" },
+      { "title": "Artifacts", "body": ".prompt output with optional .xsir and .psdbg evidence" }
+    ],
+    "journeyLabel": "One tool, the whole local loop",
+    "journeyTitle": "Six commands from idea to evidence.",
+    "journeyBody": "Each command enters the same typed manager, scheduler, cancellation, and event pipeline—no hidden second implementation in the CLI.",
+    "journey": [
+      { "command": "new support", "title": "Create", "body": "Start a complete project and optionally register it in the enclosing workspace." },
+      { "command": "fmt", "title": "Format", "body": "Canonicalize project XML without changing its meaning." },
+      { "command": "add policy", "title": "Add", "body": "Resolve and record a dependency through the project model." },
+      { "command": "remove policy", "title": "Remove", "body": "Remove a dependency while keeping project state coherent." },
+      { "command": "build", "title": "Build", "body": "Lower, link, and publish deterministic Prompt artifacts." },
+      { "command": "inspect artifact", "title": "Inspect", "body": "Trace outputs, inputs, and provenance without rebuilding." }
+    ],
+    "featuresLabel": "Project management, not command accumulation",
+    "featuresTitle": "A coherent manager around the compiler.",
+    "features": [
+      { "code": "new → commit", "title": "Transactional project creation", "body": "Stage and validate before an exclusive publish. Interrupted operations recover without exposing a half-written project." },
+      { "code": "workspace + lock", "title": "Workspace and dependencies", "body": "Discover package context, inherit configuration, register members, and keep dependency decisions reproducible." },
+      { "code": "prompt + xsir + psdbg", "title": "Inspectable artifacts", "body": "Ship the Prompt while retaining optional binary IR and provenance evidence for tools and debugging." }
+    ],
+    "outputLabel": "Humans and automation share one truth",
+    "outputTitle": "One event stream, three renderers.",
+    "outputBody": "Output format changes presentation, never execution semantics. Terminals, scripts, IDEs, and robot agents observe the same ordered operation.",
+    "outputs": [
+      { "name": "human", "body": "Readable terminal diagnostics and progress." },
+      { "name": "short", "body": "Compact, stable lines for logs and shell tools." },
+      { "name": "ndjson", "body": "Structured newline-delimited JSON for IDEs and agents." }
+    ],
+    "downloadsTitle": "Native v1.0.0 builds",
+    "downloadsBody": "The links below are the expected release assets. They become downloadable when the v1.0.0 GitHub Release is published; until then, install the release candidate from source.",
     "platformNotes": ["Windows 10/11 · ZIP", "glibc 2.35+ · tar.gz", "macOS 11+ · tar.gz"],
-    "checksum": "SHA-256 checksums",
-    "downloadHelp": "Extract the archive, run ./xmlsquish --version (Windows: .\\xmlsquish.exe --version), then add its folder to PATH to use it anywhere.",
-    "unsignedNote": "Binaries are not code-signed or notarized. SHA-256 verifies download integrity, not publisher identity. Your OS may ask you to approve an unrecognized executable.",
-    "sourceNote": "Windows · Linux · macOS · No Rust installation needed",
-    "highlightsLabel": "Built for prompts that grow",
-    "highlightsTitle": "Clear boundaries. Less repeated work.",
-    "highlights": [
-      {
-        "number": "01",
-        "title": "Libraries are not entry points",
-        "body": "Define macros in modules. Import them into a separate entry and expand exactly what you need. No implicit main.",
-        "code": "module → import → entry"
-      },
-      {
-        "number": "02",
-        "title": "Keep the prompt, drop the metadata",
-        "body": "Final XML keeps structure and text, removes every attribute and namespace declaration, and compresses formatting whitespace.",
-        "code": ".o.xml = structure + text"
-      },
-      {
-        "number": "03",
-        "title": "Reuse work, not execution state",
-        "body": "Shared static IR payloads avoid repeated serialization. Recursive frames, explicit inputs and diagnostic origins remain independent.",
-        "code": "prepare once · expand again"
-      }
-    ],
-    "pipelineTitle": "From readable source to a focused prompt.",
-    "pipelineSteps": [
-      "Compose an entry",
-      "Inspect provenance",
-      "Ship compact XML"
-    ],
-    "pipelineNote": "Macros still recurse and return values. Arguments stay isolated and explicit. Metadata belongs in the diagnostic IR—not in the prompt you send.",
-    "breakingLabel": "Upgrading from 0.2?",
-    "breakingBody": "0.3.0 separates entry documents from macro libraries and replaces mount/call with expand. Migrate your sources; old syntax and module entry attributes are not supported.",
-    "technicalDetails": "Release details & migration",
-    "closeTitle": "Ready to build your next prompt?",
-    "closeBody": "Start with the tagged release. Keep the source readable, the inputs explicit and the result compact.",
-    "copy": "Copy command",
-    "copied": "Copied",
-    "copyFailed": "Copy failed; select the command manually",
-    "dateLabel": "Release date",
-    "date": "September 11, 2026",
-    "tagLabel": "Git tag",
-    "rustLabel": "Minimum supported Rust version",
-    "github": "View on GitHub",
-    "introduction": "0.3.0 introduces separate xs:entry and xs:module sources, one import operation and recursive xs:expand. There is no implicit main, module entry selector or fragment construct. The compiler remains an internal module of the CLI binary.",
-    "installation": "Installation",
-    "installBody": "Use Rust 1.88 or newer to install from the pinned tag and lockfile.",
-    "installNote": "Expected version: xmlsquish 0.3.0. This optional source installation requires Rust 1.88+. Not published on crates.io.",
-    "migration": "Language and migration",
-    "contract": "0.3.0 contract",
-    "action": "Migration",
+    "checksums": "Expected SHA-256 checksum manifest",
+    "binaryNote": "Release status: candidate. Native archives are unsigned and not notarized. SHA-256 verifies integrity, not publisher identity.",
+    "sourceLabel": "Release candidate",
+    "sourceTitle": "Install the v1 source candidate.",
+    "sourceBody": "Rust 1.88 or newer is required. The command is pinned to the v1.0.0 tag and will succeed after the release workflow publishes that tag; before then, build the current release branch directly.",
+    "github": "Follow the v1.0.0 release on GitHub",
+    "migrationLabel": "Moving from the compiler-era CLI",
+    "migrationTitle": "Adopt the project model deliberately.",
+    "migrationBody": "v1.0.0 preserves the XML language work while changing the primary user model from individual compilation invocations to managed projects.",
     "migrationRows": [
-      [
-        "Separate libraries and builds",
-        "Use xs:entry for imports, input parameters and output construction. Keep macro definitions in xs:module files."
-      ],
-      [
-        "One loading and one expansion operation",
-        "Replace call with expand. Replace mount with import plus a named macro expansion. An entry cannot be imported."
-      ],
-      [
-        "Explicit inputs and returned values",
-        "Pass Unicode text with arg and node sequences with fill/slot. Recursive results compose without capturing caller variables."
-      ],
-      [
-        "Local namespace bindings",
-        "Import definitions, then bind a local prefix to the macro namespace URI. Prefix spellings need not match across files."
-      ],
-      [
-        "Attribute-free final prompts",
-        "All attributes, namespace declarations and element prefixes are removed from .o.xml. Move meaningful attribute content into text elements."
-      ],
-      [
-        "Reusable compiler snapshots",
-        "Internal prepare/expand APIs reuse frozen sources and static event payloads. Reprepare to observe source edits; no global cache or new CLI flag."
-      ]
+      { "title": "Create a package", "body": "Use xmlsquish new PATH for new work. It produces a manifest and src/prompt.xml that format and build offline immediately." },
+      { "title": "Build from project context", "body": "Run fmt and build inside the package or workspace. Treat target output as derived state, not source." },
+      { "title": "Manage dependencies", "body": "Use add and remove instead of editing resolved state by hand; commit the manifest and lockfile decisions." },
+      { "title": "Integrate structured output", "body": "Automation should consume NDJSON rather than parse decorated human output." }
     ],
-    "example": "Minimal program",
-    "exampleNote": "Save as hello.xml, then run the command below.",
-    "execution": "Execution and output",
-    "outputRules": [
-      "The complete import closure is frozen, validated and linked before entry execution. Imports only load modules; expand only targets named macros. Module import cycles are legal, recursive expansion is budgeted.",
-      "-I emits provenance-bearing .i.xml; default -O emits clean .o.xml. --debug and --explain retain diagnostics without changing the final prompt.",
-      "Final .o.xml removes all attributes, namespace declarations and element prefixes, then squishes whitespace. Intermediate diagnostics preserve origin and expansion frames.",
-      "Sources are not overwritten. Failed expansion publishes no partial result. Directory/glob builds skip valid library modules; explicitly compiling a module is an error."
-    ],
-    "limits": "Resource and security boundaries",
-    "option": "Option",
-    "default": "Default",
-    "scope": "Scope",
-    "budgetScopes": [
-      "Active execution frames, including one entry frame",
-      "Total execution frames, including one entry frame",
-      "Serialized final-output bytes and each temporary argument/fill buffer"
-    ],
-    "security": "The byte guard checks buffers separately, not aggregate allocations or all provenance-IR overhead. It is not a process-memory limit. The loader supports only file: URIs representable as native paths, rejecting other schemes, queries and fragments. Paths do not dereference symbolic links. This is not a filesystem sandbox: untrusted sources need external filesystem and process-resource isolation.",
-    "verification": "Verification",
-    "verifyBody": "Reproduce validation from the release source using the commands below. Refer to the release commit's CI logs for recorded results.",
-    "links": "Further reading",
-    "changelog": "Changelog",
-    "design": "Language design and migration rationale",
-    "readme": "Project documentation",
-    "performance": "Performance, with context",
-    "performanceBody": "Seven paired release-build microbenchmarks reduced full in-memory compilation time by 17–81%. This includes parsing, expansion and IR serialization, but excludes CLI startup, token counting and file I/O. The small GSP CLI build was effectively unchanged within run-to-run noise. Some preparation-only cases got slower; cached payloads remain in memory until the snapshot is dropped.",
-    "performanceLink": "Inspect workloads, raw samples and trade-offs",
-    "history": "Previous release: 0.2.0"
+    "boundaryTitle": "Durability boundary",
+    "boundaryBody": "Controlled process-kill recovery is tested across creation commit boundaries. v1.0.0 does not claim proof against sudden Windows power loss, storage-controller cache loss, or arbitrary remote filesystems. Filesystems without exclusive atomic rename support are rejected rather than given a racy fallback.",
+    "closeTitle": "Build prompts as durable projects.",
+    "closeBody": "Start with new, keep dependencies explicit, and ship artifacts whose origin you can inspect."
   }
 };
 
@@ -230,127 +174,71 @@ const zh: typeof en = {
     "history": "历史 0.2.0 规范"
   },
   "release": {
-    "title": "xmlsquish 0.3.0 发布说明",
-    "description": "xmlsquish 0.3.0 的安装方法、破坏性变更、迁移指南及资源边界。",
-    "eyebrow": "为提示词组合，带来新的语言",
-    "heroTitle": "宏，负责复用。",
-    "heroAccent": "入口，负责构建。",
-    "heroBody": "认识 xmlsquish 0.3.0。宏库维护可复用定义，独立入口组织每一份提示词；交给 Agent 的，只留下需要的结构与文本。",
-    "installCta": "获取 0.3.0",
-    "changesCta": "看看有哪些新变化",
-    "sourceInstall": "也可以自行编译",
-    "downloadsTitle": "下载，解压，直接运行。",
-    "downloadsBody": "选择操作系统和 CPU 架构。压缩包包含可执行文件与许可证，无需安装 Rust 工具链。",
-    "download": "下载",
+    "title": "xmlsquish v1.0.0 — Prompt 项目管理器",
+    "description": "xmlsquish v1.0.0 将 XML Prompt 编译器升级为 Cargo 式项目管理器，统一提供创建、格式化、构建、依赖、工作区与可检查产物。",
+    "date": "2026 年 9 月 15 日",
+    "heroTitle": "提示词，也是项目。",
+    "heroAccent": "像代码一样管理它。",
+    "heroBody": "xmlsquish v1.0.0 是本地优先、确定性的 XML Prompt 项目管理器。创建项目、管理依赖、构建链接后的产物，并检查每个结果如何生成。",
+    "releaseActions": "发布操作",
+    "installCta": "获取 v1.0.0 候选版",
+    "exploreCta": "查看工作流",
+    "platformLine": "候选发布 · v1.0.0 GitHub Release 将提供 Windows、Linux 与 macOS 资产",
+    "pipelineTitle": "v1 产品模型",
+    "pipeline": [
+      { "title": "项目", "body": "工作区、清单、XML 源码与锁定依赖" },
+      { "title": "XSIR", "body": "经过验证的规范二进制中间表示" },
+      { "title": "链接", "body": "解析导入、符号与重定位" },
+      { "title": "产物", "body": ".prompt 输出，以及可选 .xsir 与 .psdbg 证据" }
+    ],
+    "journeyLabel": "一个工具，覆盖完整本地循环",
+    "journeyTitle": "六个命令，从想法走到证据。",
+    "journeyBody": "每条命令都进入同一个类型化管理器、调度、取消与事件管线；CLI 中没有隐藏的第二套实现。",
+    "journey": [
+      { "command": "new support", "title": "创建", "body": "创建完整项目，并可登记到外围工作区。" },
+      { "command": "fmt", "title": "格式化", "body": "规范化项目 XML，不改变语义。" },
+      { "command": "add policy", "title": "添加", "body": "通过项目模型解析并记录依赖。" },
+      { "command": "remove policy", "title": "移除", "body": "移除依赖，同时保持项目状态一致。" },
+      { "command": "build", "title": "构建", "body": "降低、链接并发布确定性的 Prompt 产物。" },
+      { "command": "inspect artifact", "title": "检查", "body": "无需重建即可追踪输出、输入与来源。" }
+    ],
+    "featuresLabel": "项目管理，不是命令堆积",
+    "featuresTitle": "编译器之外，是一个完整管理器。",
+    "features": [
+      { "code": "new → commit", "title": "事务式项目创建", "body": "先暂存和验证，再排他发布；操作中断后可以恢复，不暴露只写了一半的项目。" },
+      { "code": "workspace + lock", "title": "工作区与依赖", "body": "发现包上下文、继承配置、登记成员，并让依赖选择可复现。" },
+      { "code": "prompt + xsir + psdbg", "title": "可检查产物", "body": "交付 Prompt，同时可保留二进制 IR 与来源证据，服务于工具和调试。" }
+    ],
+    "outputLabel": "人类与自动化共享同一事实",
+    "outputTitle": "一条事件流，三种渲染器。",
+    "outputBody": "输出格式只改变呈现，不改变执行语义。终端、脚本、IDE 与 robot agent 观察同一个有序操作。",
+    "outputs": [
+      { "name": "human", "body": "面向终端的可读诊断与进度。" },
+      { "name": "short", "body": "面向日志与 Shell 工具的紧凑稳定行。" },
+      { "name": "ndjson", "body": "面向 IDE 与 Agent 的换行分隔结构化 JSON。" }
+    ],
+    "downloadsTitle": "v1.0.0 原生构建",
+    "downloadsBody": "下方是预期发布资产；v1.0.0 GitHub Release 发布后才可下载。在此之前，请从源码安装候选版本。",
     "platformNotes": ["Windows 10/11 · ZIP", "glibc 2.35+ · tar.gz", "macOS 11+ · tar.gz"],
-    "checksum": "SHA-256 校验文件",
-    "downloadHelp": "解压后运行 ./xmlsquish --version（Windows：.\\xmlsquish.exe --version）；将所在目录加入 PATH，即可在任意位置使用。",
-    "unsignedNote": "二进制尚未做代码签名或 macOS 公证。SHA-256 用于校验下载完整性，不证明发布者身份；系统可能提示你确认运行未知来源程序。",
-    "sourceNote": "Windows · Linux · macOS · 无需安装 Rust",
-    "highlightsLabel": "为不断成长的提示词而设计",
-    "highlightsTitle": "职责更清楚，重复工作更少。",
-    "highlights": [
-      {
-        "number": "01",
-        "title": "宏库不是程序入口",
-        "body": "module 定义宏，独立 entry 导入并展开所需内容。没有隐式 main，也不把文件偷偷当作宏。",
-        "code": "module → import → entry"
-      },
-      {
-        "number": "02",
-        "title": "保留提示词，移除元数据",
-        "body": "最终 XML 保留结构与文本，移除全部属性和命名空间声明，并压缩无意义的格式空白。",
-        "code": ".o.xml = structure + text"
-      },
-      {
-        "number": "03",
-        "title": "复用工作，不复用执行状态",
-        "body": "共享静态中间表示（IR）载荷，减少重复序列化；递归执行帧、显式输入和诊断来源仍各自独立。",
-        "code": "prepare once · expand again"
-      }
-    ],
-    "pipelineTitle": "从可读源码，到紧凑提示词。",
-    "pipelineSteps": [
-      "组织独立入口",
-      "检查来源信息",
-      "生成紧凑 XML"
-    ],
-    "pipelineNote": "宏仍可递归展开并传递返回值，参数保持显式且相互隔离。元数据留在诊断 IR 中，不混入最终发送的提示词。",
-    "breakingLabel": "正在从 0.2 升级？",
-    "breakingBody": "0.3.0 将入口文档与宏库分离，用 expand 替代 mount/call。源码需要迁移，不再接受旧语法或 module 的 entry 属性。",
-    "technicalDetails": "发布细节与迁移指南",
-    "closeTitle": "准备好构建下一份提示词了吗？",
-    "closeBody": "从固定版本开始，让源码可读、输入明确、产物紧凑。",
-    "copy": "复制安装命令",
-    "copied": "已复制",
-    "copyFailed": "复制失败，请手动选中命令",
-    "dateLabel": "发布日期",
-    "date": "2026 年 9 月 11 日",
-    "tagLabel": "Git 标签",
-    "rustLabel": "最低 Rust 版本",
-    "github": "在 GitHub 查看",
-    "introduction": "0.3.0 区分 xs:entry 与 xs:module，只保留 import 装载定义、xs:expand 递归展开宏。没有隐式 main、模块入口选择器或独立 fragment 构造。编译器仍是 CLI 二进制的内部模块。",
-    "installation": "安装",
-    "installBody": "使用 Rust 1.88 或更高版本，从固定标签及锁文件安装。",
-    "installNote": "预期版本为 xmlsquish 0.3.0。此备选源码安装方式需要 Rust 1.88+，尚未发布到 crates.io。",
-    "migration": "语言与迁移",
-    "contract": "0.3.0 契约",
-    "action": "迁移操作",
+    "checksums": "预期 SHA-256 校验清单",
+    "binaryNote": "发布状态：候选。原生压缩包未签名、未经 Apple 公证；SHA-256 校验完整性，不证明发布者身份。",
+    "sourceLabel": "即将可用",
+    "sourceTitle": "安装 v1 源码候选版。",
+    "sourceBody": "需要 Rust 1.88 或更高版本。命令固定到 v1.0.0 标签，将在发布工作流创建该标签后生效；在此之前可直接构建当前发布分支。",
+    "github": "在 GitHub 跟踪 v1.0.0 发布",
+    "migrationLabel": "从编译器时代的 CLI 迁移",
+    "migrationTitle": "有意识地采用项目模型。",
+    "migrationBody": "v1.0.0 延续 XML 语言能力，同时把主要用户模型从单次文件编译升级为受管理项目。",
     "migrationRows": [
-      [
-        "分离宏库与构建入口",
-        "xs:entry 放置导入、输入参数与输出结构；宏定义放入 xs:module 文件。"
-      ],
-      [
-        "一个装载操作，一个展开操作",
-        "call 改为 expand；mount 改为 import 加具名宏展开。不能 import 入口文件。"
-      ],
-      [
-        "显式输入与返回值",
-        "arg 传 Unicode 文本，fill/slot 传节点序列；递归结果可组合，不捕获调用方变量。"
-      ],
-      [
-        "前缀在本地声明",
-        "import 引入定义后，将本地前缀绑定到宏的命名空间 URI；文件间前缀拼写不必一致。"
-      ],
-      [
-        "最终提示词没有属性",
-        "从 .o.xml 移除所有属性、命名空间声明与元素前缀；有意义的属性内容应迁移成文本节点。"
-      ],
-      [
-        "复用编译器快照",
-        "内部 prepare/expand 接口复用冻结源码和静态事件载荷；源码变化后重新准备，不引入全局缓存或新 CLI 选项。"
-      ]
+      { "title": "创建包", "body": "新项目使用 xmlsquish new PATH；生成的清单与 src/prompt.xml 可立即离线格式化和构建。" },
+      { "title": "在项目上下文构建", "body": "在包或工作区中运行 fmt 与 build；target 输出是派生状态，不是源码。" },
+      { "title": "管理依赖", "body": "使用 add 与 remove，而不是手工编辑解析状态；提交清单与锁文件中的选择。" },
+      { "title": "接入结构化输出", "body": "自动化应消费 NDJSON，不要解析带装饰的人类输出。" }
     ],
-    "example": "最小程序",
-    "exampleNote": "保存为 hello.xml 后运行下方命令。",
-    "execution": "执行与输出",
-    "outputRules": [
-      "入口执行前冻结、验证并链接完整导入闭包。import 只装载模块，expand 只展开具名宏；模块导入环合法，递归展开受预算约束。",
-      "-I 生成带来源信息的 .i.xml；默认 -O 生成干净的 .o.xml。--debug 与 --explain 保留诊断，不改变最终提示词。",
-      "最终 .o.xml 移除全部属性、命名空间声明和元素前缀，再执行固定空白压缩；中间诊断保留生成来源与展开帧。",
-      "不覆盖源码，展开失败不发布部分结果。目录与 glob 构建跳过合法宏库；显式编译 module 文件会报错。"
-    ],
-    "limits": "资源与安全边界",
-    "option": "选项",
-    "default": "默认值",
-    "scope": "范围",
-    "budgetScopes": [
-      "活动执行帧数，包含一个入口帧",
-      "累计执行帧数，包含一个入口帧",
-      "最终输出及每个临时参数/fill 缓冲区的序列化字节数"
-    ],
-    "security": "字节预算分别检查缓冲区，不是全部活动分配量之和，也不包含所有来源中间表示（Intermediate Representation, IR）的开销，因此不是进程总内存限制。加载器仅支持可表示为本机路径的 file: URI，拒绝其他协议、查询参数和片段；路径规范化不解引用符号链接。这不是文件访问沙箱，不可信源码需要外部文件权限与进程资源隔离。",
-    "verification": "验证",
-    "verifyBody": "可在发布源码中运行下方命令复现检查；已记录的运行结果请查看发布提交的 CI 日志。",
-    "links": "延伸阅读",
-    "changelog": "更新日志",
-    "design": "语言设计与迁移依据",
-    "readme": "项目文档",
-    "performance": "性能数据，也说明边界",
-    "performanceBody": "7 组配对 release 微基准中，完整内存编译耗时下降 17%–81%。范围包含解析、展开与 IR 序列化，不含 CLI 启动、token 计数及文件 I/O。小型 GSP 的实际 CLI 构建变化接近运行波动。部分单独准备阶段变慢，缓存载荷也会保留到快照释放；这些取舍均列入报告。",
-    "performanceLink": "查看工作负载、原始样本与取舍",
-    "history": "上一版本：0.2.0"
+    "boundaryTitle": "持久性边界",
+    "boundaryBody": "我们测试了项目创建提交边界上的受控进程终止恢复。v1.0.0 不宣称已证明 Windows 突然断电、存储控制器缓存丢失或任意远程文件系统上的持久性；不支持排他原子重命名的文件系统会被拒绝，而不是使用有竞争条件的回退。",
+    "closeTitle": "把提示词构建成持久项目。",
+    "closeBody": "从 new 开始，保持依赖显式，交付来源可检查的产物。"
   }
 };
 
