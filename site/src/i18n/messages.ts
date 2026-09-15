@@ -69,6 +69,10 @@ type Messages = {
     title: string;
     intro: string;
     install: string;
+    format: string;
+    build: string;
+    add: string;
+    remove: string;
     inspect: string;
     optimize: string;
     color: string;
@@ -108,9 +112,9 @@ type Messages = {
 
 const zh: Messages = {
   meta: {
-    title: "xmlsquish — XML 提示词构建系统",
+    title: "xmlsquish — XML 提示词项目管理器",
     description:
-      "把提示词组织成多文件源码，通过宏、独立文件环境与显式参数与结构插槽，构建可检查的中间表示和紧凑的最终产物。",
+      "用统一项目管理器格式化、解析依赖并构建多文件 XML 提示词；复用二进制 XSIR，链接后发布 .prompt 与可选 .psdbg。",
   },
   nav: {
     build: "看一次构建",
@@ -121,56 +125,56 @@ const zh: Messages = {
     label: "主要导航",
   },
   hero: {
-    badge: "XML PROMPT BUILD SYSTEM",
-    revision: "v0.3.0 · 独立入口与宏库",
-    title: "提示词，也值得",
+    badge: "XML PROMPT PROJECT MANAGER",
+    revision: "项目管理器 · fmt / build / add / remove / inspect",
+    title: "提示词项目，也值得",
     accent: "好好构建。",
-    lead: "宏库维护定义，独立入口组织提示词。显式传参，递归展开，共享静态 IR；最终只保留结构与文本，移除属性并压紧空白。",
+    lead: "从 xmlsquish.toml 发现项目与工作区：格式化源码、解析锁定依赖、把 XML 编译成可缓存的二进制 XSIR，再链接并发布 .prompt 与 .psdbg。",
     primary: "看一次真实构建",
     secondary: "安装 CLI",
-    footnote: "Rust 2024 · 源文件不改写 · 编译产物可检查",
+    footnote: "Rust 2024 · 项目级增量构建 · Human / Short / NDJSON",
     source: "组织源码",
-    compile: "解析与组合",
+    compile: "编译 XSIR 并链接",
     artifact: "交付产物",
-    caption: "3 份源码 → 1 份提示词。不是把一段 XML 的换行删掉。",
+    caption: "项目清单 + XML 模块 → 二进制 XSIR → 链接 → .prompt + .psdbg。",
   },
   journey: {
     steps: [
       {
         label: "01 / AUTHOR",
-        title: "按职责拆分",
-        body: "Persona、任务与规则各自维护；用 import / expand 组合，而不是复制粘贴。",
+        title: "声明项目与依赖",
+        body: "在 xmlsquish.toml 声明包、目标与依赖；add / remove 以事务方式更新清单和锁文件。",
       },
       {
         label: "02 / COMPILE",
-        title: "展开成可检查的 XML",
-        body: "执行条件、宏与结构插槽，保留来源信息。-I 停在中间表示（Intermediate Representation, IR）。",
+        title: "编译并缓存 XSIR",
+        body: "每个 XML 模块生成规范二进制中间表示（XSIR）；内容寻址缓存复用未变化的纯变换。",
       },
       {
         label: "03 / DELIVER",
-        title: "生成紧凑 XML 产物",
-        body: "默认 -O 移除内部来源信息并压紧空白，写出 .o.xml；成功后清理对应 .i.xml。",
+        title: "链接并发布提示词",
+        body: "链接冻结的模块图并实例化入口，原子发布 .prompt；按 --emit 生成 .xsir 与自包含 .psdbg 伴随文件。",
       },
     ],
-    note: "SOURCE → SEMANTICS → ARTIFACT",
+    note: "PROJECT → RESOLVE → XSIR → LINK → ARTIFACT",
   },
   build: {
     eyebrow: "SHOW, DON'T JUST MINIFY",
-    title: "从三个文件，看懂一次构建。",
+    title: "从项目清单，看懂一次可复用构建。",
     intro:
-      "打开源码，再看展开结果：导入宏定义，显式传递 audience 并展开 Persona 与任务宏。点击 .i.xml / .o.xml 查看展开和最终结果。",
+      "切换项目清单、入口源码、二进制 XSIR 摘要、链接结果、最终 .prompt 与 .psdbg。示例命令可直接在仓库根目录运行。",
     label: "显式传给 audience 的参数",
     parent: "researchers · 研究者",
     self: "everyone · 所有人",
     proof:
-      "由仓库 Rust CLI 预编译并校验的示例；切换展示已有结果，不在浏览器里运行编译器。",
+      "数据记录当前项目管理器的工件契约；浏览器只展示结果，不把二进制 XSIR 伪装成 XML。",
     resultParent: "arg.audience = researchers，由调用者显式传入。",
     resultSelf: "arg.audience = everyone，由调用者显式传入。",
     tabLabel: "示例源码与构建产物",
     noScript: "未启用 JavaScript：以下完整列出两组参数的源码与结果。",
     source: "源码",
-    intermediate: "展开结果 · -I",
-    output: "最终产物 · -O",
+    intermediate: "构建阶段 / 伴随产物",
+    output: "最终 .prompt",
     copy: "复制代码",
     copied: "已复制",
     copyFailed: "无法复制，请选中文本",
@@ -215,38 +219,42 @@ const zh: Messages = {
   },
   cli: {
     eyebrow: "FROM SOURCE TO YOUR WORKFLOW",
-    title: "检查展开结果，再交给 Agent。",
+    title: "管理整个项目，再交付给 Agent。",
     intro:
-      "接收文件、目录或 glob。跳过 .i.xml / .o.xml；目录与 glob 跳过 module 库文件，原子替换产物；一个文件失败，不阻止其他独立输入。",
-    install: "备选：从源码编译 v0.3.0（Rust 1.88+）",
-    inspect: "只编译，保留中间表示",
-    optimize: "展开、清理来源信息并压紧最终 XML",
-    color: "纯文本诊断，也适合 CI",
-    note: "目录递归发现；源文件保持不变。示例路径对应本仓库 examples/site-demo；使用 v0.3.0 编译。",
-    diagnosticTitle: "错误回到源码，而不是一串重复路径。",
+      "fmt、build、add、remove 与 inspect 共享同一项目发现、配置、依赖解析和事件协议；build 默认继续独立工作，并原子发布成功目标。",
+    install: "从当前工作区源码安装（Rust 1.88+）",
+    format: "格式化项目源码；--check 只检查",
+    build: "构建 prompt、XSIR 与调试伴随文件",
+    add: "添加依赖并更新清单与锁文件",
+    remove: "移除直接依赖别名",
+    inspect: "检查类型化 IR、链接、来源、缓存或产物",
+    optimize: "构建 prompt、XSIR 与调试伴随文件",
+    color: "NDJSON 事件流，适合 CI 与工具",
+    note: "命令向上发现 xmlsquish.toml，也可显式传 --manifest-path；Human 面向终端，Short 稳定逐行，json 为 NDJSON。",
+    diagnosticTitle: "一种事件协议，三种终端体验。",
     diagnosticBody:
-      "下面是独立错误用例的真实诊断，显示文件、行号和源码快照；支持 --color auto / always / never。没有精确列号，就不虚构插入符位置。",
+      "Human 提供进度与摘要，Short 逐行且可 grep，--message-format=json 输出带版本与序号的换行分隔 JSON（NDJSON）事件。--plain 提供无装饰追加输出。",
   },
   stats: {
     eyebrow: "MEASURE THE RIGHT TRANSFORMATION",
-    title: "先分清展开，再谈节省。",
+    title: "缓存模块，链接目标，原子发布。",
     intro:
-      "这是上方 researchers 示例的真实结果。IR 含来源信息，展示时归一化源码 URI；最终产物移除来源信息并压紧空白。",
-    source: "主源文件",
-    ir: "已组装 IR",
-    final: "最终提示词",
+      "构建计划把扫描、编译、链接、实例化、后端与发布分开；只有确定性的纯变换进入持久动作缓存。",
+    source: "项目源码",
+    ir: "可复用 XSIR",
+    final: "发布目标",
     saved: "来源信息清理差额",
-    dependencies: "引用加载",
-    files: "个不同文件",
-    note: "固定 o200k_base；字节数不含 BOM。IR 仅展示归一化文本的 UTF-8 字节数，不与实际 token 数作差。Token 大小不等于模型质量、实际账单或推理速度。",
+    dependencies: "构建动作",
+    files: "个模块",
+    note: "计数描述演示项目的结构，不声称二进制 XSIR 是文本或把缓存命中等同于端到端加速；最终字节数不含 BOM。",
   },
   limits: {
     title: "有边界，才可依赖。",
-    body: '仅编译可信源：静态 src 可以读取本地源码。宏不能读取环境变量、时间或运行子进程。安全 insert 不防提示词注入（prompt injection）；-O 会压紧用户文本中的 XML 空白；空白敏感场景应检查最终产物。',
+    body: '仅构建可信源码与依赖：本地及已解析包可被前端读取。宏不能读取环境、时间或运行子进程；insert 也不能阻止提示词注入（prompt injection）。--locked / --offline / --frozen 控制解析，不是文件系统沙箱。',
     details: "明确的计算边界与资源预算",
-    engine: "XML 是数据，宏是计算。",
+    engine: "项目负责边界，XSIR 负责复用。",
     engineBody:
-      "标量宏支持递归、字符串构造与命名捕获；XML 结构通过 slot / fill 传递。--max-depth、--max-expansions 与 --max-output-bytes 控制运行预算，失败不提交部分产物。",
+      "解析器保留 XML 语义；规范二进制 XSIR 跨目标复用；链接器解析导入与重定位；发布器只提交完整的一代 .prompt / .psdbg。缓存可删除，不是权威项目状态。",
     docs: "阅读完整语义与边界",
   },
   footer: {
@@ -261,9 +269,9 @@ const zh: Messages = {
 
 const en: Messages = {
   meta: {
-    title: "xmlsquish — A build system for XML prompts",
+    title: "xmlsquish — The project manager for XML prompts",
     description:
-      "Compose multi-file XML prompts with macros, isolated file frames, and explicit arguments and structural slots. Inspect the expanded IR, then ship a compact artifact.",
+      "Format sources, resolve dependencies, and build multi-file XML prompts with one project manager. Reuse binary XSIR, link, then publish .prompt and optional .psdbg artifacts.",
   },
   nav: {
     build: "See a build",
@@ -274,57 +282,57 @@ const en: Messages = {
     label: "Main navigation",
   },
   hero: {
-    badge: "XML PROMPT BUILD SYSTEM",
-    revision: "v0.3.0 · Explicit entries and macro libraries",
-    title: "Your prompts deserve",
+    badge: "XML PROMPT PROJECT MANAGER",
+    revision: "Project manager · fmt / build / add / remove / inspect",
+    title: "Your prompt projects deserve",
     accent: "a proper build.",
-    lead: "Keep definitions in macro libraries and compose prompts in explicit entries. Pass inputs, expand recursively and reuse static IR. Final output keeps structure and text, strips attributes and compacts whitespace.",
+    lead: "Discover projects and workspaces from xmlsquish.toml, format sources, resolve locked dependencies, compile XML to cacheable binary XSIR, then link and publish .prompt and .psdbg.",
     primary: "See a real build",
     secondary: "Install the CLI",
-    footnote: "Rust 2024 · Sources stay untouched · Inspectable artifacts",
+    footnote: "Rust 2024 · Project-level incremental builds · Human / Short / NDJSON",
     source: "Author sources",
-    compile: "Resolve & compose",
+    compile: "Compile XSIR & link",
     artifact: "Deliver artifacts",
-    caption: "3 source files → 1 prompt. More than XML with fewer line breaks.",
+    caption: "Project manifest + XML modules → binary XSIR → link → .prompt + .psdbg.",
   },
   journey: {
     steps: [
       {
         label: "01 / AUTHOR",
-        title: "Split by responsibility",
-        body: "Maintain personas, tasks, and rules separately. Compose with import / expand instead of copy-paste.",
+        title: "Declare project and dependencies",
+        body: "Declare packages, targets, and dependencies in xmlsquish.toml; add / remove update manifests and lockfiles transactionally.",
       },
       {
         label: "02 / COMPILE",
-        title: "Inspect expanded XML",
-        body: "Evaluate macros and conditions, retain provenance. -I stops at the intermediate representation (IR).",
+        title: "Compile and cache XSIR",
+        body: "Compile each XML module to canonical binary XSIR; the content-addressed cache reuses unchanged pure transformations.",
       },
       {
         label: "03 / DELIVER",
-        title: "Ship compact XML",
-        body: "Default -O removes internal provenance compacts whitespace, and writes .o.xml, removing its matching .i.xml after success.",
+        title: "Link and publish the prompt",
+        body: "Link the frozen module graph and instantiate the entry, atomically publishing .prompt plus .xsir and self-contained .psdbg companions selected by --emit.",
       },
     ],
-    note: "SOURCE → SEMANTICS → ARTIFACT",
+    note: "PROJECT → RESOLVE → XSIR → LINK → ARTIFACT",
   },
   build: {
     eyebrow: "SHOW, DON'T JUST MINIFY",
-    title: "Three files. One understandable build.",
+    title: "One project manifest. One reusable build.",
     intro:
-      "Read the sources, then inspect the expansion: Persona and task macros are expanded with an explicit audience argument. Select .i.xml / .o.xml to see the results.",
+      "Switch among the manifest, entry source, binary XSIR summary, linked target, final .prompt, and .psdbg. The example command runs from the repository root.",
     label: "Explicit audience argument",
     parent: "researchers · focused audience",
     self: "everyone · broad audience",
     proof:
-      "Precompiled and verified with the repository's Rust CLI. Controls switch recorded results; no compiler runs in your browser.",
+      "The data records the current manager artifact contract. The browser only presents it; binary XSIR is never passed off as XML.",
     resultParent: "arg.audience = researchers, explicitly passed by the caller.",
     resultSelf: "arg.audience = everyone, explicitly passed by the caller.",
     tabLabel: "Example sources and build artifacts",
     noScript:
       "JavaScript is disabled: both argument sets and all sources and outputs are shown below.",
     source: "Source",
-    intermediate: "Expanded · -I",
-    output: "Final · -O",
+    intermediate: "Build stage / companion",
+    output: "Final .prompt",
     copy: "Copy code",
     copied: "Copied",
     copyFailed: "Copy unavailable; select the text",
@@ -369,38 +377,42 @@ const en: Messages = {
   },
   cli: {
     eyebrow: "FROM SOURCE TO YOUR WORKFLOW",
-    title: "Inspect the expansion. Then feed your agent.",
+    title: "Manage the project. Then ship to your agent.",
     intro:
-      "Accept files, directories, or globs. Discovery skips .i.xml / .o.xml and module libraries in directories/globs; output replacement is atomic, and one failed file does not stop independent inputs.",
-    install: "Optional: build v0.3.0 from source (Rust 1.88+)",
-    inspect: "Compile only; keep the intermediate",
-    optimize: "Expand, lower provenance, and compact final XML",
-    color: "Plain diagnostics, ready for CI",
-    note: "Directories are recursive; sources stay untouched. These paths use examples/site-demo in this repository. Compile with v0.3.0.",
-    diagnosticTitle: "Errors point to source, not a pile of repeated paths.",
+      "fmt, build, add, remove, and inspect share project discovery, configuration, dependency resolution, and one event protocol. Build keeps independent work moving and publishes successful targets atomically.",
+    install: "Install from the current workspace source (Rust 1.88+)",
+    format: "Format project sources; --check only reports",
+    build: "Build prompt, XSIR, and debug companion",
+    add: "Add a dependency and update manifest plus lockfile",
+    remove: "Remove a direct dependency alias",
+    inspect: "Inspect typed IR, links, sources, cache, or artifacts",
+    optimize: "Build prompt, XSIR, and debug companion",
+    color: "NDJSON events for CI and tools",
+    note: "Commands discover xmlsquish.toml upward or accept --manifest-path. Human targets terminals, Short is stable line output, and json is NDJSON.",
+    diagnosticTitle: "One event protocol. Three terminal experiences.",
     diagnosticBody:
-      "This separate failing example shows the physical file, line, and original source snapshot. Choose --color auto / always / never; no caret is invented when a column isn't known.",
+      "Human offers progress and summaries; Short is line-oriented and grep-friendly; --message-format=json emits versioned, sequenced newline-delimited JSON (NDJSON). --plain is undecorated and append-only.",
   },
   stats: {
     eyebrow: "MEASURE THE RIGHT TRANSFORMATION",
-    title: "Assembly growth is not failed compression.",
+    title: "Cache modules. Link targets. Publish atomically.",
     intro:
-      "Actual numbers from the researchers example. IR contains provenance with display-normalized source URIs; final output removes metadata and compacts whitespace.",
-    source: "Primary source",
-    ir: "Assembled IR",
-    final: "Final prompt",
+      "The plan separates scan, compile, link, instantiate, backend, and publish. Only deterministic pure transformations enter the persistent action cache.",
+    source: "Project sources",
+    ir: "Reusable XSIR",
+    final: "Published target",
     saved: "Removed provenance tokens",
-    dependencies: "Dependency loads",
-    files: "unique files",
-    note: "Fixed o200k_base; bytes exclude BOM. IR shows normalized UTF-8 bytes only, not a token delta. Token size is not model quality, actual billing, or inference speed.",
+    dependencies: "Build actions",
+    files: "modules",
+    note: "Counts describe the demo project structure. They do not pretend binary XSIR is text or equate a cache hit with end-to-end speed; final bytes exclude BOM.",
   },
   limits: {
     title: "Clear boundaries. Fewer surprises.",
-    body: 'Compile trusted sources only: static src can read local sources. Macros cannot read environment values, time, or launch subprocesses. Safe insert does not prevent prompt injection. -O compacts XML whitespace in user text; inspect the final artifact for whitespace-sensitive uses.',
+    body: 'Build trusted sources and dependencies only: the frontend can read local and resolved package sources. Macros cannot read environment values, time, or launch subprocesses, and insert does not prevent prompt injection. --locked / --offline / --frozen control resolution; they are not a filesystem sandbox.',
     details: "Explicit computational boundaries and budgets",
-    engine: "XML is data. Macros are computation.",
+    engine: "Projects define boundaries. XSIR enables reuse.",
     engineBody:
-      "Scalar macros support recursion, string construction, and named captures; slot / fill pass XML structure. --max-depth, --max-expansions, and --max-output-bytes bound each invocation. Failures never publish partial output.",
+      "The frontend preserves XML semantics; canonical binary XSIR is reusable across targets; the linker resolves imports and relocations; the publisher commits only a complete .prompt / .psdbg generation. Cache state is disposable, never authoritative project state.",
     docs: "Read the full semantics and boundaries",
   },
   footer: {

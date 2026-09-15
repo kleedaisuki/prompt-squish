@@ -22,20 +22,21 @@ const heroCode =
 const commands = [
   {
     title: m.cli.install,
-    code: "cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v0.3.0 --locked",
+    code: "cargo install --git https://github.com/kleedaisuki/prompt-squish --locked",
   },
-  { title: m.cli.inspect, code: "xmlsquish -I examples/site-demo/agent.xml" },
-  { title: m.cli.optimize, code: "xmlsquish -O examples/site-demo/agent.xml" },
+  { title: m.cli.format, code: "xmlsquish fmt --check --manifest-path examples/site-demo/xmlsquish.toml" },
+  { title: m.cli.build, code: "xmlsquish build --manifest-path examples/site-demo/xmlsquish.toml --emit prompt --emit ir --emit debug" },
+  { title: m.cli.add, code: "xmlsquish add prompt-kit@^1 --registry default --dry-run" },
+  { title: m.cli.remove, code: "xmlsquish remove prompt-kit --dry-run" },
+  { title: m.cli.inspect, code: "xmlsquish inspect link agent --manifest-path examples/site-demo/xmlsquish.toml" },
   {
     title: m.cli.color,
-    code: "xmlsquish --color never examples/site-demo/agent.xml",
+    code: "xmlsquish --message-format=json build --manifest-path examples/site-demo/xmlsquish.toml",
   },
 ];
-const stages = [
-  { label: m.stats.source, value: metrics.sourceTokens, unit: "tokens", file: "agent.xml" },
-  { label: m.stats.ir, value: metrics.irBytes, unit: "UTF-8 bytes", file: "agent.i.xml" },
-  { label: m.stats.final, value: metrics.finalTokens, unit: "tokens", file: "agent.o.xml" },
-];
+type MetricLabel = "source" | "ir" | "final";
+const stages = demo.metricStages.map((stage) => ({ ...stage, label: m.stats[stage.label as MetricLabel] }));
+const pipelineArtifacts = demo.artifacts.filter((item) => item.kind !== "source");
 ---
 
 <header class="site-header">
@@ -48,7 +49,7 @@ const stages = [
       <a href="#build">{m.nav.build}</a>
       <a href="#model">{m.nav.model}</a>
       <a href="#cli">{m.nav.cli}</a>
-      <a href={paths[locale].releases}>v0.3.0</a>
+      <a href={paths[locale].releases}>{m.reference.nav.releases}</a>
       <a href={paths[locale].namespace}>{m.reference.nav.namespace}</a>
     </nav>
     <div class="header-actions">
@@ -72,7 +73,7 @@ const stages = [
       <p class="hero-footnote">{m.hero.footnote}</p>
     </div>
     <figure class="build-graph" aria-label={m.hero.caption}>
-      <div class="graph-toolbar"><span class="graph-dot" aria-hidden="true"></span><code>build / agent.xml</code><span class="graph-status">XML → XML</span></div>
+      <div class="graph-toolbar"><span class="graph-dot" aria-hidden="true"></span><code>build / site-demo:agent</code><span class="graph-status">XML → XSIR → prompt</span></div>
       <div class="graph-sources">
         <div class="graph-label"><span>01</span>{m.hero.source}</div>
         <div class="entry-file"><span class="file-symbol" aria-hidden="true">&lt;/&gt;</span><strong>agent.xml</strong><code>xs:arg</code></div>
@@ -87,7 +88,7 @@ const stages = [
       </div>
       <div class="graph-artifacts">
         <div class="graph-label"><span>03</span>{m.hero.artifact}</div>
-        <div class="artifact-path"><code>agent.i.xml</code><span aria-hidden="true">→</span><code class="final-artifact">agent.o.xml <span aria-hidden="true">✓</span></code></div>
+        <div class="artifact-path">{pipelineArtifacts.map((item, index) => <><code class:list={{ "final-artifact": item.kind === "output" }}>{item.name}</code>{index < pipelineArtifacts.length - 1 && <span aria-hidden="true">→</span>}</>)}</div>
       </div>
       <figcaption>{m.hero.caption}</figcaption>
     </figure>
@@ -130,7 +131,7 @@ const stages = [
   <section id="cli" class="section cli-section" aria-labelledby="cli-title">
     <div class="page-width">
       <div class="cli-layout">
-        <div class="cli-copy"><p class="eyebrow">{m.cli.eyebrow}</p><h2 id="cli-title">{m.cli.title}</h2><p>{m.cli.intro}</p><p class="small-note">{m.cli.note}</p><a class="text-link" href={paths[locale].releases + "#install"}>{m.reference.release.installCta} ↓</a></div>
+        <div class="cli-copy"><p class="eyebrow">{m.cli.eyebrow}</p><h2 id="cli-title">{m.cli.title}</h2><p>{m.cli.intro}</p><p class="small-note">{m.cli.note}</p><a class="text-link" href={repo}>{m.cli.install} ↗</a></div>
         <div class="command-terminal"><div class="terminal-title"><span class="graph-dot" aria-hidden="true"></span><code>terminal / xmlsquish</code></div>{commands.map((command) => <div class="command"><p># {command.title}</p><pre><code><span aria-hidden="true">$ </span>{command.code}</code></pre></div>)}</div>
       </div>
       <div class="diagnostic-layout"><div><h3>{m.cli.diagnosticTitle}</h3><p>{m.cli.diagnosticBody}</p></div><pre class="diagnostic"><code><span>{diagnosticHeadline}</span>{diagnosticRest}</code></pre></div>
@@ -140,13 +141,13 @@ const stages = [
   <section id="stats" class="section page-width" aria-labelledby="stats-title">
     <div class="section-heading"><p class="eyebrow">{m.stats.eyebrow}</p><h2 id="stats-title">{m.stats.title}</h2><p>{m.stats.intro}</p></div>
     <div class="metrics-stages">{stages.map((stage, index) => <div class:list={["metric-stage", index === 2 && "metric-final"]}><span>{stage.label}</span><strong>{stage.value}<small>{stage.unit}</small></strong><code>{stage.file}</code></div>)}</div>
-    <div class="metrics-details"><div><strong>{metrics.dependencyLoads}<small> / {metrics.uniqueDeps} {m.stats.files}</small></strong><span>{m.stats.dependencies}</span></div><div><strong>{metrics.finalBytes}<small> UTF-8 bytes</small></strong><span>agent.o.xml</span></div></div>
+    <div class="metrics-details"><div><strong>{metrics.actions}<small> / {metrics.modules} {m.stats.files}</small></strong><span>{m.stats.dependencies}</span></div><div><strong>{metrics.finalBytes}<small> UTF-8 bytes</small></strong><span>agent.prompt</span></div></div>
     <p class="metrics-note">{m.stats.note}</p>
   </section>
 
   <section class="boundaries page-width" aria-labelledby="boundaries-title">
     <div><p class="eyebrow">THE FINE PRINT, UP FRONT.</p><h2 id="boundaries-title">{m.limits.title}</h2><p>{m.limits.body}</p><a class="text-link" href={`${repo}/blob/main/docs/dsl.md`}>{m.limits.docs} ↗</a></div>
-    <details class="engine-details"><summary>{m.limits.details}<span aria-hidden="true">+</span></summary><div><h3 id="fsm-title">{m.limits.engine}</h3><p>{m.limits.engineBody}</p><code>XML → compile → expand → IR → lower → squish → output</code><a class="text-link" href={`${repo}/blob/main/docs/dsl.md`}>DSL specification ↗</a></div></details>
+    <details class="engine-details"><summary>{m.limits.details}<span aria-hidden="true">+</span></summary><div><h3 id="fsm-title">{m.limits.engine}</h3><p>{m.limits.engineBody}</p><code>project → resolve → XML → binary XSIR → link → .prompt + .psdbg</code><a class="text-link" href={`${repo}/blob/main/docs/dsl.md`}>DSL specification ↗</a></div></details>
   </section>
 
   <section class="closing page-width"><img src="/favicon.svg" alt="" width="58" height="58" loading="lazy"/><h2>{m.footer.tagline}</h2><a class="action primary" href={repo}>{m.footer.source}<span aria-hidden="true">↗</span></a></section>
@@ -411,6 +412,7 @@ const stages = [
   }
   .artifact-path {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.7rem;
   }

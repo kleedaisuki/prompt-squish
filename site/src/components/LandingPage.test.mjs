@@ -77,7 +77,7 @@ for (const locale of ["zh", "en"]) {
     await page.keyboard.press("End");
     assert.equal(
       await page
-        .locator('[data-example-tab="output"]')
+        .locator('[data-example-tab="debug"]')
         .getAttribute("aria-selected"),
       "true",
     );
@@ -85,47 +85,48 @@ for (const locale of ["zh", "en"]) {
       await page
         .locator("[data-code-panel]:visible")
         .getAttribute("data-source"),
-      demo.scenarios.parent.output,
+      demo.scenarios.parent.stages.debug,
     );
+    await page.locator('[data-example-tab="prompt"]').click();
     await page.locator('[data-mode="self"]').click();
     assert.equal(
       await page
         .locator("[data-code-panel]:visible")
         .getAttribute("data-stage"),
-      "output",
+      "prompt",
     );
     assert.equal(
       await page
         .locator("[data-code-panel]:visible")
         .getAttribute("data-source"),
-      demo.scenarios.self.output,
+      demo.scenarios.self.stages.prompt,
     );
     await page.locator("[data-copy]").click();
     assert.equal(
       await page.evaluate(() => window.copiedCode),
-      demo.scenarios.self.output,
+      demo.scenarios.self.stages.prompt,
     );
-    await page.locator('[data-example-tab="output"]').focus();
+    await page.locator('[data-example-tab="prompt"]').focus();
     await page.keyboard.press("Home");
     await page.keyboard.press("ArrowRight");
     assert.equal(
       await page
         .locator("[data-code-panel]:visible")
         .getAttribute("data-stage"),
-      "persona",
+      "source",
     );
-    await page.locator('[data-example-tab="intermediate"]').click();
+    await page.locator('[data-example-tab="xsir"]').click();
     await page.locator("[data-copy]").click();
     assert.equal(
       await page.evaluate(() => window.copiedCode),
-      demo.scenarios.self.intermediate,
+      demo.scenarios.self.stages.xsir,
     );
     await page.locator('[data-mode="parent"]').click();
     assert.equal(
       await page
         .locator("[data-code-panel]:visible")
         .getAttribute("data-source"),
-      demo.scenarios.parent.intermediate,
+      demo.scenarios.parent.stages.xsir,
     );
     const anchors = await page
       .locator('a[href^="#"]')
@@ -171,7 +172,7 @@ for (const locale of ["zh", "en"]) {
           ),
           "theme stylesheet failed to load",
         );
-        await page.locator('[data-example-tab="output"]').click();
+        await page.locator('[data-example-tab="prompt"]').click();
         assert(
           await page.evaluate(
             () => document.documentElement.scrollWidth <= innerWidth,
@@ -204,7 +205,10 @@ for (const locale of ["zh", "en"]) {
 test("without JavaScript, all recorded sources and outputs remain readable", async () => {
   const page = await browser.newPage({ javaScriptEnabled: false });
   await page.goto(base, { waitUntil: "networkidle" });
-  assert.equal(await page.locator("[data-code-panel]:visible").count(), 10);
+  assert.equal(
+    await page.locator("[data-code-panel]:visible").count(),
+    demo.artifacts.length * 2,
+  );
   assert.equal(await page.locator("[data-copy]:visible").count(), 0);
   assert.equal(await page.locator("[data-mode]:visible").count(), 0);
   assert(await page.locator("[data-fallback]").isVisible());
@@ -240,7 +244,7 @@ for (const [path, locale, kind] of [
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
       if (kind === "namespace") {
         assert.equal(await page.locator("tbody tr").count(), 11);
-        assert.equal(await page.locator('link[rel="describedby"]').getAttribute("href"), "/ns/0.3.0/dsl.md");
+        assert.equal(await page.locator('link[rel="describedby"]').getAttribute("href"), "/ns/dsl.md");
         assert.equal(await page.locator(".identity code").textContent(), "https://xmlsquish.moesegfault.dev/ns");
       } else {
         assert.equal(await page.locator(".release-highlights article").count(), 3);

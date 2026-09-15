@@ -9,21 +9,18 @@ interface Props {
 const { locale } = Astro.props;
 const m = messages[locale].build;
 const modes = ["parent", "self"] as const;
-const tabs = [
-  { stage: "source", name: "agent.xml", label: m.source },
-  { stage: "persona", name: "persona.xml", label: m.source },
-  { stage: "tasks", name: "tasks.xml", label: m.source },
-  { stage: "intermediate", name: "agent.i.xml", label: m.intermediate },
-  { stage: "output", name: "agent.o.xml", label: m.output },
-] as const;
+/** Keep the visible pipeline derived from one artifact manifest. / 可见流水线由同一份产物清单驱动。 */
+const tabs = demo.artifacts.map((artifact) => ({
+  ...artifact,
+  label: artifact.kind === "source" ? m.source : artifact.kind === "output" ? m.output : m.intermediate,
+}));
 const prefix = `build-explorer-${locale}`;
+type Stage = keyof typeof demo.scenarios.parent.stages;
 function source(
   mode: (typeof modes)[number],
-  stage: (typeof tabs)[number]["stage"],
+  stage: Stage,
 ) {
-  if (stage === "persona") return demo.files["persona.xml"];
-  if (stage === "tasks") return demo.files["tasks.xml"];
-  return demo.scenarios[mode][stage];
+  return demo.scenarios[mode].stages[stage];
 }
 ---
 
@@ -51,14 +48,14 @@ function source(
   </div>
   <span class="copy-status" data-copy-status role="status" aria-live="polite" aria-atomic="true"></span>
   <div class="code-workspace">
-    {modes.map((mode) => tabs.map((tab) => <section class:list={['code-panel', { 'output-panel': tab.stage === 'output' }]}
+    {modes.map((mode) => tabs.map((tab) => <section class:list={['code-panel', { 'output-panel': tab.kind === 'output' }]}
       id={`${prefix}-${mode}-${tab.stage}`} data-code-panel data-stage={tab.stage} data-scenario={mode}
-      data-source={source(mode, tab.stage)}>
+      data-source={source(mode, tab.stage as Stage)}>
       <header class="code-heading">
         <h3>{tab.name} <span class="fallback-mode">/ {m[mode]}</span></h3>
         <span class="stage-label">{tab.label}</span>
       </header>
-      <Code code={source(mode, tab.stage)} lang="xml" theme="rose-pine" />
+      <Code code={source(mode, tab.stage as Stage)} lang={tab.language as "xml" | "toml" | "plaintext"} theme="rose-pine" />
     </section>))}
   </div>
   <p class="build-proof"><span aria-hidden="true">✓</span>{m.proof}</p>
