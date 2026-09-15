@@ -4,7 +4,8 @@
 
 use squish_protocol::{
     ActionId, ActionTotals, CapabilityId, Event, EventPayload, ExitStatus, InvocationId, JobId,
-    JobSummary, OperationKind, OperationRequest, OperationResult, Timing,
+    JobSummary, OperationKind, OperationRequest, OperationResult, PlanCloseReason, PlanId,
+    PlanMode, PlanningAttemptId, PlanningIssueId, PlanningStepId, SupersedeReason, Timing,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -40,7 +41,8 @@ pub struct OperationOutcome {
     pub result: OperationResult,
     /// 所有动作的终态计数。 / Terminal counts for every action.
     pub totals: ActionTotals,
-    /// 自身执行失败（非阻塞）的根失败数。 / Root execution failures, excluding blocked actions.
+    /// 最终计划问题、独立动作失败或致命计划失败的根失败数。 /
+    /// Root failures from final-plan issues, independent action failures, or a fatal planning failure.
     pub root_failures: u64,
     /// 调用是否被取消。 / Whether the invocation was cancelled.
     pub cancelled: bool,
@@ -171,6 +173,13 @@ impl InvocationContext {
     /// `JobFinished.sequence` also gives the exact count of preceding events.
     pub fn emit(&self, payload: EventPayload) -> Result<(), EmitError> {
         let _delivery = lock(&self.delivery);
+        if let Err(error) = Event::new(self.id.clone(), 0, payload.clone()).validate() {
+            let error = EmitError::Lifecycle(LifecycleError(format!(
+                "non-canonical native v2 event: {error}"
+            )));
+            self.remember(error.clone());
+            return Err(error);
+        }
         let sequence = {
             let mut lifecycle = lock(&self.lifecycle);
             if let Err(error) = lifecycle.observe(&payload).map_err(EmitError::Lifecycle) {
@@ -323,12 +332,12 @@ impl<'a> Kernel<'a> {
         let reduction = lock(&context.lifecycle)
             .finish(&outcome, context.is_cancelled())
             .map_err(KernelError::Lifecycle)?;
-        if outcome.result.is_unavailable() && reduction.totals.failed == 0 && !outcome.cancelled {
+        if outcome.result.is_unavailable() && reduction.root_failures == 0 && !outcome.cancelled {
             return Err(KernelError::UnavailableResultOnSuccess);
         }
         let status = if outcome.cancelled {
             ExitStatus::Cancelled
-        } else if reduction.totals.failed > 0 {
+        } else if reduction.root_failures > 0 {
             ExitStatus::Failed
         } else {
             ExitStatus::Success
@@ -392,18 +401,19 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ActionState {
-    Queued,
+    Declared,
     Started,
     Succeeded,
     Failed,
     Blocked,
     Cancelled,
+    Superseded,
 }
 impl ActionState {
     fn terminal(self) -> bool {
         matches!(
             self,
-            Self::Succeeded | Self::Failed | Self::Blocked | Self::Cancelled
+            Self::Succeeded | Self::Failed | Self::Blocked | Self::Cancelled | Self::Superseded
         )
     }
 }
@@ -413,12 +423,47 @@ struct ActionRecord {
     state: ActionState,
     cache_hit: bool,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StepState {
+    Started,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+impl StepState {
+    fn terminal(self) -> bool {
+        self != Self::Started
+    }
+}
+#[derive(Debug)]
+struct AttemptRecord {
+    steps: HashMap<PlanningStepId, StepState>,
+    issues: HashSet<PlanningIssueId>,
+}
+#[derive(Debug)]
+struct PlanRecord {
+    mode: PlanMode,
+    expected_actions: u64,
+    expected_issues: u64,
+    actions: HashMap<ActionId, ActionRecord>,
+    any_started: bool,
+    closed: Option<PlanCloseReason>,
+}
+#[derive(Clone, Debug)]
+enum Active {
+    Attempt(PlanningAttemptId),
+    Plan(PlanId),
+}
 #[derive(Default)]
 struct Lifecycle {
     job: Option<JobId>,
-    planned: Option<u64>,
-    actions: HashMap<ActionId, ActionRecord>,
-    cache_hits: u64,
+    active: Option<Active>,
+    attempts: HashMap<PlanningAttemptId, AttemptRecord>,
+    plans: HashMap<PlanId, PlanRecord>,
+    final_plan: Option<PlanId>,
+    retry_allowed: bool,
+    fatal_planning_failure: bool,
+    planning_cancelled: bool,
     operation_completed: bool,
     job_finished: bool,
 }
@@ -430,73 +475,616 @@ struct Reduction {
 impl Lifecycle {
     fn observe(&mut self, event: &EventPayload) -> Result<(), LifecycleError> {
         if self.operation_completed {
-            return Err(LifecycleError(
-                "capability event followed operation completion".into(),
-            ));
+            return self.invalid("capability event followed operation completion");
         }
         match event {
-            EventPayload::PlanReady { job, actions } => self.plan(job, *actions),
-            EventPayload::ActionQueued {
+            EventPayload::PlanningStarted { job, attempt } => self.start_attempt(job, attempt),
+            EventPayload::PlanningStepStarted {
+                job, attempt, step, ..
+            } => self.start_step(job, attempt, step),
+            EventPayload::PlanningStepSucceeded {
+                job, attempt, step, ..
+            } => self.finish_step(job, attempt, step, StepState::Succeeded),
+            EventPayload::PlanningStepFailed {
+                job, attempt, step, ..
+            } => self.finish_step(job, attempt, step, StepState::Failed),
+            EventPayload::PlanningStepCancelled {
+                job, attempt, step, ..
+            } => self.finish_step(job, attempt, step, StepState::Cancelled),
+            EventPayload::PlanningIssue {
                 job,
+                attempt,
+                issue,
+                ..
+            } => self.issue(job, attempt, issue),
+            EventPayload::PlanningFailed { job, attempt, .. } => {
+                self.end_attempt(job, attempt, false)
+            }
+            EventPayload::PlanningCancelled { job, attempt } => {
+                self.end_attempt(job, attempt, true)
+            }
+            EventPayload::PlanReady {
+                job,
+                attempt,
+                plan,
+                mode,
+                actions,
+                issues,
+                ..
+            } => self.seal(job, attempt, plan, *mode, *actions, *issues),
+            EventPayload::ActionDeclared {
+                job,
+                plan,
                 action,
                 dependencies,
                 ..
-            } => self.queue(job, action, dependencies),
-            EventPayload::ActionStarted { job, action } => {
-                self.transition(job, action, &[ActionState::Queued], ActionState::Started)
+            } => self.declare(job, plan, action, dependencies),
+            EventPayload::ActionStarted { job, plan, action } => {
+                self.start_action(job, plan, action)
             }
             EventPayload::CacheHit {
                 job,
+                plan,
                 action,
                 action_key,
                 ..
             } => {
                 if action_key.is_none() {
-                    return Err(LifecycleError(
-                        "new cache-hit emissions require a complete action key".into(),
-                    ));
+                    return self.invalid("native v2 cache hit requires a complete action key");
                 }
-                self.cache(job, action)?;
-                self.cache_hits += 1;
-                Ok(())
+                self.cache(job, plan, action)
             }
-            EventPayload::ActionSucceeded { job, action, .. } => {
-                self.transition(job, action, &[ActionState::Started], ActionState::Succeeded)
-            }
-            EventPayload::ActionFailed { job, action, .. } => {
-                self.transition(job, action, &[ActionState::Started], ActionState::Failed)
-            }
+            EventPayload::ActionSucceeded {
+                job, plan, action, ..
+            } => self.action_transition(
+                job,
+                plan,
+                action,
+                &[ActionState::Started],
+                ActionState::Succeeded,
+            ),
+            EventPayload::ActionFailed {
+                job, plan, action, ..
+            } => self.action_transition(
+                job,
+                plan,
+                action,
+                &[ActionState::Started],
+                ActionState::Failed,
+            ),
             EventPayload::ActionBlocked {
                 job,
+                plan,
                 action,
                 blocked_by,
-            } => self.block(job, action, blocked_by),
-            EventPayload::ActionCancelled { job, action, .. } => self.transition(
+            } => self.block(job, plan, action, blocked_by),
+            EventPayload::ActionCancelled {
+                job, plan, action, ..
+            } => self.action_transition(
                 job,
+                plan,
                 action,
-                &[ActionState::Queued, ActionState::Started],
+                &[ActionState::Declared, ActionState::Started],
                 ActionState::Cancelled,
             ),
+            EventPayload::ActionSuperseded {
+                job,
+                plan,
+                action,
+                reason,
+                ..
+            } => {
+                if *reason != SupersedeReason::AuthoritativeRevisionChanged {
+                    return self.invalid("unsupported supersede reason");
+                }
+                self.action_transition(
+                    job,
+                    plan,
+                    action,
+                    &[ActionState::Declared, ActionState::Started],
+                    ActionState::Superseded,
+                )
+            }
+            EventPayload::PlanClosed { job, plan, reason } => self.close_plan(job, plan, *reason),
             EventPayload::Diagnostic(_) => Ok(()),
-            EventPayload::OperationCompleted { .. } | EventPayload::JobFinished(_) => Err(
-                LifecycleError("only the kernel may complete or finish a job".into()),
-            ),
-            _ => Err(LifecycleError(
-                "kernel does not understand this additive lifecycle event".into(),
-            )),
+            EventPayload::OperationCompleted { .. } | EventPayload::JobFinished(_) => {
+                self.invalid("only the kernel may complete or finish a job")
+            }
+            _ => self.invalid("kernel does not understand this lifecycle event"),
         }
+    }
+
+    fn invalid<T>(&self, message: impl Into<String>) -> Result<T, LifecycleError> {
+        Err(LifecycleError(message.into()))
+    }
+    fn bind_job(&mut self, job: &JobId) -> Result<(), LifecycleError> {
+        match &self.job {
+            Some(expected) if expected != job => {
+                self.invalid(format!("event job `{job}` differs from job `{expected}`"))
+            }
+            Some(_) => Ok(()),
+            None => {
+                self.job = Some(job.clone());
+                Ok(())
+            }
+        }
+    }
+    fn same_job(&self, job: &JobId) -> Result<(), LifecycleError> {
+        match &self.job {
+            Some(expected) if expected == job => Ok(()),
+            Some(expected) => {
+                self.invalid(format!("event job `{job}` differs from job `{expected}`"))
+            }
+            None => self.invalid("event preceded planning-started"),
+        }
+    }
+    fn start_attempt(
+        &mut self,
+        job: &JobId,
+        attempt: &PlanningAttemptId,
+    ) -> Result<(), LifecycleError> {
+        self.bind_job(job)?;
+        if self.active.is_some()
+            || (!self.attempts.is_empty() && !self.retry_allowed)
+            || self.final_plan.is_some()
+            || self.fatal_planning_failure
+            || self.planning_cancelled
+        {
+            return self.invalid("planning attempt is not permitted in the current job state");
+        }
+        if self.attempts.contains_key(attempt) {
+            return self.invalid(format!("planning attempt `{attempt}` was reused"));
+        }
+        self.attempts.insert(
+            attempt.clone(),
+            AttemptRecord {
+                steps: HashMap::new(),
+                issues: HashSet::new(),
+            },
+        );
+        self.active = Some(Active::Attempt(attempt.clone()));
+        self.retry_allowed = false;
+        Ok(())
+    }
+    fn active_attempt(
+        &self,
+        job: &JobId,
+        attempt: &PlanningAttemptId,
+    ) -> Result<&AttemptRecord, LifecycleError> {
+        self.same_job(job)?;
+        match &self.active {
+            Some(Active::Attempt(active)) if active == attempt => {
+                Ok(self.attempts.get(attempt).expect("active attempt exists"))
+            }
+            _ => self.invalid(format!("planning attempt `{attempt}` is not active")),
+        }
+    }
+    fn start_step(
+        &mut self,
+        job: &JobId,
+        attempt: &PlanningAttemptId,
+        step: &PlanningStepId,
+    ) -> Result<(), LifecycleError> {
+        self.active_attempt(job, attempt)?;
+        let record = self
+            .attempts
+            .get_mut(attempt)
+            .expect("active attempt exists");
+        if record
+            .steps
+            .insert(step.clone(), StepState::Started)
+            .is_some()
+        {
+            return self.invalid(format!("planning step `{step}` was reused"));
+        }
+        Ok(())
+    }
+    fn finish_step(
+        &mut self,
+        job: &JobId,
+        attempt: &PlanningAttemptId,
+        step: &PlanningStepId,
+        state: StepState,
+    ) -> Result<(), LifecycleError> {
+        self.active_attempt(job, attempt)?;
+        let current = self
+            .attempts
+            .get_mut(attempt)
+            .expect("active attempt exists")
+            .steps
+            .get_mut(step)
+            .ok_or_else(|| LifecycleError(format!("planning step `{step}` was not started")))?;
+        if *current != StepState::Started {
+            return self.invalid(format!("planning step `{step}` terminated more than once"));
+        }
+        *current = state;
+        Ok(())
+    }
+    fn issue(
+        &mut self,
+        job: &JobId,
+        attempt: &PlanningAttemptId,
+        issue: &PlanningIssueId,
+    ) -> Result<(), LifecycleError> {
+        self.active_attempt(job, attempt)?;
+        if !self
+            .attempts
+            .get_mut(attempt)
+            .expect("active attempt exists")
+            .issues
+            .insert(issue.clone())
+        {
+            return self.invalid(format!("planning issue `{issue}` was reused"));
+        }
+        Ok(())
+    }
+    fn require_terminal_steps(&self, attempt: &PlanningAttemptId) -> Result<(), LifecycleError> {
+        if self
+            .attempts
+            .get(attempt)
+            .expect("attempt exists")
+            .steps
+            .values()
+            .all(|state| state.terminal())
+        {
+            Ok(())
+        } else {
+            self.invalid("planning attempt ended with a non-terminal step")
+        }
+    }
+    fn end_attempt(
+        &mut self,
+        job: &JobId,
+        attempt: &PlanningAttemptId,
+        cancelled: bool,
+    ) -> Result<(), LifecycleError> {
+        self.active_attempt(job, attempt)?;
+        self.require_terminal_steps(attempt)?;
+        self.active = None;
+        if cancelled {
+            self.planning_cancelled = true;
+        } else {
+            self.fatal_planning_failure = true;
+        }
+        Ok(())
+    }
+    fn seal(
+        &mut self,
+        job: &JobId,
+        attempt: &PlanningAttemptId,
+        plan: &PlanId,
+        mode: PlanMode,
+        actions: u64,
+        issues: u64,
+    ) -> Result<(), LifecycleError> {
+        self.active_attempt(job, attempt)?;
+        if mode == PlanMode::Legacy {
+            return self.invalid("inspection-only legacy plans are not native v2 lifecycle events");
+        }
+        self.require_terminal_steps(attempt)?;
+        let actual_issues = self
+            .attempts
+            .get(attempt)
+            .expect("attempt exists")
+            .issues
+            .len() as u64;
+        if issues != actual_issues {
+            return self.invalid(format!(
+                "plan declared {issues} issues but observed {actual_issues}"
+            ));
+        }
+        if self.plans.contains_key(plan) {
+            return self.invalid(format!("plan `{plan}` was reused"));
+        }
+        self.plans.insert(
+            plan.clone(),
+            PlanRecord {
+                mode,
+                expected_actions: actions,
+                expected_issues: issues,
+                actions: HashMap::new(),
+                any_started: false,
+                closed: None,
+            },
+        );
+        self.active = Some(Active::Plan(plan.clone()));
+        Ok(())
+    }
+    fn active_plan(&self, job: &JobId, plan: &PlanId) -> Result<&PlanRecord, LifecycleError> {
+        self.same_job(job)?;
+        match &self.active {
+            Some(Active::Plan(active)) if active == plan => {
+                Ok(self.plans.get(plan).expect("active plan exists"))
+            }
+            _ => self.invalid(format!("plan `{plan}` is not active")),
+        }
+    }
+    fn declarations_complete(record: &PlanRecord) -> bool {
+        record.actions.len() as u64 == record.expected_actions
+    }
+    fn declare(
+        &mut self,
+        job: &JobId,
+        plan: &PlanId,
+        action: &ActionId,
+        dependencies: &[ActionId],
+    ) -> Result<(), LifecycleError> {
+        let record = self.active_plan(job, plan)?;
+        if Self::declarations_complete(record) {
+            return self.invalid("action declaration followed the plan's declared count");
+        }
+        let mut unique = HashSet::new();
+        if dependencies
+            .iter()
+            .any(|dependency| dependency == action || !unique.insert(dependency))
+        {
+            return self.invalid(format!("action `{action}` has invalid dependencies"));
+        }
+        let record = self.plans.get_mut(plan).expect("active plan exists");
+        if record
+            .actions
+            .insert(
+                action.clone(),
+                ActionRecord {
+                    dependencies: dependencies.to_vec(),
+                    state: ActionState::Declared,
+                    cache_hit: false,
+                },
+            )
+            .is_some()
+        {
+            return self.invalid(format!("action `{action}` was declared more than once"));
+        }
+        if Self::declarations_complete(record) {
+            Self::validate_dag(record)?;
+        }
+        Ok(())
+    }
+    fn validate_dag(record: &PlanRecord) -> Result<(), LifecycleError> {
+        for (action, item) in &record.actions {
+            for dependency in &item.dependencies {
+                if !record.actions.contains_key(dependency) {
+                    return Err(LifecycleError(format!(
+                        "action `{action}` refers to undeclared dependency `{dependency}`"
+                    )));
+                }
+            }
+        }
+        fn visit(
+            id: &ActionId,
+            plan: &PlanRecord,
+            visiting: &mut HashSet<ActionId>,
+            done: &mut HashSet<ActionId>,
+        ) -> Result<(), LifecycleError> {
+            if done.contains(id) {
+                return Ok(());
+            }
+            if !visiting.insert(id.clone()) {
+                return Err(LifecycleError(format!(
+                    "action graph contains a cycle at `{id}`"
+                )));
+            }
+            for dependency in &plan.actions[id].dependencies {
+                visit(dependency, plan, visiting, done)?;
+            }
+            visiting.remove(id);
+            done.insert(id.clone());
+            Ok(())
+        }
+        let mut visiting = HashSet::new();
+        let mut done = HashSet::new();
+        for id in record.actions.keys() {
+            visit(id, record, &mut visiting, &mut done)?;
+        }
+        Ok(())
+    }
+    fn start_action(
+        &mut self,
+        job: &JobId,
+        plan: &PlanId,
+        action: &ActionId,
+    ) -> Result<(), LifecycleError> {
+        let record = self.active_plan(job, plan)?;
+        if record.mode != PlanMode::Execute {
+            return self.invalid("actions may start only in an execute plan");
+        }
+        if !Self::declarations_complete(record) {
+            return self.invalid("action started before every plan vertex was declared");
+        }
+        let item = record
+            .actions
+            .get(action)
+            .ok_or_else(|| LifecycleError(format!("action `{action}` was not declared")))?;
+        if item.state != ActionState::Declared {
+            return self.invalid(format!(
+                "invalid transition for action `{action}` from {:?}",
+                item.state
+            ));
+        }
+        for dependency in &item.dependencies {
+            if record.actions[dependency].state != ActionState::Succeeded {
+                return self.invalid(format!(
+                    "action `{action}` started before dependency `{dependency}` succeeded"
+                ));
+            }
+        }
+        let record = self.plans.get_mut(plan).expect("active plan exists");
+        record
+            .actions
+            .get_mut(action)
+            .expect("declared action")
+            .state = ActionState::Started;
+        record.any_started = true;
+        Ok(())
+    }
+    fn action_transition(
+        &mut self,
+        job: &JobId,
+        plan: &PlanId,
+        action: &ActionId,
+        from: &[ActionState],
+        to: ActionState,
+    ) -> Result<(), LifecycleError> {
+        let record = self.active_plan(job, plan)?;
+        if !Self::declarations_complete(record) {
+            return self.invalid("action transition preceded complete declaration");
+        }
+        let state = record
+            .actions
+            .get(action)
+            .ok_or_else(|| LifecycleError(format!("action `{action}` was not declared")))?
+            .state;
+        if !from.contains(&state) {
+            return self.invalid(format!(
+                "invalid transition for action `{action}` from {state:?}"
+            ));
+        }
+        self.plans
+            .get_mut(plan)
+            .expect("active plan exists")
+            .actions
+            .get_mut(action)
+            .expect("declared action")
+            .state = to;
+        Ok(())
+    }
+    fn cache(
+        &mut self,
+        job: &JobId,
+        plan: &PlanId,
+        action: &ActionId,
+    ) -> Result<(), LifecycleError> {
+        self.active_plan(job, plan)?;
+        self.action_transition(
+            job,
+            plan,
+            action,
+            &[ActionState::Started],
+            ActionState::Started,
+        )?;
+        let item = self
+            .plans
+            .get_mut(plan)
+            .expect("active plan exists")
+            .actions
+            .get_mut(action)
+            .expect("declared action");
+        if item.cache_hit {
+            return self.invalid(format!(
+                "action `{action}` reported more than one cache hit"
+            ));
+        }
+        item.cache_hit = true;
+        Ok(())
+    }
+    fn block(
+        &mut self,
+        job: &JobId,
+        plan: &PlanId,
+        action: &ActionId,
+        blocked_by: &[ActionId],
+    ) -> Result<(), LifecycleError> {
+        let record = self.active_plan(job, plan)?;
+        if blocked_by.is_empty() {
+            return self.invalid(format!(
+                "blocked action `{action}` has no blocking predecessor"
+            ));
+        }
+        let item = record
+            .actions
+            .get(action)
+            .ok_or_else(|| LifecycleError(format!("action `{action}` was not declared")))?;
+        if item.state != ActionState::Declared {
+            return self.invalid(format!(
+                "invalid transition for action `{action}` from {:?}",
+                item.state
+            ));
+        }
+        for blocker in blocked_by {
+            if !item.dependencies.contains(blocker)
+                || !matches!(
+                    record.actions.get(blocker).map(|x| x.state),
+                    Some(ActionState::Failed | ActionState::Blocked)
+                )
+            {
+                return self.invalid(format!("action `{action}` has invalid blocker `{blocker}`"));
+            }
+        }
+        self.action_transition(
+            job,
+            plan,
+            action,
+            &[ActionState::Declared],
+            ActionState::Blocked,
+        )
+    }
+    fn close_plan(
+        &mut self,
+        job: &JobId,
+        plan: &PlanId,
+        reason: PlanCloseReason,
+    ) -> Result<(), LifecycleError> {
+        let record = self.active_plan(job, plan)?;
+        if !Self::declarations_complete(record) {
+            return self.invalid("plan closed before every action was declared");
+        }
+        match reason {
+            PlanCloseReason::Executed
+                if record.mode != PlanMode::Execute
+                    || record
+                        .actions
+                        .values()
+                        .any(|x| !x.state.terminal() || x.state == ActionState::Superseded) =>
+            {
+                return self.invalid("executed plan has invalid mode or non-executed actions");
+            }
+            PlanCloseReason::Reported
+                if record.mode != PlanMode::ReportOnly
+                    || record.any_started
+                    || record
+                        .actions
+                        .values()
+                        .any(|x| x.state != ActionState::Declared) =>
+            {
+                return self.invalid("reported plan must have declarations and zero starts");
+            }
+            PlanCloseReason::Superseded
+                if record.mode != PlanMode::Execute
+                    || record
+                        .actions
+                        .values()
+                        .any(|x| x.state == ActionState::Started) =>
+            {
+                return self.invalid("superseded plan has running actions");
+            }
+            PlanCloseReason::Executed | PlanCloseReason::Reported | PlanCloseReason::Superseded => {
+            }
+        }
+        let record = self.plans.get_mut(plan).expect("active plan exists");
+        if reason == PlanCloseReason::Superseded {
+            for action in record.actions.values_mut() {
+                if action.state == ActionState::Declared {
+                    action.state = ActionState::Superseded;
+                }
+            }
+            self.retry_allowed = true;
+        } else {
+            if self.final_plan.is_some() {
+                return self.invalid("job has more than one non-superseded plan");
+            }
+            self.final_plan = Some(plan.clone());
+        }
+        record.closed = Some(reason);
+        self.active = None;
+        Ok(())
     }
     fn complete(&mut self, job: &JobId) -> Result<(), LifecycleError> {
         self.same_job(job)?;
         if self.operation_completed {
-            return Err(LifecycleError(
-                "operation-completed emitted more than once".into(),
-            ));
+            return self.invalid("operation-completed emitted more than once");
         }
-        if self.actions.values().any(|record| !record.state.terminal()) {
-            return Err(LifecycleError(
-                "operation completed with non-terminal actions".into(),
-            ));
+        if self.active.is_some() || self.retry_allowed {
+            return self.invalid("operation completed with an open lifecycle state");
         }
         self.operation_completed = true;
         Ok(())
@@ -504,140 +1092,13 @@ impl Lifecycle {
     fn finish_job(&mut self, job: &JobId) -> Result<(), LifecycleError> {
         self.same_job(job)?;
         if !self.operation_completed {
-            return Err(LifecycleError(
-                "job-finished preceded operation-completed".into(),
-            ));
+            return self.invalid("job-finished preceded operation-completed");
         }
         if self.job_finished {
-            return Err(LifecycleError("job-finished emitted more than once".into()));
+            return self.invalid("job-finished emitted more than once");
         }
         self.job_finished = true;
         Ok(())
-    }
-    fn plan(&mut self, job: &JobId, actions: u64) -> Result<(), LifecycleError> {
-        if self.job.is_some() {
-            return Err(LifecycleError("plan-ready emitted more than once".into()));
-        }
-        self.job = Some(job.clone());
-        self.planned = Some(actions);
-        Ok(())
-    }
-    fn queue(
-        &mut self,
-        job: &JobId,
-        action: &ActionId,
-        dependencies: &[ActionId],
-    ) -> Result<(), LifecycleError> {
-        self.same_job(job)?;
-        let mut unique = HashSet::new();
-        for dependency in dependencies {
-            if dependency == action
-                || !unique.insert(dependency)
-                || !self.actions.contains_key(dependency)
-            {
-                return Err(LifecycleError(format!(
-                    "action `{action}` has invalid dependency `{dependency}`"
-                )));
-            }
-        }
-        if self
-            .actions
-            .insert(
-                action.clone(),
-                ActionRecord {
-                    dependencies: dependencies.to_vec(),
-                    state: ActionState::Queued,
-                    cache_hit: false,
-                },
-            )
-            .is_some()
-        {
-            return Err(LifecycleError(format!(
-                "action `{action}` queued more than once"
-            )));
-        }
-        Ok(())
-    }
-    fn transition(
-        &mut self,
-        job: &JobId,
-        action: &ActionId,
-        from: &[ActionState],
-        to: ActionState,
-    ) -> Result<(), LifecycleError> {
-        self.require(job, action, from)?;
-        self.actions.get_mut(action).expect("required action").state = to;
-        Ok(())
-    }
-    fn cache(&mut self, job: &JobId, action: &ActionId) -> Result<(), LifecycleError> {
-        self.require(job, action, &[ActionState::Started])?;
-        let record = self.actions.get_mut(action).expect("required action");
-        if record.cache_hit {
-            return Err(LifecycleError(format!(
-                "action `{action}` reported more than one cache hit"
-            )));
-        }
-        record.cache_hit = true;
-        Ok(())
-    }
-    fn block(
-        &mut self,
-        job: &JobId,
-        action: &ActionId,
-        blocked_by: &[ActionId],
-    ) -> Result<(), LifecycleError> {
-        if blocked_by.is_empty() {
-            return Err(LifecycleError(format!(
-                "blocked action `{action}` has no blocking predecessor"
-            )));
-        }
-        let dependencies = &self
-            .actions
-            .get(action)
-            .ok_or_else(|| LifecycleError(format!("action `{action}` was not queued")))?
-            .dependencies;
-        for predecessor in blocked_by {
-            if !dependencies.contains(predecessor) {
-                return Err(LifecycleError(format!(
-                    "action `{action}` was blocked by non-dependency `{predecessor}`"
-                )));
-            }
-            self.require(
-                job,
-                predecessor,
-                &[ActionState::Failed, ActionState::Blocked],
-            )?;
-        }
-        self.transition(job, action, &[ActionState::Queued], ActionState::Blocked)
-    }
-    fn require(
-        &self,
-        job: &JobId,
-        action: &ActionId,
-        states: &[ActionState],
-    ) -> Result<(), LifecycleError> {
-        self.same_job(job)?;
-        let record = self
-            .actions
-            .get(action)
-            .ok_or_else(|| LifecycleError(format!("action `{action}` was not queued")))?;
-        if states.contains(&record.state) {
-            Ok(())
-        } else {
-            Err(LifecycleError(format!(
-                "invalid transition for action `{action}` from {:?}",
-                record.state
-            )))
-        }
-    }
-    fn same_job(&self, job: &JobId) -> Result<(), LifecycleError> {
-        match &self.job {
-            Some(expected) if expected == job => Ok(()),
-            Some(expected) => Err(LifecycleError(format!(
-                "event job `{job}` differs from plan `{expected}`"
-            ))),
-            None => Err(LifecycleError("action event preceded plan-ready".into())),
-        }
     }
     fn finish(
         &self,
@@ -645,43 +1106,47 @@ impl Lifecycle {
         cancellation_requested: bool,
     ) -> Result<Reduction, LifecycleError> {
         self.same_job(&outcome.job)?;
-        let planned = self.planned.expect("job implies planned count");
-        if planned != self.actions.len() as u64 {
-            return Err(LifecycleError(format!(
-                "plan declared {planned} actions but {} were queued",
-                self.actions.len()
-            )));
-        }
-        if self.actions.values().any(|r| !r.state.terminal()) {
-            return Err(LifecycleError("job ended with non-terminal actions".into()));
+        if self.active.is_some() || self.retry_allowed {
+            return self.invalid("job ended with an open planning attempt or plan");
         }
         let mut totals = ActionTotals::default();
         let mut root_failures = 0;
-        for record in self.actions.values() {
-            match record.state {
-                ActionState::Succeeded => totals.succeeded += 1,
-                ActionState::Failed => {
-                    totals.failed += 1;
-                    root_failures += 1;
+        let mut cancelled = self.planning_cancelled || cancellation_requested;
+        let mut cache_hits = 0;
+        if let Some(plan) = &self.final_plan {
+            let record = &self.plans[plan];
+            root_failures += record.expected_issues;
+            for action in record.actions.values() {
+                cache_hits += u64::from(action.cache_hit);
+                match action.state {
+                    ActionState::Succeeded => totals.succeeded += 1,
+                    ActionState::Failed => {
+                        totals.failed += 1;
+                        root_failures += 1;
+                    }
+                    ActionState::Blocked => totals.blocked += 1,
+                    ActionState::Cancelled => {
+                        totals.cancelled += 1;
+                        cancelled = true;
+                    }
+                    ActionState::Declared | ActionState::Started | ActionState::Superseded => {}
                 }
-                ActionState::Blocked => totals.blocked += 1,
-                ActionState::Cancelled => totals.cancelled += 1,
-                ActionState::Queued | ActionState::Started => unreachable!(),
             }
+        } else if self.fatal_planning_failure {
+            root_failures = 1;
+        } else if !self.planning_cancelled {
+            return self.invalid("job has neither a final plan nor a terminal planning outcome");
         }
-        let cancelled = totals.cancelled > 0 || cancellation_requested;
         if totals != outcome.totals
             || root_failures != outcome.root_failures
             || cancelled != outcome.cancelled
         {
-            return Err(LifecycleError(
-                "declared outcome disagrees with reduced events".into(),
-            ));
+            return self.invalid("declared outcome disagrees with reduced events");
         }
         Ok(Reduction {
             totals,
             root_failures,
-            cache_hits: self.cache_hits,
+            cache_hits,
         })
     }
 }
@@ -690,68 +1155,556 @@ impl Lifecycle {
 mod tests {
     use super::*;
     use squish_protocol::{
-        ActionKind, BuildRequest, BuildResult, Diagnostic, DiagnosticId, EmitKind, InspectRequest,
-        InspectResult, InspectView, LockMode, OpaqueSourceId, Phase, ProfileName,
-        ProjectInspection, ProjectPath, Severity, WorkspaceScope,
+        ActionKind, BuildRequest, BuildResult, Diagnostic, DiagnosticId, Digest, DigestAlgorithm,
+        EmitKind, InspectRequest, InspectResult, InspectView, LockMode, OpaqueSourceId, Phase,
+        PlanDigest, PlanningStepKind, ProfileName, ProjectInspection, ProjectPath, Severity,
+        WorkspaceScope,
     };
     use std::sync::Mutex;
-    static DESC: CapabilityDescriptor = CapabilityDescriptor {
-        id: "build",
+
+    fn job() -> JobId {
+        JobId::new("job").unwrap()
+    }
+    fn attempt(value: &str) -> PlanningAttemptId {
+        PlanningAttemptId::new(value).unwrap()
+    }
+    fn plan(value: &str) -> PlanId {
+        PlanId::new(value).unwrap()
+    }
+    fn action(value: &str) -> ActionId {
+        ActionId::new(value).unwrap()
+    }
+    fn plan_digest() -> PlanDigest {
+        PlanDigest::new(Digest::new(DigestAlgorithm::Sha256, vec![0; 32]).unwrap())
+    }
+    fn diagnostic() -> Diagnostic {
+        Diagnostic {
+            id: DiagnosticId::new("d").unwrap(),
+            code: "failed".into(),
+            severity: Severity::Error,
+            phase: Phase::Analyze,
+            message: "failed".into(),
+            primary: None,
+            related: vec![],
+            help: None,
+        }
+    }
+    fn start(lifecycle: &mut Lifecycle, attempt: &PlanningAttemptId) {
+        lifecycle
+            .observe(&EventPayload::PlanningStarted {
+                job: job(),
+                attempt: attempt.clone(),
+            })
+            .unwrap();
+    }
+    fn seal(
+        lifecycle: &mut Lifecycle,
+        attempt: &PlanningAttemptId,
+        plan: &PlanId,
+        mode: PlanMode,
+        actions: u64,
+        issues: u64,
+    ) {
+        lifecycle
+            .observe(&EventPayload::PlanReady {
+                job: job(),
+                attempt: attempt.clone(),
+                plan: plan.clone(),
+                digest: plan_digest(),
+                mode,
+                actions,
+                issues,
+            })
+            .unwrap();
+    }
+    fn declare(
+        lifecycle: &mut Lifecycle,
+        plan: &PlanId,
+        action: &ActionId,
+        dependencies: Vec<ActionId>,
+    ) {
+        lifecycle
+            .observe(&EventPayload::ActionDeclared {
+                job: job(),
+                plan: plan.clone(),
+                action: action.clone(),
+                kind: ActionKind::Compile,
+                dependencies,
+            })
+            .unwrap();
+    }
+    fn outcome(totals: ActionTotals, root_failures: u64, cancelled: bool) -> OperationOutcome {
+        OperationOutcome {
+            job: job(),
+            result: OperationResult::Build(BuildResult {
+                published: vec![],
+                build_record: None,
+            }),
+            totals,
+            root_failures,
+            cancelled,
+        }
+    }
+
+    #[test]
+    fn executable_plan_requires_complete_declaration_and_closes() {
+        let mut lifecycle = Lifecycle::default();
+        let a = attempt("a");
+        let p = plan("p");
+        let x = action("x");
+        let y = action("y");
+        start(&mut lifecycle, &a);
+        seal(&mut lifecycle, &a, &p, PlanMode::Execute, 2, 0);
+        declare(&mut lifecycle, &p, &x, vec![]);
+        assert!(
+            lifecycle
+                .observe(&EventPayload::ActionStarted {
+                    job: job(),
+                    plan: p.clone(),
+                    action: x.clone()
+                })
+                .is_err()
+        );
+        declare(&mut lifecycle, &p, &y, vec![x.clone()]);
+        lifecycle
+            .observe(&EventPayload::ActionStarted {
+                job: job(),
+                plan: p.clone(),
+                action: x.clone(),
+            })
+            .unwrap();
+        lifecycle
+            .observe(&EventPayload::ActionSucceeded {
+                job: job(),
+                plan: p.clone(),
+                action: x,
+                timing: Timing::default(),
+                artifacts: vec![],
+            })
+            .unwrap();
+        lifecycle
+            .observe(&EventPayload::ActionStarted {
+                job: job(),
+                plan: p.clone(),
+                action: y.clone(),
+            })
+            .unwrap();
+        lifecycle
+            .observe(&EventPayload::ActionSucceeded {
+                job: job(),
+                plan: p.clone(),
+                action: y,
+                timing: Timing::default(),
+                artifacts: vec![],
+            })
+            .unwrap();
+        lifecycle
+            .observe(&EventPayload::PlanClosed {
+                job: job(),
+                plan: p,
+                reason: PlanCloseReason::Executed,
+            })
+            .unwrap();
+        lifecycle
+            .finish(
+                &outcome(
+                    ActionTotals {
+                        succeeded: 2,
+                        ..Default::default()
+                    },
+                    0,
+                    false,
+                ),
+                false,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn planning_steps_must_be_terminal_and_plan_counts_must_match() {
+        let mut lifecycle = Lifecycle::default();
+        let a = attempt("a");
+        let p = plan("p");
+        let step = PlanningStepId::new("locate").unwrap();
+        start(&mut lifecycle, &a);
+        lifecycle
+            .observe(&EventPayload::PlanningStepStarted {
+                job: job(),
+                attempt: a.clone(),
+                step: step.clone(),
+                kind: PlanningStepKind::Locate,
+            })
+            .unwrap();
+        assert!(
+            lifecycle
+                .observe(&EventPayload::PlanReady {
+                    job: job(),
+                    attempt: a.clone(),
+                    plan: p.clone(),
+                    digest: plan_digest(),
+                    mode: PlanMode::Execute,
+                    actions: 0,
+                    issues: 0
+                })
+                .is_err()
+        );
+        lifecycle
+            .observe(&EventPayload::PlanningStepSucceeded {
+                job: job(),
+                attempt: a.clone(),
+                step,
+                timing: Timing::default(),
+            })
+            .unwrap();
+        lifecycle
+            .observe(&EventPayload::PlanningIssue {
+                job: job(),
+                attempt: a.clone(),
+                issue: PlanningIssueId::new("issue").unwrap(),
+                affected: vec![],
+                diagnostic: diagnostic(),
+            })
+            .unwrap();
+        assert!(
+            lifecycle
+                .observe(&EventPayload::PlanReady {
+                    job: job(),
+                    attempt: a.clone(),
+                    plan: p,
+                    digest: plan_digest(),
+                    mode: PlanMode::Execute,
+                    actions: 0,
+                    issues: 0
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn report_only_declares_graph_but_never_starts_actions() {
+        let mut lifecycle = Lifecycle::default();
+        let a = attempt("a");
+        let p = plan("p");
+        let x = action("x");
+        start(&mut lifecycle, &a);
+        seal(&mut lifecycle, &a, &p, PlanMode::ReportOnly, 1, 0);
+        declare(&mut lifecycle, &p, &x, vec![]);
+        assert!(
+            lifecycle
+                .observe(&EventPayload::ActionStarted {
+                    job: job(),
+                    plan: p.clone(),
+                    action: x
+                })
+                .is_err()
+        );
+        lifecycle
+            .observe(&EventPayload::PlanClosed {
+                job: job(),
+                plan: p,
+                reason: PlanCloseReason::Reported,
+            })
+            .unwrap();
+        lifecycle
+            .finish(&outcome(Default::default(), 0, false), false)
+            .unwrap();
+    }
+
+    #[test]
+    fn pre_plan_failure_and_cancellation_have_zero_actions() {
+        let mut failed = Lifecycle::default();
+        let a = attempt("failure");
+        start(&mut failed, &a);
+        failed
+            .observe(&EventPayload::PlanningFailed {
+                job: job(),
+                attempt: a,
+                diagnostic: diagnostic(),
+            })
+            .unwrap();
+        failed
+            .finish(&outcome(Default::default(), 1, false), false)
+            .unwrap();
+        let mut cancelled = Lifecycle::default();
+        let a = attempt("cancel");
+        start(&mut cancelled, &a);
+        cancelled
+            .observe(&EventPayload::PlanningCancelled {
+                job: job(),
+                attempt: a,
+            })
+            .unwrap();
+        cancelled
+            .finish(&outcome(Default::default(), 0, true), false)
+            .unwrap();
+    }
+
+    #[test]
+    fn revision_conflict_supersedes_old_plan_then_replans() {
+        let mut lifecycle = Lifecycle::default();
+        let a1 = attempt("a1");
+        let p1 = plan("p1");
+        let commit = action("commit");
+        start(&mut lifecycle, &a1);
+        seal(&mut lifecycle, &a1, &p1, PlanMode::Execute, 1, 0);
+        declare(&mut lifecycle, &p1, &commit, vec![]);
+        lifecycle
+            .observe(&EventPayload::ActionStarted {
+                job: job(),
+                plan: p1.clone(),
+                action: commit.clone(),
+            })
+            .unwrap();
+        lifecycle
+            .observe(&EventPayload::ActionSuperseded {
+                job: job(),
+                plan: p1.clone(),
+                action: commit,
+                timing: Timing::default(),
+                reason: SupersedeReason::AuthoritativeRevisionChanged,
+            })
+            .unwrap();
+        lifecycle
+            .observe(&EventPayload::PlanClosed {
+                job: job(),
+                plan: p1,
+                reason: PlanCloseReason::Superseded,
+            })
+            .unwrap();
+        let a2 = attempt("a2");
+        let p2 = plan("p2");
+        let x = action("new");
+        start(&mut lifecycle, &a2);
+        seal(&mut lifecycle, &a2, &p2, PlanMode::Execute, 1, 0);
+        declare(&mut lifecycle, &p2, &x, vec![]);
+        lifecycle
+            .observe(&EventPayload::ActionStarted {
+                job: job(),
+                plan: p2.clone(),
+                action: x.clone(),
+            })
+            .unwrap();
+        lifecycle
+            .observe(&EventPayload::ActionSucceeded {
+                job: job(),
+                plan: p2.clone(),
+                action: x,
+                timing: Timing::default(),
+                artifacts: vec![],
+            })
+            .unwrap();
+        lifecycle
+            .observe(&EventPayload::PlanClosed {
+                job: job(),
+                plan: p2,
+                reason: PlanCloseReason::Executed,
+            })
+            .unwrap();
+        lifecycle
+            .finish(
+                &outcome(
+                    ActionTotals {
+                        succeeded: 1,
+                        ..Default::default()
+                    },
+                    0,
+                    false,
+                ),
+                false,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn plan_identity_and_invalid_interleavings_are_rejected() {
+        let mut lifecycle = Lifecycle::default();
+        let a = attempt("a");
+        let p = plan("p");
+        start(&mut lifecycle, &a);
+        seal(&mut lifecycle, &a, &p, PlanMode::Execute, 1, 0);
+        assert!(
+            lifecycle
+                .observe(&EventPayload::ActionDeclared {
+                    job: job(),
+                    plan: plan("wrong"),
+                    action: action("x"),
+                    kind: ActionKind::Compile,
+                    dependencies: vec![]
+                })
+                .is_err()
+        );
+        assert!(
+            lifecycle
+                .observe(&EventPayload::ActionDeclared {
+                    job: job(),
+                    plan: p,
+                    action: action("x"),
+                    kind: ActionKind::Compile,
+                    dependencies: vec![action("missing")]
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_mode_and_cyclic_closed_graph_are_rejected() {
+        let mut legacy = Lifecycle::default();
+        let a = attempt("legacy-attempt");
+        start(&mut legacy, &a);
+        assert!(
+            legacy
+                .observe(&EventPayload::PlanReady {
+                    job: job(),
+                    attempt: a,
+                    plan: plan("legacy-plan"),
+                    digest: plan_digest(),
+                    mode: PlanMode::Legacy,
+                    actions: 0,
+                    issues: 0,
+                })
+                .is_err()
+        );
+
+        let mut cyclic = Lifecycle::default();
+        let a = attempt("cycle-attempt");
+        let p = plan("cycle-plan");
+        let x = action("x");
+        let y = action("y");
+        start(&mut cyclic, &a);
+        seal(&mut cyclic, &a, &p, PlanMode::Execute, 2, 0);
+        declare(&mut cyclic, &p, &x, vec![y.clone()]);
+        assert!(
+            cyclic
+                .observe(&EventPayload::ActionDeclared {
+                    job: job(),
+                    plan: p,
+                    action: y,
+                    kind: ActionKind::Compile,
+                    dependencies: vec![x],
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn final_plan_issues_and_failures_drive_root_failure_reduction() {
+        let mut lifecycle = Lifecycle::default();
+        let a = attempt("a");
+        let p = plan("p");
+        let x = action("x");
+        start(&mut lifecycle, &a);
+        lifecycle
+            .observe(&EventPayload::PlanningIssue {
+                job: job(),
+                attempt: a.clone(),
+                issue: PlanningIssueId::new("issue").unwrap(),
+                affected: vec![],
+                diagnostic: diagnostic(),
+            })
+            .unwrap();
+        seal(&mut lifecycle, &a, &p, PlanMode::Execute, 1, 1);
+        declare(&mut lifecycle, &p, &x, vec![]);
+        lifecycle
+            .observe(&EventPayload::ActionStarted {
+                job: job(),
+                plan: p.clone(),
+                action: x.clone(),
+            })
+            .unwrap();
+        lifecycle
+            .observe(&EventPayload::ActionFailed {
+                job: job(),
+                plan: p.clone(),
+                action: x,
+                timing: Timing::default(),
+                diagnostic: diagnostic(),
+            })
+            .unwrap();
+        lifecycle
+            .observe(&EventPayload::PlanClosed {
+                job: job(),
+                plan: p,
+                reason: PlanCloseReason::Executed,
+            })
+            .unwrap();
+        lifecycle
+            .finish(
+                &outcome(
+                    ActionTotals {
+                        failed: 1,
+                        ..Default::default()
+                    },
+                    2,
+                    false,
+                ),
+                false,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn inspect_result_identity_validation_is_preserved() {
+        let request = OperationRequest::Inspect(InspectRequest {
+            project: ProjectPath::new(".").unwrap(),
+            view: InspectView::Source(OpaqueSourceId::new("src/main.squish").unwrap()),
+        });
+        let wrong = OperationResult::Inspect(InspectResult::Project(ProjectInspection {
+            packages: vec![],
+            targets: vec![],
+        }));
+        assert!(!wrong.matches_request(&request));
+    }
+
+    #[test]
+    fn build_request_result_identity_still_matches() {
+        let request = OperationRequest::Build(BuildRequest {
+            project: ProjectPath::new(".").unwrap(),
+            scope: WorkspaceScope::Current,
+            targets: vec![],
+            profile: ProfileName::new("dev").unwrap(),
+            arguments: Default::default(),
+            emit: vec![EmitKind::Prompt],
+            lock: LockMode::Update,
+        });
+        let result = OperationResult::Build(BuildResult {
+            published: vec![],
+            build_record: None,
+        });
+        assert!(result.matches_request(&request));
+    }
+
+    static BUILD_DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
+        id: "planning-failure",
         operations: &[OperationKind::Build],
-        summary: "build",
+        summary: "planning failure",
     };
-    static INSPECT_DESC: CapabilityDescriptor = CapabilityDescriptor {
-        id: "inspect",
-        operations: &[OperationKind::Inspect],
-        summary: "inspect",
-    };
-    struct Build;
-    impl Capability for Build {
+    struct PlanningFailure;
+    impl Capability for PlanningFailure {
         fn descriptor(&self) -> &'static CapabilityDescriptor {
-            &DESC
+            &BUILD_DESCRIPTOR
         }
         fn execute(&self, _: &OperationRequest, context: &InvocationContext) -> OperationOutcome {
-            let job = JobId::new("job").unwrap();
-            let action = ActionId::new("root").unwrap();
+            let attempt = attempt("fatal");
             context
-                .emit(EventPayload::PlanReady {
-                    job: job.clone(),
-                    actions: 1,
+                .emit(EventPayload::PlanningStarted {
+                    job: job(),
+                    attempt: attempt.clone(),
                 })
                 .unwrap();
             context
-                .emit(EventPayload::ActionQueued {
-                    job: job.clone(),
-                    action: action.clone(),
-                    kind: ActionKind::Compile,
-                    dependencies: vec![],
-                })
-                .unwrap();
-            context
-                .emit(EventPayload::ActionStarted {
-                    job: job.clone(),
-                    action: action.clone(),
-                })
-                .unwrap();
-            context
-                .emit(EventPayload::ActionSucceeded {
-                    job: job.clone(),
-                    action,
-                    timing: Timing::default(),
-                    artifacts: vec![],
+                .emit(EventPayload::PlanningFailed {
+                    job: job(),
+                    attempt,
+                    diagnostic: diagnostic(),
                 })
                 .unwrap();
             OperationOutcome {
-                job,
-                result: OperationResult::Build(BuildResult {
-                    published: vec![],
-                    build_record: None,
-                }),
-                totals: ActionTotals {
-                    succeeded: 1,
-                    ..ActionTotals::default()
+                job: job(),
+                result: OperationResult::Unavailable {
+                    kind: OperationKind::Build,
                 },
-                root_failures: 0,
+                totals: ActionTotals::default(),
+                root_failures: 1,
                 cancelled: false,
             }
         }
@@ -764,8 +1717,17 @@ mod tests {
             Ok(())
         }
     }
-    fn operation() -> OperationRequest {
-        OperationRequest::Build(BuildRequest {
+
+    #[test]
+    fn fatal_planning_failure_with_zero_actions_drives_failed_exit() {
+        static CAPABILITY: PlanningFailure = PlanningFailure;
+        let sink = Arc::new(Sink::default());
+        let context = InvocationContext::new(
+            InvocationId::new("invocation").unwrap(),
+            CancellationToken::default(),
+            sink,
+        );
+        let request = OperationRequest::Build(BuildRequest {
             project: ProjectPath::new(".").unwrap(),
             scope: WorkspaceScope::Current,
             targets: vec![],
@@ -773,428 +1735,13 @@ mod tests {
             arguments: Default::default(),
             emit: vec![EmitKind::Prompt],
             lock: LockMode::Update,
-        })
-    }
-    #[test]
-    fn dispatch_reduces_success_and_finishes() {
-        static BUILD: Build = Build;
-        let capabilities: &[&dyn Capability] = &[&BUILD];
-        let sink = Arc::new(Sink::default());
-        let context = InvocationContext::new(
-            InvocationId::new("i").unwrap(),
-            CancellationToken::default(),
-            sink.clone(),
-        );
-        let outcome = Kernel::new(capabilities)
+        });
+        let dispatched = Kernel::new(&[&CAPABILITY])
             .unwrap()
-            .dispatch(&operation(), &context)
+            .dispatch(&request, &context)
             .unwrap();
-        assert_eq!(outcome.summary.status, ExitStatus::Success);
-        assert_eq!(outcome.result.kind(), OperationKind::Build);
-        let events = lock(&sink.0);
-        assert!(matches!(
-            events[events.len() - 2].payload,
-            EventPayload::OperationCompleted { .. }
-        ));
-        assert!(matches!(
-            events.last().unwrap().payload,
-            EventPayload::JobFinished(_)
-        ));
-        assert_eq!(
-            events[events.len() - 2].sequence + 1,
-            events.last().unwrap().sequence
-        );
-    }
-    struct WrongResult;
-    impl Capability for WrongResult {
-        fn descriptor(&self) -> &'static CapabilityDescriptor {
-            &DESC
-        }
-        fn execute(
-            &self,
-            operation: &OperationRequest,
-            context: &InvocationContext,
-        ) -> OperationOutcome {
-            let mut outcome = Build.execute(operation, context);
-            outcome.result = OperationResult::Format(squish_protocol::FormatResult {
-                selected: vec![],
-                changed: vec![],
-                check: true,
-                diffs: vec![],
-            });
-            outcome
-        }
-    }
-    #[test]
-    fn result_kind_mismatch_emits_neither_completion_nor_summary() {
-        static WRONG: WrongResult = WrongResult;
-        let capabilities: &[&dyn Capability] = &[&WRONG];
-        let sink = Arc::new(Sink::default());
-        let context = InvocationContext::new(
-            InvocationId::new("i").unwrap(),
-            CancellationToken::default(),
-            sink.clone(),
-        );
-        assert!(matches!(
-            Kernel::new(capabilities)
-                .unwrap()
-                .dispatch(&operation(), &context),
-            Err(KernelError::ResultKindMismatch { .. })
-        ));
-        assert!(!lock(&sink.0).iter().any(|event| matches!(
-            event.payload,
-            EventPayload::OperationCompleted { .. } | EventPayload::JobFinished(_)
-        )));
-    }
-    fn early_failure(context: &InvocationContext, kind: ActionKind) -> JobId {
-        let job = JobId::new("early-failure").unwrap();
-        let action = ActionId::new("resolve").unwrap();
-        context
-            .emit(EventPayload::PlanReady {
-                job: job.clone(),
-                actions: 1,
-            })
-            .unwrap();
-        context
-            .emit(EventPayload::ActionQueued {
-                job: job.clone(),
-                action: action.clone(),
-                kind,
-                dependencies: vec![],
-            })
-            .unwrap();
-        context
-            .emit(EventPayload::ActionStarted {
-                job: job.clone(),
-                action: action.clone(),
-            })
-            .unwrap();
-        context
-            .emit(EventPayload::ActionFailed {
-                job: job.clone(),
-                action,
-                timing: Timing::default(),
-                diagnostic: Diagnostic {
-                    id: DiagnosticId::new("resolution-failed").unwrap(),
-                    code: "resolution_failed".into(),
-                    severity: Severity::Error,
-                    phase: Phase::Resolve,
-                    message: "resolution failed before domain data existed".into(),
-                    primary: None,
-                    related: vec![],
-                    help: None,
-                },
-            })
-            .unwrap();
-        job
-    }
-    struct ResolveFails;
-    impl Capability for ResolveFails {
-        fn descriptor(&self) -> &'static CapabilityDescriptor {
-            &DESC
-        }
-        fn execute(&self, _: &OperationRequest, context: &InvocationContext) -> OperationOutcome {
-            OperationOutcome {
-                job: early_failure(context, ActionKind::Resolve),
-                result: OperationResult::Unavailable {
-                    kind: OperationKind::Build,
-                },
-                totals: ActionTotals {
-                    failed: 1,
-                    ..ActionTotals::default()
-                },
-                root_failures: 1,
-                cancelled: false,
-            }
-        }
-    }
-    #[test]
-    fn resolve_failure_publishes_typed_unavailable_before_failed_summary() {
-        static CAPABILITY: ResolveFails = ResolveFails;
-        let sink = Arc::new(Sink::default());
-        let context = InvocationContext::new(
-            InvocationId::new("i").unwrap(),
-            CancellationToken::default(),
-            sink.clone(),
-        );
-        let outcome = Kernel::new(&[&CAPABILITY])
-            .unwrap()
-            .dispatch(&operation(), &context)
-            .unwrap();
-        assert_eq!(outcome.summary.status, ExitStatus::Failed);
-        assert_eq!(
-            outcome.result,
-            OperationResult::Unavailable {
-                kind: OperationKind::Build
-            }
-        );
-        let events = lock(&sink.0);
-        assert!(matches!(
-            events[events.len() - 2].payload,
-            EventPayload::OperationCompleted {
-                result: OperationResult::Unavailable {
-                    kind: OperationKind::Build
-                },
-                ..
-            }
-        ));
-        assert!(matches!(
-            events.last().unwrap().payload,
-            EventPayload::JobFinished(_)
-        ));
-    }
-    struct InspectFails;
-    impl Capability for InspectFails {
-        fn descriptor(&self) -> &'static CapabilityDescriptor {
-            &INSPECT_DESC
-        }
-        fn execute(&self, _: &OperationRequest, context: &InvocationContext) -> OperationOutcome {
-            OperationOutcome {
-                job: early_failure(context, ActionKind::ResolveCandidate),
-                result: OperationResult::Unavailable {
-                    kind: OperationKind::Inspect,
-                },
-                totals: ActionTotals {
-                    failed: 1,
-                    ..ActionTotals::default()
-                },
-                root_failures: 1,
-                cancelled: false,
-            }
-        }
-    }
-    fn inspect_operation() -> OperationRequest {
-        OperationRequest::Inspect(InspectRequest {
-            project: ProjectPath::new(".").unwrap(),
-            view: InspectView::Source(OpaqueSourceId::new("src/main.squish").unwrap()),
-        })
-    }
-    #[test]
-    fn inspect_early_failure_can_report_unavailable_without_fabricated_data() {
-        static CAPABILITY: InspectFails = InspectFails;
-        let sink = Arc::new(Sink::default());
-        let context = InvocationContext::new(
-            InvocationId::new("i").unwrap(),
-            CancellationToken::default(),
-            sink.clone(),
-        );
-        Kernel::new(&[&CAPABILITY])
-            .unwrap()
-            .dispatch(&inspect_operation(), &context)
-            .unwrap();
-        assert!(matches!(
-            lock(&sink.0)[4].payload,
-            EventPayload::OperationCompleted {
-                result: OperationResult::Unavailable {
-                    kind: OperationKind::Inspect
-                },
-                ..
-            }
-        ));
-    }
-    struct WrongInspectIdentity;
-    impl Capability for WrongInspectIdentity {
-        fn descriptor(&self) -> &'static CapabilityDescriptor {
-            &INSPECT_DESC
-        }
-        fn execute(&self, _: &OperationRequest, context: &InvocationContext) -> OperationOutcome {
-            let job = JobId::new("inspect").unwrap();
-            context
-                .emit(EventPayload::PlanReady {
-                    job: job.clone(),
-                    actions: 0,
-                })
-                .unwrap();
-            OperationOutcome {
-                job,
-                result: OperationResult::Inspect(InspectResult::Project(ProjectInspection {
-                    packages: vec![],
-                    targets: vec![],
-                })),
-                totals: ActionTotals::default(),
-                root_failures: 0,
-                cancelled: false,
-            }
-        }
-    }
-    #[test]
-    fn inspect_view_mismatch_is_rejected_before_completion() {
-        static CAPABILITY: WrongInspectIdentity = WrongInspectIdentity;
-        let sink = Arc::new(Sink::default());
-        let context = InvocationContext::new(
-            InvocationId::new("i").unwrap(),
-            CancellationToken::default(),
-            sink.clone(),
-        );
-        assert_eq!(
-            Kernel::new(&[&CAPABILITY])
-                .unwrap()
-                .dispatch(&inspect_operation(), &context),
-            Err(KernelError::ResultRequestMismatch)
-        );
-        assert!(!lock(&sink.0).iter().any(|event| matches!(
-            event.payload,
-            EventPayload::OperationCompleted { .. } | EventPayload::JobFinished(_)
-        )));
-    }
-    struct Liar;
-    impl Capability for Liar {
-        fn descriptor(&self) -> &'static CapabilityDescriptor {
-            &DESC
-        }
-        fn execute(&self, _: &OperationRequest, context: &InvocationContext) -> OperationOutcome {
-            let job = JobId::new("job").unwrap();
-            context
-                .emit(EventPayload::PlanReady {
-                    job: job.clone(),
-                    actions: 0,
-                })
-                .unwrap();
-            OperationOutcome {
-                job,
-                result: OperationResult::Build(BuildResult {
-                    published: vec![],
-                    build_record: None,
-                }),
-                totals: ActionTotals {
-                    failed: 1,
-                    ..ActionTotals::default()
-                },
-                root_failures: 1,
-                cancelled: false,
-            }
-        }
-    }
-    #[test]
-    fn mismatch_is_rejected_without_finished_event() {
-        static LIAR: Liar = Liar;
-        let capabilities: &[&dyn Capability] = &[&LIAR];
-        let sink = Arc::new(Sink::default());
-        let context = InvocationContext::new(
-            InvocationId::new("i").unwrap(),
-            CancellationToken::default(),
-            sink.clone(),
-        );
-        assert!(matches!(
-            Kernel::new(capabilities)
-                .unwrap()
-                .dispatch(&operation(), &context),
-            Err(KernelError::Lifecycle(_))
-        ));
-        assert!(
-            !lock(&sink.0)
-                .iter()
-                .any(|e| matches!(e.payload, EventPayload::JobFinished(_)))
-        );
-    }
-    struct ChildFails;
-    impl Capability for ChildFails {
-        fn descriptor(&self) -> &'static CapabilityDescriptor {
-            &DESC
-        }
-        fn execute(&self, _: &OperationRequest, context: &InvocationContext) -> OperationOutcome {
-            let job = JobId::new("job").unwrap();
-            let first = ActionId::new("first").unwrap();
-            let child = ActionId::new("child").unwrap();
-            context
-                .emit(EventPayload::PlanReady {
-                    job: job.clone(),
-                    actions: 2,
-                })
-                .unwrap();
-            context
-                .emit(EventPayload::ActionQueued {
-                    job: job.clone(),
-                    action: first.clone(),
-                    kind: ActionKind::Compile,
-                    dependencies: vec![],
-                })
-                .unwrap();
-            context
-                .emit(EventPayload::ActionStarted {
-                    job: job.clone(),
-                    action: first.clone(),
-                })
-                .unwrap();
-            context
-                .emit(EventPayload::ActionSucceeded {
-                    job: job.clone(),
-                    action: first.clone(),
-                    timing: Timing::default(),
-                    artifacts: vec![],
-                })
-                .unwrap();
-            context
-                .emit(EventPayload::ActionQueued {
-                    job: job.clone(),
-                    action: child.clone(),
-                    kind: ActionKind::Link,
-                    dependencies: vec![first],
-                })
-                .unwrap();
-            context
-                .emit(EventPayload::ActionStarted {
-                    job: job.clone(),
-                    action: child.clone(),
-                })
-                .unwrap();
-            context
-                .emit(EventPayload::ActionFailed {
-                    job: job.clone(),
-                    action: child,
-                    timing: Timing::default(),
-                    diagnostic: Diagnostic {
-                        id: DiagnosticId::new("link-failed").unwrap(),
-                        code: "link_failed".into(),
-                        severity: Severity::Error,
-                        phase: Phase::Link,
-                        message: "link failed".into(),
-                        primary: None,
-                        related: vec![],
-                        help: None,
-                    },
-                })
-                .unwrap();
-            OperationOutcome {
-                job,
-                result: OperationResult::Build(BuildResult {
-                    published: vec![],
-                    build_record: None,
-                }),
-                totals: ActionTotals {
-                    succeeded: 1,
-                    failed: 1,
-                    ..ActionTotals::default()
-                },
-                root_failures: 1,
-                cancelled: false,
-            }
-        }
-    }
-    #[test]
-    fn child_after_success_is_still_a_root_failure() {
-        static CAPABILITY: ChildFails = ChildFails;
-        let capabilities: &[&dyn Capability] = &[&CAPABILITY];
-        let sink = Arc::new(Sink::default());
-        let context = InvocationContext::new(
-            InvocationId::new("i").unwrap(),
-            CancellationToken::default(),
-            sink,
-        );
-        let outcome = Kernel::new(capabilities)
-            .unwrap()
-            .dispatch(&operation(), &context)
-            .unwrap();
-        assert_eq!(outcome.summary.status, ExitStatus::Failed);
-        assert_eq!(outcome.summary.root_failures, 1);
-    }
-    #[test]
-    fn duplicate_operation_handler_is_rejected() {
-        static BUILD: Build = Build;
-        let capabilities: &[&dyn Capability] = &[&BUILD, &BUILD];
-        assert!(matches!(
-            Kernel::new(capabilities),
-            Err(KernelError::DuplicateCapability(_))
-        ));
+        assert_eq!(dispatched.summary.status, ExitStatus::Failed);
+        assert_eq!(dispatched.summary.totals, ActionTotals::default());
+        assert_eq!(dispatched.summary.root_failures, 1);
     }
 }
