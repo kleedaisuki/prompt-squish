@@ -1213,8 +1213,14 @@ mod tests {
         );
 
         sink.emit(terminal).expect("render terminal event");
-        coordinator.on_interrupt();
-        cancellation_published.store(true, Ordering::Release);
+        {
+            // 把测试观察标志与生产取消发布置于呈现状态锁内，排除旧 pump 迭代的确认。
+            // Publish both observations under rendering-state exclusion so an old pump
+            // iteration cannot acknowledge this barrier.
+            let _state = sink.state.lock().expect("rendering state lock");
+            coordinator.on_interrupt();
+            cancellation_published.store(true, Ordering::Release);
+        }
         ticked_rx
             .recv_timeout(DEFAULT_PROGRESS_REFRESH * 5)
             .expect("pump cycled after cancellation");
