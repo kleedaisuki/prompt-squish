@@ -12,7 +12,10 @@ use std::{
     ffi::OsString,
     fmt,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use sha2::{Digest, Sha256};
@@ -21,15 +24,22 @@ use url::Url;
 
 use squish_fetch::{
     AuthorizationValue, CredentialError, CredentialLookup, CredentialPort, FetchError, GitHost,
-    GitRunner, HostContext, HttpRequest, HttpResponse, HttpTransport, Limits, Materializer,
-    Observer, RegistryConfig, SourceEvent, SparseRegistry, SystemGitRunner,
+    GitInvocation, GitRunner, HostContext, HttpRequest, HttpResponse, HttpTransport, Limits,
+    Materializer, Observer, RegistryConfig, SourceEvent, SparseRegistry, SystemGitRunner,
 };
 use squish_manager::{
-    ArtifactLocator, ProvenanceNonApplicability, ProvenanceRelation, ResolveRequest,
-    ResolvedDependencies, ServiceError, Services, StorageLayout,
+    ArtifactLocator, ProjectCreationLocation, ProjectCreationStatus, ProvenanceNonApplicability,
+    ProvenanceRelation, ResolveRequest, ResolvedDependencies, ServiceError, Services,
+    StorageLayout,
 };
-use squish_project::{DependencyResolver, LockedSource, Lockfile, ResolutionInput, ResolutionMode};
-use squish_repository::PackageLocation;
+use squish_project::{
+    DependencyResolver, LockedSource, Lockfile, Manifest, ResolutionInput, ResolutionMode,
+};
+use squish_protocol::VcsChoice;
+use squish_repository::{
+    CreateProjectRequest, NoFault, PackageLocation, ProjectVcs, StagePreparer, WorkspaceMembership,
+    create_project,
+};
 use squish_resolver::{
     Access as ResolverAccess, FilesystemPort, GitCandidate, GitPort, LocalPackage, LocalRequest,
     RegistryCandidate, RegistryPort, Resolver, SourceUnavailable,
@@ -295,6 +305,97 @@ pub enum GitExecution {
     Runner(Arc<dyn GitRunner>),
 }
 
+/// 尚未存在的项目所使用的最小生产宿主。 / Minimal production host for a project that does not yet exist.
+///
+/// 该宿主只执行只读落位和候选目录内的 Git 初始化；它不会规范化未来项目根、创建
+/// cache/CAS，或假装未来项目已经可发现。 / This host performs only read-only placement and
+/// Git initialization inside the staged candidate; it neither canonicalizes the future project
+/// root, opens caches/CAS, nor pretends the future project is discoverable.
+pub struct ProjectCreationHost {
+    git: Arc<dyn GitRunner>,
+}
+
+impl ProjectCreationHost {
+    /// 由显式 Git 执行端口构造。 / Constructs the host from an explicit Git execution port.
+    pub fn new(git: GitExecution) -> Result<Self, HostError> {
+        Ok(Self {
+            git: git_runner(git)?,
+        })
+    }
+}
+
+impl StagePreparer for ProjectCreationHost {
+    fn prepare(&self, candidate_root: &Path, vcs: ProjectVcs) -> std::io::Result<()> {
+        if vcs != ProjectVcs::InitializeGit {
+            return Ok(());
+        }
+        let output = self.git.execute(GitInvocation {
+            cwd: Some(candidate_root.to_path_buf()),
+            args: ["init", "--quiet"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+            env: BTreeMap::new(),
+        })?;
+        if output.success {
+            return Ok(());
+        }
+        let detail = String::from_utf8_lossy(&output.stderr);
+        Err(std::io::Error::other(format!(
+            "git init failed{}{}; retry with --vcs=none",
+            output
+                .code
+                .map_or_else(String::new, |code| format!(" ({code})")),
+            if detail.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", detail.trim())
+            }
+        )))
+    }
+}
+
+struct CancellablePreparation<'a, P> {
+    inner: &'a P,
+    cancellation: squish_kernel::CancellationToken,
+    observed: &'a AtomicBool,
+}
+
+impl<P: StagePreparer> StagePreparer for CancellablePreparation<'_, P> {
+    fn prepare(&self, candidate_root: &Path, vcs: ProjectVcs) -> std::io::Result<()> {
+        if self.cancellation.is_cancelled() {
+            self.observed.store(true, Ordering::Release);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "project creation cancelled before Git preparation",
+            ));
+        }
+        self.inner.prepare(candidate_root, vcs)?;
+        if self.cancellation.is_cancelled() {
+            self.observed.store(true, Ordering::Release);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "project creation cancelled after Git preparation",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn git_runner(git: GitExecution) -> Result<Arc<dyn GitRunner>, HostError> {
+    match git {
+        GitExecution::Executable(path) => {
+            if !path.is_absolute() {
+                return Err(HostError::Config(
+                    "Git executable must be an absolute path".into(),
+                ));
+            }
+            Ok(Arc::new(SystemGitRunner::new(path)))
+        }
+        GitExecution::Runner(runner) => Ok(runner),
+    }
+}
+
 /// 生产宿主的全部外部依赖。 / Complete external dependencies of the production host.
 pub struct HostConfig {
     /// 唯一允许的项目根。 / Sole permitted project root.
@@ -408,6 +509,7 @@ pub struct ProductionHost {
     context: HostContext,
     registries: Vec<RegistryEntry>,
     git: GitHost,
+    git_runner: Arc<dyn GitRunner>,
     filesystem: Arc<dyn FilesystemPort + Send + Sync>,
 }
 
@@ -488,18 +590,8 @@ impl ProductionHost {
                 }
             }
         }
-        let git_runner: Arc<dyn GitRunner> = match config.git {
-            GitExecution::Executable(path) => {
-                if !path.is_absolute() {
-                    return Err(HostError::Config(
-                        "Git executable must be an absolute path".into(),
-                    ));
-                }
-                Arc::new(SystemGitRunner::new(path))
-            }
-            GitExecution::Runner(runner) => runner,
-        };
-        let git = GitHost::with_runner(context.clone(), git_runner);
+        let git_runner = git_runner(config.git)?;
+        let git = GitHost::with_runner(context.clone(), git_runner.clone());
         Ok(Self {
             project_root,
             source_cache_root,
@@ -507,6 +599,7 @@ impl ProductionHost {
             context,
             registries,
             git,
+            git_runner,
             filesystem: config.filesystem,
         })
     }
@@ -703,6 +796,15 @@ impl ProductionHost {
     }
 }
 
+impl StagePreparer for ProductionHost {
+    fn prepare(&self, candidate_root: &Path, vcs: ProjectVcs) -> std::io::Result<()> {
+        ProjectCreationHost {
+            git: self.git_runner.clone(),
+        }
+        .prepare(candidate_root, vcs)
+    }
+}
+
 fn retryable_registry_miss(error: &FetchError) -> bool {
     match error {
         FetchError::OfflineMiss(_)
@@ -832,7 +934,264 @@ fn windows_path_key(path: &Path) -> String {
     normalized.replace('/', "\\").to_lowercase()
 }
 
+impl Services for ProjectCreationHost {
+    fn locate_project_creation(
+        &self,
+        destination: &Path,
+        vcs: VcsChoice,
+    ) -> Result<ProjectCreationLocation, ServiceError> {
+        let destination = normalize_prospective_destination(destination)
+            .map_err(|error| external_service_error("project_destination_unavailable", error))?;
+        let workspace = locate_enclosing_workspace(&destination)?;
+        let vcs = match vcs {
+            VcsChoice::None => ProjectVcs::None,
+            VcsChoice::Git => self.git_placement(&destination)?,
+        };
+        Ok(ProjectCreationLocation {
+            destination,
+            vcs,
+            workspace,
+        })
+    }
+
+    fn create_project(
+        &self,
+        request: &CreateProjectRequest,
+        cancellation: squish_kernel::CancellationToken,
+    ) -> Result<ProjectCreationStatus, ServiceError> {
+        publish_project(request, self, cancellation)
+    }
+
+    fn storage_layout(&self, _project_root: &Path) -> Result<StorageLayout, ServiceError> {
+        Err(creation_only_service("storage layout"))
+    }
+
+    fn materialize_locked(
+        &self,
+        _project: &Path,
+        _lock: &Lockfile,
+        _mode: ResolutionMode,
+    ) -> Result<Vec<PackageLocation>, ServiceError> {
+        Err(creation_only_service("dependency materialization"))
+    }
+
+    fn resolve(&self, _request: ResolveRequest<'_>) -> Result<ResolvedDependencies, ServiceError> {
+        Err(creation_only_service("dependency resolution"))
+    }
+}
+
+impl ProjectCreationHost {
+    fn git_placement(&self, destination: &Path) -> Result<ProjectVcs, ServiceError> {
+        let cwd = nearest_existing_directory(destination)
+            .map_err(|error| external_service_error("project_destination_unavailable", error))?;
+        let output = self
+            .git
+            .execute(GitInvocation {
+                cwd: Some(cwd),
+                args: ["rev-parse", "--show-toplevel"]
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect(),
+                env: BTreeMap::from([
+                    (OsString::from("LC_ALL"), OsString::from("C")),
+                    (OsString::from("LANG"), OsString::from("C")),
+                ]),
+            })
+            .map_err(|error| external_service_error("git_discovery_failed", error))?;
+        if !output.success {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("not a git repository") {
+                return Ok(ProjectVcs::InitializeGit);
+            }
+            return Err(ServiceError::new(
+                "git_discovery_failed",
+                format!(
+                    "could not inspect the enclosing Git worktree; retry with --vcs=none{}",
+                    if stderr.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", stderr.trim())
+                    }
+                ),
+            ));
+        }
+        let root = std::str::from_utf8(&output.stdout)
+            .map_err(|_| {
+                ServiceError::new(
+                    "git_discovery_failed",
+                    "Git returned a non-UTF-8 worktree root; retry with --vcs=none",
+                )
+            })?
+            .trim();
+        let root = native_host_path(
+            std::fs::canonicalize(root)
+                .map_err(|error| external_service_error("git_discovery_failed", error))?,
+        );
+        if !destination.starts_with(&root) {
+            return Err(ServiceError::new(
+                "git_discovery_failed",
+                "Git returned a worktree that does not contain the destination; retry with --vcs=none",
+            ));
+        }
+        Ok(ProjectVcs::InheritedGit)
+    }
+}
+
+fn creation_only_service(capability: &str) -> ServiceError {
+    ServiceError::new(
+        "creation_host_scope",
+        format!("{capability} is unavailable while creating a project"),
+    )
+}
+
+fn publish_project<P: StagePreparer>(
+    request: &CreateProjectRequest,
+    preparer: &P,
+    cancellation: squish_kernel::CancellationToken,
+) -> Result<ProjectCreationStatus, ServiceError> {
+    if cancellation.is_cancelled() {
+        return Ok(ProjectCreationStatus::Cancelled);
+    }
+    let observed = AtomicBool::new(false);
+    let cancellable = CancellablePreparation {
+        inner: preparer,
+        cancellation: cancellation.clone(),
+        observed: &observed,
+    };
+    match create_project(request, &cancellable, &NoFault) {
+        Ok(created) => Ok(ProjectCreationStatus::Created(created)),
+        Err(_) if observed.load(Ordering::Acquire) => Ok(ProjectCreationStatus::Cancelled),
+        Err(error) => Err(external_service_error("project_creation_failed", error)),
+    }
+}
+
+fn external_service_error(code: &str, error: impl fmt::Display) -> ServiceError {
+    ServiceError::new(code, error.to_string())
+}
+
+fn normalize_prospective_destination(destination: &Path) -> std::io::Result<PathBuf> {
+    let absolute = std::path::absolute(destination)?;
+    let mut cursor = absolute.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::canonicalize(cursor) {
+            Ok(mut canonical) => {
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(native_host_path(canonical));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = cursor.file_name().ok_or(error)?;
+                missing.push(name.to_os_string());
+                cursor = cursor.parent().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "project destination has no existing ancestor",
+                    )
+                })?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// 只读定位待创建路径的唯一外围工作区。 / Read-only locates the sole enclosing workspace of a prospective path.
+///
+/// 此函数只读取已有祖先及其清单，因此可在加载 workspace 配置前使用。 / This function
+/// reads only existing ancestors and manifests, so it is safe before workspace configuration is loaded.
+pub fn locate_enclosing_workspace(
+    destination: &Path,
+) -> Result<Option<WorkspaceMembership>, ServiceError> {
+    let destination = normalize_prospective_destination(destination)
+        .map_err(|error| external_service_error("project_destination_unavailable", error))?;
+    let mut found = Vec::new();
+    for ancestor in destination.parent().into_iter().flat_map(Path::ancestors) {
+        let manifest_path = ancestor.join(squish_project::MANIFEST_FILE_NAME);
+        let source = match std::fs::read_to_string(&manifest_path) {
+            Ok(source) => source,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(external_service_error(
+                    "workspace_manifest_unavailable",
+                    error,
+                ));
+            }
+        };
+        let manifest = Manifest::parse(&source)
+            .map_err(|error| external_service_error("workspace_manifest_invalid", error))?;
+        if manifest.workspace.is_some() {
+            found.push(ancestor.to_path_buf());
+        }
+    }
+    if found.len() > 1 {
+        return Err(ServiceError::new(
+            "ambiguous_enclosing_workspace",
+            "project destination is enclosed by multiple xmlsquish workspaces",
+        ));
+    }
+    let Some(root) = found.pop() else {
+        return Ok(None);
+    };
+    let relative = destination.strip_prefix(&root).map_err(|_| {
+        ServiceError::new(
+            "invalid_workspace_member",
+            "project destination is outside its enclosing workspace",
+        )
+    })?;
+    let member = relative
+        .components()
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| {
+            ServiceError::new(
+                "invalid_workspace_member",
+                "workspace member path must be valid Unicode",
+            )
+        })?
+        .join("/");
+    Ok(Some(WorkspaceMembership { root, member }))
+}
+
+fn nearest_existing_directory(path: &Path) -> std::io::Result<PathBuf> {
+    let mut cursor = path.parent().unwrap_or(path);
+    loop {
+        match std::fs::canonicalize(cursor) {
+            Ok(existing) if existing.is_dir() => return Ok(native_host_path(existing)),
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    "the nearest existing destination ancestor is not a directory",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                cursor = cursor.parent().ok_or(error)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 impl Services for ProductionHost {
+    fn locate_project_creation(
+        &self,
+        destination: &Path,
+        vcs: VcsChoice,
+    ) -> Result<ProjectCreationLocation, ServiceError> {
+        ProjectCreationHost {
+            git: self.git_runner.clone(),
+        }
+        .locate_project_creation(destination, vcs)
+    }
+
+    fn create_project(
+        &self,
+        request: &CreateProjectRequest,
+        cancellation: squish_kernel::CancellationToken,
+    ) -> Result<ProjectCreationStatus, ServiceError> {
+        publish_project(request, self, cancellation)
+    }
+
     fn storage_layout(&self, project_root: &Path) -> Result<StorageLayout, ServiceError> {
         self.require_project(project_root)?;
         Ok(self.storage.clone())
@@ -1159,6 +1518,44 @@ mod tests {
             Err(FetchError::Http(
                 "network is forbidden by the fixture".into(),
             ))
+        }
+    }
+
+    struct RecordingGit {
+        calls: Mutex<Vec<GitInvocation>>,
+        worktree: PathBuf,
+    }
+
+    impl GitRunner for RecordingGit {
+        fn execute(&self, invocation: GitInvocation) -> std::io::Result<GitRunOutput> {
+            let discovery = invocation
+                .args
+                .first()
+                .is_some_and(|value| value == "rev-parse");
+            self.calls.lock().unwrap().push(invocation);
+            Ok(GitRunOutput {
+                success: true,
+                code: Some(0),
+                stdout: if discovery {
+                    format!("{}\n", self.worktree.display()).into_bytes()
+                } else {
+                    Vec::new()
+                },
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    struct FailedGitDiscovery(&'static str);
+
+    impl GitRunner for FailedGitDiscovery {
+        fn execute(&self, _invocation: GitInvocation) -> std::io::Result<GitRunOutput> {
+            Ok(GitRunOutput {
+                success: false,
+                code: Some(128),
+                stdout: Vec::new(),
+                stderr: self.0.as_bytes().to_vec(),
+            })
         }
     }
 
@@ -1907,5 +2304,82 @@ mod tests {
             Some("https://[2001:db8::1]:8443".into())
         );
         assert!(canonical_https_origin("https://example.com/path").is_none());
+    }
+
+    #[test]
+    fn creation_location_is_read_only_and_reuses_enclosing_git_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("xmlsquish.toml"),
+            "manifest-version = 1\n\n[workspace]\nmembers = []\n",
+        )
+        .unwrap();
+        std::fs::create_dir(temp.path().join(".git")).unwrap();
+        let git = Arc::new(RecordingGit {
+            calls: Mutex::new(Vec::new()),
+            worktree: temp.path().to_path_buf(),
+        });
+        let host = ProjectCreationHost::new(GitExecution::Runner(git.clone())).unwrap();
+        let destination = temp.path().join("nested/project");
+
+        let location = host
+            .locate_project_creation(&destination, VcsChoice::Git)
+            .unwrap();
+
+        assert_eq!(location.destination, destination);
+        assert_eq!(location.vcs, ProjectVcs::InheritedGit);
+        assert_eq!(location.workspace.unwrap().member, "nested/project");
+        assert!(!destination.exists());
+        let calls = git.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].args, ["rev-parse", "--show-toplevel"]);
+    }
+
+    #[test]
+    fn creation_stage_runs_shell_free_git_init_only_for_standalone_git() {
+        let temp = tempfile::tempdir().unwrap();
+        let git = Arc::new(RecordingGit {
+            calls: Mutex::new(Vec::new()),
+            worktree: temp.path().to_path_buf(),
+        });
+        let host = ProjectCreationHost::new(GitExecution::Runner(git.clone())).unwrap();
+
+        host.prepare(temp.path(), ProjectVcs::InitializeGit)
+            .unwrap();
+        host.prepare(temp.path(), ProjectVcs::InheritedGit).unwrap();
+        host.prepare(temp.path(), ProjectVcs::None).unwrap();
+
+        let calls = git.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].cwd.as_deref(), Some(temp.path()));
+        assert_eq!(calls[0].args, ["init", "--quiet"]);
+        assert!(calls[0].env.is_empty());
+    }
+
+    #[test]
+    fn git_discovery_distinguishes_absence_from_execution_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("demo");
+        let absent = ProjectCreationHost::new(GitExecution::Runner(Arc::new(FailedGitDiscovery(
+            "fatal: not a git repository",
+        ))))
+        .unwrap();
+        assert_eq!(
+            absent
+                .locate_project_creation(&destination, VcsChoice::Git)
+                .unwrap()
+                .vcs,
+            ProjectVcs::InitializeGit
+        );
+
+        let broken = ProjectCreationHost::new(GitExecution::Runner(Arc::new(FailedGitDiscovery(
+            "fatal: detected dubious ownership",
+        ))))
+        .unwrap();
+        let error = broken
+            .locate_project_creation(&destination, VcsChoice::Git)
+            .unwrap_err();
+        assert_eq!(error.code(), "git_discovery_failed");
+        assert!(error.message().contains("--vcs=none"));
     }
 }

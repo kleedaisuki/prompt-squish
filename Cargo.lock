@@ -1537,6 +1537,7 @@ dependencies = [
  "squish-build",
  "squish-config",
  "squish-fetch",
+ "squish-kernel",
  "squish-manager",
  "squish-project",
  "squish-protocol",
@@ -1615,6 +1616,12 @@ version = "0.1.0"
 dependencies = [
  "semver",
  "serde",
+ "serde_json",
+ "squish-format",
+ "squish-ir",
+ "squish-protocol",
+ "squish-source",
+ "squish-xml-front",
  "thiserror 2.0.20",
  "toml",
  "toml_edit",
@@ -1657,6 +1664,7 @@ dependencies = [
  "squish-source",
  "tempfile",
  "thiserror 2.0.20",
+ "toml_edit",
 ]
 
 [[package]]

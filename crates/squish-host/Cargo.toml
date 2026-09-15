@@ -15,6 +15,7 @@ squish-config = { path = "../squish-config" }
 squish-build = { path = "../squish-build" }
 squish-fetch = { path = "../squish-fetch" }
 squish-manager = { path = "../squish-manager" }
+squish-kernel = { path = "../squish-kernel" }
 squish-project = { path = "../squish-project" }
 squish-protocol = { path = "../squish-protocol" }
 squish-repository = { path = "../squish-repository" }

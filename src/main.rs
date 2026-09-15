@@ -27,7 +27,7 @@ use squish_fetch::{
 };
 use squish_host::{
     CredentialRoute, EnvironmentCredentials, GitExecution, HostConfig, ProductionHost,
-    RegistryEndpoint,
+    ProjectCreationHost, RegistryEndpoint, locate_enclosing_workspace,
 };
 use squish_kernel::{
     CancellationToken, EventSink, InvocationContext, Kernel, KernelError, SinkError,
@@ -42,7 +42,7 @@ use squish_presentation::{
 };
 use squish_protocol::{
     ActionKeyId, Event, EventPayload, ExitStatus, InvocationId, OperationRequest, OperationResult,
-    ProjectPath,
+    ProjectPath, VcsChoice,
 };
 use squish_repository::{Discovery, ProjectRepository};
 use squish_store::{BlobDigest, Cas};
@@ -69,6 +69,13 @@ struct BootstrapRecord<'a> {
     status: Option<&'static str>,
     /// 对应进程退出码。 / Corresponding process exit code.
     exit_code: u8,
+}
+
+/// 两条组合路径汇合后共享的进程级呈现状态。 / Process-level presentation state shared after composition paths converge.
+struct DispatchRuntime {
+    terminal: SystemTerminal,
+    emergency_terminal: Arc<StderrEmergencyRestore>,
+    coordinator: Arc<InterruptCoordinator>,
 }
 
 /// 可跨线程重建的输出故障。 / An output failure that can be reconstructed across threads.
@@ -343,7 +350,83 @@ fn execute(
             true,
         ));
     }
-    let explicit = requested_project(&invocation.request);
+    let durability = match durability_ports(&environment) {
+        Ok(durability) => durability,
+        Err(error) => {
+            let message = format!("invalid process-recovery fault selector: {error}");
+            return Ok(bootstrap_failure(
+                bootstrap_json,
+                "fault-injection",
+                "TEST_FAULT001",
+                &message,
+                1,
+                true,
+            ));
+        }
+    };
+    let runtime = DispatchRuntime {
+        terminal,
+        emergency_terminal,
+        coordinator,
+    };
+    if matches!(invocation.request, OperationRequest::New(_)) {
+        let destination = match &invocation.request {
+            OperationRequest::New(request) => request.destination.as_path(),
+            _ => unreachable!("branch is guarded by the operation kind"),
+        };
+        let workspace = match locate_enclosing_workspace(destination) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                let message = format!("could not locate enclosing project context: {error}");
+                return Ok(bootstrap_failure(
+                    bootstrap_json,
+                    "discover",
+                    "PROJECT001",
+                    &message,
+                    1,
+                    true,
+                ));
+            }
+        };
+        let config = match load_config(
+            workspace.as_ref().map(|value| value.root.as_path()),
+            &invocation,
+        ) {
+            Ok(config) => config,
+            Err(error) => {
+                let message = format!("could not load configuration: {error}");
+                return Ok(bootstrap_failure(
+                    bootstrap_json,
+                    "config",
+                    "CONFIG001",
+                    &message,
+                    1,
+                    true,
+                ));
+            }
+        };
+        let operation_json = operation_json_requested(&invocation, &config);
+        let host = match ProjectCreationHost::new(GitExecution::Runner(Arc::new(
+            SystemGitRunner::default(),
+        ))) {
+            Ok(host) => host,
+            Err(error) => {
+                let message = format!("could not initialize project creation services: {error}");
+                return Ok(bootstrap_failure(
+                    operation_json,
+                    "host",
+                    "HOST001",
+                    &message,
+                    1,
+                    true,
+                ));
+            }
+        };
+        return dispatch_operation(invocation, config, host, None, runtime, durability);
+    }
+
+    let explicit = requested_project(&invocation.request)
+        .expect("non-new operations always address an existing project");
     let discovery = if explicit == Path::new(".") {
         Discovery::Implicit(std::env::current_dir()?)
     } else {
@@ -365,21 +448,7 @@ fn execute(
     };
     let root = repository.root().to_path_buf();
     set_project(&mut invocation.request, &root)?;
-    let durability = match durability_ports(&environment) {
-        Ok(durability) => durability,
-        Err(error) => {
-            let message = format!("invalid process-recovery fault selector: {error}");
-            return Ok(bootstrap_failure(
-                bootstrap_json,
-                "fault-injection",
-                "TEST_FAULT001",
-                &message,
-                1,
-                true,
-            ));
-        }
-    };
-    let config = match load_config(&root, &invocation) {
+    let config = match load_config(Some(&root), &invocation) {
         Ok(config) => config,
         Err(error) => {
             let message = format!("could not load configuration: {error}");
@@ -393,11 +462,7 @@ fn execute(
             ));
         }
     };
-    let operation_json = !matches!(invocation.request, OperationRequest::Inspect(_))
-        && invocation.presentation.message_format.map_or(
-            config.term.message_format == squish_config::MessageFormat::Json,
-            |value| value == MessageFormat::Json,
-        );
+    let operation_json = operation_json_requested(&invocation, &config);
     let (host, storage) = match compose_host(root, &config, environment) {
         Ok(composed) => composed,
         Err(error) => {
@@ -426,15 +491,28 @@ fn execute(
             ));
         }
     };
+    dispatch_operation(invocation, config, host, Some(cas), runtime, durability)
+}
 
+/// 在已有项目与待创建项目完成各自组合后，共享唯一调度和呈现路径。 /
+/// Shares one dispatch and presentation path after existing and prospective composition diverge.
+fn dispatch_operation<S: squish_manager::Services>(
+    invocation: ParsedInvocation,
+    config: Config,
+    host: S,
+    cas: Option<Cas>,
+    runtime: DispatchRuntime,
+    durability: DurabilityPorts,
+) -> Result<u8, Box<dyn std::error::Error>> {
+    let operation_json = operation_json_requested(&invocation, &config);
     let query = matches!(invocation.request, OperationRequest::Inspect(_));
     let sink = match rendering_sink(
         &invocation,
         &config,
         query,
-        terminal,
-        &emergency_terminal,
-        Arc::clone(&coordinator),
+        runtime.terminal,
+        &runtime.emergency_terminal,
+        Arc::clone(&runtime.coordinator),
     ) {
         Ok(sink) => Arc::new(sink),
         Err(error) => {
@@ -451,6 +529,10 @@ fn execute(
     };
     let settings = InvocationSettings {
         excluded_packages: invocation.execution.excluded_packages,
+        new_vcs: match config.new.vcs {
+            squish_config::NewVcs::Git => VcsChoice::Git,
+            squish_config::NewVcs::None => VcsChoice::None,
+        },
         jobs: invocation
             .execution
             .jobs
@@ -468,7 +550,7 @@ fn execute(
 
     let context = InvocationContext::new(
         invocation_id(),
-        coordinator.cancellation_token(),
+        runtime.coordinator.cancellation_token(),
         sink.clone(),
     );
     let outcome = match kernel.dispatch(&invocation.request, &context) {
@@ -508,7 +590,8 @@ fn execute(
     }
     if !query
         && !operation_json
-        && let Err(error) = render_format_diffs(&outcome.result, &cas)
+        && let Some(cas) = cas.as_ref()
+        && let Err(error) = render_format_diffs(&outcome.result, cas)
     {
         return Ok(output_failure(
             Box::new(error),
@@ -516,6 +599,14 @@ fn execute(
         ));
     }
     Ok(outcome.summary.status.code())
+}
+
+fn operation_json_requested(invocation: &ParsedInvocation, config: &Config) -> bool {
+    !matches!(invocation.request, OperationRequest::Inspect(_))
+        && invocation.presentation.message_format.map_or(
+            config.term.message_format == squish_config::MessageFormat::Json,
+            |value| value == MessageFormat::Json,
+        )
 }
 
 /// 从进程边界已捕获的环境构造持久化端口。 /
@@ -723,6 +814,7 @@ fn set_project(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let project = ProjectPath::new(root.to_string_lossy().into_owned())?;
     match request {
+        OperationRequest::New(_) => {}
         OperationRequest::Build(value) => value.project = project,
         OperationRequest::Format(value) => value.project = project,
         OperationRequest::Add(value) => value.project = project,
@@ -733,14 +825,15 @@ fn set_project(
 }
 
 /// 返回解析器保留的项目选择。 / Returns the parser-preserved project selection.
-fn requested_project(request: &OperationRequest) -> &Path {
-    Path::new(match request {
+fn requested_project(request: &OperationRequest) -> Option<&Path> {
+    Some(Path::new(match request {
+        OperationRequest::New(_) => return None,
         OperationRequest::Build(value) => value.project.as_str(),
         OperationRequest::Format(value) => value.project.as_str(),
         OperationRequest::Add(value) => value.project.as_str(),
         OperationRequest::Remove(value) => value.project.as_str(),
         OperationRequest::Inspect(value) => value.project.as_str(),
-    })
+    }))
 }
 
 /// 将纯查询负载写成单个 stdout 文档。 / Writes a pure-query payload as one stdout document.
@@ -812,7 +905,7 @@ fn progress_mode(
 /// 按 defaults < user < workspace < environment < CLI 加载确定性配置。 /
 /// Loads deterministic configuration in defaults < user < workspace < environment < CLI order.
 fn load_config(
-    root: &Path,
+    workspace_root: Option<&Path>,
     invocation: &ParsedInvocation,
 ) -> Result<Config, Box<dyn std::error::Error>> {
     let mut overrides = environment_overrides();
@@ -854,12 +947,13 @@ fn load_config(
             invocation.execution.keep_going
         ));
     }
-    Ok(ConfigLoader::new(ConfigHome::new(config_home()?))
-        .workspace_root(root)
+    let mut loader = ConfigLoader::new(ConfigHome::new(config_home()?))
         .cli_base(std::env::current_dir()?)
-        .cli_overrides(overrides)
-        .load()?
-        .config)
+        .cli_overrides(overrides);
+    if let Some(root) = workspace_root {
+        loader = loader.workspace_root(root);
+    }
+    Ok(loader.load()?.config)
 }
 
 /// 将支持的进程环境值转为显式的强类型覆盖。 / Converts supported process environment values into explicit typed overrides.
@@ -869,6 +963,7 @@ fn environment_overrides() -> Vec<String> {
         ("XMLSQUISH_STORAGE_ROOT", "manager.storage-root", true),
         ("XMLSQUISH_JOBS", "build.jobs", false),
         ("XMLSQUISH_KEEP_GOING", "build.keep-going", false),
+        ("XMLSQUISH_VCS", "new.vcs", true),
         ("XMLSQUISH_COLOR", "term.color", true),
         ("XMLSQUISH_PROGRESS", "term.progress", true),
         ("XMLSQUISH_MESSAGE_FORMAT", "term.message-format", true),
@@ -1046,7 +1141,9 @@ mod tests {
     };
 
     use super::*;
-    use squish_protocol::{ActionTotals, JobId, JobSummary, Timing};
+    use squish_protocol::{
+        ActionTotals, JobId, JobSummary, NewRequest, ProjectDestination, Timing,
+    };
 
     /// 首次 tick 报错并通知测试线程的呈现器。 /
     /// Renderer that reports an error on its first tick and notifies the test thread.
@@ -1067,6 +1164,17 @@ mod tests {
         log: Arc<Mutex<Vec<&'static str>>>,
         ticked: mpsc::Sender<()>,
         cancellation_published: Arc<AtomicBool>,
+    }
+
+    #[test]
+    fn prospective_operation_has_no_existing_project_discovery_input() {
+        let request = OperationRequest::New(NewRequest {
+            destination: ProjectDestination::new("future/project"),
+            name: None,
+            vcs: None,
+        });
+
+        assert_eq!(requested_project(&request), None);
     }
 
     impl Renderer for OrderingRenderer {
