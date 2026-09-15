@@ -597,7 +597,13 @@ fn decode_sources(
     Ok((archives, blobs))
 }
 
-fn encode_link_trace(trace: &LinkTrace) -> Vec<u8> {
+/// 将静态链接来源证据编码为规范字节。 / Encodes static-link provenance as canonical bytes.
+///
+/// 该投影既用于 `.psdbg` section，也用于计算 [`DebugBundle::link_trace_digest`]；
+/// manager 必须调用同一编码，不能复制一份容易漂移的摘要配方。
+/// The projection is shared by the `.psdbg` section and
+/// [`DebugBundle::link_trace_digest`], so managers never duplicate a drifting digest recipe.
+pub fn encode_link_trace(trace: &LinkTrace) -> Vec<u8> {
     let mut w = Writer::default();
     w.digest(trace.entry_object.0);
     w.digest(trace.resolution_snapshot);
@@ -681,7 +687,8 @@ fn encode_link_trace(trace: &LinkTrace) -> Vec<u8> {
     w.bytes
 }
 
-fn decode_link_trace(bytes: &[u8]) -> Result<LinkTrace, DecodeError> {
+/// 从规范字节解码静态链接来源证据。 / Decodes static-link provenance from canonical bytes.
+pub fn decode_link_trace(bytes: &[u8]) -> Result<LinkTrace, DecodeError> {
     let mut r = Reader::new(bytes);
     let entry_object = ObjectDigest(r.digest()?);
     let resolution_snapshot = r.digest()?;

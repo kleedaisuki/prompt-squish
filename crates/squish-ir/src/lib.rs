@@ -24,7 +24,9 @@ pub use codec::{
     SECTION_DESCRIPTOR, SECTION_DOCUMENT, SECTION_LINKED_IMAGE, SECTION_UNIT, Section,
     SectionFlags, SemanticDescriptor, decode_container, encode_container,
 };
-pub use debug_bundle::{decode_debug_bundle, encode_debug_bundle};
+pub use debug_bundle::{
+    decode_debug_bundle, decode_link_trace, encode_debug_bundle, encode_link_trace,
+};
 pub use digest::{
     ArtifactDigest, DebugDigest, Digest, DigestAlgorithm, DocumentDigest, LinkedImageDigest,
     ObjectDigest, SemanticUnitDigest, SourceDigest,
