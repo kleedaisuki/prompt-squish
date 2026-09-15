@@ -53,6 +53,15 @@ impl PublishObserver for RecordingObserver {
     }
 }
 
+struct CrashAt(DurablePoint);
+impl PublishObserver for CrashAt {
+    fn observe(&self, event: &PublishEvent) {
+        if event == &PublishEvent::DurablePoint(self.0) {
+            panic!("simulated process crash at {:?}", self.0);
+        }
+    }
+}
+
 fn publication(digest: Digest, size: u64, destination: &str) -> Publication {
     Publication {
         output: ProducedOutput {
@@ -287,6 +296,157 @@ fn recovers_durable_journal_without_user_repair() {
         b"recovered"
     );
     assert!(!root.path().join(STATE_DIR).join(JOURNAL).exists());
+}
+
+#[test]
+fn publishes_a_complete_multi_artifact_generation() {
+    let root = tempfile::tempdir().unwrap();
+    let store = MemoryStore::default();
+    let prompt = store.insert(b"prompt-v1");
+    let debug = store.insert(b"debug-v1");
+    let publisher = FileArtifactPublisher::open(root.path(), store).unwrap();
+    let requests = [
+        publication(prompt, 9, "app.prompt"),
+        publication(debug, 8, "app.psdbg"),
+    ];
+
+    let published = publisher.publish_generation("app", &requests).unwrap();
+    assert_eq!(
+        publisher.current_generation("app").unwrap(),
+        Some(published.clone())
+    );
+    assert_eq!(published.artifacts.len(), 2);
+    assert_eq!(
+        fs::read(root.path().join(&published.artifacts[0].uri)).unwrap(),
+        b"prompt-v1"
+    );
+    assert_eq!(
+        fs::read(root.path().join(&published.artifacts[1].uri)).unwrap(),
+        b"debug-v1"
+    );
+}
+
+#[test]
+fn rejects_collisions_across_the_complete_destination_set() {
+    let root = tempfile::tempdir().unwrap();
+    let store = MemoryStore::default();
+    let digest = store.insert(b"x");
+    let publisher = FileArtifactPublisher::open(root.path(), store).unwrap();
+    for destinations in [
+        ["A.prompt", "a.prompt"],
+        ["name", "name."],
+        ["tree", "tree/child"],
+        [r"dir\file", "dir/file"],
+    ] {
+        let requests = destinations.map(|destination| publication(digest.clone(), 1, destination));
+        assert!(matches!(
+            publisher.publish_generation("app", &requests),
+            Err(PublishError::AliasConflict(_))
+        ));
+    }
+    assert!(publisher.current_generation("app").unwrap().is_none());
+}
+
+#[test]
+fn failure_while_staging_one_file_never_switches_the_generation() {
+    let root = tempfile::tempdir().unwrap();
+    let initial = MemoryStore::default();
+    let old = initial.insert(b"old");
+    let publisher = FileArtifactPublisher::open(root.path(), initial).unwrap();
+    let old_generation = publisher
+        .publish_generation("app", &[publication(old, 3, "app.prompt")])
+        .unwrap();
+
+    let store = MemoryStore::default();
+    let good = store.insert(b"new");
+    let missing = Digest::new(DigestAlgorithm::Blake3, vec![0x42; 32]).unwrap();
+    let publisher = FileArtifactPublisher::open(root.path(), store).unwrap();
+    let error = publisher
+        .publish_generation(
+            "app",
+            &[
+                publication(good, 3, "app.prompt"),
+                publication(missing, 3, "app.psdbg"),
+            ],
+        )
+        .unwrap_err();
+    assert!(matches!(error, PublishError::MissingBlob));
+    assert_eq!(
+        publisher.current_generation("app").unwrap(),
+        Some(old_generation)
+    );
+    assert!(!publisher.state.join(GENERATION_JOURNAL).exists());
+}
+
+#[test]
+fn crash_at_every_durable_point_preserves_or_rolls_forward_a_whole_generation() {
+    let points = [
+        DurablePoint::ArtifactStaged,
+        DurablePoint::ManifestStaged,
+        DurablePoint::GenerationStaged,
+        DurablePoint::CommitDecision,
+        DurablePoint::CurrentSwitched,
+        DurablePoint::JournalCleared,
+    ];
+    for point in points {
+        let root = tempfile::tempdir().unwrap();
+        let old_store = MemoryStore::default();
+        let old_prompt = old_store.insert(b"old-prompt");
+        let old_debug = old_store.insert(b"old-debug");
+        let old_publisher = FileArtifactPublisher::open(root.path(), old_store).unwrap();
+        let old_generation = old_publisher
+            .publish_generation(
+                "app",
+                &[
+                    publication(old_prompt, 10, "app.prompt"),
+                    publication(old_debug, 9, "app.psdbg"),
+                ],
+            )
+            .unwrap();
+        drop(old_publisher);
+
+        let new_store = MemoryStore::default();
+        let new_prompt = new_store.insert(b"new-prompt");
+        let new_debug = new_store.insert(b"new-debug");
+        let publisher =
+            FileArtifactPublisher::with_observer(root.path(), new_store, Arc::new(CrashAt(point)))
+                .unwrap();
+        let requests = [
+            publication(new_prompt.clone(), 10, "app.prompt"),
+            publication(new_debug.clone(), 9, "app.psdbg"),
+        ];
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            publisher.publish_generation("app", &requests).unwrap();
+        }));
+        assert!(crashed.is_err(), "fault point {point:?} was not reached");
+        drop(publisher);
+
+        let recovery_store = MemoryStore::default();
+        recovery_store.insert(b"new-prompt");
+        recovery_store.insert(b"new-debug");
+        let recovered = FileArtifactPublisher::open(root.path(), recovery_store).unwrap();
+        let current = recovered.current_generation("app").unwrap().unwrap();
+        let rolls_forward = matches!(
+            point,
+            DurablePoint::CommitDecision
+                | DurablePoint::CurrentSwitched
+                | DurablePoint::JournalCleared
+        );
+        if rolls_forward {
+            assert_ne!(current.generation_id, old_generation.generation_id);
+            assert_eq!(
+                fs::read(root.path().join(&current.artifacts[0].uri)).unwrap(),
+                b"new-prompt"
+            );
+            assert_eq!(
+                fs::read(root.path().join(&current.artifacts[1].uri)).unwrap(),
+                b"new-debug"
+            );
+        } else {
+            assert_eq!(current, old_generation);
+        }
+        assert!(!recovered.state.join(GENERATION_JOURNAL).exists());
+    }
 }
 
 #[cfg(unix)]

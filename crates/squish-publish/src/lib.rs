@@ -1,10 +1,12 @@
 //! 可崩溃恢复的本地文件产物发布器。 / Crash-recoverable local-file artifact publisher.
 //!
-//! 发布器从 [`BlobStore`] 流式读取不可变内容，在目标目录内写入并校验临时文件，
-//! 随后以原子替换发布。持久 journal 让下一次打开自动完成被中断的发布。
-//! The publisher streams immutable content from a [`BlobStore`], writes and verifies
-//! a temporary file in the destination directory, then publishes it with an atomic
-//! replacement. A durable journal lets the next open finish an interrupted publication.
+//! 发布器从 [`BlobStore`] 流式读取不可变内容。单文件兼容 API 在目标目录内校验临时
+//! 文件后原子替换；generation API 先完整暂存产物集合，再以一次 current manifest
+//! 替换提交。持久 journal 让下一次打开自动 roll-forward 被中断的提交。
+//! The publisher streams immutable content from a [`BlobStore`]. The compatible single-file
+//! API verifies a destination-local temporary before atomic replacement; the generation API
+//! stages a complete artifact set and commits it with one current-manifest replacement. A
+//! durable journal automatically rolls an interrupted commit forward on the next open.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -26,6 +28,9 @@ use tempfile::NamedTempFile;
 
 const STATE_DIR: &str = ".squish-publish";
 const JOURNAL: &str = "journal.json";
+const GENERATION_JOURNAL: &str = "generation-journal.json";
+const GENERATIONS: &str = "generations";
+const TARGETS: &str = "targets";
 const LOCK: &str = "lock";
 
 /// 文件发布失败。 / Filesystem publication failure.
@@ -100,6 +105,47 @@ struct Journal {
     digest: Digest,
 }
 
+/// 一次原子提交的完整产物集合。 / Complete artifact set committed in one atomic generation.
+///
+/// `manifest` 是稳定的 current manifest URI；其中一次原子文件替换就是 generation 的
+/// 唯一可见提交点。每个 artifact URI 指向不可变 generation 目录中的字节。
+/// `manifest` is the stable current-manifest URI. Its single atomic replacement is the
+/// generation's only visibility point; artifact URIs address immutable generation bytes.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PublishedGeneration {
+    /// 调用者提供的目标身份。 / Caller-provided target identity.
+    pub target_id: String,
+    /// 由完整请求内容导出的稳定 generation 身份。 / Stable generation identity derived from the complete request.
+    pub generation_id: String,
+    /// 相对于发布根目录的稳定 current manifest URI。 / Stable current-manifest URI relative to the publication root.
+    pub manifest: String,
+    /// 本 generation 的不可变产物。 / Immutable artifacts in this generation.
+    pub artifacts: Vec<Artifact>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct GenerationJournal {
+    target_key: String,
+    generation_id: String,
+}
+
+/// generation 协议中的持久化边界。 / Durable boundaries in the generation protocol.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DurablePoint {
+    /// 一个完整校验的产物文件已同步。 / One fully verified artifact file was synchronized.
+    ArtifactStaged,
+    /// generation manifest 已同步。 / The generation manifest was synchronized.
+    ManifestStaged,
+    /// 不可变 generation 目录项已持久化。 / The immutable generation directory entry was persisted.
+    GenerationStaged,
+    /// commit-decision journal 已持久化。 / The commit-decision journal was persisted.
+    CommitDecision,
+    /// stable current manifest 已原子切换。 / The stable current manifest was atomically switched.
+    CurrentSwitched,
+    /// commit-decision journal 已清除。 / The commit-decision journal was cleared.
+    JournalCleared,
+}
+
 /// 目录元数据持久化结果。 / Directory-metadata durability result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DirectoryDurability {
@@ -121,6 +167,9 @@ pub enum PublishEvent {
         /// 平台提供的保证。 / Guarantee supplied by the platform.
         guarantee: DirectoryDurability,
     },
+    /// 一个 generation 持久化边界已完成；可用于确定性 crash fault injection。
+    /// A generation durability boundary completed; useful for deterministic crash fault injection.
+    DurablePoint(DurablePoint),
 }
 
 /// 接收持久性事件而不耦合日志框架。 / Receives durability events without coupling to a logging framework.
@@ -182,7 +231,10 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
             store,
             observer,
         };
-        publisher.with_lock(|this| this.recover_locked())?;
+        publisher.with_lock(|this| {
+            this.recover_locked()?;
+            this.recover_generation_locked()
+        })?;
         Ok(publisher)
     }
 
@@ -239,6 +291,155 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
             this.finish_journal()?;
             artifact(publication)
         })
+    }
+
+    /// 将一个 target 的全部产物作为单一 generation 发布。 / Publishes every artifact of one target as a single generation.
+    ///
+    /// 此方法先从 CAS 完整读取、校验并同步**全部**字节和 manifest，之后才写入持久
+    /// commit decision。current manifest 的一次原子替换是唯一提交点；所以通过
+    /// [`Self::current_generation`] 读取的调用者不会把不同 generation 的文件混合起来。
+    /// The method completely reads, verifies, and synchronizes **all** CAS bytes and the
+    /// manifest before recording a durable commit decision. One atomic replacement of the
+    /// current manifest is the sole commit point, so [`Self::current_generation`] readers
+    /// cannot combine files from different generations.
+    ///
+    /// # 示例 / Example
+    /// ```no_run
+    /// # use squish_publish::FileArtifactPublisher;
+    /// # fn publish<S: squish_build::BlobStore>(p: &FileArtifactPublisher<S>, files: &[squish_build::Publication]) -> Result<(), squish_publish::PublishError<S::Error>> {
+    /// let generation = p.publish_generation("app", files)?;
+    /// assert_eq!(generation.target_id, "app");
+    /// # Ok(()) }
+    /// ```
+    pub fn publish_generation(
+        &self,
+        target_id: &str,
+        publications: &[Publication],
+    ) -> Result<PublishedGeneration, PublishError<S::Error>> {
+        self.with_lock(|this| {
+            this.recover_locked()?;
+            this.recover_generation_locked()?;
+            this.publish_generation_locked(target_id, publications)
+        })
+    }
+
+    /// 读取一个 target 最近完整提交的 generation。 / Reads the most recently committed complete generation for a target.
+    pub fn current_generation(
+        &self,
+        target_id: &str,
+    ) -> Result<Option<PublishedGeneration>, PublishError<S::Error>> {
+        let key = target_key(target_id)?;
+        self.with_lock(|this| {
+            this.recover_generation_locked()?;
+            let path = this.current_manifest_path(&key);
+            match fs::read(path) {
+                Ok(bytes) => {
+                    let generation: PublishedGeneration =
+                        serde_json::from_slice(&bytes).map_err(PublishError::Journal)?;
+                    if generation.target_id != target_id
+                        || generation.manifest != current_manifest_uri(&key)
+                    {
+                        return Err(PublishError::IntegrityMismatch);
+                    }
+                    Ok(Some(generation))
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.into()),
+            }
+        })
+    }
+
+    fn publish_generation_locked(
+        &self,
+        target_id: &str,
+        publications: &[Publication],
+    ) -> Result<PublishedGeneration, PublishError<S::Error>> {
+        let key = target_key(target_id)?;
+        let destinations = validate_generation_destinations(publications)?;
+        let generation_id = generation_id(target_id, publications);
+        let target_dir = self.state.join(GENERATIONS).join(&key);
+        create_directory_tree(&target_dir, self.observer.as_ref())?;
+
+        let temporary = tempfile::Builder::new()
+            .prefix(".stage-")
+            .tempdir_in(&target_dir)?;
+        let artifact_root = temporary.path().join("artifacts");
+        fs::create_dir(&artifact_root)?;
+        let mut artifacts = Vec::with_capacity(publications.len());
+        for (publication, relative) in publications.iter().zip(&destinations) {
+            let path = artifact_root.join(relative);
+            create_directory_tree(
+                path.parent().expect("validated artifact path has parent"),
+                self.observer.as_ref(),
+            )?;
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)?;
+            let verification = Journal {
+                destination: publication.destination.clone(),
+                temporary: String::new(),
+                size: publication.output.size,
+                digest: publication.output.digest.clone(),
+            };
+            self.fill_and_verify(&file, &verification)?;
+            self.observer
+                .observe(&PublishEvent::DurablePoint(DurablePoint::ArtifactStaged));
+            let mut published = artifact(publication)?;
+            published.uri = generation_artifact_uri(&key, &generation_id, &publication.destination);
+            artifacts.push(published);
+        }
+
+        let manifest_uri = current_manifest_uri(&key);
+        let generation = PublishedGeneration {
+            target_id: target_id.to_owned(),
+            generation_id: generation_id.clone(),
+            manifest: manifest_uri,
+            artifacts,
+        };
+        let manifest_bytes = serde_json::to_vec(&generation).map_err(PublishError::Journal)?;
+        let manifest_path = temporary.path().join("manifest.json");
+        write_new_synced(&manifest_path, &manifest_bytes)?;
+        self.observer
+            .observe(&PublishEvent::DurablePoint(DurablePoint::ManifestStaged));
+        sync_tree_directories(temporary.path(), self.observer.as_ref())?;
+
+        let final_dir = target_dir.join(&generation_id);
+        if final_dir.exists() {
+            let existing = fs::read(final_dir.join("manifest.json"))?;
+            if existing != manifest_bytes {
+                return Err(PublishError::IntegrityMismatch);
+            }
+            for (publication, path) in publications.iter().zip(&destinations) {
+                if !valid_file(
+                    &final_dir.join("artifacts").join(path),
+                    publication.output.size,
+                    &publication.output.digest,
+                )? {
+                    return Err(PublishError::IntegrityMismatch);
+                }
+            }
+        } else {
+            let staged = temporary.keep();
+            fs::rename(&staged, &final_dir)?;
+            sync_directory(&target_dir, self.observer.as_ref())?;
+        }
+        self.observer
+            .observe(&PublishEvent::DurablePoint(DurablePoint::GenerationStaged));
+
+        self.write_generation_journal(&GenerationJournal {
+            target_key: key.clone(),
+            generation_id,
+        })?;
+        self.observer
+            .observe(&PublishEvent::DurablePoint(DurablePoint::CommitDecision));
+        self.commit_current(&key, &manifest_bytes)?;
+        self.observer
+            .observe(&PublishEvent::DurablePoint(DurablePoint::CurrentSwitched));
+        self.finish_generation_journal()?;
+        self.observer
+            .observe(&PublishEvent::DurablePoint(DurablePoint::JournalCleared));
+        Ok(generation)
     }
 
     fn with_lock<T>(
@@ -303,6 +504,74 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
         fs::remove_file(temporary_path).ok();
         sync_parent(&destination, self.observer.as_ref())?;
         self.finish_journal()
+    }
+
+    fn recover_generation_locked(&self) -> Result<(), PublishError<S::Error>> {
+        let path = self.state.join(GENERATION_JOURNAL);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let journal: GenerationJournal =
+            serde_json::from_slice(&bytes).map_err(PublishError::Journal)?;
+        if !is_key(&journal.target_key) || !is_key(&journal.generation_id) {
+            return Err(PublishError::InvalidDestination(
+                "malformed generation journal identity".into(),
+            ));
+        }
+        let manifest = self
+            .state
+            .join(GENERATIONS)
+            .join(&journal.target_key)
+            .join(&journal.generation_id)
+            .join("manifest.json");
+        let bytes = fs::read(manifest)?;
+        let parsed: PublishedGeneration =
+            serde_json::from_slice(&bytes).map_err(PublishError::Journal)?;
+        if parsed.generation_id != journal.generation_id
+            || target_key::<S::Error>(&parsed.target_id)? != journal.target_key
+            || parsed.manifest != current_manifest_uri(&journal.target_key)
+        {
+            return Err(PublishError::IntegrityMismatch);
+        }
+        self.commit_current(&journal.target_key, &bytes)?;
+        self.finish_generation_journal()
+    }
+
+    fn write_generation_journal(
+        &self,
+        journal: &GenerationJournal,
+    ) -> Result<(), PublishError<S::Error>> {
+        let mut temporary = NamedTempFile::new_in(&self.state)?;
+        serde_json::to_writer(&mut temporary, journal).map_err(PublishError::Journal)?;
+        temporary.as_file_mut().flush()?;
+        temporary.as_file().sync_all()?;
+        persist_replace(temporary, &self.state.join(GENERATION_JOURNAL))?;
+        sync_directory(&self.state, self.observer.as_ref())
+    }
+
+    fn finish_generation_journal(&self) -> Result<(), PublishError<S::Error>> {
+        match fs::remove_file(self.state.join(GENERATION_JOURNAL)) {
+            Ok(()) => sync_directory(&self.state, self.observer.as_ref()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn current_manifest_path(&self, key: &str) -> PathBuf {
+        self.state.join(TARGETS).join(key).join("current.json")
+    }
+
+    fn commit_current(&self, key: &str, bytes: &[u8]) -> Result<(), PublishError<S::Error>> {
+        let target = self.state.join(TARGETS).join(key);
+        create_directory_tree(&target, self.observer.as_ref())?;
+        let mut temporary = NamedTempFile::new_in(&target)?;
+        temporary.write_all(bytes)?;
+        temporary.as_file_mut().flush()?;
+        temporary.as_file().sync_all()?;
+        persist_replace(temporary, &target.join("current.json"))?;
+        sync_directory(&target, self.observer.as_ref())
     }
 
     fn prepare_path(&self, relative: &Path) -> Result<(), PublishError<S::Error>> {
@@ -433,15 +702,142 @@ fn artifact<E>(publication: &Publication) -> Result<Artifact, PublishError<E>> {
     })
 }
 
+fn target_key<E>(target_id: &str) -> Result<String, PublishError<E>> {
+    if target_id.is_empty() || target_id.chars().any(char::is_control) {
+        return Err(PublishError::InvalidDestination(target_id.to_owned()));
+    }
+    Ok(hex_bytes(&Sha256::digest(target_id.as_bytes())))
+}
+
+fn generation_id(target_id: &str, publications: &[Publication]) -> String {
+    let mut hasher = Sha256::new();
+    feed_field(&mut hasher, target_id.as_bytes());
+    for publication in publications {
+        feed_field(&mut hasher, publication.destination.as_bytes());
+        feed_field(&mut hasher, publication.output.name.as_str().as_bytes());
+        feed_field(
+            &mut hasher,
+            serde_json::to_string(&publication.output.kind)
+                .expect("ArtifactKind serialization is infallible")
+                .as_bytes(),
+        );
+        feed_field(
+            &mut hasher,
+            serde_json::to_string(&publication.output.digest)
+                .expect("Digest serialization is infallible")
+                .as_bytes(),
+        );
+        hasher.update(publication.output.size.to_le_bytes());
+    }
+    hex_bytes(&hasher.finalize())
+}
+
+fn feed_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut result = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        result.push(HEX[(byte >> 4) as usize] as char);
+        result.push(HEX[(byte & 0xf) as usize] as char);
+    }
+    result
+}
+
+fn is_key(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn validate_generation_destinations<E>(
+    publications: &[Publication],
+) -> Result<Vec<PathBuf>, PublishError<E>> {
+    let mut destinations = Vec::with_capacity(publications.len());
+    let mut normalized = Vec::<(String, PathBuf)>::with_capacity(publications.len());
+    for publication in publications {
+        let path = parse_destination(&publication.destination)
+            .map_err(PublishError::InvalidDestination)?;
+        let folded = path
+            .iter()
+            .map(portable_component_key)
+            .collect::<Vec<_>>()
+            .join("/");
+        for (prior, prior_path) in &normalized {
+            if folded == *prior
+                || folded
+                    .strip_prefix(prior)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+                || prior
+                    .strip_prefix(&folded)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+            {
+                return Err(PublishError::AliasConflict(prior_path.clone()));
+            }
+        }
+        normalized.push((folded, path.clone()));
+        destinations.push(path);
+    }
+    Ok(destinations)
+}
+
+fn generation_artifact_uri(key: &str, generation: &str, destination: &str) -> String {
+    format!(
+        "{STATE_DIR}/{GENERATIONS}/{key}/{generation}/artifacts/{}",
+        destination.replace('\\', "/")
+    )
+}
+
+fn current_manifest_uri(key: &str) -> String {
+    format!("{STATE_DIR}/{TARGETS}/{key}/current.json")
+}
+
+fn write_new_synced<E>(path: &Path, bytes: &[u8]) -> Result<(), PublishError<E>> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)?;
+    file.flush()?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn sync_tree_directories<E>(
+    root: &Path,
+    observer: &dyn PublishObserver,
+) -> Result<(), PublishError<E>> {
+    let mut directories = vec![root.to_path_buf()];
+    let mut index = 0;
+    while index < directories.len() {
+        for entry in fs::read_dir(&directories[index])? {
+            let path = entry?.path();
+            if path.is_dir() {
+                directories.push(path);
+            }
+        }
+        index += 1;
+    }
+    for directory in directories.into_iter().rev() {
+        sync_directory(&directory, observer)?;
+    }
+    Ok(())
+}
+
 fn parse_destination(value: &str) -> Result<PathBuf, String> {
     if value.is_empty() || value.starts_with(['/', '\\']) {
         return Err(value.to_owned());
     }
     let pieces: Vec<_> = value.split(['/', '\\']).collect();
-    if pieces
-        .iter()
-        .any(|piece| piece.is_empty() || *piece == "." || *piece == "..")
-        || pieces.first().is_some_and(|piece| piece.ends_with(':'))
+    if pieces.iter().any(|piece| {
+        piece.is_empty()
+            || *piece == "."
+            || *piece == ".."
+            || piece.chars().any(|character| {
+                character.is_control()
+                    || matches!(character, '<' | '>' | ':' | '"' | '|' | '?' | '*')
+            })
+            || piece.trim_end_matches([' ', '.']).is_empty()
+            || is_windows_device_name(piece)
+    }) || pieces.first().is_some_and(|piece| piece.ends_with(':'))
         || pieces.first() == Some(&STATE_DIR)
     {
         return Err(value.to_owned());
@@ -455,6 +851,46 @@ fn parse_destination(value: &str) -> Result<PathBuf, String> {
     } else {
         Err(value.to_owned())
     }
+}
+
+fn portable_component_key(value: &OsStr) -> String {
+    value
+        .to_string_lossy()
+        .trim_end_matches([' ', '.'])
+        .to_lowercase()
+}
+
+fn is_windows_device_name(value: &str) -> bool {
+    let stem = value
+        .trim_end_matches([' ', '.'])
+        .split('.')
+        .next()
+        .unwrap_or_default();
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
 }
 
 fn is_file_name(value: &str) -> bool {
