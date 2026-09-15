@@ -875,7 +875,6 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                 outputs,
                 ..
             } => {
-                self.set_action_state(job, plan, action, ActionState::Terminal);
                 if self.options.verbosity != Verbosity::Quiet {
                     self.write_persistent(&format!(
                         "{} {} ({}, {}, {}, {} outputs)",
@@ -887,6 +886,10 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                         outputs.len()
                     ))?;
                 }
+                // 缓存命中是执行器观察到的事实，不是动作终态；内核稍后仍会发送
+                // `ActionSucceeded` 或 `ActionFailed`。 / A cache hit is an executor fact,
+                // not an action terminal state; the kernel still emits `ActionSucceeded` or
+                // `ActionFailed` afterwards.
                 self.update_action_progress(job, plan)?;
             }
             EventPayload::ActionSucceeded {
@@ -1729,6 +1732,115 @@ mod tests {
         let output = String::from_utf8_lossy(renderer.writer.as_slice());
         assert!(output.contains("Running 2 actions (including alpha)"));
         assert!(!output.contains("|") && !output.contains("/ build"));
+    }
+
+    #[test]
+    fn cache_hit_does_not_finish_a_started_action() {
+        let clock = TestClock::default();
+        let terminal = FixedTerminal::new(TerminalCapabilities {
+            is_terminal: true,
+            supports_ansi: true,
+            supports_dynamic: true,
+        })
+        .with_width(Some(80));
+        let mut renderer = HumanRenderer::with_clock_and_terminal(
+            Vec::new(),
+            terminal,
+            Environment::default(),
+            PresentationOptions {
+                color: ColorMode::Never,
+                progress: ProgressMode::Always,
+                ..PresentationOptions::default()
+            },
+            clock.clone(),
+        );
+        let job = id::<JobId>("build");
+        let plan = id::<PlanId>("plan");
+        let alpha = id::<ActionId>("alpha");
+        let beta = id::<ActionId>("beta");
+        for payload in [
+            EventPayload::PlanReady {
+                job: job.clone(),
+                attempt: id::<PlanningAttemptId>("attempt"),
+                plan: plan.clone(),
+                digest: plan_digest(5),
+                mode: PlanMode::Execute,
+                actions: 2,
+                issues: 0,
+            },
+            EventPayload::ActionDeclared {
+                job: job.clone(),
+                plan: plan.clone(),
+                action: alpha.clone(),
+                kind: ActionKind::Compile,
+                dependencies: vec![],
+            },
+            EventPayload::ActionDeclared {
+                job: job.clone(),
+                plan: plan.clone(),
+                action: beta.clone(),
+                kind: ActionKind::Link,
+                dependencies: vec![],
+            },
+            EventPayload::ActionStarted {
+                job: job.clone(),
+                plan: plan.clone(),
+                action: alpha.clone(),
+            },
+            EventPayload::ActionStarted {
+                job: job.clone(),
+                plan: plan.clone(),
+                action: beta.clone(),
+            },
+        ] {
+            renderer.render(&event(0, payload)).unwrap();
+        }
+        clock.advance(100);
+        renderer.tick().unwrap();
+        renderer
+            .render(&event(
+                5,
+                EventPayload::CacheHit {
+                    job: job.clone(),
+                    plan: plan.clone(),
+                    action: alpha.clone(),
+                    cache: CacheKind::Local,
+                    digest: Digest::new(DigestAlgorithm::Blake3, vec![6; 32]).unwrap(),
+                    action_key: Some(id::<ActionKeyId>("alpha-key")),
+                    outputs: vec![],
+                },
+            ))
+            .unwrap();
+        clock.advance(100);
+        renderer.tick().unwrap();
+
+        let plan_view = &renderer.jobs[&job].plans[&plan];
+        assert_eq!(plan_view.actions[&alpha].state, ActionState::Running);
+        assert_eq!(plan_view.actions[&beta].state, ActionState::Running);
+        let before_terminal = String::from_utf8_lossy(renderer.writer.as_slice()).into_owned();
+        assert!(before_terminal.contains("Running 2 actions (including alpha)   0% (0/2)"));
+        assert!(!before_terminal.contains(" 50% (1/2)"));
+
+        renderer
+            .render(&event(
+                6,
+                EventPayload::ActionSucceeded {
+                    job: job.clone(),
+                    plan: plan.clone(),
+                    action: alpha.clone(),
+                    timing: Timing { elapsed_ms: 3 },
+                    artifacts: vec![],
+                },
+            ))
+            .unwrap();
+        clock.advance(100);
+        renderer.tick().unwrap();
+
+        let plan_view = &renderer.jobs[&job].plans[&plan];
+        assert_eq!(plan_view.actions[&alpha].state, ActionState::Terminal);
+        assert_eq!(plan_view.actions[&beta].state, ActionState::Running);
+        let after_terminal = String::from_utf8_lossy(renderer.writer.as_slice());
+        assert!(after_terminal.contains("link beta  50% (1/2)"));
     }
 
     #[test]
