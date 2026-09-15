@@ -141,7 +141,7 @@ impl PtySession {
             "--jobs=1",
             "--color=always",
             "--progress=always",
-            "-v",
+            "-vv",
         ]);
         command.cwd(project);
         command.env("XMLSQUISH_HOME", home);
@@ -495,8 +495,8 @@ fn ordered_recovery_frame(transcript: &str) -> Option<String> {
     None
 }
 
-/// 查找 CR/LF 定界的 verbose 步骤终态并返回结束偏移与 job。 /
-/// Finds a CR/LF-delimited verbose step terminal and returns its end offset and job.
+/// 查找 CR/LF 定界的 trace 步骤终态并返回结束偏移与 job。 /
+/// Finds a CR/LF-delimited trace step terminal and returns its end offset and job.
 fn completed_step_after<'a>(
     transcript: &'a str,
     offset: usize,
@@ -512,17 +512,19 @@ fn completed_step_after<'a>(
         .find(['\r', '\n'])
         .map_or(transcript.len(), |end| start + end);
     let line = &transcript[start..line_end];
-    let body = line.strip_prefix(&prefix)?.strip_suffix(" ms)")?;
-    let (job, milliseconds) = body.rsplit_once(", ")?;
+    let body = line.strip_prefix(&prefix)?;
+    let (milliseconds, job) = body.split_once(" ms) (")?;
+    let job = job.strip_suffix(')')?;
     milliseconds.parse::<u64>().ok()?;
     Some((line_end, job))
 }
 
-/// 解析完整的 `<phase> <job> (<seconds>s)` 帧并返回 job。 /
-/// Parses a complete `<phase> <job> (<seconds>s)` frame and returns its job.
+/// 解析完整的 `<phase> (<job>) (<seconds>s)` trace 帧并返回 job。 /
+/// Parses a complete `<phase> (<job>) (<seconds>s)` trace frame and returns its job.
 fn progress_job<'a>(frame: &'a str, phase: &str) -> Option<&'a str> {
     let rest = frame.strip_prefix(phase)?.strip_prefix(' ')?;
-    let (job, elapsed) = rest.rsplit_once(" (")?;
+    let (job, elapsed) = rest.rsplit_once(") (")?;
+    let job = job.strip_prefix('(')?;
     let seconds = elapsed.strip_suffix("s)")?;
     (job.starts_with("build-cli-") && seconds.parse::<f64>().is_ok()).then_some(job)
 }
@@ -569,8 +571,8 @@ fn wait_for_recovery_frame_after(
     }
 }
 
-/// 验证 `Recovering <job> (<seconds>s)` 的完整终端语法。 /
-/// Validates the complete `Recovering <job> (<seconds>s)` terminal grammar.
+/// 验证 `Recovering (<job>) (<seconds>s)` 的完整 trace 终端语法。 /
+/// Validates the complete `Recovering (<job>) (<seconds>s)` trace terminal grammar.
 fn complete_recovery_grammar(frame: &str, truncated: bool) -> bool {
     let Some((label, elapsed)) = frame.trim().rsplit_once(" (") else {
         return false;
@@ -581,7 +583,7 @@ fn complete_recovery_grammar(frame: &str, truncated: bool) -> bool {
     let label_is_complete = if truncated {
         label.starts_with("Recovering") && label.contains("...")
     } else {
-        label.starts_with("Recovering build-cli-") && label.len() > "Recovering build-cli-".len()
+        label.starts_with("Recovering (build-cli-") && label.ends_with(')')
     };
     label_is_complete && seconds.parse::<f64>().is_ok()
 }
