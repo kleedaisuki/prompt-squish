@@ -257,28 +257,58 @@ for (const [path, locale, kind] of [
       assert.equal(await page.locator(".language-link").getAttribute("href"), locale === "en" ? zhPath : enPath);
       assert.equal(await page.locator('meta[property="og:locale"]').getAttribute("content"), locale === "en" ? "en_US" : "zh_CN");
       const text = await page.locator("main").textContent();
-      assert(text.includes("0.3.0"));
       if (locale === "en") assert(!/\p{Script=Han}/u.test(text), "English page contains untranslated Chinese copy");
       else assert(/\p{Script=Han}/u.test(text), "Chinese page is missing localized copy");
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
       if (kind === "namespace") {
+        assert(text.includes("0.3.0"));
         assert.equal(await page.locator("tbody tr").count(), 11);
         assert.equal(await page.locator('link[rel="describedby"]').getAttribute("href"), "/ns/dsl.md");
         assert.equal(await page.locator(".identity code").textContent(), "https://xmlsquish.moesegfault.dev/ns");
       } else {
-        assert.equal(await page.locator(".release-highlights article").count(), 3);
-        assert.equal(await page.locator(".release-details").getAttribute("open"), null);
-        assert.equal(await page.locator(".release-intro .primary").getAttribute("href"), "#install");
-        const targets = [
-          "x86_64-pc-windows-msvc.zip", "aarch64-pc-windows-msvc.zip",
-          "x86_64-unknown-linux-gnu.tar.gz", "aarch64-unknown-linux-gnu.tar.gz",
-          "x86_64-apple-darwin.tar.gz", "aarch64-apple-darwin.tar.gz",
+        const commands = ["new", "fmt", "build", "add", "remove", "inspect"];
+        assert(text.includes("1.0.0"));
+        assert(!text.includes("0.3.0"), "v1 release page must not present the old release");
+        assert(!text.includes(".o.xml"), "v1 release page must not preserve the old single-file artifact story");
+        const journey = await page.locator(".command-journey > li > code").allTextContents();
+        assert.equal(journey.length, 6);
+        assert.deepEqual(
+          journey.map(invocation => invocation.trim().split(/\s+/)[1]).sort(),
+          [...commands].sort(),
+        );
+        assert.equal(await page.locator('.actions .primary[href="#install"]').count(), 1);
+
+        // Candidate assets are labels, not deceptive links. / 候选资产只是标签，不伪装成下载链接。
+        const expectedAssets = [
+          "xmlsquish-1.0.0-x86_64-pc-windows-msvc.zip",
+          "xmlsquish-1.0.0-aarch64-pc-windows-msvc.zip",
+          "xmlsquish-1.0.0-x86_64-unknown-linux-gnu.tar.gz",
+          "xmlsquish-1.0.0-aarch64-unknown-linux-gnu.tar.gz",
+          "xmlsquish-1.0.0-x86_64-apple-darwin.tar.gz",
+          "xmlsquish-1.0.0-aarch64-apple-darwin.tar.gz",
         ];
-        const downloadBase = "https://github.com/kleedaisuki/prompt-squish/releases/download/v0.3.0/";
-        assert.deepEqual(await page.locator("[data-binary-download]").evaluateAll(links => links.map(link => link.href)),
-          targets.map(target => downloadBase + "xmlsquish-0.3.0-" + target));
-        assert.equal(await page.locator("[data-checksums]").getAttribute("href"), downloadBase + "SHA256SUMS");
-        assert((await page.locator("[data-install-command]").textContent()).includes("--tag v0.3.0 --locked"));
+        const pending = page.locator('.download-actions [aria-disabled="true"]');
+        assert.equal(await pending.count(), 6);
+        assert.deepEqual(await pending.evaluateAll(nodes => nodes.map(node => node.title)), expectedAssets);
+        assert.equal(await page.locator('a[href*="/releases/download/v1.0.0/"]').count(), 0);
+        assert.equal(await page.locator('a[href$="SHA256SUMS"]').count(), 0);
+
+        const source = await page.locator('#source-title').locator("xpath=../following-sibling::pre/code").textContent();
+        assert(source.includes("--tag v1.0.0 --locked"));
+        assert(text.includes(locale === "en" ? "will succeed after" : "发布工作流创建该标签后生效"));
+
+        assert.equal(await page.locator('link[rel="alternate"][type="application/json"]').getAttribute("href"),
+          "https://xmlsquish.moesegfault.dev/releases/1.0.0.json");
+        assert.equal(await page.locator('meta[property="og:image"]').getAttribute("content"),
+          "https://xmlsquish.moesegfault.dev/release-v1.png");
+        const jsonLd = await page.locator('script[type="application/ld+json"]').allTextContents();
+        assert.equal(jsonLd.length, 1, "release page has one authoritative SoftwareApplication entity");
+        const application = JSON.parse(jsonLd[0]);
+        assert.equal(application["@type"], "SoftwareApplication");
+        assert.equal(application.softwareVersion, "1.0.0");
+        assert.equal(application.additionalProperty?.value, "release candidate");
+        for (const dishonestClaim of ["downloadUrl", "aggregateRating", "rating", "review", "offers"])
+          assert.equal(dishonestClaim in application, false, dishonestClaim);
       }
       if (process.env.UI_SCREENSHOT_DIR) {
         await mkdir(process.env.UI_SCREENSHOT_DIR, { recursive: true });
@@ -293,31 +323,54 @@ for (const [path, locale, kind] of [
 }
 
 for (const locale of ["zh-CN", "en"]) {
-  test(locale + ": release command copy and progressive details", async () => {
-    const page = await browser.newPage({ viewport: { width: 390, height: 1000 } });
-    await page.addInitScript(() => {
-      Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async text => { window.copiedCommand = text; } } });
+  for (const width of [390, 1440]) {
+    test(`${locale}: v1 release remains readable in light and dark at ${width}px`, async () => {
+      const page = await browser.newPage({ viewport: { width, height: 1000 }, javaScriptEnabled: false });
+      const path = locale === "en" ? "/en/releases/" : "/releases/";
+      await page.goto(base + path, { waitUntil: "networkidle" });
+      assert(await page.locator("main").isVisible());
+      assert.equal(await page.locator(".command-journey > li").count(), 6);
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+      await page.close();
+
+      for (const theme of ["light", "dark"]) {
+        const themed = await browser.newPage({ viewport: { width, height: 1000 } });
+        await themed.addInitScript(theme => localStorage.setItem("xmlsquish-theme", theme), theme);
+        await themed.goto(base + path, { waitUntil: "networkidle" });
+        assert.equal(await themed.evaluate(() => document.documentElement.dataset.moeTheme), theme);
+        assert(await themed.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+        await themed.close();
+      }
     });
-    await page.goto(base + (locale === "en" ? "/en/releases/" : "/releases/"), { waitUntil: "networkidle" });
-    await page.locator("[data-install-copy]").click();
-    assert.equal(await page.evaluate(() => window.copiedCommand), await page.locator("[data-install-command]").textContent());
-    assert.equal(await page.locator("[data-copy-status]").textContent(), locale === "en" ? "Copied" : "已复制");
-    await page.locator(".release-details summary").click();
-    assert(await page.locator(".release-detail-body").isVisible());
-    await page.getByRole("button", { name: locale === "en" ? "Dark" : "深色", exact: true }).click();
-    assert.equal(await page.evaluate(() => document.documentElement.dataset.moeTheme), "dark");
-    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
-    if (process.env.UI_SCREENSHOT_DIR) {
-      await mkdir(process.env.UI_SCREENSHOT_DIR, { recursive: true });
-      await page.screenshot({ path: join(process.env.UI_SCREENSHOT_DIR, locale + "-releases-390-dark-expanded.png"), fullPage: true });
-    }
-    await page.goto(base + (locale === "en" ? "/en/ns/" : "/ns/"), { waitUntil: "networkidle" });
-    assert.equal(await page.evaluate(() => document.documentElement.dataset.moeTheme), "dark");
-    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
-    if (process.env.UI_SCREENSHOT_DIR) await page.screenshot({ path: join(process.env.UI_SCREENSHOT_DIR, locale + "-namespace-390-dark.png"), fullPage: true });
-    await page.close();
-  });
+  }
 }
+
+test("release discovery files expose prepared, machine-readable v1 state", async () => {
+  const metadata = JSON.parse(await readFile(join(root, "releases/1.0.0.json"), "utf8"));
+  assert.equal(metadata.schemaVersion, 1);
+  assert.equal(metadata.release.version, "1.0.0");
+  assert.equal(metadata.release.tag, "v1.0.0");
+  assert.equal(metadata.release.releaseStatus, "prepared");
+  assert.deepEqual(metadata.cli.commands, ["new", "fmt", "build", "add", "remove", "inspect"]);
+  assert.equal(metadata.artifacts.length, 6);
+  assert(metadata.artifacts.every(asset => asset.intendedUrl.includes("/releases/download/v1.0.0/")));
+
+  const robots = await readFile(join(root, "robots.txt"), "utf8");
+  assert.match(robots, /^User-agent: \*$/m);
+  assert.match(robots, /^Allow: \/$/m);
+  assert.match(robots, /^Sitemap: https:\/\/xmlsquish\.moesegfault\.dev\/sitemap\.xml$/m);
+
+  const sitemap = await readFile(join(root, "sitemap.xml"), "utf8");
+  assert(sitemap.includes("https://xmlsquish.moesegfault.dev/releases/"));
+  assert(sitemap.includes("https://xmlsquish.moesegfault.dev/en/releases/"));
+  assert.equal((sitemap.match(/<loc>https:\/\/xmlsquish\.moesegfault\.dev\/(?:en\/)?releases\/<\/loc>/g) ?? []).length, 2);
+
+  const llms = await readFile(join(root, "llms.txt"), "utf8");
+  assert(llms.includes("/releases/1.0.0.json"));
+  assert(llms.includes("releaseStatus"));
+  assert(llms.includes("Prepared asset URLs may not exist"));
+  for (const command of metadata.cli.commands) assert(llms.includes(`\`${command}\``));
+});
 
 test("current namespace specification follows the working source", async () => {
   const published = await readFile(join(root, "ns/dsl.md"), "utf8");
