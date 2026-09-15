@@ -23,7 +23,7 @@
   },
   "cli": {
     "commands": ["new", "fmt", "build", "add", "remove", "inspect"],
-    "sourceInstall": "cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v1.0.0 --locked",
+    "intendedSourceInstall": "cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v1.0.0 --locked",
     "sourceInstallRequirement": "Rust 1.88 or newer"
   },
   "artifacts": [

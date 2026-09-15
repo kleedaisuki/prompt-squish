@@ -18,6 +18,7 @@ This file follows the experimental community `llms.txt` proposal. It is an addit
 
 ## Specifications
 
+- [Machine-friendly XML DSL reference](https://xmlsquish.moesegfault.dev/ns/dsl.md): Markdown reference generated from the normative vocabulary source.
 - [English XML namespace reference](https://xmlsquish.moesegfault.dev/en/ns/): Canonical element and attribute reference.
 - [中文 XML 命名空间参考](https://xmlsquish.moesegfault.dev/ns): 规范元素与属性参考。
 - [XML namespace identity](https://xmlsquish.moesegfault.dev/ns): Stable namespace URI; never localize this identity.
