@@ -52,6 +52,7 @@ use crate::{
     },
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use squish_kernel::{CancellationToken, InvocationContext, OperationOutcome};
 
 const XML_FRONTEND_ABI: &str = "xmlsquish.xml/1";
@@ -100,6 +101,24 @@ pub struct CatalogArtifact {
     pub artifact: Artifact,
     /// 相对 publication root 的规范逻辑目标。 / Canonical logical destination relative to the publication root.
     pub destination: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetRecordV1 {
+    schema: u32,
+    target: String,
+    snapshot: String,
+    artifacts: Vec<TargetRecordArtifactV1>,
+}
+
+#[derive(Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct TargetRecordArtifactV1 {
+    destination: String,
+    kind: String,
+    digest: String,
+    size: u64,
 }
 
 /// 构建记录中的动作事实。 / Action fact stored in a build record.
@@ -425,10 +444,47 @@ impl fmt::Display for BuildCatalogError {
 
 impl std::error::Error for BuildCatalogError {}
 
-/// 从显式布局读取并验证当前 BuildRecord v2；仅目录不存在时返回 `None`。
-/// Reads and validates the current BuildRecord v2 from an explicit layout; returns `None` only
-/// when the catalog generation is absent.
-pub fn read_current_build_catalog(
+fn publisher_read_error<E: fmt::Display>(error: PublishError<E>) -> BuildCatalogError {
+    match error {
+        PublishError::Store(error) => BuildCatalogError::Storage(error.to_string()),
+        PublishError::Io(error) => BuildCatalogError::Storage(error.to_string()),
+        PublishError::Journal(error) => BuildCatalogError::Corrupt(error.to_string()),
+        PublishError::InvalidDestination(value) => {
+            BuildCatalogError::Corrupt(format!("invalid persisted destination `{value}`"))
+        }
+        PublishError::AliasConflict(path) => BuildCatalogError::Corrupt(format!(
+            "persisted destination aliases `{}`",
+            path.display()
+        )),
+        PublishError::Symlink(path) => BuildCatalogError::Corrupt(format!(
+            "persisted destination traverses symlink `{}`",
+            path.display()
+        )),
+        PublishError::MissingBlob => {
+            BuildCatalogError::Corrupt("persisted generation references a missing blob".into())
+        }
+        PublishError::IntegrityMismatch => {
+            BuildCatalogError::Corrupt("persisted generation failed integrity validation".into())
+        }
+        PublishError::UnsupportedDigest(name) => {
+            BuildCatalogError::Corrupt(format!("persisted digest `{name}` is unsupported"))
+        }
+    }
+}
+
+fn durable_read(path: &Path, subject: &str) -> Result<Vec<u8>, BuildCatalogError> {
+    std::fs::read(path).map_err(|error| classify_durable_read_error(error, subject))
+}
+
+fn classify_durable_read_error(error: std::io::Error, subject: &str) -> BuildCatalogError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        BuildCatalogError::Corrupt(format!("{subject} is missing"))
+    } else {
+        BuildCatalogError::Storage(format!("cannot read {subject}: {error}"))
+    }
+}
+
+fn read_base_build_catalog(
     layout: &StorageLayout,
 ) -> Result<Option<BuildCatalogSnapshot>, BuildCatalogError> {
     let publisher = FileArtifactPublisher::open(
@@ -436,13 +492,23 @@ pub fn read_current_build_catalog(
         Cas::open(layout.cas_root())
             .map_err(|error| BuildCatalogError::Storage(error.to_string()))?,
     )
-    .map_err(|error| BuildCatalogError::Storage(error.to_string()))?;
+    .map_err(publisher_read_error)?;
     let Some(generation) = publisher
         .current_generation(BUILD_CATALOG_TARGET)
-        .map_err(|error| BuildCatalogError::Corrupt(error.to_string()))?
+        .map_err(publisher_read_error)?
     else {
         return Ok(None);
     };
+    let (catalog_manifest, catalog_prefix) =
+        generation_locator_recipe(BUILD_CATALOG_TARGET, &generation.generation_id)?;
+    if generation.target_id != BUILD_CATALOG_TARGET
+        || generation.manifest != catalog_manifest
+        || generation.artifacts.len() != 1
+    {
+        return Err(BuildCatalogError::Corrupt(
+            "build catalog generation identity or membership is not canonical".into(),
+        ));
+    }
     let mut records = generation
         .artifacts
         .iter()
@@ -455,10 +521,17 @@ pub fn read_current_build_catalog(
             "current generation has duplicate build-record-v2 artifacts".into(),
         ));
     }
+    if artifact.uri != format!("{catalog_prefix}build-record-v2.json") {
+        return Err(BuildCatalogError::Corrupt(
+            "build-record immutable URI is not canonical".into(),
+        ));
+    }
     validate_catalog_path(&artifact.uri)
         .map_err(|error| BuildCatalogError::Corrupt(error.to_string()))?;
-    let bytes = std::fs::read(layout.catalog_root().join(&artifact.uri))
-        .map_err(|error| BuildCatalogError::Corrupt(error.to_string()))?;
+    let bytes = durable_read(
+        &layout.catalog_root().join(&artifact.uri),
+        "build-record artifact",
+    )?;
     if bytes.len() as u64 != artifact.size || protocol_blake3(&bytes) != artifact.digest {
         return Err(BuildCatalogError::Corrupt(
             "build-record artifact size or digest mismatch".into(),
@@ -468,12 +541,6 @@ pub fn read_current_build_catalog(
         .map_err(|error| BuildCatalogError::Corrupt(error.to_string()))?;
     let cas = Cas::open(layout.cas_root())
         .map_err(|error| BuildCatalogError::Storage(error.to_string()))?;
-    let publication_publisher = FileArtifactPublisher::open(
-        layout.publication_root(),
-        Cas::open(layout.cas_root())
-            .map_err(|error| BuildCatalogError::Storage(error.to_string()))?,
-    )
-    .map_err(|error| BuildCatalogError::Storage(error.to_string()))?;
     let record_digest = blob_digest(&artifact.digest)
         .map_err(|error| BuildCatalogError::Corrupt(error.to_string()))?;
     let stored_record = cas
@@ -493,6 +560,9 @@ pub fn read_current_build_catalog(
             &format!("action output `{}`", output.name),
         )?;
     }
+    for target in &record.targets {
+        validate_recorded_generation_locator(target)?;
+    }
     for item in record.targets.iter().flat_map(|target| &target.artifacts) {
         let stored = verify_catalog_blob(
             &cas,
@@ -500,65 +570,96 @@ pub fn read_current_build_catalog(
             item.artifact.size,
             &format!("artifact `{}`", item.artifact.id),
         )?;
-        let published = std::fs::read(layout.publication_root().join(&item.artifact.uri))
-            .map_err(|error| BuildCatalogError::Corrupt(error.to_string()))?;
+        let published = durable_read(
+            &layout.publication_root().join(&item.artifact.uri),
+            &format!("immutable publication `{}`", item.artifact.uri),
+        )?;
         if published != stored {
             return Err(BuildCatalogError::Corrupt(format!(
                 "immutable publication `{}` differs from CAS",
                 item.artifact.uri
             )));
         }
+        validate_target_artifact_schema(&item.artifact, &stored)?;
     }
     for target in &record.targets {
+        validate_generation_target_record(target, &cas)?;
+    }
+    Ok(Some(BuildCatalogSnapshot {
+        record,
+        record_artifact: artifact.clone(),
+    }))
+}
+
+fn validate_target_artifact_schema(
+    artifact: &Artifact,
+    bytes: &[u8],
+) -> Result<(), BuildCatalogError> {
+    let valid = match &artifact.kind {
+        ArtifactKind::BinaryIr => decode_unit_container(bytes).is_ok(),
+        ArtifactKind::DebugInfo => squish_ir::decode_debug_bundle(bytes).is_ok(),
+        ArtifactKind::Other(name) if name == "static-link-map" => {
+            decode_static_link_map(bytes).is_ok()
+        }
+        ArtifactKind::Metadata if artifact.id.as_str().ends_with(":target-record") => {
+            serde_json::from_slice::<TargetRecordV1>(bytes)
+                .is_ok_and(|record| record.schema == 1 && !record.snapshot.is_empty())
+        }
+        ArtifactKind::Prompt | ArtifactKind::Metadata | ArtifactKind::Other(_) => true,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(BuildCatalogError::Corrupt(format!(
+            "artifact `{}` does not match its declared schema",
+            artifact.id
+        )))
+    }
+}
+
+/// 从显式布局读取并严格验证当前 BuildRecord v2；仅目录不存在时返回 `None`。
+/// Reads and strictly validates the current BuildRecord v2 from an explicit layout; returns
+/// `None` only when the catalog generation is absent.
+pub fn read_current_build_catalog(
+    layout: &StorageLayout,
+) -> Result<Option<BuildCatalogSnapshot>, BuildCatalogError> {
+    let Some(snapshot) = read_base_build_catalog(layout)? else {
+        return Ok(None);
+    };
+    let publication_publisher = FileArtifactPublisher::open(
+        layout.publication_root(),
+        Cas::open(layout.cas_root())
+            .map_err(|error| BuildCatalogError::Storage(error.to_string()))?,
+    )
+    .map_err(publisher_read_error)?;
+    let cas = Cas::open(layout.cas_root())
+        .map_err(|error| BuildCatalogError::Storage(error.to_string()))?;
+    for target in &snapshot.record.targets {
         let Some(current) = publication_publisher
             .current_generation(&target.target_id)
-            .map_err(|error| BuildCatalogError::Corrupt(error.to_string()))?
+            .map_err(publisher_read_error)?
         else {
             return Err(BuildCatalogError::MissingCurrent {
                 target: target.target_id.clone(),
                 generation: target.generation_id.clone(),
             });
         };
-        if current.generation_id != target.generation_id {
+        let actual = recover_current_generation(layout, &cas, current)?;
+        if actual.generation_id != target.generation_id {
             return Err(BuildCatalogError::Historical {
                 target: target.target_id.clone(),
                 recorded: target.generation_id.clone(),
-                current: current.generation_id,
+                current: actual.generation_id,
             });
         }
-        let artifacts: Vec<_> = target
-            .artifacts
-            .iter()
-            .map(|item| item.artifact.clone())
-            .collect();
-        if current.target_id != target.target_id
-            || current.manifest != target.manifest
-            || current.artifacts != artifacts
-        {
+        if &actual != target {
             return Err(BuildCatalogError::Corrupt(format!(
                 "target `{}` current manifest differs from the recorded generation",
                 target.target_id
             )));
         }
-        for item in &target.artifacts {
-            let suffix = format!("/artifacts/{}", item.destination);
-            if !item.artifact.uri.ends_with(&suffix)
-                || !item
-                    .artifact
-                    .uri
-                    .contains(&format!("/{}/", target.generation_id))
-            {
-                return Err(BuildCatalogError::Corrupt(format!(
-                    "artifact `{}` URI does not encode its generation and logical destination",
-                    item.artifact.id
-                )));
-            }
-        }
     }
-    Ok(Some(BuildCatalogSnapshot {
-        record,
-        record_artifact: artifact.clone(),
-    }))
+    Ok(Some(snapshot))
 }
 
 fn verify_catalog_blob(
@@ -587,6 +688,317 @@ pub fn read_current_build_record(
     layout: &StorageLayout,
 ) -> Result<Option<BuildRecordV2>, BuildCatalogError> {
     read_current_build_catalog(layout).map(|snapshot| snapshot.map(|snapshot| snapshot.record))
+}
+
+fn recover_build_catalog(
+    layout: &StorageLayout,
+) -> Result<Option<BuildRecordV2>, BuildCatalogError> {
+    let Some(snapshot) = read_base_build_catalog(layout)? else {
+        return Ok(None);
+    };
+    let publisher = FileArtifactPublisher::open(
+        layout.publication_root(),
+        Cas::open(layout.cas_root())
+            .map_err(|error| BuildCatalogError::Storage(error.to_string()))?,
+    )
+    .map_err(publisher_read_error)?;
+    let cas = Cas::open(layout.cas_root())
+        .map_err(|error| BuildCatalogError::Storage(error.to_string()))?;
+    let mut recovered = Vec::with_capacity(snapshot.record.targets.len());
+    for recorded in &snapshot.record.targets {
+        let actual = match publisher.current_generation(&recorded.target_id) {
+            Ok(Some(current)) => recover_current_generation(layout, &cas, current),
+            Ok(None) => Err(BuildCatalogError::Corrupt(
+                "target current generation needs recovery".into(),
+            )),
+            Err(cause) => Err(publisher_read_error(cause)),
+        };
+        match actual {
+            Ok(current) if current.generation_id == recorded.generation_id => {
+                if &current != recorded {
+                    recovered.push(restore_recorded_generation(&publisher, recorded)?);
+                } else {
+                    recovered.push(current);
+                }
+            }
+            Ok(current) => recovered.push(current),
+            Err(BuildCatalogError::Corrupt(_)) => {
+                recovered.push(restore_recorded_generation(&publisher, recorded)?);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let mut record = snapshot.record;
+    recovered.sort_by(|left, right| left.target_id.cmp(&right.target_id));
+    record.targets = recovered;
+    validate_build_record(&record)
+        .map_err(|error| BuildCatalogError::Corrupt(error.to_string()))?;
+    Ok(Some(record))
+}
+
+fn recover_current_generation(
+    layout: &StorageLayout,
+    cas: &Cas,
+    current: PublishedGeneration,
+) -> Result<RecordedGeneration, BuildCatalogError> {
+    let (expected_manifest, prefix) =
+        generation_locator_recipe(&current.target_id, &current.generation_id)?;
+    if current.manifest != expected_manifest {
+        return Err(BuildCatalogError::Corrupt(format!(
+            "target `{}` current manifest locator is not canonical",
+            current.target_id
+        )));
+    }
+    let mut artifacts = Vec::with_capacity(current.artifacts.len());
+    for artifact in &current.artifacts {
+        validate_catalog_path(&artifact.uri)
+            .map_err(|error| BuildCatalogError::Corrupt(error.to_string()))?;
+        let destination = artifact.uri.strip_prefix(&prefix).ok_or_else(|| {
+            BuildCatalogError::Corrupt(format!(
+                "artifact `{}` has a noncanonical immutable URI",
+                artifact.id
+            ))
+        })?;
+        validate_catalog_path(destination)
+            .map_err(|error| BuildCatalogError::Corrupt(error.to_string()))?;
+        let stored = verify_catalog_blob(
+            cas,
+            &artifact.digest,
+            artifact.size,
+            &format!("artifact `{}`", artifact.id),
+        )?;
+        let published = durable_read(
+            &layout.publication_root().join(&artifact.uri),
+            &format!("immutable publication `{}`", artifact.uri),
+        )?;
+        if published != stored {
+            return Err(BuildCatalogError::Corrupt(format!(
+                "immutable publication `{}` differs from CAS",
+                artifact.uri
+            )));
+        }
+        validate_target_artifact_schema(artifact, &stored)?;
+        artifacts.push(CatalogArtifact {
+            artifact: artifact.clone(),
+            destination: destination.into(),
+        });
+    }
+    let generation = RecordedGeneration {
+        target_id: current.target_id,
+        generation_id: current.generation_id,
+        manifest: current.manifest,
+        artifacts,
+    };
+    validate_recorded_generation_locator(&generation)?;
+    validate_recorded_generation(&generation)?;
+    validate_generation_target_record(&generation, cas)?;
+    Ok(generation)
+}
+
+fn generation_locator_recipe(
+    target: &str,
+    generation: &str,
+) -> Result<(String, String), BuildCatalogError> {
+    validate_generation_id(generation)?;
+    let target_key = hex(&Sha256::digest(target.as_bytes()));
+    Ok((
+        format!(".squish-publish/targets/{target_key}/current.json"),
+        format!(".squish-publish/generations/{target_key}/{generation}/artifacts/"),
+    ))
+}
+
+fn validate_generation_id(generation: &str) -> Result<(), BuildCatalogError> {
+    if generation.len() == 64
+        && generation
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(())
+    } else {
+        Err(BuildCatalogError::Corrupt(format!(
+            "generation identity `{generation}` is not canonical lowercase SHA-256"
+        )))
+    }
+}
+
+fn validate_recorded_generation_locator(
+    generation: &RecordedGeneration,
+) -> Result<(), BuildCatalogError> {
+    let (manifest, prefix) =
+        generation_locator_recipe(&generation.target_id, &generation.generation_id)?;
+    if generation.manifest != manifest {
+        return Err(BuildCatalogError::Corrupt(format!(
+            "target `{}` recorded manifest locator is not canonical",
+            generation.target_id
+        )));
+    }
+    for item in &generation.artifacts {
+        let expected = format!("{prefix}{}", item.destination);
+        if item.artifact.uri != expected {
+            return Err(BuildCatalogError::Corrupt(format!(
+                "artifact `{}` recorded URI does not match target, generation, and destination",
+                item.artifact.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_recorded_generation(generation: &RecordedGeneration) -> Result<(), BuildCatalogError> {
+    if generation.target_id.is_empty()
+        || generation.target_id.chars().any(char::is_control)
+        || generation.generation_id.is_empty()
+        || generation.generation_id.chars().any(char::is_control)
+        || generation.artifacts.is_empty()
+        || !generation
+            .artifacts
+            .windows(2)
+            .all(|pair| pair[0].artifact.id < pair[1].artifact.id)
+    {
+        return Err(BuildCatalogError::Corrupt(format!(
+            "target `{}` artifact membership is not canonical",
+            generation.target_id
+        )));
+    }
+    let maps = generation
+        .artifacts
+        .iter()
+        .filter(|item| {
+            matches!(&item.artifact.kind, ArtifactKind::Other(name) if name == "static-link-map")
+        })
+        .count();
+    if maps != 1 {
+        return Err(BuildCatalogError::Corrupt(format!(
+            "target `{}` does not contain exactly one static link map",
+            generation.target_id
+        )));
+    }
+    let records = generation
+        .artifacts
+        .iter()
+        .filter(|item| {
+            matches!(item.artifact.kind, ArtifactKind::Metadata)
+                && item.artifact.id.as_str().ends_with(":target-record")
+        })
+        .count();
+    let unique_destinations: BTreeSet<_> = generation
+        .artifacts
+        .iter()
+        .map(|item| item.destination.as_str())
+        .collect();
+    if records != 1 || unique_destinations.len() != generation.artifacts.len() {
+        return Err(BuildCatalogError::Corrupt(format!(
+            "target `{}` has invalid target-record or destination membership",
+            generation.target_id
+        )));
+    }
+    Ok(())
+}
+
+fn validate_generation_target_record(
+    generation: &RecordedGeneration,
+    cas: &Cas,
+) -> Result<(), BuildCatalogError> {
+    let item = generation
+        .artifacts
+        .iter()
+        .find(|item| {
+            matches!(item.artifact.kind, ArtifactKind::Metadata)
+                && item.artifact.id.as_str().ends_with(":target-record")
+        })
+        .ok_or_else(|| {
+            BuildCatalogError::Corrupt(format!(
+                "target `{}` has no target record",
+                generation.target_id
+            ))
+        })?;
+    let bytes = verify_catalog_blob(
+        cas,
+        &item.artifact.digest,
+        item.artifact.size,
+        &format!("target record `{}`", item.artifact.id),
+    )?;
+    let record: TargetRecordV1 = serde_json::from_slice(&bytes)
+        .map_err(|error| BuildCatalogError::Corrupt(error.to_string()))?;
+    if record.schema != 1 || record.target != generation.target_id || record.snapshot.is_empty() {
+        return Err(BuildCatalogError::Corrupt(format!(
+            "target record `{}` has the wrong identity",
+            item.artifact.id
+        )));
+    }
+    let expected: BTreeMap<_, _> = generation
+        .artifacts
+        .iter()
+        .filter(|candidate| candidate.artifact.id != item.artifact.id)
+        .map(|candidate| {
+            (
+                candidate.destination.clone(),
+                TargetRecordArtifactV1 {
+                    destination: candidate.destination.clone(),
+                    kind: format!("{:?}", candidate.artifact.kind),
+                    digest: candidate.artifact.digest.hex(),
+                    size: candidate.artifact.size,
+                },
+            )
+        })
+        .collect();
+    let actual_len = record.artifacts.len();
+    let actual: BTreeMap<_, _> = record
+        .artifacts
+        .into_iter()
+        .map(|artifact| (artifact.destination.clone(), artifact))
+        .collect();
+    if actual_len != actual.len() || expected != actual {
+        return Err(BuildCatalogError::Corrupt(format!(
+            "target record `{}` does not cover its generation",
+            item.artifact.id
+        )));
+    }
+    Ok(())
+}
+
+fn restore_recorded_generation(
+    publisher: &FileArtifactPublisher<Cas>,
+    recorded: &RecordedGeneration,
+) -> Result<RecordedGeneration, BuildCatalogError> {
+    let publications: Vec<_> = recorded
+        .artifacts
+        .iter()
+        .map(|item| {
+            let name = OutputName::new(item.artifact.id.as_str()).map_err(|_| {
+                BuildCatalogError::Corrupt(format!(
+                    "artifact `{}` cannot be restored as a named output",
+                    item.artifact.id
+                ))
+            })?;
+            Ok(Publication {
+                output: ProducedOutput {
+                    name,
+                    kind: item.artifact.kind.clone(),
+                    digest: item.artifact.digest.clone(),
+                    size: item.artifact.size,
+                },
+                destination: item.destination.clone(),
+            })
+        })
+        .collect::<Result<_, BuildCatalogError>>()?;
+    let restored = publish_generation(publisher, &recorded.target_id, &publications)
+        .map_err(|error| BuildCatalogError::Storage(error.to_string()))?;
+    if restored.generation_id != recorded.generation_id
+        || restored.manifest != recorded.manifest
+        || restored.artifacts
+            != recorded
+                .artifacts
+                .iter()
+                .map(|item| item.artifact.clone())
+                .collect::<Vec<_>>()
+    {
+        return Err(BuildCatalogError::Corrupt(format!(
+            "target `{}` could not restore its recorded generation",
+            recorded.target_id
+        )));
+    }
+    Ok(recorded.clone())
 }
 
 /// 一个经过完整验证的 current catalog 快照。 / A fully validated current-catalog snapshot.
@@ -888,7 +1300,7 @@ fn prepare_excluding(
     let storage = services
         .storage_layout(repository.root())
         .map_err(|e| ManagerError::new(e.code(), Phase::Cache, e.message()))?;
-    let prior_record = read_current_build_record(&storage)
+    let prior_record = recover_build_catalog(&storage)
         .map_err(|e| ManagerError::new("MGB124", Phase::Cache, e.to_string()))?;
     let mode = resolution_mode(request);
     let bare = repository.snapshot();
@@ -967,11 +1379,15 @@ fn prepare_recorded(
             .storage_layout(repository.root())
             .map_err(|e| ManagerError::new(e.code(), Phase::Cache, e.message()))
     })?;
-    let prior_record =
-        planning.step(step("read-build-catalog"), PlanningStepKind::Fetch, || {
-            read_current_build_record(&storage)
+    let prior_record = planning.step(
+        step("recover-build-catalog"),
+        PlanningStepKind::Recover,
+        || {
+            planning_not_cancelled(context)?;
+            recover_build_catalog(&storage)
                 .map_err(|e| ManagerError::new("MGB124", Phase::Cache, e.to_string()))
-        })?;
+        },
+    )?;
     let mode = resolution_mode(request);
     let workspace = planning.step(step("snapshot-initial"), PlanningStepKind::Snapshot, || {
         planning_not_cancelled(context)?;
@@ -3181,4 +3597,75 @@ fn produced(name: &str, kind: ArtifactKind, bytes: &[u8]) -> ProducedOutput {
 }
 fn error(code: &'static str, phase: Phase, value: impl std::fmt::Display) -> ManagerError {
     ManagerError::new(code, phase, value.to_string())
+}
+
+#[cfg(test)]
+mod catalog_error_tests {
+    use super::{
+        BuildCatalogError, CatalogArtifact, RecordedGeneration, classify_durable_read_error,
+        generation_locator_recipe, validate_recorded_generation_locator,
+    };
+    use squish_protocol::{Artifact, ArtifactId, ArtifactKind, Digest, DigestAlgorithm};
+
+    #[test]
+    fn durable_read_classifies_absence_as_corruption_and_permission_as_storage() {
+        assert!(matches!(
+            classify_durable_read_error(std::io::ErrorKind::NotFound.into(), "fixture"),
+            BuildCatalogError::Corrupt(_)
+        ));
+        assert!(matches!(
+            classify_durable_read_error(std::io::ErrorKind::PermissionDenied.into(), "fixture"),
+            BuildCatalogError::Storage(_)
+        ));
+    }
+
+    #[test]
+    fn recorded_generation_locator_binds_target_generation_and_destination() {
+        let generation_id = "a".repeat(64);
+        let (manifest, prefix) = generation_locator_recipe("pkg:chat", &generation_id).unwrap();
+        let mut generation = RecordedGeneration {
+            target_id: "pkg:chat".into(),
+            generation_id: generation_id.clone(),
+            manifest,
+            artifacts: vec![CatalogArtifact {
+                artifact: Artifact {
+                    id: ArtifactId::new("pkg:chat:prompt").unwrap(),
+                    kind: ArtifactKind::Prompt,
+                    uri: format!("{prefix}chat.prompt"),
+                    size: 1,
+                    digest: Digest::new(DigestAlgorithm::Blake3, vec![1; 32]).unwrap(),
+                },
+                destination: "chat.prompt".into(),
+            }],
+        };
+        assert!(validate_recorded_generation_locator(&generation).is_ok());
+        generation.manifest = "wrong/current.json".into();
+        assert!(matches!(
+            validate_recorded_generation_locator(&generation),
+            Err(BuildCatalogError::Corrupt(_))
+        ));
+        generation.manifest = generation_locator_recipe("pkg:chat", &generation_id)
+            .unwrap()
+            .0;
+        generation.artifacts[0].artifact.uri = format!("{prefix}other.prompt");
+        assert!(matches!(
+            validate_recorded_generation_locator(&generation),
+            Err(BuildCatalogError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn generation_identity_rejects_traversal_uppercase_and_wrong_length() {
+        for invalid in ["../x", "A", "abc"] {
+            let value = if invalid == "A" {
+                invalid.repeat(64)
+            } else {
+                invalid.into()
+            };
+            assert!(matches!(
+                generation_locator_recipe("pkg:chat", &value),
+                Err(BuildCatalogError::Corrupt(_))
+            ));
+        }
+    }
 }

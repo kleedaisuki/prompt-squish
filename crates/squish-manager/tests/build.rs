@@ -44,6 +44,21 @@ impl EventSink for CancelOnPlanReady {
     }
 }
 
+struct RecordAndCancelOnPlanReady {
+    token: CancellationToken,
+    events: Mutex<Vec<Event>>,
+}
+
+impl EventSink for RecordAndCancelOnPlanReady {
+    fn emit(&self, event: Event) -> Result<(), SinkError> {
+        if matches!(event.payload, EventPayload::PlanReady { .. }) {
+            self.token.cancel();
+        }
+        self.events.lock().unwrap().push(event);
+        Ok(())
+    }
+}
+
 struct BreakCatalogOnPlanClosed {
     catalog_root: std::path::PathBuf,
     events: Mutex<Vec<Event>>,
@@ -434,7 +449,7 @@ fn build_catalog_distinguishes_absence_from_corruption_and_rejects_traversal() {
         .unwrap();
     assert!(matches!(
         build::read_current_build_catalog(&layout),
-        Err(build::BuildCatalogError::Historical { .. })
+        Err(build::BuildCatalogError::Corrupt(_))
     ));
     let wire = serde_json::to_value(&snapshot.record).unwrap();
     for invalid in [
@@ -738,6 +753,186 @@ fn failed_and_cancelled_attempts_retain_the_previous_target_generation() {
             .actions
             .iter()
             .any(|fact| matches!(fact.state, build::BuildTerminalState::Cancelled))
+    );
+}
+
+#[test]
+fn planning_recovery_adopts_valid_newer_generation_after_catalog_failure() {
+    let (temp, request) = fixture();
+    let layout = StorageLayout::project_local_for_tests(temp.path());
+    let manager = ManagerCapability::new(LocalServices, InvocationSettings::default());
+    let capabilities: [&dyn squish_kernel::Capability; 1] = [&manager];
+    let kernel = Kernel::new(&capabilities).unwrap();
+    let context = InvocationContext::new(
+        InvocationId::new("recovery-g1").unwrap(),
+        CancellationToken::default(),
+        Arc::new(IgnoreEvents),
+    );
+    kernel
+        .dispatch(&OperationRequest::Build(request.clone()), &context)
+        .unwrap();
+    let g1 = build::read_current_build_catalog(&layout)
+        .unwrap()
+        .unwrap()
+        .record
+        .targets[0]
+        .generation_id
+        .clone();
+
+    fs::write(
+        temp.path().join("src/main.xml"),
+        r#"<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><message>Version two</message></xs:entry>"#,
+    )
+    .unwrap();
+    let fault = Arc::new(BreakCatalogOnPlanClosed {
+        catalog_root: layout.catalog_root().to_path_buf(),
+        events: Mutex::new(Vec::new()),
+    });
+    let manager = ManagerCapability::new(LocalServices, InvocationSettings::default());
+    let capabilities: [&dyn squish_kernel::Capability; 1] = [&manager];
+    let kernel = Kernel::new(&capabilities).unwrap();
+    let context = InvocationContext::new(
+        InvocationId::new("recovery-g2-fault").unwrap(),
+        CancellationToken::default(),
+        fault.clone(),
+    );
+    let fault_outcome = kernel
+        .dispatch(&OperationRequest::Build(request.clone()), &context)
+        .unwrap();
+    assert_eq!(fault_outcome.summary.root_failures, 1);
+    assert!(
+        fault
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event.payload, EventPayload::FinalizationFailed { .. }))
+    );
+    fs::remove_dir(layout.catalog_root().join(".squish-publish/lock")).unwrap();
+    let publisher = FileArtifactPublisher::open(
+        layout.publication_root(),
+        Cas::open(layout.cas_root()).unwrap(),
+    )
+    .unwrap();
+    let g2 = publisher
+        .current_generation("fixture:chat")
+        .unwrap()
+        .unwrap();
+    assert_ne!(g1, g2.generation_id);
+    assert!(matches!(
+        build::read_current_build_catalog(&layout),
+        Err(build::BuildCatalogError::Historical {
+            recorded,
+            current,
+            ..
+        }) if recorded == g1 && current == g2.generation_id
+    ));
+
+    let token = CancellationToken::default();
+    let recovery_events = Arc::new(RecordAndCancelOnPlanReady {
+        token: token.clone(),
+        events: Mutex::new(Vec::new()),
+    });
+    let manager = ManagerCapability::new(LocalServices, InvocationSettings::default());
+    let capabilities: [&dyn squish_kernel::Capability; 1] = [&manager];
+    let kernel = Kernel::new(&capabilities).unwrap();
+    let context = InvocationContext::new(
+        InvocationId::new("recovery-adopt-g2").unwrap(),
+        token,
+        recovery_events.clone(),
+    );
+    kernel
+        .dispatch(&OperationRequest::Build(request.clone()), &context)
+        .unwrap();
+    let strict = build::read_current_build_catalog(&layout).unwrap().unwrap();
+    assert_eq!(strict.record.targets[0].generation_id, g2.generation_id);
+    assert_eq!(
+        publisher
+            .current_generation("fixture:chat")
+            .unwrap()
+            .unwrap()
+            .generation_id,
+        g2.generation_id
+    );
+    assert!(recovery_events.events.lock().unwrap().iter().any(|event| {
+        matches!(
+            &event.payload,
+            EventPayload::PlanningStepStarted { step, kind: squish_protocol::PlanningStepKind::Recover, .. }
+                if step.as_str() == "recover-build-catalog"
+        )
+    }));
+    assert!(recovery_events.events.lock().unwrap().iter().any(|event| {
+        matches!(
+            &event.payload,
+            EventPayload::PlanningStepSucceeded { step, .. }
+                if step.as_str() == "recover-build-catalog"
+        )
+    }));
+    assert!(!recovery_events.events.lock().unwrap().iter().any(|event| {
+        matches!(
+            &event.payload,
+            EventPayload::PlanningStepFailed { step, .. }
+                | EventPayload::PlanningStepCancelled { step, .. }
+                if step.as_str() == "recover-build-catalog"
+        )
+    }));
+
+    fs::write(
+        temp.path().join("src/main.xml"),
+        r#"<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><message>Version three</message></xs:entry>"#,
+    )
+    .unwrap();
+    let fault = Arc::new(BreakCatalogOnPlanClosed {
+        catalog_root: layout.catalog_root().to_path_buf(),
+        events: Mutex::new(Vec::new()),
+    });
+    let manager = ManagerCapability::new(LocalServices, InvocationSettings::default());
+    let capabilities: [&dyn squish_kernel::Capability; 1] = [&manager];
+    let kernel = Kernel::new(&capabilities).unwrap();
+    let context = InvocationContext::new(
+        InvocationId::new("recovery-g3-fault").unwrap(),
+        CancellationToken::default(),
+        fault,
+    );
+    kernel
+        .dispatch(&OperationRequest::Build(request.clone()), &context)
+        .unwrap();
+    fs::remove_dir(layout.catalog_root().join(".squish-publish/lock")).unwrap();
+    let g3 = publisher
+        .current_generation("fixture:chat")
+        .unwrap()
+        .unwrap();
+    assert_ne!(g2.generation_id, g3.generation_id);
+    fs::write(
+        layout.publication_root().join(&g3.artifacts[0].uri),
+        b"corrupt-generation",
+    )
+    .unwrap();
+    let manager = ManagerCapability::new(LocalServices, InvocationSettings::default());
+    let capabilities: [&dyn squish_kernel::Capability; 1] = [&manager];
+    let kernel = Kernel::new(&capabilities).unwrap();
+    let context = InvocationContext::new(
+        InvocationId::new("recovery-reject-g3").unwrap(),
+        CancellationToken::default(),
+        Arc::new(IgnoreEvents),
+    );
+    let failed = kernel
+        .dispatch(&OperationRequest::Build(request), &context)
+        .unwrap();
+    assert!(failed.summary.root_failures > 0);
+    let restored = build::read_current_build_catalog(&layout).unwrap().unwrap();
+    assert_eq!(restored.record.targets[0].generation_id, g2.generation_id);
+    assert!(restored.record.actions.iter().any(|fact| {
+        fact.kind == squish_protocol::ActionKind::Publish
+            && matches!(fact.state, build::BuildTerminalState::Failed { .. })
+    }));
+    assert_eq!(
+        publisher
+            .current_generation("fixture:chat")
+            .unwrap()
+            .unwrap()
+            .generation_id,
+        g2.generation_id
     );
 }
 

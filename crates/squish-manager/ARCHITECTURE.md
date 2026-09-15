@@ -130,6 +130,21 @@ catalog. `Corrupt` covers malformed, missing, or inconsistent catalog bytes,
 CAS objects, manifests, identities, and memberships. None of these three typed
 states collapses to absence.
 
+Catalog recovery is deliberately separate from strict inspection. Inspect
+preserves `Historical`, `MissingCurrent`, and `Corrupt` as observable typed
+results. Build planning instead performs recovery in an observable `Recover`
+step: it reads a fully verified base catalog, then validates any authoritative
+newer current generation's complete manifest, artifact URIs, logical
+destinations, CAS contents, and typed schemas before a typed reconciliation.
+A missing or corrupt current generation may be repaired only through the
+publisher generation API, atomically restoring a previously verified good
+generation; storage errors are propagated rather than treated as absence.
+Finalization persists a verified recovery candidate so interruption between G1
+(target generation publication) and G2 (catalog publication) cannot leave a
+permanent recovery deadlock. The manager currently depends on the publisher's
+stable URI layout to validate generations; that parser should move behind a
+public typed publisher API rather than remain a long-term layout dependency.
+
 Successful action manifests preserve the complete declared named-output set,
 including the backend result rather than only user-published files. Every
 behavior-changing option participates in the corresponding action recipe, so a
