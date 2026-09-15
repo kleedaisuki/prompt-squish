@@ -287,7 +287,9 @@ Normative rules:
 
 - `v`, `name`, `vers`, `package`, `deps`, `archive`, `manifest-sha256`, and
   `yanked` are required. An unknown `v` is skipped as an unsupported candidate,
-  not partially interpreted.
+  not partially interpreted. Unknown fields within a recognized v1 row are
+  ignored after all required fields validate, allowing additive presentation
+  metadata without changing resolution semantics.
 - `vers` is SemVer 2.0.0. Build metadata does not make a second publishable
   version. The package `name` and `version` reconstructed from the row must
   match the selected archive manifest.
@@ -317,6 +319,13 @@ dependencies. Once a candidate is selected, materialization parses its complete
 manifest and verifies that `(name, version, dialect, source-root, dependencies)`
 exactly matches the canonical projection. Targets, profiles, and exports live
 only in the archive manifest and become available after selection.
+
+The same closed-tree rule applies to Git packages: a manifest loaded from a
+remote Git `subdir` may depend on registry or other Git packages, but v1 rejects
+path/workspace dependencies in that remote manifest. Such a path would otherwise
+refer outside the locked package tree or create an implicit second monorepo
+resolver. Authors represent another in-repository package as its own explicit
+Git dependency and `subdir`, so it receives its own exact lock node.
 
 ### 4.4 HTTP freshness and errors
 
@@ -529,6 +538,13 @@ the server will not provide as an unadvertised object produces a specific
 "revision not fetchable" result; the client does not silently fetch every head
 and tag. Supplying a branch/tag that reaches it or pre-populating the cache are
 the bounded remedies.
+
+Before remote access, branch/tag names are validated as exactly one legal Git
+ref suffix and then prefixed with `refs/heads/` or `refs/tags/`; control bytes,
+empty/path-dot components, `..`, `@{`, backslash, a leading/trailing slash, and
+other names rejected by Git ref-format rules are invalid manifest intent. This
+validation plus direct process arguments prevents a selector from becoming an
+option or a revision expression.
 
 The protocol sequence is conceptually:
 
