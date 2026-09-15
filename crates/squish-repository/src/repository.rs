@@ -442,6 +442,11 @@ fn freeze_locked_manifests(
             });
             continue;
         }
+        if !require_external {
+            // Formatting and other workspace-only operations freeze precisely root/member
+            // authority. A path dependency outside that set is build input, not workspace-owned.
+            continue;
+        }
         let path = package_root.join(MANIFEST_FILE_NAME);
         let bytes = fs::read(&path).map_err(|e| RepositoryError::io(&path, e))?;
         let source = std::str::from_utf8(&bytes).map_err(|_| {
