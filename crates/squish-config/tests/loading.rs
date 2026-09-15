@@ -364,3 +364,31 @@ fn incomplete_registry_is_rejected_after_all_layers() {
         matches!(ConfigLoader::new(ConfigHome::new(&home)).load(), Err(ConfigError::InvalidValue { key, .. }) if key == "registries.corp.index")
     );
 }
+
+#[test]
+fn auth_scope_environment_stems_are_portable_and_collisions_are_rejected() {
+    let tmp = TestDir::new();
+    let home = tmp.path().join("home");
+    write(
+        &home.join("config.toml"),
+        "[registries.first]\nid='https://one.example/'\nindex='sparse+https://one.example/'\nauth-scope='corp-read'\n\
+         [registries.second]\nid='https://two.example/'\nindex='sparse+https://two.example/'\nauth-scope='CORP_READ'\n",
+    );
+    assert!(
+        matches!(ConfigLoader::new(ConfigHome::new(&home)).load(), Err(ConfigError::RegistryCollision { kind, .. }) if kind == "environment auth-scope stem")
+    );
+
+    write(
+        &home.join("config.toml"),
+        "[registries.safe]\nid='https://one.example/'\nindex='sparse+https://one.example/'\nauth-scope='corp-read'\n\
+         [registries.hashed]\nid='https://two.example/'\nindex='sparse+https://two.example/'\nauth-scope='https://registry.example/v1'\n",
+    );
+    let loaded = ConfigLoader::new(ConfigHome::new(&home)).load().unwrap();
+    let safe = &loaded.config.registries["safe"].auth_scope;
+    assert_eq!(safe.environment_stem(), "CORP_READ");
+    let hashed = &loaded.config.registries["hashed"].auth_scope;
+    assert_eq!(
+        hashed.environment_stem(),
+        "H_35DF0950DE50FE84C26B4766850A2B5D921F2E1A381A0BBE54242EB360AB0488"
+    );
+}

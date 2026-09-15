@@ -4,6 +4,7 @@
 //! project location, explicit service composition, event presentation, and exit status.
 
 use std::{
+    ffi::OsString,
     io::{self, Write},
     path::Path,
     process::ExitCode,
@@ -17,10 +18,12 @@ use squish_cli::{
 };
 use squish_config::{Config, ConfigHome, ConfigLoader};
 use squish_fetch::{
-    FilesystemHost, Limits, NoCredentials, NoopObserver, RegistryConfig, ReqwestTransport,
-    SystemGitRunner,
+    FilesystemHost, Limits, NoopObserver, RegistryConfig, ReqwestTransport, SystemGitRunner,
 };
-use squish_host::{GitExecution, HostConfig, ProductionHost, RegistryEndpoint};
+use squish_host::{
+    CredentialRoute, EnvironmentCredentials, GitExecution, HostConfig, ProductionHost,
+    RegistryEndpoint,
+};
 use squish_kernel::{
     CancellationToken, EventSink, InvocationContext, Kernel, KernelError, SinkError,
 };
@@ -101,6 +104,9 @@ impl EventSink for RenderingSink {
 
 /// 运行一次进程调用。 / Runs one process invocation.
 fn run() -> u8 {
+    // 只在进程边界捕获一次；后续组件不得再次读取全局环境。
+    // Capture once at the process boundary; downstream components never reread globals.
+    let environment = std::env::vars_os().collect::<Vec<_>>();
     let parsed = match parse_from_with_version(std::env::args_os(), env!("CARGO_PKG_VERSION")) {
         Ok(BootstrapOutcome::BareHelp(help)) => {
             print_stdout(help.as_str());
@@ -120,7 +126,7 @@ fn run() -> u8 {
         }
     };
 
-    match execute(parsed) {
+    match execute(parsed, environment) {
         Ok(code) => code,
         Err(error) => {
             print_stderr(&format!("internal error: {error}\n"));
@@ -130,7 +136,10 @@ fn run() -> u8 {
 }
 
 /// 完成项目定位、组合与内核调度。 / Locates, composes, and dispatches through the kernel.
-fn execute(mut invocation: ParsedInvocation) -> Result<u8, Box<dyn std::error::Error>> {
+fn execute(
+    mut invocation: ParsedInvocation,
+    environment: Vec<(OsString, OsString)>,
+) -> Result<u8, Box<dyn std::error::Error>> {
     // 在任何文件系统工作前安装处理器；定位期到达的信号会在进入内核时继续生效。
     // Install before filesystem work; a signal received during location remains set on kernel entry.
     let cancellation = CancellationToken::default();
@@ -178,7 +187,7 @@ fn execute(mut invocation: ParsedInvocation) -> Result<u8, Box<dyn std::error::E
             config.term.message_format == squish_config::MessageFormat::Json,
             |value| value == MessageFormat::Json,
         );
-    let (host, storage) = match compose_host(root, &config) {
+    let (host, storage) = match compose_host(root, &config, environment) {
         Ok(composed) => composed,
         Err(error) => {
             let message = format!("could not initialize project services: {error}");
@@ -274,6 +283,7 @@ fn execute(mut invocation: ParsedInvocation) -> Result<u8, Box<dyn std::error::E
 fn compose_host(
     root: std::path::PathBuf,
     config: &Config,
+    environment: Vec<(OsString, OsString)>,
 ) -> Result<(ProductionHost, StorageLayout), Box<dyn std::error::Error>> {
     let state = &config.manager.storage_root;
     let catalog = state
@@ -287,22 +297,35 @@ fn compose_host(
         catalog,
     )?;
     let filesystem = Arc::new(FilesystemHost::new(&root)?);
+    let registries = config
+        .registries
+        .iter()
+        .map(|(name, registry)| RegistryEndpoint {
+            name: name.clone(),
+            config: RegistryConfig {
+                id: registry.id.as_str().to_owned(),
+                index: registry.index.as_str().to_owned(),
+                auth_scope: registry.auth_scope.as_str().to_owned(),
+            },
+        })
+        .collect::<Vec<_>>();
+    let credential_routes = registries
+        .iter()
+        .map(|endpoint| {
+            Ok(CredentialRoute {
+                registry_id: endpoint.config.id.clone(),
+                auth_scope: endpoint.config.auth_scope.clone(),
+                primary_origin: registry_primary_origin(&endpoint.config.index)?,
+            })
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    let credentials = EnvironmentCredentials::from_snapshot(credential_routes, environment)?;
     let host = ProductionHost::open(HostConfig {
         project_root: root,
         source_cache_root: config.source.cache_root.clone(),
         storage: storage.clone(),
-        registries: config
-            .registries
-            .iter()
-            .map(|(name, registry)| RegistryEndpoint {
-                name: name.clone(),
-                config: RegistryConfig {
-                    id: registry.id.as_str().to_owned(),
-                    index: registry.index.as_str().to_owned(),
-                },
-            })
-            .collect(),
-        credentials: Arc::new(NoCredentials),
+        registries,
+        credentials: Arc::new(credentials),
         http: Arc::new(ReqwestTransport::new()?),
         git: GitExecution::Runner(Arc::new(SystemGitRunner::default())),
         limits: Limits::default(),
@@ -310,6 +333,17 @@ fn compose_host(
         filesystem,
     })?;
     Ok((host, storage))
+}
+
+/// 从已验证的 sparse index URL 取得规范 ASCII origin。 / Extracts the canonical ASCII
+/// origin from an already validated sparse-index URL.
+fn registry_primary_origin(index: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let url = url::Url::parse(
+        index
+            .strip_prefix("sparse+")
+            .ok_or("missing sparse+ prefix")?,
+    )?;
+    Ok(url.origin().ascii_serialization())
 }
 
 /// 从规范项目路径派生稳定且不泄露路径的 catalog 命名空间。 /

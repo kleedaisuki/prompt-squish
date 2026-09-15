@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -105,16 +106,75 @@ impl HttpTransport for ReqwestTransport {
     }
 }
 
+/// 已验证且不可观察的 HTTP Authorization 字段值。 / Validated, opaque HTTP
+/// Authorization field value.
+#[derive(Clone, Eq, PartialEq)]
+pub struct AuthorizationValue(String);
+
+impl AuthorizationValue {
+    /// 验证精确字段值；不会修剪或添加认证 scheme。 / Validates an exact field value;
+    /// it neither trims it nor adds an authentication scheme.
+    pub fn new(value: String) -> Result<Self, CredentialError> {
+        if value.is_empty() || reqwest::header::HeaderValue::from_str(&value).is_err() {
+            return Err(CredentialError::Invalid(
+                "Authorization environment value is empty or is not a valid HTTP header value"
+                    .into(),
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    /// 仅供 HTTP 请求构造器读取字段内容。 / Exposes the field only for HTTP request
+    /// construction.
+    #[must_use]
+    pub(crate) fn expose_for_http(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for AuthorizationValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AuthorizationValue(<redacted>)")
+    }
+}
+
+impl fmt::Display for AuthorizationValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
+/// 凭据提供器的非秘密配置错误。 / Non-secret credential-provider configuration error.
+#[derive(Debug, thiserror::Error)]
+pub enum CredentialError {
+    /// 环境或提供器配置无效；消息不得包含 credential value。 / Environment or
+    /// provider configuration is invalid; the message must not contain credential values.
+    #[error("{0}")]
+    Invalid(String),
+}
+
 /// Registry credential provider; returned values are never persisted or observed. / Registry credential provider；返回值绝不持久化或进入事件。
 pub trait CredentialPort: Send + Sync {
-    fn authorization(&self, registry_id: &str, origin: &str) -> Option<String>;
+    /// 为稳定 registry、配置作用域和当前 origin 查询 credential。 / Looks up a
+    /// credential for the stable registry, configured scope, and current origin.
+    fn authorization(
+        &self,
+        registry_id: &str,
+        auth_scope: &str,
+        origin: &str,
+    ) -> Result<Option<AuthorizationValue>, CredentialError>;
 }
 /// 不提供认证信息。 / Supplies no credentials.
 #[derive(Default)]
 pub struct NoCredentials;
 impl CredentialPort for NoCredentials {
-    fn authorization(&self, _: &str, _: &str) -> Option<String> {
-        None
+    fn authorization(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<Option<AuthorizationValue>, CredentialError> {
+        Ok(None)
     }
 }
 
@@ -123,6 +183,9 @@ impl CredentialPort for NoCredentials {
 pub struct RegistryConfig {
     pub id: String,
     pub index: String,
+    /// 非秘密 credential namespace；别名不得参与查询。 / Non-secret credential
+    /// namespace; aliases never participate in lookup.
+    pub auth_scope: String,
 }
 
 #[derive(Clone, Debug)]
@@ -617,10 +680,17 @@ impl<C: CredentialPort> SparseRegistry<C> {
         let mut origin = redacted_origin(&current_url);
         let mut authorization = auth
             .then(|| {
-                self.credentials
-                    .authorization(&self.config.id, &request_origin(&current_url))
+                self.credentials.authorization(
+                    &self.config.id,
+                    &self.config.auth_scope,
+                    &request_origin(&current_url),
+                )
             })
+            .transpose()?
             .flatten();
+        if auth && authorization.is_none() {
+            return Err(authentication_unavailable(&self.config, &current_url));
+        }
         let mut bootstrap_attempted = auth;
         'redirects: for redirects in 0..=8 {
             for attempt in 1..=3u8 {
@@ -637,7 +707,7 @@ impl<C: CredentialPort> SparseRegistry<C> {
                     headers.insert(name.into(), value.into());
                 }
                 if let Some(value) = &authorization {
-                    headers.insert("authorization".into(), value.clone());
+                    headers.insert("authorization".into(), value.expose_for_http().to_owned());
                 }
                 let mut response = self.transport.execute(HttpRequest {
                     url: current_url.clone(),
@@ -680,22 +750,29 @@ impl<C: CredentialPort> SparseRegistry<C> {
                         return Err(FetchError::Http("redirect must preserve HTTPS".into()));
                     }
                     let next_origin = redacted_origin(&next);
-                    authorization = if auth {
-                        self.credentials
-                            .authorization(&self.config.id, &request_origin(&next))
+                    authorization = if bootstrap_attempted {
+                        self.credentials.authorization(
+                            &self.config.id,
+                            &self.config.auth_scope,
+                            &request_origin(&next),
+                        )?
                     } else {
                         None
                     };
-                    bootstrap_attempted = auth;
+                    if bootstrap_attempted && authorization.is_none() {
+                        return Err(authentication_unavailable(&self.config, &next));
+                    }
                     current_url = next;
                     origin = next_origin;
                     continue 'redirects;
                 }
                 if status == 401 && !bootstrap_attempted {
                     bootstrap_attempted = true;
-                    authorization = self
-                        .credentials
-                        .authorization(&self.config.id, &request_origin(&current_url));
+                    authorization = self.credentials.authorization(
+                        &self.config.id,
+                        &self.config.auth_scope,
+                        &request_origin(&current_url),
+                    )?;
                     if authorization.is_some() {
                         self.context
                             .observer
@@ -707,6 +784,14 @@ impl<C: CredentialPort> SparseRegistry<C> {
                             });
                         continue;
                     }
+                    return Err(authentication_unavailable(&self.config, &current_url));
+                }
+                if matches!(status, 401 | 403) && authorization.is_some() {
+                    return Err(FetchError::AuthenticationRejected(format!(
+                        "registry `{}` at `{}` rejected its scoped credential",
+                        self.config.id,
+                        request_origin(&current_url)
+                    )));
                 }
                 let retryable = status == 408 || status == 429 || status >= 500;
                 if retryable && attempt < 3 {
@@ -854,6 +939,11 @@ fn validate_package_name(name: &str) -> Result<(), FetchError> {
     Ok(())
 }
 fn validate_registry_config(c: &RegistryConfig) -> Result<(), FetchError> {
+    if c.auth_scope.is_empty() {
+        return Err(FetchError::Config(
+            "registry auth scope must not be empty".into(),
+        ));
+    }
     let id = Url::parse(&c.id).map_err(|e| FetchError::Config(e.to_string()))?;
     if id.scheme() != "https"
         || id.username() != ""
@@ -1114,6 +1204,15 @@ fn request_origin(u: &Url) -> String {
         u.port().map(|p| format!(":{p}")).unwrap_or_default()
     )
 }
+
+fn authentication_unavailable(config: &RegistryConfig, url: &Url) -> FetchError {
+    FetchError::AuthenticationUnavailable(format!(
+        "registry `{}` requires scope `{}` at `{}`",
+        config.id,
+        config.auth_scope,
+        request_origin(url)
+    ))
+}
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), FetchError> {
     let parent = path.parent().ok_or_else(|| {
         FetchError::Io(std::io::Error::new(
@@ -1187,6 +1286,32 @@ mod tests {
     struct RedirectHttp {
         calls: std::sync::Arc<Mutex<Vec<HttpRequest>>>,
     }
+    struct BootstrapRedirectHttp {
+        calls: std::sync::Arc<Mutex<Vec<HttpRequest>>>,
+    }
+    impl HttpTransport for BootstrapRedirectHttp {
+        fn execute(&self, request: HttpRequest) -> Result<HttpResponse, FetchError> {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(request);
+            match calls.len() {
+                1 => Ok(HttpResponse {
+                    status: 401,
+                    headers: BTreeMap::new(),
+                    body: Vec::new(),
+                }),
+                2 => Ok(HttpResponse {
+                    status: 302,
+                    headers: BTreeMap::from([("location".into(), "https://b.example/file".into())]),
+                    body: Vec::new(),
+                }),
+                _ => Ok(HttpResponse {
+                    status: 200,
+                    headers: BTreeMap::new(),
+                    body: b"done".to_vec(),
+                }),
+            }
+        }
+    }
     impl HttpTransport for RedirectHttp {
         fn execute(&self, request: HttpRequest) -> Result<HttpResponse, FetchError> {
             let mut calls = self.calls.lock().unwrap();
@@ -1208,8 +1333,17 @@ mod tests {
     }
     struct ScopedCredentials;
     impl CredentialPort for ScopedCredentials {
-        fn authorization(&self, _: &str, origin: &str) -> Option<String> {
-            Some(format!("token-for-{origin}"))
+        fn authorization(
+            &self,
+            registry_id: &str,
+            auth_scope: &str,
+            origin: &str,
+        ) -> Result<Option<AuthorizationValue>, CredentialError> {
+            assert_eq!(registry_id, "https://registry.example/v1");
+            assert_eq!(auth_scope, "test-scope");
+            Ok(Some(
+                AuthorizationValue::new(format!("token-for-{origin}")).unwrap(),
+            ))
         }
     }
     #[test]
@@ -1234,6 +1368,7 @@ mod tests {
             HostContext::new(root.join("cache")).unwrap(),
             RegistryConfig {
                 id: "https://registry.example/v1".into(),
+                auth_scope: "test".into(),
                 index: format!(
                     "sparse+{}",
                     Url::from_directory_path(fs::canonicalize(&index).unwrap()).unwrap()
@@ -1313,6 +1448,7 @@ mod tests {
             HostContext::new(root.clone()).unwrap(),
             RegistryConfig {
                 id: "https://registry.example/v1".into(),
+                auth_scope: "test".into(),
                 index: format!("sparse+http://{address}/"),
             },
         )
@@ -1364,6 +1500,7 @@ mod tests {
             HostContext::new(root.clone()).unwrap(),
             RegistryConfig {
                 id: "https://registry.example/v1".into(),
+                auth_scope: "test".into(),
                 index: format!("sparse+http://{address}/"),
             },
         )
@@ -1407,6 +1544,7 @@ mod tests {
             HostContext::new(root.clone()).unwrap(),
             RegistryConfig {
                 id: "https://registry.example/v1".into(),
+                auth_scope: "test".into(),
                 index: "sparse+https://unreachable.invalid/".into(),
             },
             NoCredentials,
@@ -1440,6 +1578,7 @@ mod tests {
             HostContext::new(root.clone()).unwrap(),
             RegistryConfig {
                 id: "https://registry.example/v1".into(),
+                auth_scope: "test-scope".into(),
                 index: "sparse+https://a.example/".into(),
             },
             ScopedCredentials,
@@ -1469,6 +1608,122 @@ mod tests {
             "token-for-https://b.example"
         );
         drop(calls);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bootstrap_then_redirect_relooks_up_the_new_origin() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.temp")
+            .join(format!("fetch-bootstrap-redirect-{}", std::process::id()));
+        let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let registry = SparseRegistry::with_dependencies(
+            HostContext::new(root.clone()).unwrap(),
+            RegistryConfig {
+                id: "https://registry.example/v1".into(),
+                auth_scope: "test-scope".into(),
+                index: "sparse+https://a.example/".into(),
+            },
+            ScopedCredentials,
+            Box::new(BootstrapRedirectHttp {
+                calls: calls.clone(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            registry
+                .get_url(
+                    &Url::parse("https://a.example/start").unwrap(),
+                    "test",
+                    false,
+                    None,
+                    16,
+                )
+                .unwrap()
+                .body,
+            b"done"
+        );
+        let calls = calls.lock().unwrap();
+        assert!(!calls[0].headers.contains_key("authorization"));
+        assert_eq!(
+            calls[1].headers.get("authorization").unwrap(),
+            "token-for-https://a.example"
+        );
+        assert_eq!(
+            calls[2].headers.get("authorization").unwrap(),
+            "token-for-https://b.example"
+        );
+        drop(calls);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn authorization_values_are_validated_and_always_redacted() {
+        let secret = AuthorizationValue::new("Bearer distinctive-secret".into()).unwrap();
+        assert_eq!(secret.expose_for_http(), "Bearer distinctive-secret");
+        assert_eq!(format!("{secret}"), "<redacted>");
+        assert_eq!(format!("{secret:?}"), "AuthorizationValue(<redacted>)");
+        assert!(AuthorizationValue::new(String::new()).is_err());
+        let error = AuthorizationValue::new("Bearer secret\nInjected: yes".into()).unwrap_err();
+        assert!(!error.to_string().contains("secret"));
+    }
+
+    struct FixedStatus(u16);
+    impl HttpTransport for FixedStatus {
+        fn execute(&self, _: HttpRequest) -> Result<HttpResponse, FetchError> {
+            Ok(HttpResponse {
+                status: self.0,
+                headers: BTreeMap::new(),
+                body: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn missing_and_rejected_authentication_are_distinct() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.temp")
+            .join(format!("fetch-auth-errors-{}", std::process::id()));
+        let config = RegistryConfig {
+            id: "https://registry.example/v1".into(),
+            auth_scope: "test-scope".into(),
+            index: "sparse+https://a.example/".into(),
+        };
+        let missing = SparseRegistry::with_dependencies(
+            HostContext::new(root.join("missing")).unwrap(),
+            config.clone(),
+            NoCredentials,
+            Box::new(FixedStatus(401)),
+        )
+        .unwrap()
+        .get_url(
+            &Url::parse("https://a.example/private").unwrap(),
+            "test",
+            false,
+            None,
+            16,
+        )
+        .err()
+        .expect("missing credential must fail");
+        assert!(matches!(missing, FetchError::AuthenticationUnavailable(_)));
+
+        let rejected = SparseRegistry::with_dependencies(
+            HostContext::new(root.join("rejected")).unwrap(),
+            config,
+            ScopedCredentials,
+            Box::new(FixedStatus(403)),
+        )
+        .unwrap()
+        .get_url(
+            &Url::parse("https://a.example/private").unwrap(),
+            "test",
+            true,
+            None,
+            16,
+        )
+        .err()
+        .expect("rejected credential must fail");
+        assert!(matches!(rejected, FetchError::AuthenticationRejected(_)));
         fs::remove_dir_all(root).unwrap();
     }
 }

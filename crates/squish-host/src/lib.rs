@@ -9,15 +9,20 @@
 
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     fmt,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
+use sha2::{Digest, Sha256};
+use squish_config::AuthScope;
+use url::Url;
+
 use squish_fetch::{
-    CredentialPort, FetchError, GitHost, GitRunner, HostContext, HttpRequest, HttpResponse,
-    HttpTransport, Limits, Materializer, Observer, RegistryConfig, SourceEvent, SparseRegistry,
-    SystemGitRunner,
+    AuthorizationValue, CredentialError, CredentialPort, FetchError, GitHost, GitRunner,
+    HostContext, HttpRequest, HttpResponse, HttpTransport, Limits, Materializer, Observer,
+    RegistryConfig, SourceEvent, SparseRegistry, SystemGitRunner,
 };
 use squish_manager::{
     ArtifactLocator, ProvenanceNonApplicability, ProvenanceRelation, ResolveRequest,
@@ -38,6 +43,248 @@ pub struct RegistryEndpoint {
     pub name: String,
     /// 稳定身份与可变 sparse endpoint。 / Stable identity and mutable sparse endpoint.
     pub config: RegistryConfig,
+}
+
+/// 环境 credential namespace 到 registry origin 的稳定路由。 / Stable route from an
+/// environment credential namespace to a registry origin.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CredentialRoute {
+    /// Registry 的稳定身份；别名不属于该身份。 / Stable registry identity; aliases are
+    /// not part of this identity.
+    pub registry_id: String,
+    /// 配置的非秘密 credential scope。 / Configured non-secret credential scope.
+    pub auth_scope: String,
+    /// 规范化 sparse index origin。 / Canonical sparse-index origin.
+    pub primary_origin: String,
+}
+
+/// 启动时环境 credential snapshot 的配置错误。 / Configuration error in the startup
+/// environment credential snapshot.
+#[derive(Debug, thiserror::Error)]
+pub enum CredentialConfigError {
+    /// Registry route 自相矛盾或 origin 无效。 / A registry route conflicts or has an
+    /// invalid origin.
+    #[error("invalid credential route: {0}")]
+    Route(String),
+    /// 环境变量名称不可移植或存在大小写折叠重复。 / An environment variable name is
+    /// non-portable or duplicated after ASCII case folding.
+    #[error("invalid credential environment: {0}")]
+    Environment(String),
+    /// 环境中的 Authorization 字段值无效。 / An Authorization field value in the
+    /// environment is invalid.
+    #[error("invalid credential value in `{variable}`")]
+    Value {
+        /// 非秘密的变量名称。 / Non-secret variable name.
+        variable: String,
+    },
+}
+
+#[derive(Clone)]
+struct CredentialRouteState {
+    auth_scope: String,
+    stem: String,
+    primary_origin: String,
+}
+
+/// 从一次启动环境快照读取 registry credentials 的生产适配器。 / Production adapter
+/// which reads registry credentials from one startup environment snapshot.
+pub struct EnvironmentCredentials {
+    routes: BTreeMap<String, CredentialRouteState>,
+    values: BTreeMap<String, AuthorizationValue>,
+}
+
+impl fmt::Debug for EnvironmentCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EnvironmentCredentials")
+            .field("route_count", &self.routes.len())
+            .field("credential_count", &self.values.len())
+            .finish()
+    }
+}
+
+impl EnvironmentCredentials {
+    /// 校验路由和注入的环境快照；本函数不读取进程全局状态。 / Validates routes and an
+    /// injected environment snapshot; this function never reads process-global state.
+    ///
+    /// # 示例 / Example
+    ///
+    /// ```
+    /// use std::ffi::OsString;
+    /// use squish_host::{CredentialRoute, EnvironmentCredentials};
+    /// let credentials = EnvironmentCredentials::from_snapshot(
+    ///     [CredentialRoute {
+    ///         registry_id: "https://registry.example/v1".into(),
+    ///         auth_scope: "corp-read".into(),
+    ///         primary_origin: "https://index.example".into(),
+    ///     }],
+    ///     [(OsString::from("XMLSQUISH_REGISTRY_CORP_READ_AUTHORIZATION"),
+    ///       OsString::from("Bearer example"))],
+    /// ).expect("valid environment snapshot");
+    /// # let _ = credentials;
+    /// ```
+    pub fn from_snapshot(
+        routes: impl IntoIterator<Item = CredentialRoute>,
+        variables: impl IntoIterator<Item = (OsString, OsString)>,
+    ) -> Result<Self, CredentialConfigError> {
+        let mut route_map = BTreeMap::<String, CredentialRouteState>::new();
+        let mut stems = BTreeMap::<String, String>::new();
+        for route in routes {
+            if route.auth_scope.is_empty() {
+                return Err(CredentialConfigError::Route(format!(
+                    "registry `{}` has an empty auth scope",
+                    route.registry_id
+                )));
+            }
+            let primary_origin =
+                canonical_https_origin(&route.primary_origin).ok_or_else(|| {
+                    CredentialConfigError::Route(format!(
+                        "registry `{}` has a non-canonical HTTPS primary origin",
+                        route.registry_id
+                    ))
+                })?;
+            if primary_origin != route.primary_origin {
+                return Err(CredentialConfigError::Route(format!(
+                    "registry `{}` primary origin must be `{primary_origin}`",
+                    route.registry_id
+                )));
+            }
+            let stem = AuthScope::environment_stem_for(&route.auth_scope);
+            if let Some(first_scope) = stems.insert(stem.clone(), route.auth_scope.clone())
+                && first_scope != route.auth_scope
+            {
+                return Err(CredentialConfigError::Route(format!(
+                    "auth scopes `{first_scope}` and `{}` share environment stem `{stem}`",
+                    route.auth_scope
+                )));
+            }
+            let state = CredentialRouteState {
+                auth_scope: route.auth_scope,
+                stem,
+                primary_origin,
+            };
+            if let Some(first) = route_map.insert(route.registry_id.clone(), state.clone())
+                && (first.auth_scope != state.auth_scope
+                    || first.primary_origin != state.primary_origin)
+            {
+                return Err(CredentialConfigError::Route(format!(
+                    "registry `{}` has conflicting credential routes",
+                    route.registry_id
+                )));
+            }
+        }
+
+        let relevant_names = route_map
+            .values()
+            .map(|route| {
+                (
+                    format!("XMLSQUISH_REGISTRY_{}_AUTHORIZATION", route.stem),
+                    format!("XMLSQUISH_REGISTRY_{}_ORIGIN_", route.stem),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut values = BTreeMap::new();
+        for (raw_name, raw_value) in variables {
+            let Some(name) = raw_name.to_str() else {
+                if raw_name
+                    .to_string_lossy()
+                    .to_ascii_uppercase()
+                    .starts_with("XMLSQUISH_REGISTRY_")
+                {
+                    return Err(CredentialConfigError::Environment(
+                        "reserved variable name is not Unicode".into(),
+                    ));
+                }
+                continue;
+            };
+            let folded = name.to_ascii_uppercase();
+            if !folded.starts_with("XMLSQUISH_REGISTRY_") {
+                continue;
+            }
+            if !relevant_names.iter().any(|(primary, origin_prefix)| {
+                &folded == primary || origin_variable_matches(&folded, origin_prefix)
+            }) {
+                continue;
+            }
+            if values.contains_key(&folded) {
+                return Err(CredentialConfigError::Environment(format!(
+                    "variables collide after ASCII case folding at `{folded}`"
+                )));
+            }
+            let value = raw_value
+                .into_string()
+                .map_err(|_| CredentialConfigError::Value {
+                    variable: folded.clone(),
+                })?;
+            let value =
+                AuthorizationValue::new(value).map_err(|_| CredentialConfigError::Value {
+                    variable: folded.clone(),
+                })?;
+            values.insert(folded, value);
+        }
+        Ok(Self {
+            routes: route_map,
+            values,
+        })
+    }
+}
+
+impl CredentialPort for EnvironmentCredentials {
+    fn authorization(
+        &self,
+        registry_id: &str,
+        auth_scope: &str,
+        origin: &str,
+    ) -> Result<Option<AuthorizationValue>, CredentialError> {
+        let route = self.routes.get(registry_id).ok_or_else(|| {
+            CredentialError::Invalid(format!("registry `{registry_id}` has no credential route"))
+        })?;
+        if route.auth_scope != auth_scope {
+            return Err(CredentialError::Invalid(format!(
+                "registry `{registry_id}` requested an inconsistent auth scope"
+            )));
+        }
+        let origin = canonical_https_origin(origin).ok_or_else(|| {
+            CredentialError::Invalid(format!(
+                "registry `{registry_id}` requested a non-canonical HTTPS origin"
+            ))
+        })?;
+        let name = if origin == route.primary_origin {
+            format!("XMLSQUISH_REGISTRY_{}_AUTHORIZATION", route.stem)
+        } else {
+            let digest = hex::encode_upper(Sha256::digest(origin.as_bytes()));
+            format!(
+                "XMLSQUISH_REGISTRY_{}_ORIGIN_{}_AUTHORIZATION",
+                route.stem, digest
+            )
+        };
+        Ok(self.values.get(&name).cloned())
+    }
+}
+
+fn origin_variable_matches(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix)
+        .and_then(|tail| tail.strip_suffix("_AUTHORIZATION"))
+        .is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte))
+        })
+}
+
+fn canonical_https_origin(origin: &str) -> Option<String> {
+    let url = Url::parse(origin).ok()?;
+    if url.scheme() != "https"
+        || url.username() != ""
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+    {
+        return None;
+    }
+    Some(url.origin().ascii_serialization())
 }
 
 /// Git 执行依赖；生产可固定 executable，测试可注入 runner。 / Git execution dependency; production can pin an executable and tests can inject a runner.
@@ -129,8 +376,13 @@ impl From<FetchError> for HostError {
 #[derive(Clone)]
 struct SharedCredentials(Arc<dyn CredentialPort>);
 impl CredentialPort for SharedCredentials {
-    fn authorization(&self, registry_id: &str, origin: &str) -> Option<String> {
-        self.0.authorization(registry_id, origin)
+    fn authorization(
+        &self,
+        registry_id: &str,
+        auth_scope: &str,
+        origin: &str,
+    ) -> Result<Option<AuthorizationValue>, CredentialError> {
+        self.0.authorization(registry_id, auth_scope, origin)
     }
 }
 
@@ -460,6 +712,9 @@ fn retryable_registry_miss(error: &FetchError) -> bool {
         | FetchError::Manifest(_) => true,
         FetchError::Io(error) => error.kind() == std::io::ErrorKind::NotFound,
         FetchError::Config(_)
+        | FetchError::AuthenticationUnavailable(_)
+        | FetchError::AuthenticationRejected(_)
+        | FetchError::Credential(_)
         | FetchError::Path(_)
         | FetchError::Unsupported(_)
         | FetchError::Git(_)
@@ -494,21 +749,42 @@ fn normalize_from_existing_ancestor(path: &Path) -> Result<PathBuf, std::io::Err
 }
 
 fn validate_registry_routes(endpoints: &[RegistryEndpoint]) -> Result<(), HostError> {
-    let mut routes = BTreeMap::<&str, usize>::new();
+    let mut aliases = BTreeMap::<&str, usize>::new();
+    let mut identities = BTreeMap::<&str, usize>::new();
     for (index, endpoint) in endpoints.iter().enumerate() {
-        if endpoint.name.trim().is_empty() || endpoint.config.id.trim().is_empty() {
+        if endpoint.name.trim().is_empty()
+            || endpoint.config.id.trim().is_empty()
+            || endpoint.config.auth_scope.is_empty()
+        {
             return Err(HostError::Config(
-                "registry names and stable identities must be non-empty".into(),
+                "registry names, stable identities, and auth scopes must be non-empty".into(),
             ));
         }
-        for route in [&*endpoint.name, &*endpoint.config.id] {
-            if let Some(owner) = routes.insert(route, index)
-                && owner != index
+        if aliases.insert(&endpoint.name, index).is_some() {
+            return Err(HostError::Config(format!(
+                "registry alias `{}` is defined more than once",
+                endpoint.name
+            )));
+        }
+        if let Some(owner) = identities.insert(&endpoint.config.id, index) {
+            let first = &endpoints[owner].config;
+            if first.index != endpoint.config.index
+                || first.auth_scope != endpoint.config.auth_scope
             {
                 return Err(HostError::Config(format!(
-                    "registry route `{route}` ambiguously names multiple endpoints"
+                    "stable registry `{}` has conflicting endpoint or auth-scope routes",
+                    endpoint.config.id
                 )));
             }
+        }
+    }
+    for (alias, owner) in aliases {
+        if let Some(identity_owner) = identities.get(alias)
+            && endpoints[owner].config.id != endpoints[*identity_owner].config.id
+        {
+            return Err(HostError::Config(format!(
+                "registry route `{alias}` ambiguously names multiple endpoints"
+            )));
         }
     }
     Ok(())
@@ -1033,6 +1309,7 @@ mod tests {
                 host.context.clone(),
                 RegistryConfig {
                     id: identity.into(),
+                    auth_scope: identity.into(),
                     index: "sparse+https://index.example/".into(),
                 },
                 SharedCredentials(Arc::new(NoCredentials)),
@@ -1059,6 +1336,7 @@ mod tests {
                 name: "default".into(),
                 config: RegistryConfig {
                     id: "https://registry.example/a".into(),
+                    auth_scope: "a".into(),
                     index: "sparse+https://a.example/".into(),
                 },
             },
@@ -1066,11 +1344,31 @@ mod tests {
                 name: "https://registry.example/a".into(),
                 config: RegistryConfig {
                     id: "https://registry.example/b".into(),
+                    auth_scope: "b".into(),
                     index: "sparse+https://b.example/".into(),
                 },
             },
         ];
         assert!(validate_registry_routes(&collision).is_err());
+        let shared = vec![
+            RegistryEndpoint {
+                name: "corp".into(),
+                config: RegistryConfig {
+                    id: "https://registry.example/shared".into(),
+                    auth_scope: "corp-read".into(),
+                    index: "sparse+https://index.example/".into(),
+                },
+            },
+            RegistryEndpoint {
+                name: "corp-mirror-name".into(),
+                config: RegistryConfig {
+                    id: "https://registry.example/shared".into(),
+                    auth_scope: "corp-read".into(),
+                    index: "sparse+https://index.example/".into(),
+                },
+            },
+        ];
+        assert!(validate_registry_routes(&shared).is_ok());
     }
 
     #[test]
@@ -1099,6 +1397,7 @@ mod tests {
                 host.context.clone(),
                 RegistryConfig {
                     id: identity.into(),
+                    auth_scope: identity.into(),
                     index: index.into(),
                 },
                 SharedCredentials(Arc::new(NoCredentials)),
@@ -1231,6 +1530,7 @@ mod tests {
                 name: "default".into(),
                 config: RegistryConfig {
                     id: identity.into(),
+                    auth_scope: identity.into(),
                     index: "sparse+https://index.example/".into(),
                 },
             }],
@@ -1430,5 +1730,146 @@ mod tests {
                 .is_empty()
         );
         assert!(ActionIndex::lookup(&index, &key).unwrap().is_none());
+    }
+
+    #[test]
+    fn environment_credentials_scope_primary_and_cross_origin_values() {
+        let cross_origin = "https://packages.example.com";
+        let digest = hex::encode_upper(Sha256::digest(cross_origin.as_bytes()));
+        let credentials = EnvironmentCredentials::from_snapshot(
+            [CredentialRoute {
+                registry_id: "https://registry.example/v1".into(),
+                auth_scope: "corp-read".into(),
+                primary_origin: "https://index.example.com".into(),
+            }],
+            [
+                (
+                    OsString::from("xmlsquish_registry_corp_read_authorization"),
+                    OsString::from("Bearer primary-secret"),
+                ),
+                (
+                    OsString::from(format!(
+                        "XMLSQUISH_REGISTRY_CORP_READ_ORIGIN_{digest}_AUTHORIZATION"
+                    )),
+                    OsString::from("Basic cross-secret"),
+                ),
+                (OsString::from("IGNORED"), OsString::from("not retained")),
+            ],
+        )
+        .unwrap();
+        let primary = credentials
+            .authorization(
+                "https://registry.example/v1",
+                "corp-read",
+                "https://index.example.com",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            primary,
+            AuthorizationValue::new("Bearer primary-secret".into()).unwrap()
+        );
+        let cross = credentials
+            .authorization("https://registry.example/v1", "corp-read", cross_origin)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cross,
+            AuthorizationValue::new("Basic cross-secret".into()).unwrap()
+        );
+        assert!(
+            credentials
+                .authorization(
+                    "https://registry.example/v1",
+                    "corp-read",
+                    "https://other.example.com",
+                )
+                .unwrap()
+                .is_none()
+        );
+        let rendered = format!("{credentials:?} {primary:?} {cross}");
+        assert!(!rendered.contains("primary-secret"));
+        assert!(!rendered.contains("cross-secret"));
+    }
+
+    #[test]
+    fn environment_credentials_reject_portability_and_value_errors_without_leaking() {
+        let route = CredentialRoute {
+            registry_id: "https://registry.example/v1".into(),
+            auth_scope: "corp-read".into(),
+            primary_origin: "https://index.example.com".into(),
+        };
+        let duplicate = EnvironmentCredentials::from_snapshot(
+            [route.clone()],
+            [
+                (
+                    OsString::from("XMLSQUISH_REGISTRY_CORP_READ_AUTHORIZATION"),
+                    OsString::from("Bearer first-secret"),
+                ),
+                (
+                    OsString::from("xmlsquish_registry_corp_read_authorization"),
+                    OsString::from("Bearer second-secret"),
+                ),
+            ],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(duplicate.contains("collide"));
+        assert!(!duplicate.contains("first-secret"));
+        assert!(!duplicate.contains("second-secret"));
+
+        let invalid = EnvironmentCredentials::from_snapshot(
+            [route],
+            [(
+                OsString::from("XMLSQUISH_REGISTRY_CORP_READ_AUTHORIZATION"),
+                OsString::from("Bearer secret\nInjected: value"),
+            )],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(invalid.contains("XMLSQUISH_REGISTRY_CORP_READ_AUTHORIZATION"));
+        assert!(!invalid.contains("secret"));
+    }
+
+    #[test]
+    fn environment_credentials_reject_scope_stem_collision_but_allow_exact_reuse() {
+        let route = |id: &str, scope: &str| CredentialRoute {
+            registry_id: id.into(),
+            auth_scope: scope.into(),
+            primary_origin: "https://index.example.com".into(),
+        };
+        assert!(
+            EnvironmentCredentials::from_snapshot(
+                [
+                    route("https://registry.example/a", "corp-read"),
+                    route("https://registry.example/b", "CORP_READ"),
+                ],
+                [],
+            )
+            .is_err()
+        );
+        assert!(
+            EnvironmentCredentials::from_snapshot(
+                [
+                    route("https://registry.example/a", "corp-read"),
+                    route("https://registry.example/b", "corp-read"),
+                ],
+                [],
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn credential_origins_canonicalize_default_ports_and_ipv6() {
+        assert_eq!(
+            canonical_https_origin("https://example.com:443"),
+            Some("https://example.com".into())
+        );
+        assert_eq!(
+            canonical_https_origin("https://[2001:db8::1]:8443"),
+            Some("https://[2001:db8::1]:8443".into())
+        );
+        assert!(canonical_https_origin("https://example.com/path").is_none());
     }
 }

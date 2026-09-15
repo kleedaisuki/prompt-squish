@@ -58,6 +58,7 @@ squish-presentation = { path = "crates/squish-presentation" }
 squish-protocol = { path = "crates/squish-protocol" }
 squish-repository = { path = "crates/squish-repository" }
 squish-store = { path = "crates/squish-store" }
+url = "2.5"
 
 [dev-dependencies]
 tempfile = "3.23"

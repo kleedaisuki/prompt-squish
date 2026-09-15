@@ -8,7 +8,9 @@ repository.workspace = true
 description = "Deterministic layered configuration for the xmlsquish manager"
 
 [dependencies]
+hex = "0.4"
 serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.10"
 thiserror = "2.0"
 toml = "0.9"
 toml_edit = "0.23"

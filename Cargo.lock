@@ -1386,7 +1386,9 @@ dependencies = [
 name = "squish-config"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "serde",
+ "sha2",
  "thiserror",
  "toml",
  "toml_edit",
@@ -1432,6 +1434,7 @@ dependencies = [
  "semver",
  "sha2",
  "squish-build",
+ "squish-config",
  "squish-fetch",
  "squish-manager",
  "squish-project",
@@ -1441,6 +1444,8 @@ dependencies = [
  "squish-store",
  "tar",
  "tempfile",
+ "thiserror",
+ "url",
 ]
 
 [[package]]
@@ -1498,6 +1503,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "squish-protocol",
+ "terminal_size",
  "unicode-segmentation",
  "unicode-width",
 ]
@@ -1579,6 +1585,7 @@ dependencies = [
  "squish-build",
  "squish-protocol",
  "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1686,6 +1693,16 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.3",
  "once_cell",
+ "rustix",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "terminal_size"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
+dependencies = [
  "rustix",
  "windows-sys 0.61.2",
 ]
@@ -2218,6 +2235,7 @@ checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
 name = "xmlsquish"
 version = "0.3.0"
 dependencies = [
+ "blake3",
  "ctrlc",
  "serde",
  "serde_json",
@@ -2232,6 +2250,7 @@ dependencies = [
  "squish-repository",
  "squish-store",
  "tempfile",
+ "url",
 ]
 
 [[package]]

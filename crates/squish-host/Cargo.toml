@@ -8,7 +8,10 @@ repository.workspace = true
 description = "Explicit production composition root for prompt-squish"
 
 [dependencies]
+hex = "0.4"
 semver = "1.0"
+sha2 = "0.10"
+squish-config = { path = "../squish-config" }
 squish-build = { path = "../squish-build" }
 squish-fetch = { path = "../squish-fetch" }
 squish-manager = { path = "../squish-manager" }
@@ -17,6 +20,8 @@ squish-protocol = { path = "../squish-protocol" }
 squish-repository = { path = "../squish-repository" }
 squish-resolver = { path = "../squish-resolver" }
 squish-store = { path = "../squish-store" }
+thiserror = "2.0"
+url = "2.5"
 
 [dev-dependencies]
 flate2 = "1.1"

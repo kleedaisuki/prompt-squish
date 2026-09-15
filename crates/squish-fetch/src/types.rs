@@ -217,6 +217,15 @@ pub enum FetchError {
     Io(#[from] std::io::Error),
     #[error("HTTP unavailable: {0}")]
     Http(String),
+    /// 必需的 registry credential 不可用。 / A required registry credential is unavailable.
+    #[error("registry authentication unavailable: {0}")]
+    AuthenticationUnavailable(String),
+    /// Registry 拒绝了已提供的 credential。 / The registry rejected a supplied credential.
+    #[error("registry authentication rejected: {0}")]
+    AuthenticationRejected(String),
+    /// Credential provider 配置无效。 / Credential-provider configuration is invalid.
+    #[error("credential configuration invalid: {0}")]
+    Credential(#[from] crate::CredentialError),
     #[error("JSON invalid: {0}")]
     Json(#[from] serde_json::Error),
     #[error("manifest invalid: {0}")]

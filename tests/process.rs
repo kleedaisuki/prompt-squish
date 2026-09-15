@@ -134,6 +134,46 @@ fn json_parse_failures_are_diagnostic_plus_one_terminal_record() {
 }
 
 #[test]
+fn invalid_registry_environment_credential_is_redacted_in_machine_output() {
+    let project = project("invalid-registry-credential");
+    fs::write(
+        project.path().join(".xmlsquish/config.toml"),
+        "[source]\ncache-root = 'cache/sources'\n[manager]\nstorage-root = 'cache/state'\n\
+         [registries.corp]\nid = 'https://registry.example/v1'\nindex = 'sparse+https://index.example/'\nauth-scope = 'corp-read'\n",
+    )
+    .unwrap();
+    let secret = "Bearer distinctive-secret\nInjected: yes";
+    for args in [
+        vec!["build", "--message-format=json"],
+        vec!["build", "--message-format=json", "--verbose"],
+        vec!["build", "--message-format=json", "--verbose", "--verbose"],
+        vec!["build"],
+    ] {
+        let output = binary()
+            .current_dir(project.path())
+            .args(&args)
+            .env("XMLSQUISH_REGISTRY_CORP_READ_AUTHORIZATION", secret)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(combined.contains("XMLSQUISH_REGISTRY_CORP_READ_AUTHORIZATION"));
+        assert!(!combined.contains("distinctive-secret"));
+        assert!(!combined.contains("Injected"));
+        if args.contains(&"--message-format=json") {
+            assert!(output.stderr.is_empty());
+            assert!(String::from_utf8_lossy(&output.stdout).contains("xmlsquish-bootstrap-v1"));
+        } else {
+            assert!(output.stdout.is_empty());
+        }
+    }
+}
+
+#[test]
 fn failed_project_discovery_is_a_domain_failure() {
     let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join(".temp/no-project");
     fs::create_dir_all(&scratch).unwrap();

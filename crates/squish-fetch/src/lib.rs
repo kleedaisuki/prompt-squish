@@ -16,7 +16,7 @@ pub use filesystem::FilesystemHost;
 pub use git::{GitHost, GitInvocation, GitRunOutput, GitRunner, GitSelector, SystemGitRunner};
 pub use materialize::{LogicalFile, LogicalTree, Materializer};
 pub use registry::{
-    CredentialPort, HttpRequest, HttpResponse, HttpTransport, NoCredentials, RegistryConfig,
-    ReqwestTransport, SparseRegistry,
+    AuthorizationValue, CredentialError, CredentialPort, HttpRequest, HttpResponse, HttpTransport,
+    NoCredentials, RegistryConfig, ReqwestTransport, SparseRegistry,
 };
 pub use types::*;

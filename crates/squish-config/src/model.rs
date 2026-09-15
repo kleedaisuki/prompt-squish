@@ -5,6 +5,7 @@ use std::{
 };
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use toml_edit::{Document, Item, TableLike};
 use url::Url;
 
@@ -84,6 +85,28 @@ impl AuthScope {
     /// 返回不透明作用域。 / Returns the opaque scope.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// 生成可移植的环境变量片段；相同输入始终得到相同输出。 / Produces a portable
+    /// environment-variable stem; identical inputs always produce identical output.
+    pub fn environment_stem(&self) -> String {
+        Self::environment_stem_for(&self.0)
+    }
+
+    /// 为已验证或即将验证的原始作用域计算环境变量片段。 / Computes the
+    /// environment-variable stem for a validated or soon-to-be-validated raw scope.
+    #[must_use]
+    pub fn environment_stem_for(scope: &str) -> String {
+        let bytes = scope.as_bytes();
+        let readable = matches!(bytes.first(), Some(first) if first.is_ascii_alphabetic())
+            && bytes.len() <= 64
+            && bytes
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+        if readable {
+            return scope.to_ascii_uppercase().replace('-', "_");
+        }
+        format!("H_{}", hex::encode_upper(Sha256::digest(bytes)))
     }
 }
 
@@ -392,6 +415,7 @@ impl State {
         }
         let mut ids: BTreeMap<&str, (&str, &Registry)> = BTreeMap::new();
         let mut aliases: BTreeMap<String, &str> = BTreeMap::new();
+        let mut scope_stems: BTreeMap<String, (&str, &str)> = BTreeMap::new();
         for (alias, registry) in &self.config.registries {
             let folded = alias.to_ascii_lowercase();
             if let Some(first) = aliases.insert(folded.clone(), alias) {
@@ -424,6 +448,19 @@ impl State {
                         &self.registry_locations,
                     ));
                 }
+            }
+            let stem = registry.auth_scope.environment_stem();
+            if let Some((first_alias, first_scope)) =
+                scope_stems.insert(stem.clone(), (alias, registry.auth_scope.as_str()))
+                && first_scope != registry.auth_scope.as_str()
+            {
+                return Err(collision(
+                    first_alias,
+                    alias,
+                    "environment auth-scope stem",
+                    &stem,
+                    &self.registry_locations,
+                ));
             }
         }
         Ok(EffectiveConfig {
