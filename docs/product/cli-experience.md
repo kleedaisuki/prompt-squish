@@ -475,12 +475,12 @@ Example interactive transcript:
 $ xmlsquish build -t support-agent
   Resolving  14 packages (locked)
   Loading    38 sources
-  Compiling  support-core -> ir:sha256:8c36…
-  Compiling  support-agent -> ir:sha256:07b1…
+  Cached     support-core (IR)
+  Compiling  support-agent
   Linking    support-agent
   Squishing  support-agent
   Published  target/prompts/support-agent.prompt
-  Finished   1 target, 2 IR units, 1 cache hit in 1.84s
+  Finished   1 target, 1 compiled, 1 cached in 1.84s
 ```
 
 Status verbs have stable meanings. They are not log levels and are never abbreviated in plain
@@ -643,6 +643,58 @@ meaning. `--unicode`, `--hyperlinks`, `--no-input`, `--diagnostic-format`, `--tr
 implicit release requirements. The current parser contract is executable in
 `crates/squish-cli/src/lib.rs` and `crates/squish-cli/tests/cli_contract.rs`; layered precedence is
 exercised in `crates/squish-config/tests/loading.rs` and composed in `src/main.rs`.
+
+### 4.1 Information-density and identity disclosure
+
+The ordinary CLI answers the user's task, not the scheduler's bookkeeping. Cryptographic digests,
+content-store keys, and job/plan/action IDs are necessary internal identities, but they are not
+ordinary progress information. Default human output therefore names packages, targets, source
+paths, artifact paths, phases, counts, elapsed time, and whether work was cached; it does not append
+SHA-256, BLAKE3, or opaque lifecycle IDs to successful status lines.
+
+Removing an identity from a human projection must not remove the underlying fact. In particular,
+cache reuse remains visible as `Cached <target> (<kind>)` and as a cached count in the terminal
+summary. This lets a person distinguish reuse from compilation without reading or comparing hash
+strings. A cache miss may be stated at verbose levels when it explains performed work; ordinary
+mode simply reports the work that occurred.
+
+The disclosure contract is:
+
+| Projection | Full digest or opaque key | Short fingerprint | Job/plan/action IDs | Cache presentation |
+| --- | --- | --- | --- | --- |
+| Human, normal | No, except one locator in an actionable error help command | No | No | Semantic target/kind line plus summary count |
+| Human, `-v` | No, except an actionable error locator | Yes, only beside a named cache or artifact fact when correlation is useful | No | Hit/miss class, named target/kind, reason when known, and counts |
+| Human, `-vv` | Yes, for explicitly requested trace-level cache/artifact evidence | Yes | Yes, but only in lifecycle trace detail rather than replacing domain names | Complete cache decision and lifecycle evidence |
+| `--message-format=short` | No, except an actionable error locator | No | No | One append-only semantic `cached` record per reused target and terminal counts |
+| `--message-format=json` | Yes, exactly as typed by the versioned protocol | Not substituted for full values | Yes | Lossless `cache_hit` payload including action key, digest, and output metadata |
+| `inspect ... --format=human` | Yes for the specifically inspected object and its declared relations | May additionally show one for scanning | Only if the selected subject explicitly describes lifecycle state | Labeled cache inputs, decision, outputs, and full identities |
+| `inspect ... --format=json` | Yes, exactly as typed by the inspect schema | Not substituted for full values | When part of the selected subject's schema | Lossless typed query result |
+
+A short fingerprint is an algorithm label plus the first 12 hexadecimal digits, for example
+`blake3:6f82c0a119de`. It is display-only, is never an equality or security boundary, and is never
+accepted where a complete identity is required. Normal human and `short` output must not expose it
+merely because the protocol event happens to carry a digest.
+
+When a failure genuinely requires object-level investigation, the diagnostic remains centered on
+the package, target, or path and ends with one copyable help command, for example:
+
+```text
+help: run `xmlsquish inspect cache <complete-action-key>` for declared inputs and outputs
+```
+
+That locator is an intentional, local exception: it enables the next user action instead of
+turning every successful build line into a database dump. Scheduler-only job, plan, and action IDs
+do not qualify as locators in normal output. `-vv` or JSON is the route for correlating scheduler
+events.
+
+This is a presentation policy, not a build-identity migration. The native NDJSON envelope and
+fields, inspect JSON schemas, cache-key derivation, content-addressed store paths, artifact bytes,
+and digest verification remain unchanged. Renderer verbosity must not participate in project
+discovery, planning, action keys, cache lookup, compilation, or publication. Human prose and line
+layout may evolve and are not a stable machine interface; consumers that require identities use
+the versioned JSON forms. This separation follows Cargo's production distinction between calm
+default output, repeated `-v` detail, and machine-readable message formats, without copying
+Cargo's schema.
 
 ## 5. Stream contract
 
