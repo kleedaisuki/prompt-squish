@@ -114,7 +114,11 @@ fn accepts_native_unicode_paths() {
     assert!(destination.is_dir());
 }
 
-#[cfg(unix)]
+// Linux 与 Android 文件系统接受任意字节名称；Apple 文件系统可能在调用生产 API 之前以
+// EILSEQ 拒绝该夹具，因此 Apple 由上方 Unicode 用例覆盖。 / Linux and Android filesystems
+// accept arbitrary byte names. Apple filesystems can reject the fixture with EILSEQ before the
+// production API is called, so Apple coverage uses Unicode above.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[test]
 fn accepts_non_utf8_paths() {
     use std::ffi::OsStr;
