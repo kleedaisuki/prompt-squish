@@ -481,6 +481,7 @@ struct Lifecycle {
     retry_allowed: bool,
     fatal_planning_failure: bool,
     planning_cancelled: bool,
+    deferred_cancellation_observed: bool,
     pending_deferred_cancellation: Option<(PlanId, ActionId)>,
     operation_completed: bool,
     job_finished: bool,
@@ -1035,6 +1036,7 @@ impl Lifecycle {
             .get_mut(action)
             .expect("declared action")
             .cancellation_deferred = true;
+        self.deferred_cancellation_observed = true;
         self.pending_deferred_cancellation = Some((plan.clone(), action.clone()));
         Ok(())
     }
@@ -1168,12 +1170,16 @@ impl Lifecycle {
                         .actions
                         .values()
                         .any(|x| x.state == ActionState::Superseded)
+                    || record.actions.values().any(|x| x.cancellation_deferred)
                     || record.actions.values().any(|x| {
-                        x.kind == ActionKind::CommitTransaction && x.state == ActionState::Succeeded
+                        matches!(
+                            x.kind,
+                            ActionKind::CreateProject | ActionKind::CommitTransaction
+                        ) && x.state == ActionState::Succeeded
                     }) =>
             {
                 return self.invalid(
-                    "superseded plan requires discarded work before any commit succeeded",
+                    "superseded plan requires discarded work before an irreversible decision",
                 );
             }
             PlanCloseReason::Executed | PlanCloseReason::Reported | PlanCloseReason::Superseded => {
@@ -1296,14 +1302,13 @@ impl Lifecycle {
         }
         let mut totals = ActionTotals::default();
         let mut root_failures = 0;
-        let mut cancelled = self.planning_cancelled;
+        let mut cancelled = self.planning_cancelled || self.deferred_cancellation_observed;
         let mut cache_hits = 0;
         if let Some(plan) = &self.final_plan {
             let record = &self.plans[plan];
             root_failures += record.expected_issues;
             for action in record.actions.values() {
                 cache_hits += u64::from(action.cache_hit);
-                cancelled |= action.cancellation_deferred;
                 match action.state {
                     ActionState::Succeeded => totals.succeeded += 1,
                     ActionState::Failed => {
@@ -2192,6 +2197,61 @@ mod tests {
                 .observe(&EventPayload::PlanClosed {
                     job: job(),
                     plan: p,
+                    reason: PlanCloseReason::Superseded,
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn supersede_rejects_a_deferred_irreversible_decision_even_after_failure() {
+        let mut lifecycle = Lifecycle::default();
+        let attempt = attempt("deferred-supersede-attempt");
+        let plan = plan("deferred-supersede-plan");
+        let commit = action("create-project");
+        let discarded = action("discarded");
+        start(&mut lifecycle, &attempt);
+        seal(&mut lifecycle, &attempt, &plan, PlanMode::Execute, 2, 0);
+        declare_kind(
+            &mut lifecycle,
+            &plan,
+            &commit,
+            ActionKind::CreateProject,
+            vec![],
+        );
+        declare(&mut lifecycle, &plan, &discarded, vec![]);
+        lifecycle
+            .observe(&EventPayload::ActionStarted {
+                job: job(),
+                plan: plan.clone(),
+                action: commit.clone(),
+            })
+            .unwrap();
+        defer_cancellation(&mut lifecycle, &plan, &commit);
+        lifecycle
+            .observe(&EventPayload::ActionFailed {
+                job: job(),
+                plan: plan.clone(),
+                action: commit,
+                timing: Timing::default(),
+                diagnostic: diagnostic(),
+            })
+            .unwrap();
+        lifecycle
+            .observe(&EventPayload::ActionSuperseded {
+                job: job(),
+                plan: plan.clone(),
+                action: discarded,
+                timing: Timing::default(),
+                reason: SupersedeReason::AuthoritativeRevisionChanged,
+            })
+            .unwrap();
+
+        assert!(
+            lifecycle
+                .observe(&EventPayload::PlanClosed {
+                    job: job(),
+                    plan,
                     reason: PlanCloseReason::Superseded,
                 })
                 .is_err()
