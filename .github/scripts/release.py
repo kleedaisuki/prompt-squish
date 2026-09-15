@@ -26,6 +26,7 @@ TARGETS = (
     "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc",
     "x86_64-apple-darwin", "aarch64-apple-darwin",
 )
+COMMANDS = ("build", "fmt", "add", "remove", "inspect")
 
 
 def run(*args, cwd=None):
@@ -96,13 +97,40 @@ def package(source, dist, tag):
         raise ValueError("binary version does not match release tag")
     with tempfile.TemporaryDirectory() as directory:
         staging = Path(directory)
-        # Exercise imports, macro expansion, attribute stripping and whitespace squishing.
-        # 验证导入、宏展开、属性剥离与产品空白压缩语义。
-        (staging / "library.xml").write_text('<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:smoke"><xs:macro name="m:greeting"><m:Hello ignored="yes">  hello   world  </m:Hello></xs:macro></xs:module>', encoding="utf-8")
-        (staging / "entry.xml").write_text('<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns" xmlns:m="urn:smoke"><xs:import src="library.xml"/><xs:expand ref="m:greeting"/></xs:entry>', encoding="utf-8")
-        run(str(binary), "--color=never", "entry.xml", cwd=staging)
-        if (staging / "entry.o.xml").read_text(encoding="utf-8") != "<Hello> hello world </Hello>":
-            raise ValueError("native compilation smoke test failed")
+        help_text = run(str(binary))
+        for command in COMMANDS:
+            if not re.search(rf"^  {command}\s", help_text, re.MULTILINE):
+                raise ValueError(f"binary help omits direct command: {command}")
+            run(str(binary), command, "--help")
+        # Exercise the installed project-manager contract and public .prompt artifact.
+        # 验证安装后的项目管理契约与公开 .prompt 产物。
+        (staging / "src").mkdir()
+        (staging / ".xmlsquish").mkdir()
+        (staging / ".xmlsquish" / "config.toml").write_text(
+            '[source]\ncache-root = "cache/sources"\n[manager]\nstorage-root = "cache/state"\n',
+            encoding="utf-8",
+        )
+        (staging / "xmlsquish.toml").write_text(
+            'manifest-version = 1\n[package]\nname = "release-smoke"\nversion = "1.0.0"\n\n'
+            '[target.chat]\nentry = "src/main.xml"\n',
+            encoding="utf-8",
+        )
+        source_file = staging / "src" / "main.xml"
+        source_file.write_text(
+            "<xs:entry  xmlns:xs = 'https://xmlsquish.moesegfault.dev/ns' >"
+            "<message>Hello   release</message></xs:entry >",
+            encoding="utf-8",
+        )
+        run(str(binary), "fmt", "--plain", cwd=staging)
+        run(str(binary), "build", "--plain", cwd=staging)
+        if not list((staging / "target" / "xmlsquish").rglob("*.prompt")):
+            raise ValueError("native bare build smoke test did not publish its default .prompt artifact")
+        run(str(binary), "build", "--emit=ir", "--plain", cwd=staging)
+        if not list((staging / "target" / "xmlsquish").rglob("*.xsir")):
+            raise ValueError("native explicit IR build smoke test did not publish an .xsir artifact")
+        inspected = json.loads(run(str(binary), "inspect", "link", "chat", "--format=json", cwd=staging))
+        if inspected.get("view") != "link":
+            raise ValueError("native inspect smoke test returned the wrong view")
         root = staging / f"xmlsquish-{version}-{target}"
         root.mkdir()
         shutil.copy2(binary, root / executable)
@@ -111,9 +139,11 @@ def package(source, dist, tag):
         (root / "README.txt").write_text(
             f"xmlsquish {version} ({target})\n\n"
             "EN: Extract the archive and place xmlsquish (xmlsquish.exe on Windows)\n"
-            "in a directory on PATH. Run xmlsquish --version, then xmlsquish entry.xml.\n"
+            "in a directory on PATH. Run xmlsquish --version, then run xmlsquish build\n"
+            "from a project containing xmlsquish.toml.\n"
             "ZH: 解压后将 xmlsquish（Windows 为 xmlsquish.exe）放入 PATH 目录，\n"
-            "运行 xmlsquish --version 验证，再运行 xmlsquish entry.xml 编译。\n\n"
+            "运行 xmlsquish --version 验证，再在含 xmlsquish.toml 的项目中运行\n"
+            "xmlsquish build。\n\n"
             "Linux: glibc >= 2.35. macOS: 11.0+. Windows: MSVC desktop target.\n"
             "Unsigned, not notarized. SHA256SUMS verifies integrity, not identity.\n"
             "二进制未签名、未经 Apple 公证。SHA256SUMS 校验完整性，不证明身份。\n\n"

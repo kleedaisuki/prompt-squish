@@ -74,6 +74,30 @@ jobs:
       - name: Run tests
         run: cargo +1.88.0 test --workspace --all-features --locked
 
+      # Exercise the composed binary, not only the crates behind it.
+      # 验证组合后的根二进制，而不只是其内部 crate。
+      - name: Smoke test root project-manager CLI
+        shell: pwsh
+        run: |
+          $binary = if ($IsWindows) { "target/debug/xmlsquish.exe" } else { "target/debug/xmlsquish" }
+          python .github/scripts/ci_smoke.py $binary "$env:RUNNER_TEMP/xmlsquish-ci"
+
+      - name: Install root package from source
+        if: runner.os == 'Linux'
+        shell: bash
+        # The preceding workspace build has populated the locked dependency cache.
+        # 前序 workspace 构建已填充锁定依赖缓存，因此安装无需再次访问网络。
+        run: cargo +1.88.0 install --path . --locked --offline --root "$RUNNER_TEMP/xmlsquish-install"
+
+      - name: Smoke test source-installed binary
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$RUNNER_TEMP/xmlsquish-install/bin/xmlsquish"
+          "$binary" --version | grep -E '^xmlsquish [0-9]+\.[0-9]+\.[0-9]+'
+          "$binary" | grep -E '^  (build|fmt|add|remove|inspect)[[:space:]]'
+
   site:
     name: Site
     runs-on: ubuntu-latest
