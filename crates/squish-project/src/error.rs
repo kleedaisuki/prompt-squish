@@ -41,4 +41,7 @@ pub enum ProjectError {
     /// Serialization failed. / 序列化失败。
     #[error("serialization failed: {0}")]
     Serialization(#[from] toml_edit::ser::Error),
+    /// Internal scaffold generation violated a deterministic domain invariant. / 内部脚手架生成违反确定性领域不变式。
+    #[error("project scaffold invariant failed: {0}")]
+    ScaffoldInvariant(String),
 }

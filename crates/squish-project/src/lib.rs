@@ -11,7 +11,9 @@ mod error;
 mod lock;
 mod manifest;
 mod model;
+mod package_name;
 mod resolver;
+mod scaffold;
 mod transaction;
 
 pub use edit::{CandidateManifest, DependencyChange, EditPlan};
@@ -21,7 +23,9 @@ pub use manifest::Manifest;
 pub use model::{
     DependencyDetail, DependencySpec, GitReference, Limits, Package, Profile, Target, Workspace,
 };
+pub use package_name::{InvalidPackageName, PackageName, validate_package_name};
 pub use resolver::{DependencyResolver, ResolutionInput, ResolutionMode};
+pub use scaffold::{NewProjectSpec, ProjectScaffold, STARTER_SOURCE, ScaffoldFile, ScaffoldVcs};
 pub use transaction::{
     CommitPreparation, JournalRecord, MutationFile, MutationKind, MutationPlan, MutationPlanner,
     TransactionId,

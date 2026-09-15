@@ -72,16 +72,16 @@ pub struct Target {
     #[serde(default = "default_backend")]
     pub backend: String,
     /// Published path; defaults to `<target>.prompt`. / 发布路径，默认 `<target>.prompt`。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<PathBuf>,
     /// Link-time scalar arguments. / 链接时标量参数。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub args: BTreeMap<String, String>,
     /// Target resource limits. / 目标资源限制。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Limits::is_default")]
     pub limits: Limits,
     /// Enabled frontend/backend features. / 启用的前后端特性。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub features: BTreeSet<String>,
 }
 
@@ -132,6 +132,12 @@ pub struct Limits {
     pub max_expansions: Option<u64>,
     /// Maximum output bytes. / 最大输出字节数。
     pub max_output_bytes: Option<u64>,
+}
+
+impl Limits {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 /// 依赖声明的简写或完整形式。 / Shorthand or detailed dependency declaration.

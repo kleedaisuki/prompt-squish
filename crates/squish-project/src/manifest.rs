@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     DependencySpec, MANIFEST_VERSION, Package, Profile, ProjectError, Target, ValidationIssue,
-    Workspace,
+    Workspace, validate_package_name,
 };
 
 /// 完整的人工编写项目意图。 / Complete human-authored project intent.
@@ -17,22 +17,26 @@ pub struct Manifest {
     /// Manifest schema version. / 清单架构版本。
     pub manifest_version: u32,
     /// Optional root workspace policy. / 可选的根工作区策略。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<Workspace>,
     /// Optional package; virtual workspaces omit it. / 可选包；虚拟工作区省略。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<Package>,
     /// Named link targets. / 命名链接目标。
-    #[serde(default, rename = "target")]
+    #[serde(default, rename = "target", skip_serializing_if = "BTreeMap::is_empty")]
     pub targets: BTreeMap<String, Target>,
     /// Direct dependency aliases. / 直接依赖别名。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<String, DependencySpec>,
     /// Public export name to source path. / 公开 export 名称到源路径。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub exports: BTreeMap<String, std::path::PathBuf>,
     /// Named build/format profiles. / 命名构建/格式化 profile。
-    #[serde(default, rename = "profile")]
+    #[serde(
+        default,
+        rename = "profile",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub profiles: BTreeMap<String, Profile>,
 }
 
@@ -222,11 +226,7 @@ fn lexical_normalize(path: &Path) -> Option<PathBuf> {
 }
 
 fn validate_name(path: &str, name: &str, issues: &mut Vec<ValidationIssue>) {
-    if name.is_empty()
-        || !name
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
-    {
+    if validate_package_name(name).is_err() {
         issues.push(ValidationIssue::new(
             path,
             "name must contain only ASCII letters, digits, '-' or '_'",
