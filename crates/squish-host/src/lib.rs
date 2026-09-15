@@ -20,9 +20,9 @@ use squish_config::AuthScope;
 use url::Url;
 
 use squish_fetch::{
-    AuthorizationValue, CredentialError, CredentialPort, FetchError, GitHost, GitRunner,
-    HostContext, HttpRequest, HttpResponse, HttpTransport, Limits, Materializer, Observer,
-    RegistryConfig, SourceEvent, SparseRegistry, SystemGitRunner,
+    AuthorizationValue, CredentialError, CredentialLookup, CredentialPort, FetchError, GitHost,
+    GitRunner, HostContext, HttpRequest, HttpResponse, HttpTransport, Limits, Materializer,
+    Observer, RegistryConfig, SourceEvent, SparseRegistry, SystemGitRunner,
 };
 use squish_manager::{
     ArtifactLocator, ProvenanceNonApplicability, ProvenanceRelation, ResolveRequest,
@@ -235,7 +235,7 @@ impl CredentialPort for EnvironmentCredentials {
         registry_id: &str,
         auth_scope: &str,
         origin: &str,
-    ) -> Result<Option<AuthorizationValue>, CredentialError> {
+    ) -> Result<CredentialLookup, CredentialError> {
         let route = self.routes.get(registry_id).ok_or_else(|| {
             CredentialError::Invalid(format!("registry `{registry_id}` has no credential route"))
         })?;
@@ -258,7 +258,7 @@ impl CredentialPort for EnvironmentCredentials {
                 route.stem, digest
             )
         };
-        Ok(self.values.get(&name).cloned())
+        CredentialLookup::new(self.values.get(&name).cloned(), Some(name))
     }
 }
 
@@ -381,7 +381,7 @@ impl CredentialPort for SharedCredentials {
         registry_id: &str,
         auth_scope: &str,
         origin: &str,
-    ) -> Result<Option<AuthorizationValue>, CredentialError> {
+    ) -> Result<CredentialLookup, CredentialError> {
         self.0.authorization(registry_id, auth_scope, origin)
     }
 }
@@ -1764,6 +1764,8 @@ mod tests {
                 "https://index.example.com",
             )
             .unwrap()
+            .into_parts()
+            .0
             .unwrap();
         assert_eq!(
             primary,
@@ -1772,6 +1774,8 @@ mod tests {
         let cross = credentials
             .authorization("https://registry.example/v1", "corp-read", cross_origin)
             .unwrap()
+            .into_parts()
+            .0
             .unwrap();
         assert_eq!(
             cross,
@@ -1785,11 +1789,43 @@ mod tests {
                     "https://other.example.com",
                 )
                 .unwrap()
+                .into_parts()
+                .0
                 .is_none()
         );
         let rendered = format!("{credentials:?} {primary:?} {cross}");
         assert!(!rendered.contains("primary-secret"));
         assert!(!rendered.contains("cross-secret"));
+
+        let missing = EnvironmentCredentials::from_snapshot(
+            [CredentialRoute {
+                registry_id: "https://registry.example/v1".into(),
+                auth_scope: "corp-read".into(),
+                primary_origin: "https://index.example.com".into(),
+            }],
+            [],
+        )
+        .unwrap();
+        let (_, primary_hint) = missing
+            .authorization(
+                "https://registry.example/v1",
+                "corp-read",
+                "https://index.example.com",
+            )
+            .unwrap()
+            .into_parts();
+        assert_eq!(
+            primary_hint.as_deref(),
+            Some("XMLSQUISH_REGISTRY_CORP_READ_AUTHORIZATION")
+        );
+        let (_, cross_hint) = missing
+            .authorization("https://registry.example/v1", "corp-read", cross_origin)
+            .unwrap()
+            .into_parts();
+        assert_eq!(
+            cross_hint.as_deref(),
+            Some(format!("XMLSQUISH_REGISTRY_CORP_READ_ORIGIN_{digest}_AUTHORIZATION").as_str())
+        );
     }
 
     #[test]

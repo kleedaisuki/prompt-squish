@@ -153,6 +153,54 @@ pub enum CredentialError {
     Invalid(String),
 }
 
+/// 一次 credential 查询的秘密值与非秘密恢复提示。 / Secret value and non-secret
+/// recovery hint produced by one credential lookup.
+pub struct CredentialLookup {
+    authorization: Option<AuthorizationValue>,
+    expected_variable: Option<String>,
+}
+
+impl CredentialLookup {
+    /// 构造查询结果并验证可显示的环境变量提示。 / Constructs a lookup result and
+    /// validates the display-safe environment-variable hint.
+    pub fn new(
+        authorization: Option<AuthorizationValue>,
+        expected_variable: Option<String>,
+    ) -> Result<Self, CredentialError> {
+        if expected_variable.as_ref().is_some_and(|name| {
+            name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        }) {
+            return Err(CredentialError::Invalid(
+                "credential recovery variable name is not portable".into(),
+            ));
+        }
+        Ok(Self {
+            authorization,
+            expected_variable,
+        })
+    }
+
+    /// 返回无 credential 且无 provider-specific 提示的结果。 / Returns no credential
+    /// and no provider-specific recovery hint.
+    #[must_use]
+    pub fn unavailable() -> Self {
+        Self {
+            authorization: None,
+            expected_variable: None,
+        }
+    }
+
+    /// 将结果拆为秘密 header value 与非秘密变量名。 / Splits the result into its secret
+    /// header value and non-secret variable name.
+    #[must_use]
+    pub fn into_parts(self) -> (Option<AuthorizationValue>, Option<String>) {
+        (self.authorization, self.expected_variable)
+    }
+}
+
 /// Registry credential provider; returned values are never persisted or observed. / Registry credential provider；返回值绝不持久化或进入事件。
 pub trait CredentialPort: Send + Sync {
     /// 为稳定 registry、配置作用域和当前 origin 查询 credential。 / Looks up a
@@ -162,7 +210,7 @@ pub trait CredentialPort: Send + Sync {
         registry_id: &str,
         auth_scope: &str,
         origin: &str,
-    ) -> Result<Option<AuthorizationValue>, CredentialError>;
+    ) -> Result<CredentialLookup, CredentialError>;
 }
 /// 不提供认证信息。 / Supplies no credentials.
 #[derive(Default)]
@@ -173,8 +221,8 @@ impl CredentialPort for NoCredentials {
         _: &str,
         _: &str,
         _: &str,
-    ) -> Result<Option<AuthorizationValue>, CredentialError> {
-        Ok(None)
+    ) -> Result<CredentialLookup, CredentialError> {
+        Ok(CredentialLookup::unavailable())
     }
 }
 
@@ -678,18 +726,23 @@ impl<C: CredentialPort> SparseRegistry<C> {
     ) -> Result<FetchedResponse, FetchError> {
         let mut current_url = url.clone();
         let mut origin = redacted_origin(&current_url);
-        let mut authorization = auth
-            .then(|| {
-                self.credentials.authorization(
+        let (mut authorization, mut expected_variable) = if auth {
+            self.credentials
+                .authorization(
                     &self.config.id,
                     &self.config.auth_scope,
                     &request_origin(&current_url),
                 )
-            })
-            .transpose()?
-            .flatten();
+                .map(CredentialLookup::into_parts)?
+        } else {
+            (None, None)
+        };
         if auth && authorization.is_none() {
-            return Err(authentication_unavailable(&self.config, &current_url));
+            return Err(authentication_unavailable(
+                &self.config,
+                &current_url,
+                expected_variable.as_deref(),
+            ));
         }
         let mut bootstrap_attempted = auth;
         'redirects: for redirects in 0..=8 {
@@ -750,17 +803,23 @@ impl<C: CredentialPort> SparseRegistry<C> {
                         return Err(FetchError::Http("redirect must preserve HTTPS".into()));
                     }
                     let next_origin = redacted_origin(&next);
-                    authorization = if bootstrap_attempted {
-                        self.credentials.authorization(
-                            &self.config.id,
-                            &self.config.auth_scope,
-                            &request_origin(&next),
-                        )?
+                    (authorization, expected_variable) = if bootstrap_attempted {
+                        self.credentials
+                            .authorization(
+                                &self.config.id,
+                                &self.config.auth_scope,
+                                &request_origin(&next),
+                            )?
+                            .into_parts()
                     } else {
-                        None
+                        (None, None)
                     };
                     if bootstrap_attempted && authorization.is_none() {
-                        return Err(authentication_unavailable(&self.config, &next));
+                        return Err(authentication_unavailable(
+                            &self.config,
+                            &next,
+                            expected_variable.as_deref(),
+                        ));
                     }
                     current_url = next;
                     origin = next_origin;
@@ -768,11 +827,14 @@ impl<C: CredentialPort> SparseRegistry<C> {
                 }
                 if status == 401 && !bootstrap_attempted {
                     bootstrap_attempted = true;
-                    authorization = self.credentials.authorization(
-                        &self.config.id,
-                        &self.config.auth_scope,
-                        &request_origin(&current_url),
-                    )?;
+                    (authorization, expected_variable) = self
+                        .credentials
+                        .authorization(
+                            &self.config.id,
+                            &self.config.auth_scope,
+                            &request_origin(&current_url),
+                        )?
+                        .into_parts();
                     if authorization.is_some() {
                         self.context
                             .observer
@@ -784,7 +846,11 @@ impl<C: CredentialPort> SparseRegistry<C> {
                             });
                         continue;
                     }
-                    return Err(authentication_unavailable(&self.config, &current_url));
+                    return Err(authentication_unavailable(
+                        &self.config,
+                        &current_url,
+                        expected_variable.as_deref(),
+                    ));
                 }
                 if matches!(status, 401 | 403) && authorization.is_some() {
                     return Err(FetchError::AuthenticationRejected(format!(
@@ -1205,9 +1271,16 @@ fn request_origin(u: &Url) -> String {
     )
 }
 
-fn authentication_unavailable(config: &RegistryConfig, url: &Url) -> FetchError {
+fn authentication_unavailable(
+    config: &RegistryConfig,
+    url: &Url,
+    expected_variable: Option<&str>,
+) -> FetchError {
+    let recovery = expected_variable
+        .map(|name| format!("; set environment variable `{name}`"))
+        .unwrap_or_default();
     FetchError::AuthenticationUnavailable(format!(
-        "registry `{}` requires scope `{}` at `{}`",
+        "registry `{}` requires scope `{}` at `{}`{recovery}",
         config.id,
         config.auth_scope,
         request_origin(url)
@@ -1338,12 +1411,13 @@ mod tests {
             registry_id: &str,
             auth_scope: &str,
             origin: &str,
-        ) -> Result<Option<AuthorizationValue>, CredentialError> {
+        ) -> Result<CredentialLookup, CredentialError> {
             assert_eq!(registry_id, "https://registry.example/v1");
             assert_eq!(auth_scope, "test-scope");
-            Ok(Some(
-                AuthorizationValue::new(format!("token-for-{origin}")).unwrap(),
-            ))
+            CredentialLookup::new(
+                Some(AuthorizationValue::new(format!("token-for-{origin}")).unwrap()),
+                Some("XMLSQUISH_REGISTRY_TEST_SCOPE_AUTHORIZATION".into()),
+            )
         }
     }
     #[test]
@@ -1677,6 +1751,60 @@ mod tests {
                 body: Vec::new(),
             })
         }
+    }
+
+    struct MissingHintCredentials;
+    impl CredentialPort for MissingHintCredentials {
+        fn authorization(
+            &self,
+            _: &str,
+            _: &str,
+            origin: &str,
+        ) -> Result<CredentialLookup, CredentialError> {
+            let variable = if origin == "https://a.example" {
+                "XMLSQUISH_REGISTRY_TEST_SCOPE_AUTHORIZATION"
+            } else {
+                "XMLSQUISH_REGISTRY_TEST_SCOPE_ORIGIN_CROSS_AUTHORIZATION"
+            };
+            CredentialLookup::new(None, Some(variable.into()))
+        }
+    }
+
+    #[test]
+    fn unavailable_authentication_names_primary_and_cross_origin_recovery_variables() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.temp")
+            .join(format!("fetch-auth-hints-{}", std::process::id()));
+        let config = RegistryConfig {
+            id: "https://registry.example/v1".into(),
+            auth_scope: "test-scope".into(),
+            index: "sparse+https://a.example/".into(),
+        };
+        for (origin, expected) in [
+            (
+                "https://a.example/private",
+                "XMLSQUISH_REGISTRY_TEST_SCOPE_AUTHORIZATION",
+            ),
+            (
+                "https://b.example/private",
+                "XMLSQUISH_REGISTRY_TEST_SCOPE_ORIGIN_CROSS_AUTHORIZATION",
+            ),
+        ] {
+            let error = SparseRegistry::with_dependencies(
+                HostContext::new(root.join(hex::encode(Sha256::digest(origin)))).unwrap(),
+                config.clone(),
+                MissingHintCredentials,
+                Box::new(FixedStatus(200)),
+            )
+            .unwrap()
+            .get_url(&Url::parse(origin).unwrap(), "test", true, None, 16)
+            .err()
+            .expect("missing credential must fail before transport");
+            let message = error.to_string();
+            assert!(message.contains(expected));
+            assert!(message.contains(&request_origin(&Url::parse(origin).unwrap())));
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
