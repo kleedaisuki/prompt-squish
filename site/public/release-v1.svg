@@ -48,7 +48,7 @@
   <!-- 版本胶囊是发布页的主要识别锚点。The version capsule is the release's primary identity anchor. -->
   <g transform="rotate(2 987 135)" filter="url(#soft-shadow)">
     <rect x="857" y="74" width="260" height="122" rx="28" fill="url(#version)"/>
-    <text x="987" y="120" text-anchor="middle" fill="#3b1720" font-family="ui-monospace, 'Cascadia Mono', monospace" font-size="19" font-weight="700" letter-spacing="3">STABLE RELEASE</text>
+    <text x="987" y="120" text-anchor="middle" fill="#3b1720" font-family="ui-monospace, 'Cascadia Mono', monospace" font-size="19" font-weight="700" letter-spacing="3">RELEASE READY</text>
     <text x="987" y="174" text-anchor="middle" fill="#21121b" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="52" font-weight="850" letter-spacing="-2">1.0</text>
   </g>
 
