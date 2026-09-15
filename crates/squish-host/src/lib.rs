@@ -2361,12 +2361,17 @@ mod tests {
         });
         let host = ProjectCreationHost::new(GitExecution::Runner(git.clone())).unwrap();
         let destination = temp.path().join("nested/project");
+        let expected_destination =
+            squish_repository::normalize_new_destination(&destination).unwrap();
 
         let location = host
             .locate_project_creation(&destination, VcsChoice::Git)
             .unwrap();
 
-        assert_eq!(location.destination, destination);
+        assert_eq!(
+            squish_repository::normalize_new_destination(&location.destination).unwrap(),
+            expected_destination
+        );
         assert_eq!(location.vcs, ProjectVcs::InheritedGit);
         assert_eq!(location.workspace.unwrap().member, "nested/project");
         assert!(!destination.exists());
