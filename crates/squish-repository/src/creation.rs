@@ -1595,6 +1595,33 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn non_utf8_journal_path_round_trips_in_memory() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let native = PathBuf::from(OsString::from_vec(b"new-\xff".to_vec()));
+        let journal = Journal {
+            version: 1,
+            phase: Phase::Prepared,
+            destination: native.clone(),
+            publish_path: native.clone(),
+            stage_root: native.clone(),
+            missing_tail: native.clone(),
+            marker_name: ".xmlsquish-published-native".into(),
+            workspace: None,
+            package_name: "new".into(),
+        };
+        let encoded = serde_json::to_vec(&journal).unwrap();
+        let decoded: Journal = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.destination, native);
+    }
+
+    // Linux/Android 文件系统接受任意非 NUL 字节文件名；macOS 的实际卷会在到达故障点前
+    // 拒绝该 0xff fixture。上面的纯内存测试仍在所有 Unix 平台验证无损 journal 编码。
+    // Linux/Android filesystems accept arbitrary non-NUL filename bytes; real macOS volumes reject
+    // this 0xff fixture before the injected fault. The in-memory test above still verifies the
+    // lossless journal codec on every Unix target.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
     fn non_utf8_destination_round_trips_through_recovery_journal() {
         use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
