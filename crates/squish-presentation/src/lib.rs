@@ -17,8 +17,8 @@ use std::{
 
 use squish_protocol::{
     ActionId, ActionKind, ArtifactKind, CacheKind, Digest, DigestAlgorithm, Event, EventPayload,
-    ExitStatus, JobId, OperationResult, Phase, PlanCloseReason, PlanId, PlanMode, PlanningStepKind,
-    Severity,
+    ExitStatus, FinalizationId, FinalizationKind, JobId, OperationResult, Phase, PlanCloseReason,
+    PlanId, PlanMode, PlanningStepKind, Severity,
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -268,6 +268,7 @@ struct PlanView {
 #[derive(Clone, Debug, Default)]
 struct JobView {
     plans: BTreeMap<PlanId, PlanView>,
+    finalizations: BTreeMap<FinalizationId, FinalizationKind>,
 }
 
 /// 将协议事件按规范编码成逐行 NDJSON。 / Encodes protocol events as canonical line-delimited NDJSON.
@@ -1016,6 +1017,65 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                     }
                 }
             }
+            EventPayload::FinalizationStarted { job, id, kind } => {
+                self.stop_progress()?;
+                self.jobs
+                    .entry(job.clone())
+                    .or_default()
+                    .finalizations
+                    .insert(id.clone(), *kind);
+                if self.options.verbosity != Verbosity::Quiet {
+                    self.write_persistent(&format!(
+                        "{} {} {} ({})",
+                        styled_info(self.color, "Finalizing"),
+                        finalization_kind_name(*kind),
+                        sanitize(id.as_str()),
+                        sanitize(job.as_str())
+                    ))?;
+                }
+            }
+            EventPayload::FinalizationSucceeded { job, id, timing } => {
+                self.stop_progress()?;
+                let kind = self
+                    .jobs
+                    .get(job)
+                    .and_then(|view| view.finalizations.get(id))
+                    .copied();
+                if self.options.verbosity != Verbosity::Quiet {
+                    self.write_persistent(&format!(
+                        "{} {} {} ({}, {} ms)",
+                        styled_success(self.color, "Finalized"),
+                        finalization_name(kind),
+                        sanitize(id.as_str()),
+                        sanitize(job.as_str()),
+                        timing.elapsed_ms
+                    ))?;
+                }
+            }
+            EventPayload::FinalizationFailed {
+                job,
+                id,
+                timing,
+                diagnostic,
+            } => {
+                self.stop_progress()?;
+                let kind = self
+                    .jobs
+                    .get(job)
+                    .and_then(|view| view.finalizations.get(id))
+                    .copied();
+                if self.options.verbosity != Verbosity::Quiet {
+                    self.write_persistent(&format!(
+                        "{} {} {} ({}, {} ms)",
+                        styled_error(self.color, "Failed"),
+                        finalization_name(kind),
+                        sanitize(id.as_str()),
+                        sanitize(job.as_str()),
+                        timing.elapsed_ms
+                    ))?;
+                }
+                self.render_diagnostic(diagnostic)?;
+            }
             EventPayload::Diagnostic(diagnostic) => self.render_diagnostic(diagnostic)?,
             EventPayload::OperationCompleted { job, result } => {
                 self.stop_progress()?;
@@ -1186,6 +1246,15 @@ fn planning_step_name(kind: PlanningStepKind) -> &'static str {
         PlanningStepKind::PrepareCandidate => "Preparing candidate",
         _ => "Planning",
     }
+}
+fn finalization_kind_name(kind: FinalizationKind) -> &'static str {
+    match kind {
+        FinalizationKind::PersistBuildCatalog => "build catalog",
+        _ => "operation record",
+    }
+}
+fn finalization_name(kind: Option<FinalizationKind>) -> &'static str {
+    kind.map_or("operation record", finalization_kind_name)
 }
 fn action_kind_name(kind: ActionKind) -> &'static str {
     match kind {
@@ -1540,6 +1609,88 @@ mod tests {
             render_plain(&events),
             "Planning inspect-plan (attempt)\nPlanned plan for inspect-plan: 1 actions, 0 issues (report only)\nReported plan (inspect-plan) without execution\n"
         );
+    }
+
+    #[test]
+    fn build_catalog_finalization_success_is_post_plan_and_append_only() {
+        let job = id::<JobId>("build");
+        let finalization = id::<FinalizationId>("persist-build-catalog");
+        let events = vec![
+            event(
+                0,
+                EventPayload::FinalizationStarted {
+                    job: job.clone(),
+                    id: finalization.clone(),
+                    kind: FinalizationKind::PersistBuildCatalog,
+                },
+            ),
+            event(
+                1,
+                EventPayload::FinalizationSucceeded {
+                    job,
+                    id: finalization,
+                    timing: Timing { elapsed_ms: 4 },
+                },
+            ),
+        ];
+        let output = render_plain(&events);
+        assert_eq!(
+            output,
+            "Finalizing build catalog persist-build-catalog (build)\nFinalized build catalog persist-build-catalog (build, 4 ms)\n"
+        );
+        assert!(!output.contains('\x1b'));
+        assert!(!output.contains('\r'));
+        assert!(!output.contains("actions"));
+    }
+
+    #[test]
+    fn build_catalog_finalization_failure_is_colored_but_not_color_dependent() {
+        let job = id::<JobId>("build");
+        let finalization = id::<FinalizationId>("catalog");
+        let events = [
+            event(
+                0,
+                EventPayload::FinalizationStarted {
+                    job: job.clone(),
+                    id: finalization.clone(),
+                    kind: FinalizationKind::PersistBuildCatalog,
+                },
+            ),
+            event(
+                1,
+                EventPayload::FinalizationFailed {
+                    job,
+                    id: finalization,
+                    timing: Timing { elapsed_ms: 7 },
+                    diagnostic: diagnostic("could not persist terminal build facts"),
+                },
+            ),
+        ];
+        let render = |color| {
+            let mut renderer = HumanRenderer::new(
+                Vec::new(),
+                TerminalCapabilities::plain(),
+                Environment::default(),
+                PresentationOptions {
+                    color,
+                    ..PresentationOptions::default()
+                },
+            );
+            for event in &events {
+                renderer.render(event).unwrap();
+            }
+            renderer.finish().unwrap();
+            String::from_utf8(renderer.into_inner()).unwrap()
+        };
+        let plain = render(ColorMode::Never);
+        assert_eq!(
+            plain,
+            "Finalizing build catalog catalog (build)\nFailed build catalog catalog (build, 7 ms)\nerror[PLAN001] could not persist terminal build facts (orchestrate); help: fix the manifest\n"
+        );
+        let colored = render(ColorMode::Always);
+        assert!(colored.contains("\x1b[36mFinalizing\x1b[0m build catalog"));
+        assert!(colored.contains("\x1b[31;1mFailed\x1b[0m build catalog"));
+        assert!(colored.contains("\x1b[31;1merror\x1b[0m[PLAN001]"));
     }
 
     #[test]
