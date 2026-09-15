@@ -14,8 +14,32 @@ const platforms = [
   { name: "Linux", note: m.platformNotes[1], targets: [["x64", "x86_64-unknown-linux-gnu"], ["ARM64", "aarch64-unknown-linux-gnu"]], ext: "tar.gz" },
   { name: "macOS", note: m.platformNotes[2], targets: [["Intel", "x86_64-apple-darwin"], ["Apple Silicon", "aarch64-apple-darwin"]], ext: "tar.gz" },
 ];
+/** Keep candidate metadata factual: the current page exists, future tag assets do not.
+ * 候选版元数据只陈述当前事实：本页面已存在，未来标签资产尚不存在。 */
+const releaseUrl = new URL(Astro.url.pathname, Astro.site).href;
+const structuredData = JSON.stringify({
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "@id": `${releaseUrl}#xmlsquish-v1`,
+  name: "xmlsquish",
+  description: m.description,
+  applicationCategory: "DeveloperApplication",
+  operatingSystem: "Windows, Linux, macOS",
+  softwareVersion: version,
+  isAccessibleForFree: true,
+  license: "https://www.gnu.org/licenses/gpl-3.0.html",
+  codeRepository: repo,
+  releaseNotes: releaseUrl,
+  inLanguage: locale,
+  additionalProperty: {
+    "@type": "PropertyValue",
+    name: "Release status",
+    value: "release candidate",
+  },
+}).replaceAll("<", "\\u003c");
 ---
 <ReferenceLayout locale={locale} page="releases" title={m.title} description={m.description} product>
+  <script is:inline slot="head" type="application/ld+json" set:html={structuredData}></script>
   <article class="release" itemscope itemtype="https://schema.org/SoftwareApplication">
     <meta itemprop="softwareVersion" content={version} />
     <header class="hero">
