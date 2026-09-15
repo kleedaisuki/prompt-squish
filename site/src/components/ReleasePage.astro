@@ -7,7 +7,6 @@ const m = messages[locale].reference.release;
 const version = "1.0.0";
 const tag = `v${version}`;
 const repo = "https://github.com/kleedaisuki/prompt-squish";
-const downloads = `${repo}/releases/download/${tag}/`;
 const install = `cargo install --git ${repo} --tag ${tag} --locked`;
 /** Native archives mirror the release workflow matrix. / 原生安装包与发布工作流矩阵保持一致。 */
 const platforms = [
@@ -15,12 +14,8 @@ const platforms = [
   { name: "Linux", note: m.platformNotes[1], targets: [["x64", "x86_64-unknown-linux-gnu"], ["ARM64", "aarch64-unknown-linux-gnu"]], ext: "tar.gz" },
   { name: "macOS", note: m.platformNotes[2], targets: [["Intel", "x86_64-apple-darwin"], ["Apple Silicon", "aarch64-apple-darwin"]], ext: "tar.gz" },
 ];
-/** JSON-LD gives crawlers and software agents a stable release identity.
- * JSON-LD 为搜索引擎与软件 Agent 提供稳定的发布身份。 */
-const structuredData = JSON.stringify({ "@context": "https://schema.org", "@type": "SoftwareApplication", name: "xmlsquish", applicationCategory: "DeveloperApplication", operatingSystem: "Windows, Linux, macOS", softwareVersion: version, releaseNotes: new URL(Astro.url.pathname, Astro.site).href, downloadUrl: `${repo}/releases/tag/${tag}`, codeRepository: repo, license: `${repo}/blob/${tag}/LICENSE`, description: m.description });
 ---
 <ReferenceLayout locale={locale} page="releases" title={m.title} description={m.description} product>
-  <script is:inline slot="head" type="application/ld+json" set:html={structuredData}></script>
   <article class="release" itemscope itemtype="https://schema.org/SoftwareApplication">
     <meta itemprop="softwareVersion" content={version} />
     <header class="hero">
@@ -30,8 +25,8 @@ const structuredData = JSON.stringify({ "@context": "https://schema.org", "@type
     <section id="journey" class="section" aria-labelledby="journey-title"><p class="eyebrow">{m.journeyLabel}</p><h2 id="journey-title">{m.journeyTitle}</h2><p class="section-lead">{m.journeyBody}</p><ol class="command-journey">{m.journey.map((step, index) => <li><span>{String(index + 1).padStart(2, "0")}</span><code>xmlsquish {step.command}</code><h3>{step.title}</h3><p>{step.body}</p></li>)}</ol></section>
     <section class="section" aria-labelledby="features-title"><p class="eyebrow">{m.featuresLabel}</p><h2 id="features-title">{m.featuresTitle}</h2><div class="grid">{m.features.map(feature => <article><code>{feature.code}</code><h3>{feature.title}</h3><p>{feature.body}</p></article>)}</div></section>
     <section class="section split" aria-labelledby="output-title"><div><p class="eyebrow">{m.outputLabel}</p><h2 id="output-title">{m.outputTitle}</h2><p>{m.outputBody}</p></div><ul class="outputs">{m.outputs.map(output => <li><code>{output.name}</code><span>{output.body}</span></li>)}</ul></section>
-    <section id="install" class="section" aria-labelledby="install-title"><p class="eyebrow">xmlsquish {tag}</p><h2 id="install-title">{m.downloadsTitle}</h2><p class="section-lead">{m.downloadsBody}</p><div class="download-grid">{platforms.map(platform => <article><h3>{platform.name}</h3><p>{platform.note}</p><div class="download-actions">{platform.targets.map(([label, target]) => <a class="button secondary" href={`${downloads}xmlsquish-${version}-${target}.${platform.ext}`} download>{label}<span aria-hidden="true">↓</span></a>)}</div></article>)}</div><p><a href={`${downloads}SHA256SUMS`}>{m.checksums} ↗</a></p><p class="fine">{m.binaryNote}</p></section>
-    <section class="section split" aria-labelledby="source-title"><div><p class="eyebrow">{m.sourceLabel}</p><h2 id="source-title">{m.sourceTitle}</h2><p>{m.sourceBody}</p><a href={`${repo}/releases/tag/${tag}`}>{m.github} ↗</a></div><pre><code>{install}
+    <section id="install" class="section" aria-labelledby="install-title"><p class="eyebrow">xmlsquish {tag}</p><h2 id="install-title">{m.downloadsTitle}</h2><p class="section-lead">{m.downloadsBody}</p><div class="download-grid">{platforms.map(platform => <article><h3>{platform.name}</h3><p>{platform.note}</p><div class="download-actions">{platform.targets.map(([label, target]) => <span class="button secondary pending" aria-disabled="true" title={`xmlsquish-${version}-${target}.${platform.ext}`}>{label}<small>{m.pending}</small></span>)}</div></article>)}</div><p><code>SHA256SUMS</code> · {m.checksums}</p><p class="fine">{m.binaryNote}</p></section>
+    <section class="section split" aria-labelledby="source-title"><div><p class="eyebrow">{m.sourceLabel}</p><h2 id="source-title">{m.sourceTitle}</h2><p>{m.sourceBody}</p><a href={`${repo}/actions/workflows/release.yml`}>{m.github} ↗</a></div><pre><code>{install}
 
 xmlsquish --version
 # xmlsquish {version}</code></pre></section>
@@ -51,6 +46,7 @@ xmlsquish --version
   .button { display:inline-flex;gap:1rem;align-items:center;justify-content:center;padding:.8rem 1.05rem;border:1px solid var(--xs-line);border-radius:var(--moe-radius-sm,.5rem);color:inherit;font-weight:750;text-decoration:none }
   .button.primary { color:var(--moe-on-accent,white);background:var(--moe-accent-strong);border-color:transparent }
   .button:hover { filter:brightness(.95) }.fine{font-size:.82rem;opacity:.78}
+  .button.pending { cursor:not-allowed;opacity:.68 }.button.pending small{font-size:.68rem;font-weight:500}
   .product-map { margin:0;overflow:hidden;color:var(--xs-code-text);background:var(--xs-code);border:1px solid #fff2;border-radius:var(--moe-radius-lg,1rem);box-shadow:0 1.5rem 4rem #2412091a }
   .product-map figcaption { padding:1rem 1.3rem;border-bottom:1px solid #fff2;font:700 .78rem ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase }
   .product-map ol { margin:0;padding:1rem 1.3rem 1.3rem;list-style:none }.product-map li{display:grid;grid-template-columns:2rem 1fr;gap:.15rem .8rem;padding-block:.85rem;border-bottom:1px solid #fff2}.product-map li:last-child{border:0}.product-map small{grid-row:span 2;opacity:.45}.product-map span{font-size:.78rem;opacity:.72}
