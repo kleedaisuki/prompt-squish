@@ -184,8 +184,8 @@ be chosen unambiguously, the diagnostic names the available selectors and gives 
 command. Selection is fully resolved before work begins.
 
 Selectors are names, not filesystem paths. Commands that legitimately accept paths label their
-type explicitly: `fmt --path PATH`, `init PATH`, `add --path PATH`, `--manifest-path PATH`, and
-`inspect artifact PATH` (where the typed `artifact` subject removes path/identity ambiguity).
+type explicitly: `fmt --path PATH`, `add --path PATH`, `--manifest-path PATH`, and `inspect
+artifact PATH` (where the typed `artifact` subject removes path/identity ambiguity).
 
 ### 3.4 Build
 
