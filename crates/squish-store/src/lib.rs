@@ -12,8 +12,9 @@ mod action;
 mod cas;
 
 pub use action::{
-    ActionEntry, ActionKey, ActionManifest, ActionManifestPage, BuildActionIndex, CatalogIssue,
-    CatalogIssueKind, IndexError, MAX_MANIFEST_PAGE_SIZE, MemoryActionIndex, RunEvent,
-    SqliteActionIndex, VerifiedActionIndex,
+    ACTION_RESULT_FORMAT_VERSION, ActionEntry, ActionKey, ActionManifest, ActionManifestPage,
+    BuildActionIndex, CatalogIssue, CatalogIssueKind, IndexError, MAX_MANIFEST_PAGE_SIZE,
+    MemoryActionIndex, RunEvent, SqliteActionIndex, VerifiedActionIndex, decode_action_result,
+    encode_action_result,
 };
 pub use cas::{BlobDigest, Cas, CasError, CasEvent, CasEventKind, CasObserver, NoopObserver};

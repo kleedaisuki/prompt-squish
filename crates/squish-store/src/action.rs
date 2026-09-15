@@ -58,6 +58,12 @@ pub struct ActionEntry {
 pub struct ActionManifest {
     /// 构建边界使用的完整类型化记录。 / Fully typed record used at the build boundary.
     pub record: ActionRecord,
+    /// 规范动作结果记录在 CAS 中的摘要。 / CAS digest of the canonical action-result record.
+    ///
+    /// [`VerifiedActionIndex::manifest_page`] 保证此摘要可从其绑定 CAS 读取并由
+    /// [`decode_action_result`] 解码。 / [`VerifiedActionIndex::manifest_page`] guarantees
+    /// this digest is readable from its bound CAS and decodable by [`decode_action_result`].
+    pub result_digest: BlobDigest,
     /// 快照中记录的最近使用时间。 / Last-use time recorded in the snapshot.
     pub last_used_unix_ms: i64,
 }
@@ -110,6 +116,11 @@ pub struct ActionManifestPage {
 
 /// 单页最多扫描的动作数。 / Maximum number of actions scanned by one page.
 pub const MAX_MANIFEST_PAGE_SIZE: usize = 4096;
+
+/// 规范动作结果记录的当前格式版本。 / Current canonical action-result record format version.
+pub const ACTION_RESULT_FORMAT_VERSION: u8 = 1;
+
+const ACTION_RESULT_MAGIC: &[u8] = b"squish.action-result\0";
 
 /// 一条轻量运行事件索引；详细负载应放入 CAS。 / A lightweight run-event index; detailed payload belongs in the CAS.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -491,13 +502,18 @@ impl SqliteActionIndex {
                 continue;
             }
             match load_manifest_from(&transaction, key) {
-                Ok(Some(outputs)) => manifests.push(ActionManifest {
-                    record: ActionRecord {
+                Ok(Some(outputs)) => {
+                    let record = ActionRecord {
                         key: build_key(key),
                         outputs,
-                    },
-                    last_used_unix_ms: *last_used_unix_ms,
-                }),
+                    };
+                    let result_digest = BlobDigest::of(&encode_action_result(&record)?);
+                    manifests.push(ActionManifest {
+                        record,
+                        result_digest,
+                        last_used_unix_ms: *last_used_unix_ms,
+                    });
+                }
                 Ok(None) => issues.push(CatalogIssue {
                     key,
                     kind: CatalogIssueKind::InvalidManifest(
@@ -635,7 +651,7 @@ impl VerifiedActionIndex {
     ) -> Result<ActionManifestPage, IndexError> {
         let mut page = self.index.manifest_page(after, limit)?;
         let candidates = std::mem::take(&mut page.manifests);
-        for manifest in candidates {
+        for mut manifest in candidates {
             let key = parse_build_key(&manifest.record.key)?;
             let mut failure = None;
             for output in &manifest.record.outputs {
@@ -661,6 +677,8 @@ impl VerifiedActionIndex {
                     page.repaired += 1;
                 }
             } else {
+                let encoded = encode_action_result(&manifest.record)?;
+                manifest.result_digest = self.cas.put(&encoded)?;
                 page.manifests.push(manifest);
             }
         }
@@ -921,6 +939,158 @@ fn parse_build_key(key: &BuildKey) -> Result<ActionKey, IndexError> {
 fn build_key(key: ActionKey) -> BuildKey {
     BuildKey::new(format!("blake3:{}", key.digest().to_hex()))
         .expect("a stored BLAKE3 action key is canonical")
+}
+
+/// 将完整动作清单编码为版本化规范字节。 / Encodes a complete action manifest as versioned canonical bytes.
+///
+/// 格式使用固定魔数、显式版本、大端定长整数及长度前缀 UTF-8 字符串；输出顺序被保留，
+/// 且动作键和输出摘要只接受规范 BLAKE3 表示。相同领域值总会产生完全相同的字节。
+/// The format uses a fixed magic, explicit version, big-endian fixed-width integers,
+/// and length-prefixed UTF-8 strings. Output order is preserved, while action keys and
+/// output digests require canonical BLAKE3 representations. Equal domain values always
+/// produce byte-identical records.
+pub fn encode_action_result(record: &ActionRecord) -> Result<Vec<u8>, IndexError> {
+    let key = parse_build_key(&record.key)?;
+    let output_count = u32::try_from(record.outputs.len())
+        .map_err(|_| IndexError("too many outputs for canonical action result".into()))?;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(ACTION_RESULT_MAGIC);
+    bytes.push(ACTION_RESULT_FORMAT_VERSION);
+    bytes.extend_from_slice(key.digest().as_bytes());
+    bytes.extend_from_slice(&output_count.to_be_bytes());
+    for output in &record.outputs {
+        encode_text(&mut bytes, output.name.as_str())?;
+        match &output.kind {
+            ArtifactKind::BinaryIr => bytes.push(0),
+            ArtifactKind::Prompt => bytes.push(1),
+            ArtifactKind::DebugInfo => bytes.push(2),
+            ArtifactKind::Metadata => bytes.push(3),
+            ArtifactKind::Other(name) if !name.is_empty() => {
+                bytes.push(4);
+                encode_text(&mut bytes, name)?;
+            }
+            ArtifactKind::Other(_) => {
+                return Err(IndexError("custom artifact kind must not be empty".into()));
+            }
+        }
+        bytes.extend_from_slice(blob_digest(&output.digest)?.as_bytes());
+        bytes.extend_from_slice(&output.size.to_be_bytes());
+    }
+    Ok(bytes)
+}
+
+/// 解码并严格验证一个版本化规范动作结果。 / Decodes and strictly validates a versioned canonical action result.
+///
+/// 未知版本、截断数据、非法 UTF-8、非规范领域值以及尾随字节都会被拒绝，因此成功返回
+/// 的记录可安全地再次编码为同一字节序列。 / Unknown versions, truncation, invalid
+/// UTF-8, non-canonical domain values, and trailing bytes are rejected, so a successful
+/// result can safely be re-encoded to the identical byte sequence.
+pub fn decode_action_result(bytes: &[u8]) -> Result<ActionRecord, IndexError> {
+    let mut reader = CanonicalReader { remaining: bytes };
+    if reader.take(ACTION_RESULT_MAGIC.len())? != ACTION_RESULT_MAGIC {
+        return Err(IndexError("invalid canonical action-result magic".into()));
+    }
+    if reader.byte()? != ACTION_RESULT_FORMAT_VERSION {
+        return Err(IndexError(
+            "unsupported canonical action-result version".into(),
+        ));
+    }
+    let key_bytes: [u8; 32] = reader
+        .take(32)?
+        .try_into()
+        .expect("reader returned the requested fixed length");
+    let key = build_key(ActionKey::from_digest(BlobDigest::from_bytes(key_bytes)));
+    let count = reader.u32()?;
+    let capacity = usize::try_from(count)
+        .map_err(|_| IndexError("action-result output count exceeds usize".into()))?;
+    let mut outputs = Vec::with_capacity(capacity);
+    for _ in 0..count {
+        let name = OutputName::new(reader.text()?)
+            .map_err(|_| IndexError("empty output name in canonical action result".into()))?;
+        let kind = match reader.byte()? {
+            0 => ArtifactKind::BinaryIr,
+            1 => ArtifactKind::Prompt,
+            2 => ArtifactKind::DebugInfo,
+            3 => ArtifactKind::Metadata,
+            4 => {
+                let other = reader.text()?;
+                if other.is_empty() {
+                    return Err(IndexError(
+                        "empty custom artifact kind in canonical action result".into(),
+                    ));
+                }
+                ArtifactKind::Other(other)
+            }
+            _ => return Err(IndexError("unknown canonical artifact-kind tag".into())),
+        };
+        let digest_bytes: [u8; 32] = reader
+            .take(32)?
+            .try_into()
+            .expect("reader returned the requested fixed length");
+        outputs.push(ProducedOutput {
+            name,
+            kind,
+            digest: content_digest(BlobDigest::from_bytes(digest_bytes)),
+            size: reader.u64()?,
+        });
+    }
+    if !reader.remaining.is_empty() {
+        return Err(IndexError(
+            "trailing bytes in canonical action result".into(),
+        ));
+    }
+    Ok(ActionRecord { key, outputs })
+}
+
+fn encode_text(bytes: &mut Vec<u8>, value: &str) -> Result<(), IndexError> {
+    let length = u32::try_from(value.len())
+        .map_err(|_| IndexError("canonical action-result text exceeds u32".into()))?;
+    bytes.extend_from_slice(&length.to_be_bytes());
+    bytes.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+struct CanonicalReader<'a> {
+    remaining: &'a [u8],
+}
+
+impl CanonicalReader<'_> {
+    fn take(&mut self, count: usize) -> Result<&[u8], IndexError> {
+        if self.remaining.len() < count {
+            return Err(IndexError("truncated canonical action result".into()));
+        }
+        let (value, remaining) = self.remaining.split_at(count);
+        self.remaining = remaining;
+        Ok(value)
+    }
+
+    fn byte(&mut self) -> Result<u8, IndexError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u32(&mut self) -> Result<u32, IndexError> {
+        Ok(u32::from_be_bytes(
+            self.take(4)?
+                .try_into()
+                .expect("reader returned the requested fixed length"),
+        ))
+    }
+
+    fn u64(&mut self) -> Result<u64, IndexError> {
+        Ok(u64::from_be_bytes(
+            self.take(8)?
+                .try_into()
+                .expect("reader returned the requested fixed length"),
+        ))
+    }
+
+    fn text(&mut self) -> Result<String, IndexError> {
+        let length = usize::try_from(self.u32()?)
+            .map_err(|_| IndexError("canonical text length exceeds usize".into()))?;
+        let text = std::str::from_utf8(self.take(length)?)
+            .map_err(|_| IndexError("invalid UTF-8 in canonical action result".into()))?;
+        Ok(text.to_owned())
+    }
 }
 
 fn blob_digest(digest: &ContentDigest) -> Result<BlobDigest, IndexError> {
@@ -1592,10 +1762,93 @@ mod tests {
                     || page.manifests
                         == vec![ActionManifest {
                             record: record.clone(),
+                            result_digest: page.manifests[0].result_digest,
                             last_used_unix_ms: page.manifests[0].last_used_unix_ms,
                         }]
             );
         }
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn canonical_action_result_is_deterministic_and_sensitive_to_every_manifest_field() {
+        let (directory, _path) = database_path();
+        let cas = Cas::open(directory.path().join("cas")).unwrap();
+        let mut record = catalog_record(&cas, "codec action", b"first");
+        let second_digest = cas.put(b"second").unwrap();
+        record.outputs.push(ProducedOutput {
+            name: OutputName::new("aux").unwrap(),
+            kind: ArtifactKind::Other("trace".into()),
+            digest: content_digest(second_digest),
+            size: 6,
+        });
+        let canonical = encode_action_result(&record).unwrap();
+        assert_eq!(encode_action_result(&record).unwrap(), canonical);
+        assert_eq!(decode_action_result(&canonical).unwrap(), record);
+        assert_eq!(
+            encode_action_result(&decode_action_result(&canonical).unwrap()).unwrap(),
+            canonical
+        );
+
+        let mut mutations = Vec::new();
+        let mut changed = record.clone();
+        changed.key = build_key(ActionKey::of(b"other action"));
+        mutations.push(changed);
+        let mut changed = record.clone();
+        changed.outputs[0].name = OutputName::new("renamed").unwrap();
+        mutations.push(changed);
+        let mut changed = record.clone();
+        changed.outputs[0].kind = ArtifactKind::Metadata;
+        mutations.push(changed);
+        let mut changed = record.clone();
+        changed.outputs[0].digest = content_digest(second_digest);
+        mutations.push(changed);
+        let mut changed = record.clone();
+        changed.outputs[0].size += 1;
+        mutations.push(changed);
+        let mut changed = record.clone();
+        changed.outputs.swap(0, 1);
+        mutations.push(changed);
+
+        let canonical_digest = BlobDigest::of(&canonical);
+        assert_eq!(
+            canonical_digest.to_hex(),
+            "8089b95e4284aa8f8a8cfc352736b1cfd04983eed0ab80cf81170b615ee0ce36"
+        );
+        assert!(mutations.into_iter().all(|changed| {
+            BlobDigest::of(&encode_action_result(&changed).unwrap()) != canonical_digest
+        }));
+    }
+
+    #[test]
+    fn verified_catalog_lazily_materializes_reopen_rows_and_digest_reads_back() {
+        let (directory, path) = database_path();
+        let cas = Arc::new(Cas::open(directory.path().join("cas")).unwrap());
+        let record = catalog_record(&cas, "pre-catalog row", b"legacy output");
+        let expected_bytes = encode_action_result(&record).unwrap();
+        let expected_digest = BlobDigest::of(&expected_bytes);
+        {
+            let index = VerifiedActionIndex::open(&path, Arc::clone(&cas)).unwrap();
+            BuildIndex::record(&index, &record).unwrap();
+        }
+        assert_eq!(cas.get(expected_digest).unwrap(), None);
+
+        let reopened = VerifiedActionIndex::open(path, Arc::clone(&cas)).unwrap();
+        let page = reopened.manifest_page(None, 1).unwrap();
+        assert_eq!(page.manifests.len(), 1);
+        assert_eq!(page.manifests[0].record, record);
+        assert_eq!(page.manifests[0].result_digest, expected_digest);
+        let stored = cas.get(page.manifests[0].result_digest).unwrap().unwrap();
+        assert_eq!(stored, expected_bytes);
+        assert_eq!(decode_action_result(&stored).unwrap(), record);
+
+        drop(reopened);
+        let reopened_again =
+            VerifiedActionIndex::open(directory.path().join("actions.sqlite3"), Arc::clone(&cas))
+                .unwrap();
+        assert_eq!(
+            reopened_again.manifest_page(None, 1).unwrap().manifests[0].result_digest,
+            expected_digest
+        );
     }
 }
