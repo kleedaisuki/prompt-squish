@@ -3277,7 +3277,8 @@ fn debug_bundle(
     sources: &[FrozenSource],
 ) -> DebugBundle {
     let mut trace = output.trace.clone();
-    retain_backend_origin_dag(&mut trace);
+    let mut artifact_map = output.byte_map.clone();
+    retain_backend_origin_dag(&mut trace, &mut artifact_map, image, compiled);
     let mut archives = Vec::new();
     let mut blobs = BTreeMap::new();
     for unit in compiled.values() {
@@ -3322,75 +3323,202 @@ fn debug_bundle(
         document: document.clone(),
         expansion_trace: trace,
         link_trace: link_trace.clone(),
-        artifact_map: output.byte_map.clone(),
+        artifact_map,
         source_archives: archives,
         source_blobs,
     }
 }
 
-fn retain_backend_origin_dag(trace: &mut squish_ir::ExpansionTrace) {
-    for index in 0..trace.origins.len() {
-        let source = source_origin(
-            squish_ir::OriginNodeId(index as u32),
+fn retain_backend_origin_dag(
+    trace: &mut squish_ir::ExpansionTrace,
+    artifact_map: &mut squish_ir::ArtifactByteMap,
+    image: &squish_ir::LinkedImage,
+    compiled: &BTreeMap<SourceKey, CompiledUnit>,
+) {
+    let mut closed = BTreeMap::new();
+    for entry in &mut artifact_map.entries {
+        if origin_reaches_static_node(entry.origin, trace, &mut BTreeSet::new()) {
+            continue;
+        }
+        if let Some(origin) = closed.get(&entry.origin) {
+            entry.origin = *origin;
+            continue;
+        }
+        let mut origins = Vec::new();
+        collect_static_origins_for_dynamic_node(
+            entry.origin,
             trace,
+            image,
+            compiled,
             &mut BTreeSet::new(),
+            &mut origins,
         );
-        let Some(source) = source else { continue };
-        if let squish_ir::OriginNode::BackendTransform { inputs, .. } = &mut trace.origins[index]
-            && !inputs.iter().any(|edge| edge.parent == source)
-        {
+        if origins.is_empty() {
+            continue;
+        }
+        let Some(backend_step) =
+            backend_step_for_dynamic_node(entry.origin, trace, &mut BTreeSet::new())
+        else {
+            continue;
+        };
+        let mut inputs = vec![squish_ir::OriginEdge {
+            role: squish_ir::OriginRole::Input,
+            parent: entry.origin,
+        }];
+        for origin in origins {
+            let source = squish_ir::OriginNodeId(trace.origins.len() as u32);
+            trace
+                .origins
+                .push(squish_ir::OriginNode::SourceSpan { origin });
             inputs.push(squish_ir::OriginEdge {
                 role: squish_ir::OriginRole::Transform,
                 parent: source,
             });
         }
+        let wrapper = squish_ir::OriginNodeId(trace.origins.len() as u32);
+        trace.origins.push(squish_ir::OriginNode::BackendTransform {
+            backend_step,
+            inputs,
+        });
+        closed.insert(entry.origin, wrapper);
+        entry.origin = wrapper;
     }
 }
 
-fn source_origin(
+fn backend_step_for_dynamic_node(
     id: squish_ir::OriginNodeId,
     trace: &squish_ir::ExpansionTrace,
     seen: &mut BTreeSet<u32>,
-) -> Option<squish_ir::OriginNodeId> {
+) -> Option<squish_ir::DebugStringId> {
     if !seen.insert(id.0) {
         return None;
     }
     use squish_ir::OriginNode;
     match trace.origins.get(id.0 as usize)? {
-        OriginNode::SourceSpan { .. } | OriginNode::DecodedSegment { .. } => Some(id),
-        OriginNode::Expansion { producer, .. } => {
-            let origin = trace
-                .document_items
-                .iter()
-                .find(|item| item.producer_op == *producer)?
-                .definition_origin
-                .clone();
-            trace
-                .origins
-                .iter()
-                .enumerate()
-                .find_map(|(index, node)| match node {
-                    OriginNode::SourceSpan { origin: candidate } if *candidate == origin => {
-                        Some(squish_ir::OriginNodeId(index as u32))
-                    }
-                    _ => None,
-                })
-        }
+        OriginNode::BackendTransform { backend_step, .. } => Some(*backend_step),
         OriginNode::Import { child, .. } | OriginNode::RegexCapture { input: child, .. } => {
-            source_origin(*child, trace, seen)
+            backend_step_for_dynamic_node(*child, trace, seen)
         }
         OriginNode::Concat { ordered_inputs } => ordered_inputs
             .iter()
-            .find_map(|parent| source_origin(*parent, trace, seen)),
-        OriginNode::BackendTransform { inputs, .. } | OriginNode::Fused { inputs, .. } => inputs
+            .find_map(|parent| backend_step_for_dynamic_node(*parent, trace, seen)),
+        OriginNode::Fused { inputs, .. } => inputs
             .iter()
-            .find_map(|edge| source_origin(edge.parent, trace, seen)),
+            .find_map(|edge| backend_step_for_dynamic_node(edge.parent, trace, seen)),
         OriginNode::Synthetic {
             nearest: Some(parent),
             ..
-        } => source_origin(*parent, trace, seen),
+        } => backend_step_for_dynamic_node(*parent, trace, seen),
         _ => None,
     }
+}
+
+fn collect_static_origins_for_dynamic_node(
+    id: squish_ir::OriginNodeId,
+    trace: &squish_ir::ExpansionTrace,
+    image: &squish_ir::LinkedImage,
+    compiled: &BTreeMap<SourceKey, CompiledUnit>,
+    seen: &mut BTreeSet<u32>,
+    output: &mut Vec<QualifiedOriginRef>,
+) {
+    if !seen.insert(id.0) {
+        return;
+    }
+    use squish_ir::OriginNode;
+    let Some(node) = trace.origins.get(id.0 as usize) else {
+        return;
+    };
+    match node {
+        OriginNode::SourceSpan { origin } => push_unique_origin(output, origin.clone()),
+        OriginNode::Expansion { producer, .. } => {
+            if let Some(origin) = producer_static_origin(*producer, image, compiled) {
+                push_unique_origin(output, origin);
+            }
+        }
+        OriginNode::Import { child, .. } | OriginNode::RegexCapture { input: child, .. } => {
+            collect_static_origins_for_dynamic_node(*child, trace, image, compiled, seen, output);
+        }
+        OriginNode::Concat { ordered_inputs } => {
+            for parent in ordered_inputs {
+                collect_static_origins_for_dynamic_node(
+                    *parent, trace, image, compiled, seen, output,
+                );
+            }
+        }
+        OriginNode::BackendTransform { inputs, .. } | OriginNode::Fused { inputs, .. } => {
+            for edge in inputs {
+                collect_static_origins_for_dynamic_node(
+                    edge.parent,
+                    trace,
+                    image,
+                    compiled,
+                    seen,
+                    output,
+                );
+            }
+        }
+        OriginNode::Synthetic {
+            nearest: Some(parent),
+            ..
+        } => collect_static_origins_for_dynamic_node(*parent, trace, image, compiled, seen, output),
+        _ => {}
+    }
+}
+
+fn push_unique_origin(output: &mut Vec<QualifiedOriginRef>, origin: QualifiedOriginRef) {
+    if !output.contains(&origin) {
+        output.push(origin);
+    }
+}
+
+fn origin_reaches_static_node(
+    id: squish_ir::OriginNodeId,
+    trace: &squish_ir::ExpansionTrace,
+    seen: &mut BTreeSet<u32>,
+) -> bool {
+    if !seen.insert(id.0) {
+        return false;
+    }
+    use squish_ir::OriginNode;
+    match trace.origins.get(id.0 as usize) {
+        Some(OriginNode::SourceSpan { .. } | OriginNode::DecodedSegment { .. }) => true,
+        Some(OriginNode::Import { child, .. } | OriginNode::RegexCapture { input: child, .. }) => {
+            origin_reaches_static_node(*child, trace, seen)
+        }
+        Some(OriginNode::Concat { ordered_inputs }) => ordered_inputs
+            .iter()
+            .any(|parent| origin_reaches_static_node(*parent, trace, seen)),
+        Some(OriginNode::BackendTransform { inputs, .. } | OriginNode::Fused { inputs, .. }) => {
+            inputs
+                .iter()
+                .any(|edge| origin_reaches_static_node(edge.parent, trace, seen))
+        }
+        Some(OriginNode::Synthetic {
+            nearest: Some(parent),
+            ..
+        }) => origin_reaches_static_node(*parent, trace, seen),
+        _ => false,
+    }
+}
+
+fn producer_static_origin(
+    producer: squish_ir::LinkedOpRef,
+    image: &squish_ir::LinkedImage,
+    compiled: &BTreeMap<SourceKey, CompiledUnit>,
+) -> Option<QualifiedOriginRef> {
+    let source = &image.units.get(producer.unit_slot as usize)?.source;
+    let unit = compiled.get(source)?;
+    let origins = match &unit.unit {
+        RelocatableUnitIr::Module(module) => &module.origins,
+        RelocatableUnitIr::Entry(entry) => &entry.origins,
+    };
+    let local = origins.entries.iter().position(|entry| {
+        entry.entity_kind == EntityKind::Operation && entry.local_id == producer.op.0
+    })?;
+    Some(QualifiedOriginRef {
+        object: unit.object,
+        local: OriginId(local as u32),
+    })
 }
 
 fn publication(

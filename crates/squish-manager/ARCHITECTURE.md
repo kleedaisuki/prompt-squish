@@ -107,6 +107,25 @@ Hard-coded storage paths exist only in
 authorizes a `StorageLayout` before opening CAS, action-index, publication, or
 catalog state; no worker independently derives a project-local fallback.
 
+## External artifact contracts
+
+Format diff artifacts are a deterministic public representation, not an
+implementation-private debug payload. Their bytes are UTF-8 unified diff, their
+kind is `Other("text/x-diff")`, and their `--- a/` and `+++ b/` headers use the
+logical `OpaqueSourceId` rather than a host filesystem path. Lines are
+normalized to LF in the diff representation, while an unterminated input or
+output line is represented by the standard no-final-newline marker. Non-UTF-8
+input produces a structured formatting failure and no diff artifact or source
+write.
+
+On Windows, an absolute inspect artifact path is accepted only after both the
+project root and the existing artifact resolve to canonical native filesystem
+identities. The artifact must be contained by that canonical project identity;
+the manager then passes only its canonical project-relative `ArtifactLocator`
+to `Services`. Nonexistent absolute paths, paths outside the project, and path
+traversal are rejected. Already-relative catalog locators retain their catalog
+identity after validation rather than being replaced by host-absolute paths.
+
 ## Build record and current catalog
 
 `BuildRecordV2` in `src/build.rs` is the durable, publicly decodable statement
@@ -162,6 +181,19 @@ Artifact ID/path, plan, static link-map, and provenance queries are projections
 of this snapshot. Provenance is closed and typed: prompt and target-record
 relations name exact evidence, self-describing IR/debug/link evidence declares
 non-applicability, and unsupported kinds remain distinct from a missing catalog.
+
+Backend provenance closes over real static source identities rather than merely
+over trace-node shapes: a bare `Expansion` node is not itself evidence of a
+static source. For every dynamic producer, the manager follows its `LinkedOpRef`
+through the `LinkedImage` unit slot into the compiled unit's `OriginTable` and
+recovers all real `QualifiedOriginRef` values with stable deduplication. It
+preserves the original provenance DAG as `Input` and appends topologically valid
+`SourceSpan` and `BackendTransform` wrappers, rewiring only the artifact segment
+that corresponds to that producer. Traversal may follow an existing
+`Synthetic.nearest` edge, but closure never invents `Synthetic` or `Unknown`
+origins, falls back to `definition_origin`, or flattens provenance to the first
+source. The `semantic_example_publishes_fully_traceable_debug_bundle` regression
+in `tests/build.rs` exercises this end-to-end closure contract.
 
 ## Reviewer issues resolved
 

@@ -553,6 +553,9 @@ fn candidate(
     source: &ProjectSource,
     style: FormatStyle,
 ) -> Result<Vec<u8>, ManagerError> {
+    std::str::from_utf8(blob.bytes()).map_err(|error| {
+        manager_error("XS3114", Phase::Format, "format source is not UTF-8", error)
+    })?;
     let plan = format(blob.bytes(), style).map_err(|error| {
         manager_error(
             "XS3104",
@@ -665,20 +668,74 @@ fn machine_diff(
     original: &[u8],
     formatted: &[u8],
 ) -> Result<Vec<u8>, ManagerError> {
-    serde_json::to_vec(&serde_json::json!({
-        "schema": "xmlsquish-format-diff-v1",
-        "source": source.as_str(),
-        "original": original,
-        "formatted": formatted,
-    }))
-    .map_err(|error| {
+    if original == formatted {
+        return Ok(Vec::new());
+    }
+    let original = std::str::from_utf8(original).map_err(|error| {
+        manager_error("XS3114", Phase::Format, "format source is not UTF-8", error)
+    })?;
+    let formatted = std::str::from_utf8(formatted).map_err(|error| {
         manager_error(
-            "XS3113",
+            "XS3114",
             Phase::Format,
-            "could not encode format diff",
+            "formatted source is not UTF-8",
             error,
         )
-    })
+    })?;
+    let old = diff_lines(original);
+    let new = diff_lines(formatted);
+    let mut output = format!(
+        "--- a/{0}\n+++ b/{0}\n@@ -{1},{2} +{3},{4} @@\n",
+        source.as_str(),
+        range_start(old.len()),
+        old.len(),
+        range_start(new.len()),
+        new.len(),
+    )
+    .into_bytes();
+    append_diff_lines(&mut output, b'-', &old);
+    append_diff_lines(&mut output, b'+', &new);
+    Ok(output)
+}
+
+#[derive(Clone, Copy)]
+struct DiffLine<'a> {
+    text: &'a str,
+    terminated: bool,
+}
+
+fn diff_lines(source: &str) -> Vec<DiffLine<'_>> {
+    if source.is_empty() {
+        return Vec::new();
+    }
+    source
+        .split_inclusive('\n')
+        .map(|line| {
+            let terminated = line.ends_with('\n');
+            let line = line.strip_suffix('\n').unwrap_or(line);
+            let text = if terminated {
+                line.strip_suffix('\r').unwrap_or(line)
+            } else {
+                line
+            };
+            DiffLine { text, terminated }
+        })
+        .collect()
+}
+
+fn range_start(lines: usize) -> usize {
+    usize::from(lines != 0)
+}
+
+fn append_diff_lines(output: &mut Vec<u8>, prefix: u8, lines: &[DiffLine<'_>]) {
+    for line in lines {
+        output.push(prefix);
+        output.extend_from_slice(line.text.as_bytes());
+        output.push(b'\n');
+        if !line.terminated {
+            output.extend_from_slice(b"\\ No newline at end of file\n");
+        }
+    }
 }
 
 fn store_diffs(
@@ -700,7 +757,7 @@ fn store_diffs(
             Ok(Artifact {
                 id: ArtifactId::new(format!("format-diff:{source}"))
                     .expect("source IDs are non-empty"),
-                kind: ArtifactKind::Other("format-diff+json".into()),
+                kind: ArtifactKind::Other("text/x-diff".into()),
                 uri: format!("cas://blake3/{}", digest.to_hex()),
                 size: bytes.len() as u64,
                 digest: Digest::new(DigestAlgorithm::Blake3, digest.as_bytes().to_vec())

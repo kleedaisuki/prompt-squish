@@ -17,6 +17,7 @@ use squish_protocol::{
     ProjectPath, WorkspaceScope,
 };
 use squish_repository::{Discovery, PackageLocation, ProjectRepository};
+use squish_store::{BlobDigest, Cas};
 use squish_xml_front::DSL_NAMESPACE;
 
 #[derive(Default)]
@@ -201,8 +202,26 @@ source = { kind = "registry", registry = "test", checksum = "sha256:cccccccccccc
     assert_eq!(result.diffs.len(), 1);
     assert_eq!(
         result.diffs[0].kind,
-        squish_protocol::ArtifactKind::Other("format-diff+json".into())
+        squish_protocol::ArtifactKind::Other("text/x-diff".into())
     );
+    let raw: [u8; 32] = result.diffs[0].digest.bytes().try_into().unwrap();
+    let diff = Cas::open(directory.path().join(".cache/xmlsquish/cas"))
+        .unwrap()
+        .get(BlobDigest::from_bytes(raw))
+        .unwrap()
+        .unwrap();
+    let diff = String::from_utf8(diff).unwrap();
+    assert!(diff.starts_with(
+        "--- a/xmlsquish://app/src/main.xml\n+++ b/xmlsquish://app/src/main.xml\n@@ -1,1 +1,1 @@\n"
+    ));
+    assert!(diff.contains(&format!(
+        "-<xs:entry   xmlns:xs = \"{DSL_NAMESPACE}\">hello</xs:entry>\n"
+    )));
+    assert!(diff.contains(&format!(
+        "+<xs:entry xmlns:xs=\"{DSL_NAMESPACE}\">hello</xs:entry>\n"
+    )));
+    assert!(!diff.contains("\"schema\""));
+    assert!(!diff.contains("\"original\":"));
     assert_eq!(
         std::fs::read_to_string(source).unwrap(),
         format!("<xs:entry xmlns:xs=\"{DSL_NAMESPACE}\">hello</xs:entry>")
@@ -346,6 +365,38 @@ fn graph_digest(project: &Path, check: bool, diff: bool) -> squish_build::Semant
         .semantic_digest()
 }
 
+fn checked_diff(project: &Path, invocation: &str) -> Vec<u8> {
+    let request = OperationRequest::Format(FormatRequest {
+        project: ProjectPath::new(project.to_string_lossy()).unwrap(),
+        scope: WorkspaceScope::Current,
+        selection: FormatSelection::All,
+        style: None,
+        check: true,
+        diff: true,
+    });
+    let context = InvocationContext::new(
+        InvocationId::new(invocation).unwrap(),
+        CancellationToken::default(),
+        Arc::new(Events::default()),
+    );
+    let manager = ManagerCapability::with_default_settings(UnusedServices);
+    let capabilities: [&dyn squish_kernel::Capability; 1] = [&manager];
+    let outcome = Kernel::new(&capabilities)
+        .unwrap()
+        .dispatch(&request, &context)
+        .unwrap();
+    let squish_protocol::OperationResult::Format(result) = outcome.result else {
+        panic!("checked diff should succeed")
+    };
+    let artifact = result.diffs.first().expect("changed source has a diff");
+    let raw: [u8; 32] = artifact.digest.bytes().try_into().unwrap();
+    Cas::open(project.join(".cache/xmlsquish/cas"))
+        .unwrap()
+        .get(BlobDigest::from_bytes(raw))
+        .unwrap()
+        .unwrap()
+}
+
 #[test]
 fn plan_digest_is_job_independent_and_sensitive_to_check_and_diff() {
     let directory = tempfile::tempdir().unwrap();
@@ -393,4 +444,65 @@ fn plan_digest_is_job_independent_and_sensitive_to_check_and_diff() {
         graph_digest(directory.path(), true, true),
         "diff generation changes graph semantics"
     );
+}
+
+#[test]
+fn unified_diff_is_deterministic_and_check_does_not_rewrite_source() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("xmlsquish.toml"),
+        "manifest-version = 1\n[package]\nname = \"app\"\nversion = \"1.0.0\"\nsource-root = \"src\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir(directory.path().join("src")).unwrap();
+    let source = directory.path().join("src/main.xml");
+    let original = format!("<xs:entry   xmlns:xs = \"{DSL_NAMESPACE}\">ok</xs:entry>");
+    std::fs::write(&source, &original).unwrap();
+
+    assert_eq!(
+        checked_diff(directory.path(), "diff-stable-a"),
+        checked_diff(directory.path(), "diff-stable-b")
+    );
+    assert_eq!(std::fs::read_to_string(source).unwrap(), original);
+}
+
+#[test]
+fn non_utf8_source_is_a_structured_format_failure_without_write() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("xmlsquish.toml"),
+        "manifest-version = 1\n[package]\nname = \"app\"\nversion = \"1.0.0\"\nsource-root = \"src\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir(directory.path().join("src")).unwrap();
+    let source = directory.path().join("src/main.xml");
+    let bytes = b"<root>\xff</root>";
+    std::fs::write(&source, bytes).unwrap();
+    let request = OperationRequest::Format(FormatRequest {
+        project: ProjectPath::new(directory.path().to_string_lossy()).unwrap(),
+        scope: WorkspaceScope::Current,
+        selection: FormatSelection::All,
+        style: None,
+        check: false,
+        diff: true,
+    });
+    let events = Arc::new(Events::default());
+    let context = InvocationContext::new(
+        InvocationId::new("non-utf8").unwrap(),
+        CancellationToken::default(),
+        events.clone(),
+    );
+    let manager = ManagerCapability::with_default_settings(UnusedServices);
+    let capabilities: [&dyn squish_kernel::Capability; 1] = [&manager];
+    let outcome = Kernel::new(&capabilities)
+        .unwrap()
+        .dispatch(&request, &context)
+        .unwrap();
+
+    assert_eq!(outcome.summary.totals.failed, 1);
+    assert!(events.0.lock().unwrap().iter().any(|event| matches!(
+        &event.payload,
+        EventPayload::ActionFailed { diagnostic, .. } if diagnostic.code == "XS3114"
+    )));
+    assert_eq!(std::fs::read(source).unwrap(), bytes);
 }

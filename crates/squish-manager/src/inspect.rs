@@ -776,9 +776,9 @@ fn provenance<S: Services>(
 ) -> Result<ProvenanceInspection, ManagerError> {
     let artifact = match subject {
         Some(InspectSubject::ArtifactPath(locator)) => {
-            validate_locator(root, locator)?;
+            let canonical_locator = validate_locator(root, locator)?;
             services
-                .artifact_at(root, locator)
+                .artifact_at(root, &canonical_locator)
                 .map_err(|error| service_error_at(Phase::Cache, error))?
                 .ok_or_else(|| {
                     ManagerError::new(
@@ -864,21 +864,69 @@ fn validate_subject(
     }
 }
 
-fn validate_locator(root: &Path, locator: &ArtifactLocator) -> Result<(), ManagerError> {
+fn validate_locator(
+    root: &Path,
+    locator: &ArtifactLocator,
+) -> Result<ArtifactLocator, ManagerError> {
+    #[cfg(windows)]
+    {
+        validate_windows_locator(root, locator)
+    }
+    #[cfg(not(windows))]
+    {
+        let path = locator.as_path();
+        let relative = if path.is_absolute() {
+            path.strip_prefix(root).map_err(|_| {
+                ManagerError::new(
+                    "XS3424",
+                    Phase::Cache,
+                    "artifact path is outside the project",
+                )
+            })?
+        } else {
+            path
+        };
+        validate_relative_locator(relative)?;
+        relative_locator(relative)
+    }
+}
+
+#[cfg(windows)]
+fn validate_windows_locator(
+    root: &Path,
+    locator: &ArtifactLocator,
+) -> Result<ArtifactLocator, ManagerError> {
     let path = locator.as_path();
-    let relative = if path.is_absolute() {
-        path.strip_prefix(root).map_err(|_| {
-            ManagerError::new(
+    let canonical_root = std::fs::canonicalize(root).map_err(|error| {
+        manager_error(
+            "XS3424",
+            Phase::Cache,
+            "could not canonicalize project root",
+            error,
+        )
+    })?;
+    if path.is_absolute() {
+        let canonical = std::fs::canonicalize(path).map_err(|error| {
+            manager_error(
                 "XS3424",
                 Phase::Cache,
-                "artifact path is outside the project",
+                "absolute artifact path does not name an existing object",
+                error,
             )
-        })?
-    } else {
-        path
-    };
+        })?;
+        let relative = require_contained(&canonical_root, &canonical)?;
+        return relative_locator(relative);
+    }
+    validate_relative_locator(path)?;
+    let joined = root.join(path);
+    let anchor = canonical_artifact_anchor(&joined)?;
+    require_contained(&canonical_root, &anchor)?;
+    Ok(locator.clone())
+}
+
+fn validate_relative_locator(path: &Path) -> Result<(), ManagerError> {
     let mut depth = 0usize;
-    for component in relative.components() {
+    for component in path.components() {
         match component {
             std::path::Component::Normal(_) => depth += 1,
             std::path::Component::CurDir => {}
@@ -895,6 +943,54 @@ fn validate_locator(root: &Path, locator: &ArtifactLocator) -> Result<(), Manage
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn canonical_artifact_anchor(path: &Path) -> Result<PathBuf, ManagerError> {
+    let mut candidate = Some(path);
+    while let Some(current) = candidate {
+        match std::fs::canonicalize(current) {
+            Ok(value) => return Ok(value),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                candidate = current.parent();
+            }
+            Err(error) => {
+                return Err(manager_error(
+                    "XS3424",
+                    Phase::Cache,
+                    "could not resolve artifact path",
+                    error,
+                ));
+            }
+        }
+    }
+    Err(ManagerError::new(
+        "XS3424",
+        Phase::Cache,
+        "artifact path has no existing filesystem anchor",
+    ))
+}
+
+#[cfg(windows)]
+fn require_contained<'a>(root: &Path, artifact: &'a Path) -> Result<&'a Path, ManagerError> {
+    artifact.strip_prefix(root).map_err(|_| {
+        ManagerError::new(
+            "XS3424",
+            Phase::Cache,
+            "artifact path is outside the project",
+        )
+    })
+}
+
+fn relative_locator(path: &Path) -> Result<ArtifactLocator, ManagerError> {
+    ArtifactLocator::new(path.to_path_buf()).map_err(|error| {
+        manager_error(
+            "XS3424",
+            Phase::Cache,
+            "artifact path does not identify a project-relative object",
+            error,
+        )
+    })
 }
 
 fn validate_evidence(

@@ -654,4 +654,77 @@ fn provenance_accepts_only_kind_correct_typed_non_applicability() {
         )
         .is_err()
     );
+
+    let outside = tempfile::tempdir().unwrap();
+    let outside_path = outside.path().join("artifact.bin");
+    fs::write(&outside_path, b"outside").unwrap();
+    let outside_settings = InvocationSettings {
+        inspect_subject: Some(InspectSubject::ArtifactPath(
+            ArtifactLocator::new(outside_path).unwrap(),
+        )),
+        ..InvocationSettings::default()
+    };
+    let error = inspect_value(
+        &prompt_request,
+        &prompt_request.view,
+        &services,
+        &outside_settings,
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "XS3424");
+}
+
+#[cfg(windows)]
+#[test]
+fn ordinary_absolute_artifact_matches_verbatim_project_root_but_missing_absolute_fails() {
+    let root = project();
+    let services = FakeServices::default();
+    let bytes = b"opaque artifact";
+    let ordinary = root.path().join("artifact.bin");
+    fs::write(&ordinary, bytes).unwrap();
+    assert!(
+        !ordinary.to_string_lossy().starts_with(r"\\?\"),
+        "fixture must exercise an ordinary Win32 path"
+    );
+    assert!(
+        root.path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(r"\\?\"),
+        "canonical project root must use the verbatim namespace"
+    );
+
+    insert_blob(&services, bytes);
+    let artifact = artifact(
+        "opaque-absolute",
+        ArtifactKind::Other("vendor-object".into()),
+        bytes,
+    );
+    let catalog_locator = ArtifactLocator::new("artifact.bin").unwrap();
+    services
+        .paths
+        .lock()
+        .unwrap()
+        .insert(catalog_locator, artifact.clone());
+    services.relations.lock().unwrap().insert(
+        artifact.id.clone(),
+        ProvenanceRelation::NotApplicable(ProvenanceNonApplicability::UnsupportedKind),
+    );
+    let request = request(&root, InspectView::Provenance(artifact.id.clone()));
+    let settings = InvocationSettings {
+        inspect_subject: Some(InspectSubject::ArtifactPath(
+            ArtifactLocator::new(ordinary).unwrap(),
+        )),
+        ..InvocationSettings::default()
+    };
+    assert!(inspect_value(&request, &request.view, &services, &settings).is_ok());
+
+    let missing = ArtifactLocator::new(root.path().join("missing.bin")).unwrap();
+    let missing_settings = InvocationSettings {
+        inspect_subject: Some(InspectSubject::ArtifactPath(missing)),
+        ..InvocationSettings::default()
+    };
+    let error = inspect_value(&request, &request.view, &services, &missing_settings).unwrap_err();
+    assert_eq!(error.code(), "XS3424");
 }

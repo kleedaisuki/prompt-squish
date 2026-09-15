@@ -1,7 +1,7 @@
 //! 构建用例的跨 crate 契约测试。 / Cross-crate contract tests for the build use case.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::Path,
     sync::{Arc, Mutex},
@@ -1090,6 +1090,122 @@ output = "c.prompt"
     let c_map = link_map("fixture:c");
     assert_ne!(a_map, b_map, "different imports have distinct static maps");
     assert_eq!(b_map, c_map, "C must retain B's restored static map");
+}
+
+#[test]
+fn semantic_example_publishes_fully_traceable_debug_bundle() {
+    let temp = TempDir::new_in(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(".temp"),
+    )
+    .unwrap();
+    let example = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("examples/semantic");
+    fs::create_dir_all(temp.path().join("parts")).unwrap();
+    for relative in [
+        "xmlsquish.toml",
+        "prompt.xml",
+        "parts/hello.xml",
+        "parts/another.xml",
+    ] {
+        fs::copy(example.join(relative), temp.path().join(relative)).unwrap();
+    }
+    let request = BuildRequest {
+        project: ProjectPath::new(temp.path().display().to_string()).unwrap(),
+        scope: WorkspaceScope::Current,
+        targets: Vec::new(),
+        profile: ProfileName::new("dev").unwrap(),
+        arguments: BTreeMap::new(),
+        emit: vec![EmitKind::Prompt, EmitKind::DebugInfo],
+        lock: LockMode::Update,
+    };
+    let manager = ManagerCapability::new(LocalServices, InvocationSettings::default());
+    let capabilities: [&dyn squish_kernel::Capability; 1] = [&manager];
+    let kernel = Kernel::new(&capabilities).unwrap();
+    let context = InvocationContext::new(
+        InvocationId::new("semantic-example-debug").unwrap(),
+        CancellationToken::default(),
+        Arc::new(IgnoreEvents),
+    );
+    let outcome = kernel
+        .dispatch(&OperationRequest::Build(request), &context)
+        .unwrap();
+    let OperationResult::Build(result) = outcome.result else {
+        panic!("semantic example returns a typed build result")
+    };
+    let layout = StorageLayout::project_local_for_tests(temp.path());
+    let record = build::read_current_build_record(&layout).unwrap().unwrap();
+    assert_eq!(
+        result.published.len(),
+        1,
+        "semantic example action facts: {:?}",
+        record.actions
+    );
+    let debug = result.published[0]
+        .artifacts
+        .iter()
+        .find(|artifact| matches!(artifact.kind, squish_protocol::ArtifactKind::DebugInfo))
+        .unwrap();
+    let bytes = fs::read(layout.publication_root().join(&debug.uri)).unwrap();
+    let bundle = squish_ir::decode_debug_bundle(&bytes).unwrap();
+    assert!(!bundle.artifact_map.entries.is_empty());
+    assert!(bundle.artifact_map.entries.iter().all(|entry| {
+        test_origin_reaches_archive(
+            entry.origin,
+            &bundle.expansion_trace,
+            &bundle.source_archives,
+            &mut BTreeSet::new(),
+        )
+    }));
+}
+
+fn test_origin_reaches_archive(
+    id: squish_ir::OriginNodeId,
+    trace: &squish_ir::ExpansionTrace,
+    archives: &[squish_ir::SourceArchiveReference],
+    seen: &mut BTreeSet<u32>,
+) -> bool {
+    if !seen.insert(id.0) {
+        return false;
+    }
+    use squish_ir::OriginNode;
+    match trace.origins.get(id.0 as usize) {
+        Some(OriginNode::SourceSpan { origin }) => archives.iter().any(|archive| {
+            archive.object == origin.object
+                && archive
+                    .origins
+                    .entries
+                    .get(origin.local.0 as usize)
+                    .is_some()
+        }),
+        Some(OriginNode::DecodedSegment { map, segment_index }) => archives.iter().any(|archive| {
+            archive.object == map.object
+                && archive
+                    .origins
+                    .decoded_values
+                    .get(map.local.0 as usize)
+                    .and_then(|value| value.segments.get(*segment_index as usize))
+                    .is_some()
+        }),
+        Some(OriginNode::Import { child, .. } | OriginNode::RegexCapture { input: child, .. }) => {
+            test_origin_reaches_archive(*child, trace, archives, seen)
+        }
+        Some(OriginNode::Concat { ordered_inputs }) => ordered_inputs
+            .iter()
+            .any(|parent| test_origin_reaches_archive(*parent, trace, archives, seen)),
+        Some(OriginNode::BackendTransform { inputs, .. } | OriginNode::Fused { inputs, .. }) => {
+            inputs
+                .iter()
+                .any(|edge| test_origin_reaches_archive(edge.parent, trace, archives, seen))
+        }
+        Some(OriginNode::Synthetic {
+            nearest: Some(parent),
+            ..
+        }) => test_origin_reaches_archive(*parent, trace, archives, seen),
+        _ => false,
+    }
 }
 
 #[test]
