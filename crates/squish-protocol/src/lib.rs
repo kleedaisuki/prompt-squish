@@ -93,6 +93,10 @@ string_id!(
     "计划尝试内唯一的问题。 / Attempt-scoped unique planning issue."
 );
 string_id!(
+    FinalizationId,
+    "作业内唯一的计划后收尾协调。 / Job-scoped unique post-plan finalization coordination."
+);
+string_id!(
     PlanScopeId,
     "计划问题影响的稳定目标或源范围。 / Stable target or source scope affected by a planning issue."
 );
@@ -1135,6 +1139,19 @@ pub enum PlanCloseReason {
     Superseded,
 }
 
+/// 计划关闭后、操作结果发布前的真实收尾工作。 / Real finalization work after plan closure and before operation-result publication.
+///
+/// 收尾不是执行动作，也不是计划步骤；它用于在失败或取消的计划后仍保存必须的终态事实。 /
+/// Finalization is neither an execution action nor a planning step; it records
+/// required terminal facts even after a failed or cancelled plan.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum FinalizationKind {
+    /// 持久化包含失败/取消结果的构建目录记录；开始后必须达到终态而不发布取消事件。 / Persist the build-catalog record including failed/cancelled outcomes; once started it must reach a terminal event and has no cancellation event.
+    PersistBuildCatalog,
+}
+
 /// 完整的计划与调度事件代数。 / Complete planning and scheduling event algebra.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "type", content = "data")]
@@ -1350,6 +1367,35 @@ pub enum EventPayload {
         plan: PlanId,
         /// 封闭的状态转换原因。 / Closed state-transition reason.
         reason: PlanCloseReason,
+    },
+    /// 在最终计划关闭后开始一项必须达到终态的收尾工作。 / Starts must-terminate finalization after the final plan closes.
+    FinalizationStarted {
+        /// 作业。 / Job.
+        job: JobId,
+        /// 作业范围内的收尾身份。 / Job-scoped finalization identity.
+        id: FinalizationId,
+        /// 收尾工作类别。 / Finalization work kind.
+        kind: FinalizationKind,
+    },
+    /// 收尾工作成功。 / Finalization succeeded.
+    FinalizationSucceeded {
+        /// 作业。 / Job.
+        job: JobId,
+        /// 作业范围内的收尾身份。 / Job-scoped finalization identity.
+        id: FinalizationId,
+        /// 耗时。 / Timing.
+        timing: Timing,
+    },
+    /// 收尾工作失败；诊断描述持久化或恢复失败。 / Finalization failed; the diagnostic describes persistence or recovery failure.
+    FinalizationFailed {
+        /// 作业。 / Job.
+        job: JobId,
+        /// 作业范围内的收尾身份。 / Job-scoped finalization identity.
+        id: FinalizationId,
+        /// 耗时。 / Timing.
+        timing: Timing,
+        /// 结构化失败诊断。 / Structured failure diagnostic.
+        diagnostic: Diagnostic,
     },
     /// 非动作诊断。 / Non-action diagnostic.
     Diagnostic(Diagnostic),
@@ -1592,6 +1638,9 @@ fn known_event(value: &str, major: u16) -> bool {
             | "action_cancelled"
             | "action_superseded"
             | "plan_closed"
+            | "finalization_started"
+            | "finalization_succeeded"
+            | "finalization_failed"
             | "diagnostic"
             | "operation_completed"
             | "job_finished"
@@ -1912,6 +1961,66 @@ mod tests {
             Event::decode_json(&bytes).unwrap(),
             DecodedEvent::Known(Box::new(event))
         );
+    }
+    #[test]
+    fn post_plan_build_catalog_finalization_round_trips_terminal_outcomes() {
+        let invocation = InvocationId::new("invocation").unwrap();
+        let job = JobId::new("job").unwrap();
+        let id = FinalizationId::new("persist-build-catalog").unwrap();
+        let diagnostic = Diagnostic {
+            id: DiagnosticId::new("catalog-write-failed").unwrap(),
+            code: "store.build_catalog_write".into(),
+            severity: Severity::Error,
+            phase: Phase::Orchestrate,
+            message: "could not persist terminal build facts".into(),
+            primary: None,
+            related: vec![],
+            help: None,
+        };
+        let events = [
+            Event::new(
+                invocation.clone(),
+                10,
+                EventPayload::FinalizationStarted {
+                    job: job.clone(),
+                    id: id.clone(),
+                    kind: FinalizationKind::PersistBuildCatalog,
+                },
+            ),
+            Event::new(
+                invocation.clone(),
+                11,
+                EventPayload::FinalizationSucceeded {
+                    job: job.clone(),
+                    id: id.clone(),
+                    timing: Timing { elapsed_ms: 4 },
+                },
+            ),
+            Event::new(
+                invocation,
+                11,
+                EventPayload::FinalizationFailed {
+                    job,
+                    id,
+                    timing: Timing { elapsed_ms: 4 },
+                    diagnostic,
+                },
+            ),
+        ];
+
+        for event in events {
+            let bytes = event.encode_json().unwrap();
+            assert_eq!(
+                Event::decode_json(&bytes).unwrap(),
+                DecodedEvent::Known(Box::new(event))
+            );
+        }
+
+        let empty_id = br#"{"version":{"major":2,"minor":0},"invocation":"i","sequence":1,"payload":{"type":"finalization_started","data":{"job":"j","id":"","kind":"persist_build_catalog"}}}"#;
+        assert!(matches!(
+            Event::decode_json(empty_id),
+            Err(DecodeError::Malformed(_))
+        ));
     }
     #[test]
     fn inspect_result_matching_checks_view_and_identity() {
