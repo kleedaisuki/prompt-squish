@@ -305,11 +305,13 @@ pub fn create_project(
         }
     })?;
     sync_directory(&anchor)?;
-    journal.phase = Phase::Published;
-    store_journal(&tx, &journal)?;
+    // Deliberately inject before the phase write: the in-tree marker closes this exact
+    // rename→journal window and recovery must infer publication from it.
     faults
         .check(FaultPoint::CreationPublished)
         .map_err(|e| RepositoryError::io(&publish_path, e))?;
+    journal.phase = Phase::Published;
+    store_journal(&tx, &journal)?;
     finish_published(&tx, &mut journal, faults, _workspace_lock.is_some())?;
     Ok(CreatedProject {
         destination,
@@ -371,6 +373,11 @@ fn recover_locked(
         let tx = entry.path();
         let mut journal = load_journal(&tx)?;
         if journal.phase == Phase::Completed {
+            let marker = journal.publish_path.join(&journal.marker_name);
+            if marker.is_file() {
+                fs::remove_file(&marker).map_err(|error| RepositoryError::io(&marker, error))?;
+                sync_directory(&journal.publish_path)?;
+            }
             cleanup_predecision(&tx)?;
             continue;
         }
@@ -401,17 +408,19 @@ fn finish_published(
         if let Some(workspace) = &journal.workspace {
             ensure_membership(workspace, &journal.package_name, workspace_already_locked)?;
         }
-        journal.phase = Phase::WorkspaceReplaced;
-        store_journal(tx, journal)?;
+        // Ensure-member is semantic and idempotent, so fault before recording the phase tests
+        // the workspace-replace→journal recovery boundary rather than the easy side of it.
         faults
             .check(FaultPoint::CreationWorkspaceReplaced)
             .map_err(|e| RepositoryError::io(tx, e))?;
+        journal.phase = Phase::WorkspaceReplaced;
+        store_journal(tx, journal)?;
     }
+    journal.phase = Phase::Completed;
+    store_journal(tx, journal)?;
     fs::remove_file(journal.publish_path.join(&journal.marker_name))
         .map_err(|e| RepositoryError::io(&journal.publish_path, e))?;
     sync_directory(&journal.publish_path)?;
-    journal.phase = Phase::Completed;
-    store_journal(tx, journal)?;
     faults
         .check(FaultPoint::CreationCompleted)
         .map_err(|e| RepositoryError::io(tx, e))?;
