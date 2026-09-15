@@ -5,10 +5,11 @@ edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/kleedaisuki/prompt-squish"
-description = "Compile namespace-aware XML macros with explicit parameters and slots"
+description = "Build prompts and manage xmlsquish projects"
+publish = false
 
-# Ship only Rust sources, language fixtures, and essential documentation.
-# 仅发布 Rust 源码、语言测试样例和必要文档，不包含站点资产。
+# The root package is source-installed from the workspace and is not published to crates.io.
+# 根包从完整 workspace 源码安装，不发布到 crates.io。
 include = ["/src/**", "/examples/**", "/docs/dsl.md", "/docs/releases/**", "/CHANGELOG.md", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
 
 [workspace]
@@ -16,6 +17,7 @@ members = [
     "crates/squish-backend",
     "crates/squish-build",
     "crates/squish-cli",
+    "crates/squish-config",
     "crates/squish-fetch",
     "crates/squish-format",
     "crates/squish-host",
@@ -41,25 +43,18 @@ rust-version = "1.88"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/kleedaisuki/prompt-squish"
 
-[[test]]
-name = "diagnostics"
-path = "src/cli/diagnostics.integration.test.rs"
-
-[[test]]
-name = "binary"
-path = "src/cli/binary.integration.test.rs"
-
 [dependencies]
-anstream = "1.0"
-clap = { version = "4.6.6", features = ["derive"] }
-glob = "0.3.4"
-quick-xml = "0.38"
-regex = "1.12"
-# 0.18 uses the iterative xmlparser tokenizer; 0.20/0.21 overflow on deep XML.
-# 0.18 使用迭代式 xmlparser；0.20/0.21 在深层 XML 上产生本机栈溢出。
-roxmltree = "0.18"
-stacker = "0.1"
-url = "2.5"
-tempfile = "3.23.0"
-tiktoken-rs = "0.12.0"
-walkdir = "2.5.0"
+ctrlc = "3.5"
+serde_json = "1.0"
+squish-cli = { path = "crates/squish-cli" }
+squish-config = { path = "crates/squish-config" }
+squish-fetch = { path = "crates/squish-fetch" }
+squish-host = { path = "crates/squish-host" }
+squish-kernel = { path = "crates/squish-kernel" }
+squish-manager = { path = "crates/squish-manager" }
+squish-presentation = { path = "crates/squish-presentation" }
+squish-protocol = { path = "crates/squish-protocol" }
+squish-repository = { path = "crates/squish-repository" }
+
+[dev-dependencies]
+tempfile = "3.23"
