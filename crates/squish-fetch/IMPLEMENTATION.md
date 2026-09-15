@@ -26,6 +26,13 @@ concurrent atomic sidecar publication. The crate is checked independently by tem
 the permanent workspace edit and resulting `Cargo.lock` update are deliberately left to the
 composition owner. Local Git and HTTP acceptance fixtures remain integration work.
 
+Production composition uses `SparseRegistry::with_dependencies` with an explicit
+`HttpTransport` and credential port, and `GitHost::with_runner` with an explicit `GitRunner`.
+The convenience constructors retain reqwest/rustls and the configured `git` executable defaults.
+Unit fakes prove these constructors perform no hidden socket or child-process access. Redirect
+interpretation, HTTPS preservation, and cross-origin credential re-scoping remain in the fetch
+layer rather than being delegated to the HTTP transport.
+
 ## Verified deviations and migration constraints
 
 * `squish-resolver` still exposes its lock-v1 `RegistryCandidate { checksum, manifest }` and
@@ -39,7 +46,3 @@ composition owner. Local Git and HTTP acceptance fixtures remain integration wor
 * The v1 cache layout uses JSON sidecars and filesystem writer locks rather than the eventual
   SQLite mapping/lease transaction. Immutable blob/tree publication and complete-marker
   validation are preserved; GC/read-lease accounting awaits store integration.
-* Authenticated cross-origin redirect re-scoping requires a transport seam richer than the current
-  compatibility ports. Redirect count and operational retries are bounded, retry facts are emitted,
-  and reqwest strips sensitive headers on cross-host redirects; asking the credential port again for
-  the new origin remains composition-layer integration work.

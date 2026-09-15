@@ -6,9 +6,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fs2::FileExt;
 use reqwest::blocking::Client;
-use reqwest::header::{
-    ACCEPT, AUTHORIZATION, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED,
-};
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,6 +17,93 @@ use crate::{
 };
 
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// 单次、禁止自动 redirect 的 HTTP 请求。 / One HTTP request for which automatic redirects are forbidden.
+#[derive(Clone)]
+pub struct HttpRequest {
+    /// 完整请求 URL。 / Complete request URL.
+    pub url: Url,
+    /// 请求头；authorization 仅在内存中存在。 / Request headers; authorization exists only in memory.
+    pub headers: BTreeMap<String, String>,
+    /// 本次响应允许读取的最大字节数。 / Maximum response bytes permitted for this request.
+    pub max_bytes: u64,
+}
+
+/// Transport 返回的有限 HTTP 响应。 / Bounded HTTP response returned by a transport.
+#[derive(Clone)]
+pub struct HttpResponse {
+    /// HTTP 状态码。 / HTTP status code.
+    pub status: u16,
+    /// 小写响应头名到值。 / Lowercase response-header names to values.
+    pub headers: BTreeMap<String, String>,
+    /// 不超过请求限制的响应体。 / Response body no larger than the request limit.
+    pub body: Vec<u8>,
+}
+
+/// 可注入 HTTP transport；redirect 与 credential scope 始终由 fetch layer 处理。 / Injectable HTTP transport; the fetch layer always owns redirects and credential scope.
+pub trait HttpTransport: Send + Sync {
+    /// 执行一次请求，不得自动跟随 redirect。 / Executes one request and must not follow redirects automatically.
+    fn execute(&self, request: HttpRequest) -> Result<HttpResponse, FetchError>;
+}
+
+/// 基于 reqwest/rustls 的安全默认 transport。 / Safe default transport backed by reqwest/rustls.
+pub struct ReqwestTransport {
+    client: Client,
+}
+
+impl ReqwestTransport {
+    /// 构造禁用自动 redirect 的默认 client。 / Builds the default client with automatic redirects disabled.
+    pub fn new() -> Result<Self, FetchError> {
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(http_error)?;
+        Ok(Self { client })
+    }
+}
+
+impl HttpTransport for ReqwestTransport {
+    fn execute(&self, request: HttpRequest) -> Result<HttpResponse, FetchError> {
+        let mut builder = self.client.get(request.url);
+        for (name, value) in request.headers {
+            builder = builder.header(&name, value);
+        }
+        let response = builder.send().map_err(http_error)?;
+        if response
+            .content_length()
+            .is_some_and(|n| n > request.max_bytes)
+        {
+            return Err(FetchError::Integrity(
+                "HTTP response exceeds acquisition limit".into(),
+            ));
+        }
+        let status = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|v| (name.as_str().to_ascii_lowercase(), v.to_owned()))
+            })
+            .collect();
+        let mut body = Vec::new();
+        response
+            .take(request.max_bytes + 1)
+            .read_to_end(&mut body)?;
+        if body.len() as u64 > request.max_bytes {
+            return Err(FetchError::Integrity(
+                "HTTP response exceeds acquisition limit".into(),
+            ));
+        }
+        Ok(HttpResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+}
 
 /// Registry credential provider; returned values are never persisted or observed. / Registry credential provider；返回值绝不持久化或进入事件。
 pub trait CredentialPort: Send + Sync {
@@ -116,12 +200,18 @@ struct Cached {
     body_sha256: String,
 }
 
+struct FetchedResponse {
+    body: Vec<u8>,
+    headers: BTreeMap<String, String>,
+    not_modified: bool,
+}
+
 /// 支持 conditional cache 与严格 offline 的 sparse HTTP registry。 / Sparse HTTP registry with conditional caching and strict offline operation.
 pub struct SparseRegistry<C = NoCredentials> {
     context: HostContext,
     config: RegistryConfig,
     credentials: C,
-    client: Client,
+    transport: Box<dyn HttpTransport>,
 }
 
 impl SparseRegistry<NoCredentials> {
@@ -138,16 +228,27 @@ impl<C: CredentialPort> SparseRegistry<C> {
         config: RegistryConfig,
         credentials: C,
     ) -> Result<Self, FetchError> {
+        Self::with_dependencies(
+            context,
+            config,
+            credentials,
+            Box::new(ReqwestTransport::new()?),
+        )
+    }
+
+    /// 使用显式 transport 与 credential port 的 production constructor。 / Production constructor with explicit transport and credential port.
+    pub fn with_dependencies(
+        context: HostContext,
+        config: RegistryConfig,
+        credentials: C,
+        transport: Box<dyn HttpTransport>,
+    ) -> Result<Self, FetchError> {
         validate_registry_config(&config)?;
-        let client = Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(8))
-            .build()
-            .map_err(http_error)?;
         Ok(Self {
             context,
             config,
             credentials,
-            client,
+            transport,
         })
     }
 
@@ -316,7 +417,7 @@ impl<C: CredentialPort> SparseRegistry<C> {
                     .size
                     .min(self.context.limits.max_archive_bytes),
             )?
-            .0;
+            .body;
         if bytes.len() as u64 != candidate.archive.size
             || hex::encode(Sha256::digest(&bytes)) != candidate.archive.digest.0.0
         {
@@ -451,14 +552,14 @@ impl<C: CredentialPort> SparseRegistry<C> {
         let validator = old.as_ref().and(cached.as_ref()).and_then(|c| {
             c.etag
                 .as_ref()
-                .map(|v| (IF_NONE_MATCH, v.as_str()))
+                .map(|v| ("if-none-match", v.as_str()))
                 .or_else(|| {
                     c.last_modified
                         .as_ref()
-                        .map(|v| (IF_MODIFIED_SINCE, v.as_str()))
+                        .map(|v| ("if-modified-since", v.as_str()))
                 })
         });
-        let (body, headers, not_modified) = self.get_url_with_accept(
+        let fetched = self.get_url_with_accept(
             &url,
             resource,
             authenticated,
@@ -466,20 +567,22 @@ impl<C: CredentialPort> SparseRegistry<C> {
             accept,
             self.context.limits.max_metadata_bytes,
         )?;
-        if not_modified {
+        if fetched.not_modified {
             let body = old.ok_or_else(|| {
                 FetchError::Metadata("server returned 304 without a cached body".into())
             })?;
             validate(&body)?;
             return Ok(body);
         }
+        let body = fetched.body;
+        let headers = fetched.headers;
         validate(&body)?;
         self.store_body(
             &dir,
             &meta_path,
             &body,
-            headers.get(ETAG).and_then(|v| v.to_str().ok()),
-            headers.get(LAST_MODIFIED).and_then(|v| v.to_str().ok()),
+            headers.get("etag").map(String::as_str),
+            headers.get("last-modified").map(String::as_str),
         )?;
         Ok(body)
     }
@@ -489,9 +592,9 @@ impl<C: CredentialPort> SparseRegistry<C> {
         url: &Url,
         purpose: &str,
         auth: bool,
-        validator: Option<(reqwest::header::HeaderName, &str)>,
+        validator: Option<(&str, &str)>,
         max_bytes: u64,
-    ) -> Result<(Vec<u8>, reqwest::header::HeaderMap, bool), FetchError> {
+    ) -> Result<FetchedResponse, FetchError> {
         self.get_url_with_accept(
             url,
             purpose,
@@ -506,103 +609,140 @@ impl<C: CredentialPort> SparseRegistry<C> {
         url: &Url,
         purpose: &str,
         auth: bool,
-        validator: Option<(reqwest::header::HeaderName, &str)>,
+        validator: Option<(&str, &str)>,
         accept: &str,
         max_bytes: u64,
-    ) -> Result<(Vec<u8>, reqwest::header::HeaderMap, bool), FetchError> {
-        let origin = redacted_origin(url);
+    ) -> Result<FetchedResponse, FetchError> {
+        let mut current_url = url.clone();
+        let mut origin = redacted_origin(&current_url);
         let mut authorization = auth
-            .then(|| self.credentials.authorization(&self.config.id, &origin))
+            .then(|| {
+                self.credentials
+                    .authorization(&self.config.id, &request_origin(&current_url))
+            })
             .flatten();
         let mut bootstrap_attempted = auth;
-        for attempt in 1..=3u8 {
-            let id = REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-            self.context
-                .observer
-                .emit(SourceEvent::NetworkRequestStarted {
-                    request_id: id,
-                    origin: origin.clone(),
-                    purpose: purpose.into(),
-                });
-            let mut request = self.client.get(url.clone()).header(ACCEPT, accept);
-            if let Some((ref name, value)) = validator {
-                request = request.header(name, value);
-            }
-            if let Some(value) = &authorization {
-                request = request.header(AUTHORIZATION, value);
-            }
-            let response = request.send().map_err(http_error)?;
-            let status = response.status();
-            let headers = response.headers().clone();
-            if status == reqwest::StatusCode::NOT_MODIFIED {
+        'redirects: for redirects in 0..=8 {
+            for attempt in 1..=3u8 {
+                let id = REQUEST_ID.fetch_add(1, Ordering::Relaxed);
                 self.context
                     .observer
-                    .emit(SourceEvent::NetworkRequestFinished {
+                    .emit(SourceEvent::NetworkRequestStarted {
                         request_id: id,
-                        status: "304".into(),
-                        received_bytes: 0,
-                        validator_used: validator.is_some(),
+                        origin: origin.clone(),
+                        purpose: purpose.into(),
                     });
-                return Ok((Vec::new(), headers, true));
-            }
-            if status == reqwest::StatusCode::UNAUTHORIZED && !bootstrap_attempted {
-                bootstrap_attempted = true;
-                authorization = self.credentials.authorization(&self.config.id, &origin);
-                if authorization.is_some() {
+                let mut headers = BTreeMap::from([("accept".into(), accept.into())]);
+                if let Some((name, value)) = validator {
+                    headers.insert(name.into(), value.into());
+                }
+                if let Some(value) = &authorization {
+                    headers.insert("authorization".into(), value.clone());
+                }
+            let mut response = self.transport.execute(HttpRequest {
+                url: current_url.clone(),
+                headers,
+                max_bytes,
+            })?;
+            response.headers = response.headers.into_iter().map(|(name, value)| (name.to_ascii_lowercase(), value)).collect();
+                let status = response.status;
+                if status == 304 {
+                    self.context
+                        .observer
+                        .emit(SourceEvent::NetworkRequestFinished {
+                            request_id: id,
+                            status: "304".into(),
+                            received_bytes: 0,
+                            validator_used: validator.is_some(),
+                        });
+                    return Ok(FetchedResponse {
+                        body: Vec::new(),
+                        headers: response.headers,
+                        not_modified: true,
+                    });
+                }
+                if matches!(status, 301 | 302 | 303 | 307 | 308) {
+                    if redirects == 8 {
+                        return Err(FetchError::Http("redirect limit exceeded".into()));
+                    }
+                    let location = response
+                        .headers
+                        .get("location")
+                        .ok_or_else(|| FetchError::Http("redirect has no Location".into()))?;
+                    let next = current_url
+                        .join(location)
+                        .map_err(|_| FetchError::Http("invalid redirect Location".into()))?;
+                    if next.scheme() != "https" {
+                        return Err(FetchError::Http("redirect must preserve HTTPS".into()));
+                    }
+                    let next_origin = redacted_origin(&next);
+                    authorization = if auth {
+                        self.credentials
+                            .authorization(&self.config.id, &request_origin(&next))
+                    } else {
+                        None
+                    };
+                    bootstrap_attempted = auth;
+                    current_url = next;
+                    origin = next_origin;
+                    continue 'redirects;
+                }
+                if status == 401 && !bootstrap_attempted {
+                    bootstrap_attempted = true;
+                    authorization = self
+                        .credentials
+                        .authorization(&self.config.id, &request_origin(&current_url));
+                    if authorization.is_some() {
+                        self.context
+                            .observer
+                            .emit(SourceEvent::SourceRetryScheduled {
+                                request_id: id,
+                                reason: "authentication-bootstrap".into(),
+                                attempt,
+                                delay_ms: 0,
+                            });
+                        continue;
+                    }
+                }
+                let retryable = status == 408 || status == 429 || status >= 500;
+                if retryable && attempt < 3 {
+                    let delay_ms = u64::from(attempt) * 20 + id % 17;
                     self.context
                         .observer
                         .emit(SourceEvent::SourceRetryScheduled {
                             request_id: id,
-                            reason: "authentication-bootstrap".into(),
+                            reason: format!("http-{}xx", status / 100),
                             attempt,
-                            delay_ms: 0,
+                            delay_ms,
                         });
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                     continue;
                 }
-            }
-            let retryable = status == reqwest::StatusCode::REQUEST_TIMEOUT
-                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                || status.is_server_error();
-            if retryable && attempt < 3 {
-                let delay_ms = u64::from(attempt) * 20 + id % 17;
+                if !(200..300).contains(&status) {
+                    return Err(FetchError::Metadata(format!(
+                        "HTTP status class {}",
+                        status / 100
+                    )));
+                }
+                if response.body.len() as u64 > max_bytes {
+                    return Err(FetchError::Integrity(
+                        "HTTP response exceeds acquisition limit".into(),
+                    ));
+                }
                 self.context
                     .observer
-                    .emit(SourceEvent::SourceRetryScheduled {
+                    .emit(SourceEvent::NetworkRequestFinished {
                         request_id: id,
-                        reason: format!("http-{}xx", status.as_u16() / 100),
-                        attempt,
-                        delay_ms,
+                        status: format!("{}xx", status / 100),
+                        received_bytes: response.body.len() as u64,
+                        validator_used: validator.is_some(),
                     });
-                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                continue;
-            }
-            if !status.is_success() {
-                return Err(FetchError::Metadata(format!(
-                    "HTTP status class {}",
-                    status.as_u16() / 100
-                )));
-            }
-            if response.content_length().is_some_and(|n| n > max_bytes) {
-                return Err(FetchError::Integrity(
-                    "HTTP response exceeds acquisition limit".into(),
-                ));
-            }
-            let mut body = Vec::new();
-            response.take(max_bytes + 1).read_to_end(&mut body)?;
-            if body.len() as u64 > max_bytes {
-                return Err(FetchError::Integrity(
-                    "HTTP response exceeds acquisition limit".into(),
-                ));
-            }
-            self.context
-                .observer
-                .emit(SourceEvent::NetworkRequestFinished {
-                    request_id: id,
-                    status: format!("{}xx", status.as_u16() / 100),
-                    received_bytes: body.len() as u64,
-                    validator_used: validator.is_some(),
+                return Ok(FetchedResponse {
+                    body: response.body,
+                    headers: response.headers,
+                    not_modified: false,
                 });
-            return Ok((body, headers, false));
+            }
         }
         Err(FetchError::Metadata("HTTP retry budget exhausted".into()))
     }
@@ -961,6 +1101,15 @@ fn redacted_origin(u: &Url) -> String {
         u.path()
     )
 }
+
+fn request_origin(u: &Url) -> String {
+    format!(
+        "{}://{}{}",
+        u.scheme(),
+        u.host_str().unwrap_or("invalid"),
+        u.port().map(|p| format!(":{p}")).unwrap_or_default()
+    )
+}
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), FetchError> {
     let parent = path.parent().ok_or_else(|| {
         FetchError::Io(std::io::Error::new(
@@ -1016,6 +1165,49 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, FetchError> {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+    use std::sync::Mutex;
+
+    struct FakeHttp {
+        calls: Mutex<Vec<HttpRequest>>,
+    }
+    impl HttpTransport for FakeHttp {
+        fn execute(&self, request: HttpRequest) -> Result<HttpResponse, FetchError> {
+            self.calls.lock().unwrap().push(request);
+            Ok(HttpResponse {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: b"fake".to_vec(),
+            })
+        }
+    }
+    struct RedirectHttp {
+        calls: std::sync::Arc<Mutex<Vec<HttpRequest>>>,
+    }
+    impl HttpTransport for RedirectHttp {
+        fn execute(&self, request: HttpRequest) -> Result<HttpResponse, FetchError> {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(request);
+            if calls.len() == 1 {
+                Ok(HttpResponse {
+                    status: 302,
+                    headers: BTreeMap::from([("location".into(), "https://b.example/file".into())]),
+                    body: Vec::new(),
+                })
+            } else {
+                Ok(HttpResponse {
+                    status: 200,
+                    headers: BTreeMap::new(),
+                    body: b"done".to_vec(),
+                })
+            }
+        }
+    }
+    struct ScopedCredentials;
+    impl CredentialPort for ScopedCredentials {
+        fn authorization(&self, _: &str, origin: &str) -> Option<String> {
+            Some(format!("token-for-{origin}"))
+        }
+    }
     #[test]
     fn shard_vectors() {
         assert_eq!(shard_path("A"), "1/a");
@@ -1199,6 +1391,80 @@ mod tests {
         }
         let result = fs::read(&path).unwrap();
         assert!(result == vec![b'a'; 8192] || result == vec![b'b'; 16384]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_http_transport_has_no_hidden_network_client() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.temp")
+            .join(format!("fetch-fake-http-{}", std::process::id()));
+        let registry = SparseRegistry::with_dependencies(
+            HostContext::new(root.clone()).unwrap(),
+            RegistryConfig {
+                id: "https://registry.example/v1".into(),
+                index: "sparse+https://unreachable.invalid/".into(),
+            },
+            NoCredentials,
+            Box::new(FakeHttp {
+                calls: Mutex::new(Vec::new()),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            registry
+                .resource("body", "text/plain", Access::Online, false, |body| {
+                    if body == b"fake" {
+                        Ok(())
+                    } else {
+                        Err(FetchError::Metadata("wrong fake".into()))
+                    }
+                })
+                .unwrap(),
+            b"fake"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn redirect_credentials_are_rescoped_by_fetch_layer() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.temp")
+            .join(format!("fetch-redirect-http-{}", std::process::id()));
+        let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let registry = SparseRegistry::with_dependencies(
+            HostContext::new(root.clone()).unwrap(),
+            RegistryConfig {
+                id: "https://registry.example/v1".into(),
+                index: "sparse+https://a.example/".into(),
+            },
+            ScopedCredentials,
+            Box::new(RedirectHttp {
+                calls: calls.clone(),
+            }),
+        )
+        .unwrap();
+        let result = registry
+            .get_url(
+                &Url::parse("https://a.example/start").unwrap(),
+                "test",
+                true,
+                None,
+                16,
+            )
+            .unwrap()
+            .body;
+        assert_eq!(result, b"done");
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls[0].headers.get("authorization").unwrap(),
+            "token-for-https://a.example"
+        );
+        assert_eq!(
+            calls[1].headers.get("authorization").unwrap(),
+            "token-for-https://b.example"
+        );
+        drop(calls);
         fs::remove_dir_all(root).unwrap();
     }
 }

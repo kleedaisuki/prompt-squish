@@ -13,7 +13,10 @@ mod registry;
 mod types;
 
 pub use filesystem::FilesystemHost;
-pub use git::{GitHost, GitSelector};
+pub use git::{GitHost, GitInvocation, GitRunOutput, GitRunner, GitSelector, SystemGitRunner};
 pub use materialize::{LogicalFile, LogicalTree, Materializer};
-pub use registry::{CredentialPort, NoCredentials, RegistryConfig, SparseRegistry};
+pub use registry::{
+    CredentialPort, HttpRequest, HttpResponse, HttpTransport, NoCredentials, RegistryConfig,
+    ReqwestTransport, SparseRegistry,
+};
 pub use types::*;

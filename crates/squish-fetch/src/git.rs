@@ -1,7 +1,12 @@
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::process::Command;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -43,19 +48,91 @@ struct Observation {
 
 static FETCH_NONCE: AtomicU64 = AtomicU64::new(1);
 
+/// Git runner 的完整、无 shell 调用描述。 / Complete shell-free Git runner invocation.
+#[derive(Clone)]
+pub struct GitInvocation {
+    /// 可选工作目录。 / Optional working directory.
+    pub cwd: Option<PathBuf>,
+    /// 直接传给 Git、未经 shell 的参数。 / Shell-free arguments passed directly to Git.
+    pub args: Vec<OsString>,
+    /// 显式子进程环境覆盖。 / Explicit child-process environment overrides.
+    pub env: BTreeMap<OsString, OsString>,
+}
+
+/// Git runner 的捕获输出。 / Captured Git runner output.
+#[derive(Clone)]
+pub struct GitRunOutput {
+    /// 进程是否成功。 / Whether the process succeeded.
+    pub success: bool,
+    /// 可用时的退出码。 / Exit code when available.
+    pub code: Option<i32>,
+    /// 捕获的标准输出。 / Captured standard output.
+    pub stdout: Vec<u8>,
+    /// 捕获的标准错误；fetch layer 不直接显示它。 / Captured stderr; the fetch layer never renders it directly.
+    pub stderr: Vec<u8>,
+}
+
+/// 可注入的 Git 执行端口。 / Injectable Git execution port.
+pub trait GitRunner: Send + Sync {
+    /// 执行一个完整调用。 / Executes one complete invocation.
+    fn execute(&self, invocation: GitInvocation) -> std::io::Result<GitRunOutput>;
+}
+
+/// 直接执行配置 Git binary 的默认 runner。 / Default runner executing a configured Git binary directly.
+#[derive(Clone, Debug)]
+pub struct SystemGitRunner {
+    executable: PathBuf,
+}
+impl SystemGitRunner {
+    /// 使用显式 executable 路径。 / Uses an explicit executable path.
+    pub fn new(executable: impl Into<PathBuf>) -> Self {
+        Self {
+            executable: executable.into(),
+        }
+    }
+}
+impl Default for SystemGitRunner {
+    fn default() -> Self {
+        Self::new("git")
+    }
+}
+impl GitRunner for SystemGitRunner {
+    fn execute(&self, invocation: GitInvocation) -> std::io::Result<GitRunOutput> {
+        let mut command = Command::new(&self.executable);
+        command.args(invocation.args).envs(invocation.env);
+        if let Some(cwd) = invocation.cwd {
+            command.current_dir(cwd);
+        }
+        let output = command.output()?;
+        Ok(GitRunOutput {
+            success: output.status.success(),
+            code: output.status.code(),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+}
+
 /// 以 protocol v2 和共享 bare object DB 实现的 Git port。 / Git port backed by protocol v2 and a shared bare object database.
 #[derive(Clone)]
 pub struct GitHost {
     context: HostContext,
     materializer: Materializer,
+    runner: Arc<dyn GitRunner>,
 }
 
 impl GitHost {
     /// 创建 Git source host。 / Creates a Git source host.
     pub fn new(context: HostContext) -> Self {
+        Self::with_runner(context, Arc::new(SystemGitRunner::default()))
+    }
+
+    /// 使用显式 runner 构造 production host。 / Constructs a production host with an explicit runner.
+    pub fn with_runner(context: HostContext, runner: Arc<dyn GitRunner>) -> Self {
         Self {
             materializer: Materializer::new(context.clone()),
             context,
+            runner,
         }
     }
 
@@ -320,16 +397,14 @@ impl GitHost {
             .open(db.with_extension("init.lock"))?;
         init_lock.lock_exclusive()?;
         if !db.join("HEAD").exists() {
-            let out = Command::new("git")
-                .args([
-                    "init",
-                    "--bare",
-                    &format!("--object-format={}", object_format_name(format)),
-                ])
-                .arg(db)
-                .env("GIT_TERMINAL_PROMPT", "0")
-                .output()?;
-            if !out.status.success() {
+            let format_arg = format!("--object-format={}", object_format_name(format));
+            let db_arg = db.as_os_str().to_owned();
+            let out = self.global_run(
+                None,
+                vec!["init".into(), "--bare".into(), format_arg.into(), db_arg],
+                false,
+            )?;
+            if !out.success {
                 return Err(FetchError::Git(
                     "cannot initialize bare object database".into(),
                 ));
@@ -353,13 +428,12 @@ impl GitHost {
             let path = url
                 .to_file_path()
                 .map_err(|_| FetchError::Config("invalid file Git URL".into()))?;
-            let output = Command::new("git")
-                .arg("-C")
-                .arg(path)
-                .args(["rev-parse", "--show-object-format"])
-                .env("GIT_TERMINAL_PROMPT", "0")
-                .output()?;
-            if output.status.success() {
+            let output = self.global_run(
+                Some(path),
+                vec!["rev-parse".into(), "--show-object-format".into()],
+                false,
+            )?;
+            if output.success {
                 return match String::from_utf8_lossy(&output.stdout).trim() {
                     "sha1" => Ok(GitObjectFormat::Sha1),
                     "sha256" => Ok(GitObjectFormat::Sha256),
@@ -377,20 +451,19 @@ impl GitHost {
                 origin: stable_repo(repository),
                 purpose: "git-capabilities".into(),
             });
-        let output = Command::new("git")
-            .args([
-                "-c",
-                "protocol.version=2",
-                "ls-remote",
-                "--symref",
-                repository,
-                "HEAD",
-            ])
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GCM_INTERACTIVE", "Never")
-            .env("GIT_TRACE_PACKET", "1")
-            .output()?;
-        if !output.status.success() {
+        let output = self.global_run(
+            None,
+            vec![
+                "-c".into(),
+                "protocol.version=2".into(),
+                "ls-remote".into(),
+                "--symref".into(),
+                repository.into(),
+                "HEAD".into(),
+            ],
+            true,
+        )?;
+        if !output.success {
             return Err(FetchError::Git(
                 "cannot observe remote Git capabilities".into(),
             ));
@@ -428,20 +501,32 @@ impl GitHost {
         String::from_utf8(self.run(db, args)?.stdout)
             .map_err(|_| FetchError::Git("Git produced non-UTF-8 plumbing output".into()))
     }
-    fn run(&self, db: &Path, args: &[&str]) -> Result<Output, FetchError> {
-        let out = Command::new("git")
-            .arg(format!("--git-dir={}", db.display()))
-            .args(args)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GCM_INTERACTIVE", "Never")
-            .output()?;
-        if !out.status.success() {
+    fn run(&self, db: &Path, args: &[&str]) -> Result<GitRunOutput, FetchError> {
+        let mut invocation = vec![format!("--git-dir={}", db.display()).into()];
+        invocation.extend(args.iter().map(OsString::from));
+        let out = self.global_run(None, invocation, false)?;
+        if !out.success {
             return Err(FetchError::Git(format!(
                 "Git command failed with status {}",
-                out.status.code().unwrap_or(-1)
+                out.code.unwrap_or(-1)
             )));
         }
         Ok(out)
+    }
+    fn global_run(
+        &self,
+        cwd: Option<PathBuf>,
+        args: Vec<OsString>,
+        trace_packet: bool,
+    ) -> Result<GitRunOutput, FetchError> {
+        let mut env = BTreeMap::from([
+            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+            ("GCM_INTERACTIVE".into(), "Never".into()),
+        ]);
+        if trace_packet {
+            env.insert("GIT_TRACE_PACKET".into(), "1".into());
+        }
+        Ok(self.runner.execute(GitInvocation { cwd, args, env })?)
     }
     fn db_path(&self, repo: &str, format: GitObjectFormat) -> PathBuf {
         self.context
@@ -608,6 +693,21 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
+
+    struct FakeRunner {
+        invocations: std::sync::Mutex<Vec<GitInvocation>>,
+    }
+    impl GitRunner for FakeRunner {
+        fn execute(&self, invocation: GitInvocation) -> std::io::Result<GitRunOutput> {
+            self.invocations.lock().unwrap().push(invocation);
+            Ok(GitRunOutput {
+                success: true,
+                code: Some(0),
+                stdout: b"fake-output".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
 
     #[test]
     fn resolves_local_branch_without_a_checkout_filter() {
@@ -792,6 +892,28 @@ mod tests {
         for handle in handles {
             handle.join().unwrap();
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_git_runner_has_no_hidden_process_dependency() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.temp")
+            .join(format!("fetch-fake-git-{}", std::process::id()));
+        let runner = Arc::new(FakeRunner {
+            invocations: std::sync::Mutex::new(Vec::new()),
+        });
+        let host = GitHost::with_runner(HostContext::new(root.clone()).unwrap(), runner.clone());
+        let output = host.run(Path::new("virtual-db"), &["status"]).unwrap();
+        assert_eq!(output.stdout, b"fake-output");
+        let calls = runner.invocations.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].args.iter().any(|arg| arg == "status"));
+        assert_eq!(
+            calls[0].env.get(&OsString::from("GIT_TERMINAL_PROMPT")),
+            Some(&OsString::from("0"))
+        );
+        drop(calls);
         fs::remove_dir_all(root).unwrap();
     }
 
