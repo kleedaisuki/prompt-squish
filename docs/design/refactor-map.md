@@ -172,7 +172,7 @@ the durable locator when later edits move the lines.
 | `src/cli/mod.rs:214-331` renders summaries and stage-specific prose. | Move to `presentation`, consuming ordered structured events and job results. |
 | `src/cli/console.rs:12-61` implements color policy and safe clap styling. | Preserve as presentation infrastructure; extend it with TTY-aware progress/spinners and stable redirected output. |
 | `src/cli/diagnostics.rs:5-140`, `:161-188` buffer diagnostic rendering and sanitize displayed text. | Retain these observable qualities, but render a shared structured diagnostic type rather than compiler-formatted messages. |
-| `src/cli/pipeline.rs:96-132` is the sequential batch loop; `:143-240` combines loading, compilation, squishing, metrics, writes, cleanup, and log output. | Replace with `Job -> PlanningAttempt -> PreparedPlan -> Scheduler -> JobResult -> ArtifactStore`. Planning emits real step events while it resolves, fetches, reconciles locks, seals sources, and discovers the graph. Executors return data; they never print. |
+| `src/cli/pipeline.rs:96-132` is the sequential batch loop; `:143-240` combines loading, compilation, squishing, metrics, writes, cleanup, and log output. | Replace with `Job -> PlanningAttempt -> PreparedPlan -> Scheduler -> Finalization -> JobResult`. Planning emits real step events while it resolves, fetches, reconciles locks, seals sources, and discovers the graph; finalization persists terminal evidence through the artifact/catalog ports. Executors and finalizers return data; they never print. |
 | `src/cli/pipeline.rs:172-189` builds a read snapshot separately per entry. | Use one immutable invocation `ContentStore`, sealed before execution, so all selected targets observe the same source outcomes. |
 | `src/cli/pipeline.rs:219-237` publishes sibling XML IR/output files. | Persist binary module IR through `cache`; publish final products through `ArtifactStore` as `*.prompt`. |
 | `src/cli/files.rs:14-36` reads XML and atomically replaces a file. | Split into `SourceStore` and `ArtifactStore` ports. BOM is metadata of an XML source envelope, not an IR property. Retain durable staging/replacement semantics. |
@@ -228,6 +228,7 @@ JobLifecycle {
     active_planning_attempt,
     plans: PlanId -> PlanRecord,
     final_plan,
+    finalizations: FinalizationId -> FinalizationRecord,
 }
 
 PreparedPlan {
@@ -259,6 +260,16 @@ commits staged products. Presentation sorts by stable job/plan/action identity,
 never by completion time, so colored interactive output and redirected logs
 communicate the same facts.
 
+After the final plan closes, a separate sequential finalization phase consumes
+the frozen plan inspection and terminal action report. Its initial typed
+finalizer, `PersistBuildCatalog`, persists `BuildRecordV2` for successful,
+failed, and cancelled executable builds. This work is neither appended to the
+sealed DAG nor hidden in a return-value epilogue. It emits
+`FinalizationStarted`, `FinalizationSucceeded`/`FinalizationFailed`, and then
+`OperationCompleted`; the kernel uses the latter as the finalization-set
+closure and rejects an active/nonterminal or required-but-absent finalizer.
+Pre-plan build failure and non-build operations may have no finalization event.
+
 Project and dependency mutation uses typed manifest editing and full candidate
 resolution. `add` and `remove` seal an exact candidate and revision set, then a
 non-cacheable commit action rechecks them under the selected project's writer
@@ -272,7 +283,8 @@ manifest/lock generation and never observe a half-mutated project state.
 declares the exact graph, closes it as `Reported`, and starts no action. A fatal
 pre-plan failure or cancellation has zero action totals. The kernel reduces
 these cases from planning events rather than requiring a fabricated one-node
-failure plan.
+failure plan. Under the initial contract it proceeds directly to
+`OperationCompleted` without a finalizer or a fabricated plan.
 
 ### Concrete manager lifecycle migration
 
@@ -282,12 +294,14 @@ models indefinitely:
 
 | Slice | Required change |
 | --- | --- |
-| `squish-protocol` | Bump the event protocol major version; add `PlanningAttemptId`, `PlanningStepId`, `PlanId`, `PlanDigest`, `PlanMode`, typed planning-step/issue/terminal events, `ActionDeclared`, `ActionSuperseded`, and `PlanClosed`. Add `plan: PlanId` to every action lifecycle event. Preserve a v1 decoder that maps one old `PlanReady`/`ActionQueued` stream to one legacy executable plan; never put v2 semantics in a v1 envelope. |
-| `squish-kernel::Lifecycle` | Replace the single `job/planned/actions` record with the job/attempt/plan records in ADR 0009. Validate one active attempt/plan, one seal per plan ID, complete declaration before action start, terminal steps, and closed plans before `OperationCompleted`. Reduce the final non-superseded plan plus its planning issues. Permit a failed/cancelled pre-plan job with zero action totals; derive failure from `root_failures`, not only `ActionTotals.failed`. |
-| `squish-manager::build` | Split `prepare_excluding` into observable planning steps around discovery, materialization/fetch, resolution, lock reconciliation, repository snapshot, source sealing, target/closure scan, and graph validation. Remove `BuildWork::{Resolve, Snapshot, Scan}` and the `execute_work` branches that only revalidate already-produced planning data and return no outputs; `PreparedBuild` carries that immutable evidence as input to real compile/link/backend actions. |
-| `squish-manager::orchestrator` | Add a planning-attempt driver outside `Scheduler`. Replace `fail` and its synthetic `manager.failure` action with `PlanningFailed`/`PlanningCancelled`. Change `announce` to emit the plan identity/digest/mode and `ActionDeclared`; create `Scheduler` only after announcement succeeds. `run` accepts one already sealed plan and can neither call planning ports nor append actions. |
+| `squish-protocol` | Use event protocol v2 with `PlanningAttemptId`, `PlanningStepId`, `PlanId`, `PlanDigest`, `PlanMode`, typed planning-step/issue/terminal events, `ActionDeclared`, `ActionSuperseded`, and `PlanClosed`. Its finalization vocabulary is exactly `FinalizationId`, non-exhaustive `FinalizationKind` (initially `PersistBuildCatalog`), and `FinalizationStarted/Succeeded/Failed`; there is no separate phase-close event. Add `plan: PlanId` to every action lifecycle event. Preserve a v1 decoder that maps one old `PlanReady`/`ActionQueued` stream to one legacy executable plan; never put v2 semantics in a v1 envelope. |
+| `squish-kernel::Lifecycle` | Replace the single `job/planned/actions` record with job/attempt/plan/finalization records. Validate one active attempt/plan, one seal per plan ID, complete declaration before action start, terminal steps, plan closure before finalization, and unique sequential finalizers. `OperationCompleted` closes the finalization set and rejects active/nonterminal work. By operation/result policy, executable builds require exactly one terminal `PersistBuildCatalog`; pre-plan build failures, report-only builds, and non-build operations may have none. Reduce the final non-superseded plan plus planning issues and finalizer failures. Permit a failed/cancelled pre-plan job with zero action totals; derive failure from `root_failures`, not only `ActionTotals.failed`. |
+| `squish-manager::build` | Keep discovery, materialization/fetch, resolution, lock reconciliation, repository snapshot, source sealing, target/closure scan, and graph validation inside observable planning steps. Keep `BuildWork` limited to real compile/link/instantiate/backend/publish work; never reintroduce `Resolve`/`Snapshot`/`Scan` placeholders. `PreparedBuild` carries immutable planning evidence as input to those actions. Move the current silent `persist_terminal_record(inspection, report)` epilogue behind the typed `PersistBuildCatalog` finalizer, using a frozen terminal report and emitting its catalog artifact only on `FinalizationSucceeded`. |
+| `squish-manager::orchestrator` | Add a planning-attempt driver outside `Scheduler`. Replace `fail` and its synthetic `manager.failure` action with `PlanningFailed`/`PlanningCancelled`. Change `announce` to emit the plan identity/digest/mode and `ActionDeclared`; create `Scheduler` only after announcement succeeds. `run` accepts one already sealed plan and can neither call planning ports nor append actions. After `PlanClosed`, pass its immutable report through sequential `orchestrator::finalize` coordination; the closure cannot call or modify `Scheduler`/`BuildPlan`. Emit matching `FinalizationStarted` and terminal events around every real finalizer; the later kernel `OperationCompleted` call closes the set. |
 | resolver/repository/source ports | Take a cancellation token or typed operation context on every potentially blocking call. Expose typed fetch units so parallel downloads receive distinct planning-step IDs. Check cancellation at bounded file/scan units and adapter waits; transaction code defers it only after the durable commit decision until recovery is coherent. Ports return domain progress/evidence and never emit wire events directly. |
 | mutation manager | Put candidate computation in planning and the exact compare-and-swap transaction in the sealed plan. Map a pre-decision revision mismatch to `ActionSuperseded -> PlanClosed(Superseded) -> PlanningStarted(new attempt)`. Preserve the bounded retry policy and make retry exhaustion one final planning failure, not a partially rewritten plan. |
+| catalog publisher/finalizer | Canonically encode `BuildRecordV2` from the final plan inspection, sorted terminal action facts, planning issues, publication generations, and provisional outcome. Use the recoverable catalog-generation transaction. Required persistence runs despite an existing cooperative-cancellation request; after its durable commit decision, defer cancellation until commit/recovery is coherent. A failure preserves the previous catalog generation and returns a typed diagnostic. |
+| `squish-presentation` | Render finalization as post-plan work and keep cancellation progress active until it closes. NDJSON must preserve every finalization and catalog commit/recovery event in sequence and cannot emit operation completion first. Human output may coalesce progress, but not terminal/failure facts or the returned build-record artifact. |
 
 Remove the compatibility implementation after all manager operations and
 presenters consume the v2 reducer. In particular, retaining the no-op analysis
@@ -306,8 +320,8 @@ suite into a facade around the old pipeline.
 | Instantiation and document IR | `src/compiler/runtime.contract.test.rs:42-260`; `src/compiler/runtime.xml.test.rs:16-126`; `src/compiler/runtime.rs:647-881` | compare structured documents/traces/spans; backend-independent expansion equivalence |
 | IR codec and cache | upgrade `src/compiler/reuse.test.rs:19-83` | serialize-deserialize-link equivalence, canonical deterministic bytes, schema rejection/migration, complete cache keys, corruption recovery, relocation after checkout movement |
 | Squish backend | `src/squish.test.rs`; process coverage from `src/cli/binary.integration.test.rs:61` | identical semantic output through `LinkedDocument`, `*.prompt` publication, backend diagnostics |
-| Manager and transactions | `src/cli/mod.pipeline_tests.test.rs:96-217`; `src/cli/pipeline.semantic.test.rs:25-82` | all commands; real planning-step observation and cancellation; no placeholder analysis actions; immutable plan sealing; report-only dry-run; pre-plan zero-action failure; dependency blocking; independent keep-going work; supersede/re-plan on revision conflict; atomic publication; interrupted/candidate manifest mutations |
-| Presentation | existing console and diagnostics unit/integration tests | color modes, TTY progress lifecycle, spinner cleanup, safe user text, stable non-TTY snapshots, deterministic concurrent results |
+| Manager and transactions | `src/cli/mod.pipeline_tests.test.rs:96-217`; `src/cli/pipeline.semantic.test.rs:25-82` | all commands; real planning-step observation and cancellation; no placeholder analysis actions; immutable plan sealing; report-only dry-run; pre-plan zero-action failure; dependency blocking; independent keep-going work; supersede/re-plan on revision conflict; post-plan `BuildRecordV2` after success/failure/cancellation; finalizer failure reduction; catalog commit cancellation/recovery; atomic publication; interrupted/candidate manifest mutations |
+| Presentation | existing console and diagnostics unit/integration tests | color modes, TTY progress lifecycle through finalization, spinner cleanup, safe user text, stable non-TTY snapshots, deterministic concurrent results, and NDJSON ordering `PlanClosed -> FinalizationStarted -> FinalizationSucceeded/Failed -> OperationCompleted` |
 | Source identity | retain only relevant cases from `src/cli/paths.test.rs` | lexical identity, symlinks, non-UTF-8 platform paths, source display versus program identity |
 | Performance | retain and divide `src/compiler/perf.test.rs:121` onward | parse, encode/decode, cache hit/miss, relocation/link, instantiation/backend, cold and warm end-to-end measurements |
 
@@ -321,7 +335,11 @@ Each architecture slice needs negative tests. Particularly important are
 unknown IR schema/features, truncated or corrupted artifacts, stale content
 keys, source changes during a frozen invocation, duplicate output paths,
 dependency cycles, job failure during concurrent execution, terminal
-redirection, and publication failure after staging.
+redirection, publication failure after staging, finalization before plan
+closure, duplicate/nonterminal finalizers, omitted build-catalog finalization,
+catalog encode/CAS/commit failure, and `OperationCompleted` before
+the active finalizer terminates. Fault injection around the catalog durable decision must
+prove recovery plus persistence of failed/blocked/cancelled action facts.
 
 ## Three-platform GitHub Actions plan
 
@@ -366,7 +384,9 @@ The order follows information dependencies rather than a reduced product scope:
 4. **Implement backend boundaries.** Make squish consume linked document IR and
    publish `*.prompt`; provide inspectable structured traces.
 5. **Build the manager kernel.** Add manifests, snapshots, content store,
-   planner, scheduler, cache, artifact store, and structured event/report path.
+   planner, scheduler, cache, artifact store, post-plan finalization coordinator,
+   build catalog, and the complete structured event/reduction path through
+   `OperationCompleted` as finalization-set closure.
 6. **Install product commands and micro-interactions.** Route `fmt`, `build`,
    `add`, and `remove`; finish color, progress, non-TTY behavior, diagnostics,
    help, and corrective suggestions.

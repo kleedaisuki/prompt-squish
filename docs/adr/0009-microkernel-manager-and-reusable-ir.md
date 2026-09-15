@@ -64,6 +64,9 @@ budgets remain the semantic contract.
    lock state as one recoverable logical transaction.
 6. Builds are mathematical action graphs. Content-derived action keys make
    caching a property of declared inputs rather than an executor side effect.
+   Real pre-graph work uses a planning lifecycle; terminal evidence persistence
+   uses a post-plan finalization lifecycle. Neither is represented by fake or
+   dynamically appended actions.
 7. Immutable blobs live in a content-addressed store (CAS). SQLite in WAL mode
    stores transactional indexes, action results, leases, and garbage-collection
    metadata; it is not the semantic source of truth for blob identity.
@@ -151,7 +154,7 @@ they are private implementation crates unless separately declared public.
 | Crate/context | Owns | Forbidden knowledge |
 | --- | --- | --- |
 | `squish-kernel` | bootstrap contracts, command/result envelope, lifecycle | XML, TOML, SQLite schemas, ANSI |
-| `squish-manager` | unified `fmt`/`build`/`add`/`remove`/`inspect` use cases and the `Manager` implementation | concrete terminal rendering, XML parser internals |
+| `squish-manager` | unified `fmt`/`build`/`add`/`remove`/`inspect` use cases, planning-attempt control, post-plan finalization, and the `Manager` implementation | concrete terminal rendering, XML parser internals |
 | `squish-project` | manifests, workspaces, targets, profiles, typed edits | XML operations, cache layout |
 | `squish-resolver` | requirements, exact package graph, lock model | DSL syntax, terminal output |
 | `squish-source` | canonical `SourceIdentity` validation, `SourceRef` resolution, source envelopes and snapshots | wire event schemas, macros, artifact publication |
@@ -334,10 +337,16 @@ Two immutable records bridge authoritative intent and derived execution state:
 `BuildInputSnapshot` records the exact manifest/lock revisions, complete source
 envelopes (logical identity, exact bytes, encoding/BOM facts, content digest and
 load outcome), remote package blobs, and options observed by one invocation;
-`BuildRecord` records the snapshot digest, materialized action keys, result
-digests, diagnostics/trace references, publication generations, and final
-outcome. The lock answers *which package resolution*; the input snapshot answers
-*which bytes this build observed*; the build record answers *what happened*.
+`BuildRecordV2` records the snapshot and plan digests, materialized action keys,
+every terminal action fact (including failed, blocked, and cancelled actions),
+result digests, diagnostics/trace references, publication generations, and the
+execution outcome observed before catalog persistence. It is constructed only
+after the final plan closes, so it is not an action output of that plan. The
+separate finalization event records whether catalog persistence itself
+succeeded; putting that self-referential fact inside the record would make its
+identity circular. The lock answers *which package resolution*; the input
+snapshot answers *which bytes this build observed*; the build record answers
+*what happened*.
 
 `xmlsquish.toml` declares package identity, workspace membership, targets,
 exports, dependency requirements and sources, build/format profiles, frontend
@@ -350,7 +359,7 @@ content digest, transitive edges, resolver version/policy, and relevant source
 metadata. Path dependencies record their locator and declared manifest/package
 identity, not a content snapshot: they remain deliberately mutable. Exact
 content digests for path packages belong to the per-invocation
-`BuildInputSnapshot` and durable `BuildRecord`, never the resolution lock.
+`BuildInputSnapshot` and durable `BuildRecordV2`, never the resolution lock.
 Registry archives and Git dependencies require an immutable content digest or
 commit identity.
 
@@ -552,6 +561,10 @@ Job(request)
   |                    +-----------------+-----------------+
   |                    |                                   |
   |              PlanClosed(executed/reported)       PlanClosed(superseded)
+  |                    |                                   |
+  |              Finalization                              |
+  |                    |                                   |
+  |             OperationCompleted                         |
   |                                                        |
   +------------------------------------------------ PlanningAttempt(a2)
 ```
@@ -593,6 +606,33 @@ the requested decoding/query work. Pure planning computations may use a
 separate memo table, but they do not acquire action keys or appear as cache hits
 in the execution plan.
 
+A final, non-DAG **finalization** phase follows the final non-superseded plan.
+It consumes the now-immutable plan inspection, terminal action facts,
+publication generations, diagnostics, and provisional outcome. The first
+finalizer is `PersistBuildCatalog`, which writes `BuildRecordV2` even when
+execution failed or was cancelled. It cannot be a normal action: before the
+other actions terminate its complete inputs do not exist, and adding it after
+`PlanReady` would reopen the graph. It also cannot remain a silent call after
+`PlanClosed`, because then its latency, failure, cancellation boundary, and
+catalog commit would be absent from the event reduction.
+
+```text
+FinalizationInput {
+    job,
+    terminal_source: FinalPlan(PlanInspection) | PrePlan(PlanningTerminal),
+    planning_issues,
+    action_facts,              // sorted, terminal, empty for PrePlan
+    publication_generations,
+    provisional_root_failures,
+    cancellation_requested,
+}
+```
+
+`FinalizationInput` is immutable. `provisional_root_failures` excludes
+finalization failures, which the kernel adds from terminal finalization events.
+For `FinalPlan`, every action in `PlanInspection` occurs exactly once in
+`action_facts`; no running/pending state is representable.
+
 Two identities must not be conflated:
 
 ```text
@@ -600,6 +640,7 @@ PlanId     = invocation-scoped identity (job, monotonically increasing attempt)
 PlanDigest = H(request identity, resolved graph, snapshot digest,
                canonical planning issues, canonical closed execution DAG)
 Action identity = (PlanId, ActionId)
+Finalization identity = (JobId, FinalizationId)
 ```
 
 `PlanId` remains unique when an identical candidate is planned twice;
@@ -613,11 +654,12 @@ any action.
 
 #### Protocol lifecycle
 
-The next protocol major version introduces `PlanningAttemptId`,
+Protocol version 2 introduces `PlanningAttemptId`,
 `PlanningStepId`, `PlanningIssueId`, `PlanScopeId`, `PlanId`, `PlanDigest`,
-`PlanMode { Execute, ReportOnly }`, and the following event families. Every
-plan-scoped action event carries both `job` and `plan`. The normative payload
-shapes are:
+`PlanMode { Execute, ReportOnly }`, `FinalizationId`, and the non-exhaustive
+`FinalizationKind` (initially `PersistBuildCatalog`). Every plan-scoped action
+event carries both `job` and `plan`. Finalization is job-scoped rather than an
+action in the final plan. The normative payload shapes are:
 
 ```text
 PlanningStarted       { job, attempt }
@@ -633,7 +675,15 @@ ActionDeclared        { job, plan, action, kind, dependencies }
 ActionStarted/...     { job, plan, action, ... }
 ActionSuperseded      { job, plan, action, timing, reason }
 PlanClosed            { job, plan, reason }
+FinalizationStarted   { job, id, kind }
+FinalizationSucceeded { job, id, timing }
+FinalizationFailed    { job, id, timing, diagnostic }
 ```
+
+There is deliberately no `FinalizationClosed` event. The kernel-generated
+`OperationCompleted` transition closes the set after validating required kinds
+and terminal states; jobs allowed to have no finalizer need no synthetic zero
+event.
 
 `SupersedeReason` initially has only `AuthoritativeRevisionChanged`; it is not
 a free-form diagnostic code. `PlanCloseReason` is the closed enum `Executed`,
@@ -647,12 +697,15 @@ diagnostic may explain an event but never substitutes for its state transition.
 | `PlanningStepStarted { job, attempt, step, kind }` | Starts real manager work. `kind` is a non-exhaustive typed value including `Recover`, `Locate`, `Resolve`, `Fetch`, `ReconcileLock`, `Snapshot`, `Scan`, `ValidatePlan`, and `PrepareCandidate`. Parallel fetches use distinct step IDs. |
 | `PlanningStepSucceeded/Failed/Cancelled { ..., timing }` | Terminates that step exactly once. A failed step carries a diagnostic. Cancellation is not encoded as failure. |
 | `PlanningIssue { job, attempt, issue, affected, diagnostic }` | Records a target/source-scoped error that does not prevent sealing independent subgraphs. The canonical issue is included in `PlanDigest`; no synthetic failing action is created. |
-| `PlanningFailed` / `PlanningCancelled` | Terminates an attempt and the job path without a plan, unless this follows a superseded plan and the retry controller starts another attempt. |
+| `PlanningFailed` / `PlanningCancelled` | Terminates an attempt without a plan and establishes the job's pre-plan terminal source, unless this follows a superseded plan and the retry controller starts another attempt. Finalization still closes before operation completion. |
 | `PlanReady { job, attempt, plan, digest, mode, actions, issues }` | Atomically seals one complete plan. It occurs exactly once for a `PlanId`, not once for the entire job. All planning steps in the attempt are terminal. |
 | `ActionDeclared { job, plan, action, kind, dependencies }` | Declares one vertex of the sealed DAG. Exactly `actions` unique vertices are declared before execution starts. This replaces the misleading `ActionQueued` name. |
 | existing action lifecycle events | Add `plan`; their state transitions are otherwise unchanged. An action can start only in an `Execute` plan after every vertex has been declared. |
 | `ActionSuperseded { job, plan, action, timing }` | Terminates work discarded solely because an optimistic authoritative-revision check failed before the commit decision. It is neither failure nor user cancellation. |
 | `PlanClosed { job, plan, reason }` | `reason` is `Executed`, `Reported`, or `Superseded`. `Executed` requires every action terminal; `Reported` requires `ReportOnly` and no action start; `Superseded` requires that no authoritative commit decision was made. |
+| `FinalizationStarted { job, id, kind }` | Starts one selected post-plan finalizer. It is legal only after a final `Executed`/`Reported` plan. IDs are unique within the job. |
+| `FinalizationSucceeded { job, id, timing }` | Terminates the finalizer successfully. Any durable catalog artifact is returned in the later typed `BuildResult`, avoiding duplication in the lifecycle event. |
+| `FinalizationFailed { job, id, timing, diagnostic }` | Terminates the finalizer unsuccessfully. It is a root failure, never an action failure and never a reason to reopen the plan. |
 
 The reducer enforces these state machines (arrows not shown are invalid):
 
@@ -668,10 +721,11 @@ Plan(ReportOnly):
 
 Job:
   New -> Planning(attempt)
-  Planning -> Plan(active) | Terminal(Failed) | Terminal(Cancelled)
-  Plan -> Terminal(Completed)                         [Executed/Reported]
+  Planning -> Plan(active) | PrePlanTerminal(Failed/Cancelled)
+  Plan -> Finalizing                                 [after Closed(Executed/Reported)]
   Plan -> Planning(next attempt)                     [Superseded only]
-  Terminal -> OperationCompleted -> JobFinished
+  PrePlanTerminal -> OperationCompleted             [no final plan/finalizer]
+  Finalizing -> OperationCompleted -> JobFinished
 ```
 
 `ActionDeclared` moves `Sealed/Declaring` toward `Declared`; the declared-count
@@ -681,7 +735,12 @@ match closes that sub-state. In an executable plan an action transitions
 atomically closes any remaining declared but unstarted vertices as superseded;
 the running action that detected revision drift first emits
 `ActionSuperseded`. No attempt ID, plan ID, step ID, action ID, or issue ID may
-be reused within its documented scope.
+be reused within its documented scope. Finalization has the deliberately small
+state machine `Started -> Succeeded | Failed`. `OperationCompleted` is the
+finalization-set closure: it is invalid while any started finalizer is
+nonterminal or while the operation/result contract requires a finalizer that
+is absent. Finalizers are not actions, have no dependency edges or cache keys,
+and cannot alter the sealed plan or its action totals.
 
 Detailed byte/download progress remains a replaceable presentation event; step
 start and terminal events, issues, plan seals, action declarations, recovery,
@@ -695,32 +754,53 @@ decoder remains supported during the compatibility window by mapping its sole
 `PlanReady`/`ActionQueued` stream to one executable legacy plan. Version-2
 events are never serialized under a version-1 envelope, and a version-1 output
 projection exposes only the final plan rather than emitting a stream that old
-reducers would reject.
+reducers would reject. That projection also withholds its legacy terminal event
+until v2 finalization closes; a finalizer failure becomes its ordinary
+diagnostic plus unavailable final result. It never reports completion before
+the catalog transaction merely because v1 lacks finalization event variants.
 
 #### Kernel and manager responsibilities
 
 The kernel reducer changes from one `planned/actions` slot to a job record with
-`active_attempt`, `plans: PlanId -> PlanRecord`, and `final_plan`. It validates
-step closure, unique IDs, declared plan counts, nonempty plan-digest identity,
-plan-scoped action transitions, and the single-active-attempt rule. It does not
-recompute the domain digest from a lossy event projection; the build planner
-owns canonical `PlanDigest` computation and verifies it against the complete
-`PreparedPlan`. A normal successful or failed
-job has exactly one final `Executed` or `Reported` plan; a pre-plan failure or
-cancellation has none; any earlier plan must be `Superseded`. `OperationCompleted`
-still occurs exactly once and only after the final planning/plan state is
-closed.
+`active_attempt`, `plans: PlanId -> PlanRecord`, `final_plan`,
+and `finalizations: FinalizationId -> FinalizationRecord`. It validates step
+closure, unique IDs, declared plan counts, nonempty plan-digest identity,
+plan-scoped action transitions, the single-active-attempt rule, and finalizer
+closure at `OperationCompleted`. It does not recompute the
+domain digest from a lossy event projection; the build planner owns canonical
+`PlanDigest` computation and verifies it against the complete `PreparedPlan`.
+A normal successful or failed job has exactly one final `Executed` or
+`Reported` plan; a pre-plan failure or cancellation has none; any earlier plan
+must be `Superseded`.
+
+The kernel binds the requested `OperationKind` into the lifecycle at dispatch.
+Under the initial policy, an executable `Build` plan requires exactly one
+terminal `PersistBuildCatalog` finalizer. A pre-plan build failure and non-build
+operation may have no finalizer; `BuildRecordV2` requires a final plan and the
+manager must not invent one. `ReportOnly` build has no catalog finalizer because
+dry-run performs no write. `OperationCompleted` occurs exactly once, closes the
+finalization set, and rejects an active/nonterminal finalizer or a missing
+required executable-build catalog finalizer.
 
 The kernel reduces action totals from the final non-superseded plan only.
 `root_failures` is the number of final-plan planning issues plus independent
-failed actions, or one for a fatal final planning failure. Superseded attempts
-do not make the job fail and are reported separately as an attempt count.
-Cancelled planning or actions set cancellation without manufacturing a failed
-action. Consequently a pre-plan failure legitimately has zero action totals
-and an unavailable domain result; kernel exit status is based on reduced root
-failures and cancellation, not on `ActionTotals.failed` alone. `PlanClosed`
-closes declared-but-unstarted vertices in `ReportOnly`/`Superseded` plans, so
-the kernel no longer requires fake terminal action events for them.
+failed actions, or one for a fatal final planning failure, plus one for each
+failed required finalizer. Superseded attempts do not make the job fail and are
+reported separately as an attempt count. Cancelled planning or actions set
+cancellation without manufacturing a failed action. Consequently a pre-plan
+failure legitimately has zero action totals, and a catalog-finalization failure
+preserves those action totals but increments `root_failures`. Kernel exit status
+is based on reduced root failures and cancellation, not on
+`ActionTotals.failed` alone. `PlanClosed` closes declared-but-unstarted vertices
+in `ReportOnly`/`Superseded` plans, so the kernel no longer requires fake
+terminal action events for them.
+
+A failed `PersistBuildCatalog` makes the typed domain result `Unavailable` even
+if some target artifacts were already published; those publications remain
+truthfully visible in prior events and recoverable state. A successful
+finalizer may return `OperationResult::Build` containing its record artifact
+even when plan actions failed or were cancelled. Cancellation remains an
+orthogonal flag and retains its documented exit-status precedence.
 
 The manager owns the attempt loop. A `PlanningContext` supplies the job and
 attempt IDs, cooperative cancellation token, typed step observer, and issue
@@ -731,6 +811,27 @@ events directly. The manager wraps each port call in a planning step, freezes
 its returned evidence, validates the complete DAG, emits `PlanReady`, and only
 then constructs the scheduler. The generic scheduler never invokes a planner
 and has no API for adding a vertex.
+
+After `orchestrator::run` emits `PlanClosed` and returns its immutable
+`ExecutionReport`, the manager freezes a `FinalizationInput` containing plan
+inspection, sorted terminal action facts, planning issues, publication
+generations, diagnostics, and provisional cancellation/failure state. The
+sequential `orchestrator::finalize` coordinator emits
+`FinalizationStarted`, invokes one typed finalization closure, and emits exactly
+one matching success/failure event; it is not the scheduler and cannot call
+`BuildPlan::new`, look up an action cache key, publish an action transition, or
+change the report. `PersistBuildCatalog` canonically encodes `BuildRecordV2`,
+puts the immutable bytes in CAS, and advances the recoverable catalog
+generation. Its returned artifact appears in the final `BuildResult`;
+`FinalizationSucceeded` records lifecycle/timing without duplicating the
+artifact payload.
+
+The coordinator returns `Result<T, FinalizationFailure>` and never edits
+`ExecutionReport`. The manager constructs `OperationOutcome` with action totals
+copied unchanged from `ExecutionReport`, `root_failures =
+provisional_root_failures + finalization_failure_count`, and the original
+cancellation flag. It returns the typed build result only when the required
+catalog artifact is present; otherwise it returns `Unavailable`.
 
 Cancellation is checked before and after each filesystem operation, between
 bounded scan units, while waiting for coordination, and through abortable or
@@ -749,6 +850,29 @@ repository transaction and then re-snapshots that committed generation before
 `Snapshot`/`Scan`. For `ReportOnly`, it validates and carries the candidate lock
 in the planning evidence but performs no authoritative write; the reported plan
 is conditional on the observed revision set and says so in machine output.
+
+Required finalization is cleanup, not new domain work, so an already-requested
+cooperative cancellation does not skip `PersistBuildCatalog`; the cancellation
+state is instead recorded in `BuildRecordV2`. A required finalizer does not use
+the cooperative token as an abort condition; it runs to a terminal event and
+reports ordinary I/O failure as `FinalizationFailed`. In particular, after the
+catalog transaction writes its durable commit decision, cooperative
+cancellation is deferred until the
+catalog generation is committed or recovery has restored a coherent prior/new
+generation. A second, immediate termination may still kill the process; the
+next invocation completes journal recovery before planning. The finalizer must
+emit the recovered/committed fact and its terminal event before
+`OperationCompleted`.
+
+Presentation treats finalization as a first-class post-plan phase. Human mode
+may render `Persisting build catalog`/`Recorded build catalog` as one bounded
+status line, but must show a finalization diagnostic even after earlier action
+failures. NDJSON emits every finalization start/terminal event in sequence
+and includes the returned record artifact; it never emits `OperationCompleted`
+or the final summary first. Progress repaint is replaceable, while catalog
+commit, recovery, and finalization terminal facts are lossless. A cancelled job
+continues to display `Cancelling` while mandatory catalog persistence finishes,
+so users are not falsely told the process is hung or already complete.
 
 The source import graph may contain strongly connected components. Scan interns
 a `SourceId` before traversal; compile actions are per source; link processes
@@ -787,7 +911,8 @@ of it.
 The content-addressed store holds immutable source snapshots, dependency
 archives, `.xsir` containers, persistable `StaticLinkMap` and non-executable
 `LinkedImage` metadata, `LinkedDocumentIR` artifacts where profitable,
-backend products awaiting publication, and `.psdbg` components. A blob key is
+backend products awaiting publication, `.psdbg` components, and immutable
+`BuildRecordV2` bytes awaiting catalog-generation publication. A blob key is
 `algorithm:digest(bytes)`. Writes use a temporary file, streaming digest and
 length verification, durable close, and atomic placement. Concurrent insertion
 of identical content converges on one blob. Blob bytes are never modified in
@@ -859,6 +984,14 @@ content references would make hashing circular. A separately committed
 digests for bidirectional discovery. A portable debug export is self-contained;
 ordinary CAS references may supplement but never replace the information
 needed to debug the published product.
+
+Target `Publish` actions advance target generations during the sealed plan.
+The build-catalog generation is different: `PersistBuildCatalog` advances it
+only in finalization, after the terminal states of every target action are
+known. A failed or cancelled target retains its prior good target generation in
+the new catalog while the record still reports that target's current action
+failure/cancellation. Catalog publication is recoverable and atomic, but it is
+not retroactively attributed to any `Publish` action.
 
 Publication first reserves every destination globally and rejects cross-target,
 source, and manifest collisions before executable target actions start. Each
@@ -1005,11 +1138,22 @@ silently reported as wholly complete.
     active in a job. Each `PlanId` is sealed once; re-planning creates a new
     ID, while `PlanDigest` alone denotes content equivalence.
 21. **Cancellation and commit coherence.** Every planning and execution wait
-    observes cooperative cancellation. A durable commit decision is completed
-    or recovered to coherence before cancellation becomes terminal; cancellation
-    never manufactures failure work or deletes the last committed generation.
+    observes cooperative cancellation. A durable project, artifact, or catalog
+    commit decision is completed or recovered to coherence before cancellation
+    becomes terminal; cancellation never manufactures failure work or deletes
+    the last committed generation.
 22. **Honest dry-run.** `ReportOnly` plans declare the exact graph and candidate
     effects but start no actions and publish no authoritative bytes.
+23. **Post-plan evidence.** `BuildRecordV2` is produced only from a closed final
+    plan and its complete terminal facts. It is never a plan action and never
+    requires reopening or appending to the DAG.
+24. **Observable finalization.** Every selected finalizer has one typed start
+    and terminal event. `OperationCompleted` closes the finalization set only
+    after required finalizers are present and all started finalizers are
+    terminal. Silent catalog persistence is forbidden.
+25. **Finalization failure is real failure.** A required finalizer failure adds
+    one root failure and makes the domain result unavailable without erasing
+    already-observed action totals, diagnostics, or publications.
 
 ## Implementation topology
 
@@ -1037,6 +1181,7 @@ T1  protocol/diagnostic IDs + four IR schemas + wire/container specification
          +--> P2 resolver + exact lock + transaction/recovery
 
 T6 + P2 --> P3 planning lifecycle + action algebra + closed planner + scheduler
+              + post-plan finalization protocol
 T2 + P3 --> P4 concrete CAS/SQLite and artifact transaction adapters
 
 T3 + T6 + P4 --> K1 microkernel/manager composition with all commands wired
@@ -1164,6 +1309,25 @@ conflict without mutating the old graph or asking the user to repair manager
 state. One seal per `PlanId`, with sequential plans inside one job, preserves
 both immutability and recovery. The common path still has exactly one plan.
 
+### Persist `BuildRecordV2` as the last DAG action
+
+Rejected. The record contains the terminal states of failed, blocked, and
+cancelled actions, including actions that would be peers or predecessors of
+that proposed node. A normal dependency edge would block the record precisely
+when it is most valuable, while a special “run after failure” edge would give
+the DAG a second, incompatible readiness algebra. Adding the node after
+execution would mutate the sealed plan. Post-plan finalization is the normal
+case rather than any of these exceptions.
+
+### Persist the build catalog silently after `PlanClosed`
+
+Rejected. Catalog encoding, CAS insertion, generation publication, recovery,
+and failure affect latency, durable state, the typed result, and exit status.
+An unobservable call would let `OperationCompleted` disagree with durable
+reality and make cancellation appear complete while a commit is still active.
+Typed finalization events keep the lifecycle reducible without impersonating
+actions.
+
 ### Make the import graph the scheduler graph
 
 Rejected. Import cycles are legal and source modules do not necessarily produce
@@ -1218,6 +1382,27 @@ Implementation of this accepted decision is complete only when evidence demonstr
   totals, `ReportOnly` plans with no action start, rejection of an action before
   complete declaration, and two immutable plans separated by a superseding
   revision conflict;
+- success, independent action failure, dependency blocking, and cooperative
+  cancellation traces all order `PlanClosed` ->
+  `FinalizationStarted(PersistBuildCatalog)` -> `FinalizationSucceeded` ->
+  `OperationCompleted`, and
+  their decoded `BuildRecordV2` contains exactly the final plan's sorted
+  terminal action facts and provisional outcome;
+- lifecycle negative tests reject finalization before a final plan/pre-plan
+  terminal path, duplicate `FinalizationId`, a nonterminal finalizer at
+  `OperationCompleted`, and a build executable plan that omits
+  `PersistBuildCatalog`;
+- injected catalog encode/CAS/publication failures emit
+  `FinalizationFailed`, preserve the action totals/publication events, add one
+  root failure, leave the prior catalog generation coherent, and return an
+  unavailable build result;
+- cancellation requested during failed/cancelled-plan finalization does not
+  skip the required record; injection before and after the catalog durable
+  commit decision proves that the event stream reports either a coherent prior
+  generation or the recovered/committed new generation before completion;
+- `ReportOnly` build, non-build operations, and initial pre-plan build failure
+  reach `OperationCompleted` with no finalization events and perform no catalog
+  write;
 - cancellation injection at every planning wait and transaction durable point
   either stops before mutation or completes/recoverably records the commit; it
   never leaves a half-written authoritative manifest/lock generation;
