@@ -596,7 +596,13 @@ fn build_warms_cache_and_publishes_all_selected_artifact_kinds() {
         "{}",
         String::from_utf8_lossy(&warm.stderr)
     );
-    assert!(String::from_utf8_lossy(&warm.stderr).contains("Cached"));
+    let warm_stderr = String::from_utf8(warm.stderr).unwrap();
+    assert!(warm_stderr.lines().any(|line| {
+        line.starts_with("Completed:")
+            && line.contains("5 succeeded")
+            && line.contains("0 failed")
+            && line.contains("4 cached")
+    }));
 }
 
 #[test]
