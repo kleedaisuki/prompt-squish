@@ -755,6 +755,7 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
     }
 
     fn update_action_progress(&mut self, job: &JobId, plan: &PlanId) -> io::Result<()> {
+        let detail = self.detail();
         let Some(view) = self.jobs.get(job).and_then(|job| job.plans.get(plan)) else {
             return Ok(());
         };
@@ -777,8 +778,16 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
         }
         let message = match running.as_slice() {
             [] => "Waiting for runnable actions".to_owned(),
-            [(_, view)] => action_kind_name(view.kind).to_owned(),
-            [(_, _), ..] => format!("Running {} actions", running.len()),
+            [(action, view)] => format!(
+                "{}{}",
+                action_kind_name(view.kind),
+                detail.identity(action.as_str())
+            ),
+            [(action, _), ..] => format!(
+                "Running {} actions{}",
+                running.len(),
+                detail.identity(action.as_str())
+            ),
         };
         self.begin_progress(message, Some(completed), Some(total))
     }
@@ -1110,12 +1119,21 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                         detail.context(job)
                     ))?;
                 }
-                self.begin_progress(format!("Planning {job}"), None, None)?;
+                self.begin_progress(
+                    format!("Planning{}", self.detail().context(job)),
+                    None,
+                    None,
+                )?;
             }
             EventPayload::PlanningStepStarted {
                 job, step, kind, ..
             } => {
-                if !self.dynamic && self.options.verbosity != Verbosity::Quiet {
+                if !self.dynamic
+                    && matches!(
+                        self.options.verbosity,
+                        Verbosity::Verbose | Verbosity::Trace
+                    )
+                {
                     let detail = self.detail();
                     self.write_persistent(&format!(
                         "{} {}{}{}",
@@ -1125,7 +1143,15 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                         detail.context(job)
                     ))?;
                 }
-                self.begin_progress(format!("{} {}", planning_step_name(*kind), job), None, None)?;
+                self.begin_progress(
+                    format!(
+                        "{}{}",
+                        planning_step_name(*kind),
+                        self.detail().context(job)
+                    ),
+                    None,
+                    None,
+                )?;
             }
             EventPayload::PlanningStepSucceeded {
                 job, step, timing, ..
@@ -1939,9 +1965,32 @@ fn cache_name(cache: CacheKind) -> &'static str {
 fn product_artifact_uri(uri: &str) -> String {
     if uri.starts_with("cas://") {
         "content-addressed cache".to_owned()
+    } else if let Some(logical) = published_artifact_path(uri) {
+        sanitize(&logical)
     } else {
         sanitize(uri)
     }
+}
+
+/// 仅识别发布器拥有的 generation 布局并返回 `artifacts/` 后的逻辑路径。 / Recognizes
+/// only the publisher-owned generation layout and returns the logical path after `artifacts/`.
+fn published_artifact_path(uri: &str) -> Option<String> {
+    let parts = uri.split(['/', '\\']).collect::<Vec<_>>();
+    let marker = parts.windows(5).position(|window| {
+        window[0] == ".squish-publish"
+            && window[1] == "generations"
+            && is_hex_64(window[2])
+            && is_hex_64(window[3])
+            && window[4] == "artifacts"
+    })?;
+    let logical = &parts[marker + 5..];
+    (!logical.is_empty()).then(|| logical.join("/"))
+}
+
+/// 判断一个路径段是否恰为内部 generation 身份。 / Reports whether one path component is
+/// exactly an internal generation identity.
+fn is_hex_64(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 fn operation_kind_name(kind: squish_protocol::OperationKind) -> &'static str {
     match kind {
@@ -2540,6 +2589,51 @@ mod tests {
                 "sha256:0707070707070707070707070707070707070707070707070707070707070707"
             )
         );
+    }
+
+    #[test]
+    fn published_generation_uri_projects_only_the_owned_internal_shape() {
+        let generation = "a".repeat(64);
+        let target = "b".repeat(64);
+        let unix = format!(
+            "/workspace/.squish-publish/generations/{generation}/{target}/artifacts/target/xmlsquish/prompt.prompt"
+        );
+        let windows = format!(
+            r"C:\workspace\.squish-publish\generations\{generation}\{target}\artifacts\target\xmlsquish\prompt.prompt"
+        );
+        assert_eq!(
+            product_artifact_uri(&unix),
+            "target/xmlsquish/prompt.prompt"
+        );
+        assert_eq!(
+            product_artifact_uri(&windows),
+            "target/xmlsquish/prompt.prompt"
+        );
+
+        let near_miss =
+            format!("/workspace/generations/{generation}/{target}/artifacts/target/prompt.prompt");
+        assert_eq!(product_artifact_uri(&near_miss), near_miss);
+
+        let event = event(
+            0,
+            EventPayload::ActionSucceeded {
+                job: id::<JobId>("job-internal"),
+                plan: id::<PlanId>("plan-internal"),
+                action: id::<ActionId>("action-internal"),
+                timing: Timing { elapsed_ms: 3 },
+                artifacts: vec![artifact("artifact-internal", &unix)],
+            },
+        );
+        let normal = render_with_verbosity(std::slice::from_ref(&event), Verbosity::Normal);
+        assert!(normal.contains("Produced binary-ir target/xmlsquish/prompt.prompt (42 bytes)"));
+        assert!(!normal.contains(&generation));
+        assert!(!normal.contains(&target));
+
+        let verbose = render_with_verbosity(std::slice::from_ref(&event), Verbosity::Verbose);
+        assert!(verbose.contains("target/xmlsquish/prompt.prompt (42 bytes, sha256:070707070707)"));
+        assert!(!verbose.contains(&generation));
+        let trace = render_with_verbosity(&[event], Verbosity::Trace);
+        assert!(trace.contains(&unix));
     }
 
     #[test]
