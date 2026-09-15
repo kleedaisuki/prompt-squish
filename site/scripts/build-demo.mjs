@@ -125,7 +125,7 @@ try {
       { label: "final", value: 1, unit: "prompt", file: "agent.prompt" },
     ],
     files: sources, scenarios,
-    diagnostic: '{"version":{"major":2,"minor":0},"sequence":0,"payload":{"type":"planning_started"}}\n{"version":{"major":2,"minor":0},"sequence":1,"payload":{"type":"action_succeeded","data":{"kind":"compile","cache":"persistent"}}}\n{"version":{"major":2,"minor":0},"sequence":2,"payload":{"type":"job_finished","data":{"status":"success"}}}',
+    diagnostic: '{"version":{"major":2,"minor":1},"sequence":0,"payload":{"type":"planning_started"}}\n{"version":{"major":2,"minor":1},"sequence":1,"payload":{"type":"action_succeeded","data":{"kind":"compile","cache":"persistent"}}}\n{"version":{"major":2,"minor":1},"sequence":2,"payload":{"type":"job_finished","data":{"status":"success"}}}',
   };
   const generated = `${JSON.stringify(data, null, 2)}\n`;
   if (check) assert.equal(lf(await readFile(artifact, "utf8")), generated, "Site demo drifted. Run npm --prefix site run demo:generate.");
