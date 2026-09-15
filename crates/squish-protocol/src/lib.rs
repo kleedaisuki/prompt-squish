@@ -634,6 +634,27 @@ impl Digest {
         out
     }
 }
+
+/// 快照、问题与封闭 DAG 的规范语义摘要。 / Canonical semantic digest of the snapshot, issues, and closed DAG.
+///
+/// 独立新类型防止将产物或源内容摘要误用为计划身份。 /
+/// The distinct newtype prevents artifact or source-content digests from being
+/// accidentally substituted for a plan identity.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct PlanDigest(Digest);
+impl PlanDigest {
+    /// 从已验证的规范摘要创建计划身份。 / Creates a plan identity from an already validated canonical digest.
+    pub const fn new(digest: Digest) -> Self {
+        Self(digest)
+    }
+
+    /// 返回底层规范摘要。 / Returns the underlying canonical digest.
+    pub const fn digest(&self) -> &Digest {
+        &self.0
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 struct DigestWire {
     algorithm: DigestAlgorithm,
@@ -774,11 +795,11 @@ pub struct JobSummary {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionKind {
-    /// 依赖解析。 / Dependency resolution.
+    /// 仅解码 v1 的旧依赖解析占位动作；v2 计划必须使用 [`PlanningStepKind::Resolve`]。 / Legacy v1 dependency-resolution placeholder for decoding only; v2 plans must use [`PlanningStepKind::Resolve`].
     Resolve,
-    /// 输入快照。 / Input snapshot.
+    /// 仅解码 v1 的旧快照占位动作；v2 计划必须使用 [`PlanningStepKind::Snapshot`]。 / Legacy v1 snapshot placeholder for decoding only; v2 plans must use [`PlanningStepKind::Snapshot`].
     Snapshot,
-    /// 源码扫描。 / Source scan.
+    /// 仅解码 v1 的旧扫描占位动作；v2 计划必须使用 [`PlanningStepKind::Scan`]。 / Legacy v1 scan placeholder for decoding only; v2 plans must use [`PlanningStepKind::Scan`].
     Scan,
     /// 前端编译。 / Frontend compilation.
     Compile,
@@ -792,7 +813,9 @@ pub enum ActionKind {
     Publish,
     /// 源码格式化。 / Source formatting.
     Format,
-    /// 解析候选求值。 / Resolution candidate evaluation.
+    /// 执行非缓存的查询读取，包括 CAS/文件读取、摘要计算及 IR 或 psdbg 验证。 / Perform a non-cacheable inspection read, including CAS/file reads, hashing, and IR or psdbg validation.
+    Inspect,
+    /// 仅解码 v1 的旧候选求值占位动作；v2 计划必须使用 [`PlanningStepKind::PrepareCandidate`]。 / Legacy v1 candidate-evaluation placeholder for decoding only; v2 plans must use [`PlanningStepKind::PrepareCandidate`].
     ResolveCandidate,
     /// 项目事务提交。 / Project transaction commit.
     CommitTransaction,
@@ -1450,6 +1473,8 @@ pub enum EventValidationError {
     LegacyProjection,
     /// 原生 v2 缓存命中缺少完整动作键。 / A native v2 cache hit lacks its complete action key.
     MissingActionKey,
+    /// v2 计划将解析、快照或扫描伪造为执行动作。 / A v2 plan represents resolve, snapshot, or scan work as a fake execution action.
+    PlanningWorkDeclaredAsAction,
 }
 impl fmt::Display for EventValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1460,6 +1485,9 @@ impl fmt::Display for EventValidationError {
                 f.write_str("legacy v1 inspection projection is not a native v2 event")
             }
             Self::MissingActionKey => f.write_str("native v2 cache hit requires an action key"),
+            Self::PlanningWorkDeclaredAsAction => {
+                f.write_str("planning work must not be declared as a v2 execution action")
+            }
         }
     }
 }
@@ -1579,6 +1607,9 @@ fn validate_payload(payload: &EventPayload) -> Result<(), EventValidationError> 
         EventPayload::CacheHit {
             action_key: None, ..
         } => Err(EventValidationError::MissingActionKey),
+        EventPayload::ActionDeclared { kind, .. } if !is_v2_executable_action(*kind) => {
+            Err(EventValidationError::PlanningWorkDeclaredAsAction)
+        }
         EventPayload::ActionDeclared {
             action,
             dependencies,
@@ -1590,6 +1621,20 @@ fn validate_payload(payload: &EventPayload) -> Result<(), EventValidationError> 
         EventPayload::PlanningIssue { affected, .. } => validate_ordered(affected),
         _ => Ok(()),
     }
+}
+
+fn is_v2_executable_action(kind: ActionKind) -> bool {
+    matches!(
+        kind,
+        ActionKind::Compile
+            | ActionKind::Link
+            | ActionKind::Instantiate
+            | ActionKind::Backend
+            | ActionKind::Publish
+            | ActionKind::Format
+            | ActionKind::Inspect
+            | ActionKind::CommitTransaction
+    )
 }
 
 fn validate_action_set(action: &ActionId, values: &[ActionId]) -> Result<(), EventValidationError> {
@@ -1632,7 +1677,14 @@ fn project_v1_event(value: &mut serde_json::Value, event_type: &str) -> Result<(
                 data.insert("plan".into(), serde_json::Value::String(plan));
                 data.insert(
                     "digest".into(),
-                    serde_json::Value::String(format!("legacy-v1:{invocation}:{job}")),
+                    serde_json::to_value(PlanDigest::new(
+                        Digest::new(
+                            DigestAlgorithm::Other("legacy-v1-projection".into()),
+                            format!("{invocation}\0{job}").into_bytes(),
+                        )
+                        .expect("legacy projection identity is non-empty"),
+                    ))
+                    .expect("plan digest serialization cannot fail"),
                 );
                 data.insert("mode".into(), serde_json::Value::String("legacy".into()));
                 data.insert("issues".into(), serde_json::Value::from(0));
@@ -1681,7 +1733,7 @@ mod tests {
                 job: JobId::new("j").unwrap(),
                 attempt: PlanningAttemptId::new("attempt-1").unwrap(),
                 plan: PlanId::new("plan-1").unwrap(),
-                digest: PlanDigest::new("sha256:plan").unwrap(),
+                digest: PlanDigest::new(Digest::new(DigestAlgorithm::Sha256, vec![1; 32]).unwrap()),
                 mode: PlanMode::Execute,
                 actions: 2,
                 issues: 0,
@@ -1772,6 +1824,21 @@ mod tests {
             .validate(),
             Err(EventValidationError::NonCanonicalSet)
         );
+        let fake = Event::new(
+            InvocationId::new("i").unwrap(),
+            2,
+            EventPayload::ActionDeclared {
+                job: JobId::new("j").unwrap(),
+                plan: PlanId::new("p").unwrap(),
+                action: ActionId::new("resolve").unwrap(),
+                kind: ActionKind::Resolve,
+                dependencies: vec![],
+            },
+        );
+        assert_eq!(
+            fake.validate(),
+            Err(EventValidationError::PlanningWorkDeclaredAsAction)
+        );
     }
     #[test]
     fn report_only_plan_has_explicit_seal_declarations_and_reported_close() {
@@ -1785,7 +1852,7 @@ mod tests {
                 job: job.clone(),
                 attempt: PlanningAttemptId::new("a").unwrap(),
                 plan: plan.clone(),
-                digest: PlanDigest::new("blake3:canonical-plan").unwrap(),
+                digest: PlanDigest::new(Digest::new(DigestAlgorithm::Blake3, vec![2; 32]).unwrap()),
                 mode: PlanMode::ReportOnly,
                 actions: 1,
                 issues: 0,
@@ -1819,6 +1886,32 @@ mod tests {
                 DecodedEvent::Known(Box::new(event))
             );
         }
+    }
+    #[test]
+    fn inspect_is_a_truthful_native_read_effect_action() {
+        let event = Event::new(
+            InvocationId::new("invocation").unwrap(),
+            7,
+            EventPayload::ActionDeclared {
+                job: JobId::new("inspect-job").unwrap(),
+                plan: PlanId::new("inspect-plan").unwrap(),
+                action: ActionId::new("inspect.read-effect").unwrap(),
+                kind: ActionKind::Inspect,
+                dependencies: vec![],
+            },
+        );
+
+        assert!(event.validate().is_ok());
+        let bytes = event.encode_json().unwrap();
+        assert!(
+            std::str::from_utf8(&bytes)
+                .unwrap()
+                .contains(r#""kind":"inspect""#)
+        );
+        assert_eq!(
+            Event::decode_json(&bytes).unwrap(),
+            DecodedEvent::Known(Box::new(event))
+        );
     }
     #[test]
     fn inspect_result_matching_checks_view_and_identity() {
