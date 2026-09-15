@@ -265,17 +265,26 @@ fn execute(mut invocation: ParsedInvocation) -> Result<u8, Box<dyn std::error::E
     Ok(outcome.summary.status.code())
 }
 
-/// 用项目内互不重叠的持久责任组合生产服务。 / Composes production services with non-overlapping project-local responsibilities.
+/// 用互不重叠的持久责任组合生产服务。 / Composes production services with non-overlapping persistence responsibilities.
+///
+/// CAS 与内容键动作索引在多项目间共享，但 build catalog 记录的是项目相对
+/// locator，因而必须按规范项目身份分区。 / CAS and the content-keyed action index are
+/// shared across projects, while the build catalog contains project-relative locators and is
+/// therefore partitioned by canonical project identity.
 fn compose_host(
     root: std::path::PathBuf,
     config: &Config,
 ) -> Result<(ProductionHost, StorageLayout), Box<dyn std::error::Error>> {
     let state = &config.manager.storage_root;
+    let catalog = state
+        .join("catalog")
+        .join("projects")
+        .join(project_namespace(&root));
     let storage = StorageLayout::new(
         state.join("cas"),
         state.join("actions.sqlite3"),
         root.join("target/xmlsquish"),
-        state.join("catalog"),
+        catalog,
     )?;
     let filesystem = Arc::new(FilesystemHost::new(&root)?);
     let host = ProductionHost::open(HostConfig {
@@ -301,6 +310,32 @@ fn compose_host(
         filesystem,
     })?;
     Ok((host, storage))
+}
+
+/// 从规范项目路径派生稳定且不泄露路径的 catalog 命名空间。 /
+/// Derives a stable, path-opaque catalog namespace from the canonical project path.
+///
+/// 领域分隔防止未来将普通内容摘要误当作项目身份。路径已由项目发现层规范化；
+/// Unix 原始字节与 Windows UTF-16LE 令持久身份不依赖有损的 Unicode 转换。 /
+/// Domain separation prevents a regular content digest from being confused with a project
+/// identity. Project discovery has already canonicalized the path; Unix raw bytes and Windows
+/// UTF-16LE make the persistent identity independent of lossy Unicode conversion.
+fn project_namespace(root: &Path) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xmlsquish-project-catalog-v1\0");
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        hasher.update(root.as_os_str().as_bytes());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        for unit in root.as_os_str().encode_wide() {
+            hasher.update(&unit.to_le_bytes());
+        }
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 /// 构造符合 stdout/stderr 边界的呈现目的地。 / Builds a renderer honoring the stdout/stderr boundary.

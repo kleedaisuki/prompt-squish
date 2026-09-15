@@ -44,6 +44,37 @@ entry = "src/main.xml"
     project
 }
 
+/// 创建不覆盖全局存储的项目。 / Creates a project that does not override global storage.
+fn globally_stored_project(
+    name: &str,
+    package: &str,
+    target: &str,
+    message: &str,
+) -> tempfile::TempDir {
+    let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join(".temp");
+    fs::create_dir_all(&scratch).unwrap();
+    let project = tempfile::Builder::new()
+        .prefix(name)
+        .tempdir_in(scratch)
+        .unwrap();
+    fs::create_dir_all(project.path().join("src")).unwrap();
+    fs::write(
+        project.path().join("xmlsquish.toml"),
+        format!(
+            "manifest-version = 1\n[package]\nname = \"{package}\"\nversion = \"1.0.0\"\n\n[target.{target}]\nentry = \"src/main.xml\"\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        project.path().join("src/main.xml"),
+        format!(
+            "<xs:entry xmlns:xs='https://xmlsquish.moesegfault.dev/ns'><message>{message}</message></xs:entry>"
+        ),
+    )
+    .unwrap();
+    project
+}
+
 #[test]
 fn bare_help_is_stdout_success_and_lists_only_direct_commands() {
     let output = binary().output().unwrap();
@@ -428,6 +459,59 @@ fn bare_build_defaults_to_a_prompt_artifact() {
         walk(&project.path().join("target/xmlsquish"))
             .iter()
             .any(|path| path.extension().and_then(|value| value.to_str()) == Some("prompt"))
+    );
+}
+
+#[test]
+fn global_storage_isolates_project_catalogs_while_serving_both_projects() {
+    let first = globally_stored_project("root-global-first-", "first", "alpha", "Alpha");
+    let second = globally_stored_project("root-global-second-", "second", "beta", "Beta");
+    let home = tempfile::Builder::new()
+        .prefix("root-global-catalog-home-")
+        .tempdir_in(Path::new(env!("CARGO_MANIFEST_DIR")).join(".temp"))
+        .unwrap();
+
+    for project in [&first, &second] {
+        let built = binary()
+            .current_dir(project.path())
+            .env("XMLSQUISH_HOME", home.path())
+            .args(["build", "--plain"])
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+    }
+
+    for (project, target) in [(&first, "alpha"), (&second, "beta")] {
+        let inspected = binary()
+            .current_dir(project.path())
+            .env("XMLSQUISH_HOME", home.path())
+            .args(["inspect", "link", target, "--format=json"])
+            .output()
+            .unwrap();
+        assert!(
+            inspected.status.success(),
+            "{}",
+            String::from_utf8_lossy(&inspected.stderr)
+        );
+        let document: serde_json::Value = serde_json::from_slice(&inspected.stdout).unwrap();
+        assert_eq!(document["view"], "link");
+        assert_eq!(document["value"]["target"], target);
+    }
+
+    assert!(home.path().join("state/cas").is_dir());
+    assert!(home.path().join("state/actions.sqlite3").is_file());
+    let namespaces = fs::read_dir(home.path().join("state/catalog/projects"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .count();
+    assert_eq!(
+        namespaces, 2,
+        "each canonical project needs its own catalog"
     );
 }
 
