@@ -6,7 +6,7 @@
 
 ## 1. Product Direction
 
-`xmlsquish` has been rebuilt as a Cargo-like project manager with direct `fmt`, `build`, `add`, `remove`, and `inspect` commands. Product decision `c6d26bb` adds a required sixth command, `new`; its contract and architecture are accepted, but its implementation has not yet passed the release gates recorded here. The architecture is intentionally top-down rather than an adapter around the legacy compiler:
+`xmlsquish` has been rebuilt as a Cargo-like project manager with direct `new`, `fmt`, `build`, `add`, `remove`, and `inspect` commands. The six-command milestone is accepted at exact production snapshot `92b2a03c0bbe5c25321d414c43944111ee0ea04f`. The architecture is intentionally top-down rather than an adapter around the legacy compiler:
 
 ```text
 CLI bootstrap
@@ -24,7 +24,7 @@ The completed cutover did not preserve the old internal architecture. It preserv
 | Question | Durable artifact | Status |
 |---|---|---|
 | Why a microkernel manager and reusable IR? | [`../adr/0009-microkernel-manager-and-reusable-ir.md`](../adr/0009-microkernel-manager-and-reusable-ir.md) | Accepted, including the observable planning lifecycle amendment |
-| How does `new` create a project, workspace membership, and VCS state coherently? | [`../adr/0010-transactional-new-project-creation.md`](../adr/0010-transactional-new-project-creation.md) | Accepted design; implementation and release evidence pending |
+| How does `new` create a project, workspace membership, and VCS state coherently? | [`../adr/0010-transactional-new-project-creation.md`](../adr/0010-transactional-new-project-creation.md) | Accepted and implemented at the six-command snapshot |
 | What is the complete IR, linking, provenance, and debug model? | [`ir-model.md`](ir-model.md) | Implemented through canonical IR, link trace, and self-contained debug bundle |
 | How did the old tree map to the current architecture? | [`refactor-map.md`](refactor-map.md) | Historical/completed cutover map with verified current owners |
 | What does each CLI command feel like, and which proposals were accepted or superseded? | [`../product/cli-experience.md`](../product/cli-experience.md) | Current command contract plus evidence and supersession tables |
@@ -35,7 +35,7 @@ The completed cutover did not preserve the old internal architecture. It preserv
 
 The research is not an isolated literature dump. Each research artifact is connected to an ADR, a code boundary, or an executable acceptance gate.
 
-### 2.1 Active `new` extension
+### 2.1 Accepted `new` extension
 
 The earlier five-command milestone incorrectly treated the absence of project
 creation as outside its product boundary. Commit `c6d26bb` reverses that product
@@ -59,13 +59,14 @@ is an injected host effect performed before publication. Root composition must
 distinguish an existing project from a prospective destination and then
 reconverge at the same kernel/renderer path; `main` is not an alternate executor.
 
-This section is a design/status record, not implementation evidence. The
-canonical bytes, command grammar, output schema, and complete scenario matrix
-remain normative in CLI experience section 3.3.
+The canonical bytes, command grammar, output schema, and complete scenario
+matrix remain normative in CLI experience section 3.3. Implementation and
+acceptance evidence are recorded below; the architecture contract is no longer
+merely prospective.
 
 ## 3. Implemented and Committed Foundations
 
-The remotely accepted production snapshot is `b870c84`. Its first documentation-only descendants were `bf3394f`, a two-line correction in `docs/product/cli-experience.md`, and `f2a75f5`, this acceptance ledger. This reconciliation remains confined to the ledger and `docs/design/refactor-map.md`; executable sources, tests, workflow, lockfiles, and `site/` inputs remain byte-for-byte those exercised at `b870c84`. Earlier foundation commits remain part of the evidence chain; this table emphasizes the final cutover and the defects closed after `c616fef`.
+The five-command foundation was remotely accepted at `b870c84`. The exact six-command production snapshot is `92b2a03c0bbe5c25321d414c43944111ee0ea04f`; it retains that foundation and adds the transactional `new` path. Earlier foundation commits remain part of the evidence chain; this table records both milestones rather than rewriting the historical evidence.
 
 | Area | Committed evidence | Verified contract |
 |---|---|---|
@@ -89,12 +90,11 @@ The remotely accepted production snapshot is `b870c84`. Its first documentation-
 | Cross-platform CI definition | `454b4af` | Locked MSRV 1.88 quality checks, full workspace tests on Ubuntu/Windows/macOS, composed-manager smoke, and Linux source-install smoke are encoded in GitHub Actions |
 | Product documentation and examples | `8b856f6` | README, changelog, DSL guide, product scope, and shipped example manifests describe the manager workflow and current artifact names |
 | Live website | `a9d29f7` | The current landing page, reference content, and build explorer present the project-manager workflow without rewriting historical namespace snapshots |
+| Transactional project creation | `92b2a03` and ADR 0010 | Typed prospective bootstrap, canonical scaffold, optional Git and workspace membership, no-replace publication, cancellation semantics, and recoverable creation journals are integrated through the sole manager route |
 
-The table above is the accepted five-command foundation. It does not establish
-that `new` exists merely because its product and architecture documents now do.
-For `new`, the current durable evidence is specification only: `c6d26bb` and
-ADR 0010. Code, focused tests, composed process tests, and cross-platform remote
-acceptance must be entered only after they exist and pass.
+The historical rows establish the accepted five-command foundation. The final
+row and the exact acceptance evidence below establish `new`; its status does
+not derive from documentation alone.
 
 ## 4. Integrated Product State
 
@@ -103,7 +103,8 @@ There is now one production path rather than parallel legacy and manager impleme
 ```text
 xmlsquish argv
   -> squish-cli typed request + layered squish-config
-  -> root bootstrap output/interrupt contracts
+  -> root bootstrap (existing project or prospective destination)
+  -> output/interrupt contracts
   -> squish-kernel lifecycle
   -> squish-manager operation
   -> squish-host ports
@@ -126,23 +127,30 @@ The following previously open integration findings are closed in committed code 
 - fixed-width terminal composition and the missing second-interrupt state machine.
 - the absence of real PTY signal/resize coverage and composed process-death recovery evidence.
 
-The architecture and product material are also synchronized: shipped examples (`8b856f6`), the live site (`a9d29f7`), the workflow (`454b4af`), and root process tests use the direct manager commands and `.prompt`/`.xsir`/`.psdbg` vocabulary.
+The architecture and product material are also synchronized: shipped examples
+(`8b856f6`), the live site, the workflow, and root process tests use the direct
+six-command manager surface and `.prompt`/`.xsir`/`.psdbg` vocabulary.
 
 ## 5. Remote Acceptance History
 
-Remote execution was diagnostic evidence, not a ceremonial rerun. Two failing runs exposed platform-specific defects that local Windows validation could not reveal; the third run accepted their fixes and the complete product snapshot.
+Remote execution was diagnostic evidence, not a ceremonial rerun. The original
+three-run sequence accepted the five-command foundation. The later four-run
+sequence exposed three portability defects in the `new` test fixtures before
+accepting the exact six-command snapshot.
 
 | Run | Snapshot | Result | Diagnostic or acceptance evidence |
 |---|---|---|---|
 | [34947807569](https://github.com/kleedaisuki/prompt-squish/actions/runs/34947807569) | `270feb2` | **Failed** | Ubuntu quality and Linux/macOS builds rejected the Unix CAS rename callback because its `FnMut`/`FnOnce` lifetime implementation was not general enough on Rust 1.88. Windows Rust and Site passed. This led to `a3d6d23`. |
 | [34948934092](https://github.com/kleedaisuki/prompt-squish/actions/runs/34948934092) | `a3d6d23` | **Failed** | The CAS build defect was closed. Ubuntu strict Clippy then exposed a Unix-unused Windows retry variable/never-loop in the Git fixture cleanup, and Linux/macOS PTY tests exposed renderer/interrupt behavior that depended on timing. This led to `911304b`, `a8084d6`, `be625af`, and `b870c84`. |
 | [34955324426](https://github.com/kleedaisuki/prompt-squish/actions/runs/34955324426) | `b870c84` | **Passed** | All five jobs completed successfully: Rust quality on Ubuntu, Rust tests on Linux/macOS/Windows, and Site. This is the supported-desktop acceptance run. |
+| [34965531720](https://github.com/kleedaisuki/prompt-squish/actions/runs/34965531720) | `7d5329a` | **Failed** | macOS exposed `/var` versus `/private/var` canonical spelling and Windows exposed short-name versus long-name spelling in a host creation-location assertion. `bd5e10b` made the test compare normalized production paths. |
+| [34966915998](https://github.com/kleedaisuki/prompt-squish/actions/runs/34966915998) | `bd5e10b` | **Failed** | The host defect was closed; macOS then rejected a platform-filesystem fixture that assumed arbitrary invalid UTF-8 filename bytes were accepted. `938f3c0` scoped that byte-path fixture to systems supporting the premise. |
+| [34967638656](https://github.com/kleedaisuki/prompt-squish/actions/runs/34967638656) | `938f3c0` | **Failed** | The platform-filesystem fixture was closed; macOS exposed the same invalid-byte premise in a repository fixture. `92b2a03` applied the same platform scope there. |
+| [34968311247](https://github.com/kleedaisuki/prompt-squish/actions/runs/34968311247) | `92b2a03` | **Passed** | All five jobs passed: Ubuntu Rust quality, Linux/macOS/Windows Rust tests and composed smoke, and Site. This is the exact supported-desktop acceptance run for the six-command milestone. |
 
-The remote gate is satisfied for the five-command snapshot exercised by this
-history. The explicit `new` product decision is newer and opens a concrete
-evidence gap; none of these runs exercised project creation. A future `new`
-acceptance entry must name the exact tested snapshot and all supported-platform
-job results rather than inheriting this status.
+The five-command evidence remains attributable to `b870c84`. The `new` claim is
+instead attributable to exact snapshot `92b2a03c0bbe5c25321d414c43944111ee0ea04f`
+and run 34968311247; it does not inherit acceptance from the earlier milestone.
 
 ## 6. Cutover Gates
 
@@ -157,8 +165,8 @@ job results rather than inheriting this status.
 | Real PTY/ConPTY interaction covers resize and two-stage interrupt restoration | **Satisfied** | `1137239`, `a8084d6`, `be625af`, `b870c84`; the PTY suite passed locally and in all three remote Rust-test jobs |
 | Real process death at the supported durable boundaries converges without manual repair | **Satisfied** | `17a08b8`; 6/6 composed recovery-process tests passed locally and the all-feature workspace suite passed in all three remote Rust-test jobs |
 | Strict MSRV Clippy passes | **Satisfied** | `5f52c25`, `911304b`; the strict Rust 1.88 job passed remotely in run 34955324426 |
-| The committed workflow passes on supported GitHub-hosted desktops | **Satisfied** | [Run 34955324426](https://github.com/kleedaisuki/prompt-squish/actions/runs/34955324426) passed all five jobs at production snapshot `b870c84` |
-| `new` creates the canonical project and optional workspace membership through the manager transaction | **Specified; not yet satisfied** | Product contract `c6d26bb`; ADR 0010; implementation, process-recovery, and supported-desktop evidence pending |
+| The committed workflow passes on supported GitHub-hosted desktops | **Satisfied** | [Run 34968311247](https://github.com/kleedaisuki/prompt-squish/actions/runs/34968311247) passed all five jobs at exact six-command snapshot `92b2a03` |
+| `new` creates the canonical project and optional workspace membership through the manager transaction | **Satisfied on supported desktops** | ADR 0010; 32 root process tests, 8 process-death recovery tests, and all five jobs in run 34968311247 passed at exact snapshot `92b2a03` |
 
 ## 7. Evidence Discipline
 
@@ -176,11 +184,9 @@ This distinction prevents a design document, a green unit test, or an agent comp
 
 **Audit date:** 2026-09-15
 
-**Remotely accepted production snapshot:** `b870c84`
+**Remotely accepted production snapshot:** `92b2a03c0bbe5c25321d414c43944111ee0ea04f`
 
-**Documentation snapshot before this ledger update:** `bf3394f`
-
-**Scope:** the Cargo-like manager cutover: direct commands, scheduling and state management, XML to reusable binary IR to linked prompt, complete debug evidence, modern output behavior, dependency acquisition, and supported-desktop automation.
+**Scope:** the six-command Cargo-like manager cutover: project creation, direct commands, scheduling and state management, XML to reusable binary IR to linked prompt, complete debug evidence, modern output behavior, dependency acquisition, and supported-desktop automation.
 
 ### 8.1 Evidence classes
 
@@ -197,14 +203,14 @@ This distinction prevents a design document, a green unit test, or an agent comp
 | `build` and reusable products | **Accepted on supported desktops** | Compile/link/instantiate/backend/publish/catalogue actions; default prompt; persistent cache; representative semantic `.psdbg` traceability (`c616fef`, `d5a7ea0`); workspace tests and composed smoke passed in run 34955324426 |
 | `add` / `remove` | **Accepted on supported desktops** | Coherent manifest/lock transaction, dry run, removal references, contention/replan, and root process round trip; the full workspace suite passed on all three hosted operating systems |
 | `inspect` | **Accepted on supported desktops** | Typed `ir`, `link`, `source`, `cache`, and `artifact` views; protocol-level artifact selectors; CAS/provenance validation; Windows path equivalence; quiet closed-pipe handling; workspace tests and composed JSON-link smoke passed in run 34955324426 |
-| `new` | **Specified; acceptance pending** | CLI experience section 3.3 and ADR 0010 define canonical scaffold, prospective bootstrap, VCS/workspace transaction, no-replace publication, cancellation, and recovery; no prior five-command run is evidence for this row |
+| `new` | **Accepted on supported desktops** | Canonical scaffold, prospective bootstrap, VCS/workspace transaction, no-replace publication, cancellation, and recovery are covered by 32 root process tests and 8 process-death tests; the exact snapshot passed all five jobs in run 34968311247 |
 | Git packages | **Accepted on supported desktops** | Exact locked package-root return, owned materialization handle, documented child-process lifecycle, and platform-specific fixture cleanup (`8342d91`, `8455269`, `911304b`); workspace tests passed on Linux/macOS/Windows |
 | Storage and recovery mechanisms | **Accepted on supported desktops** | Verified CAS/action catalogues, EFS and long-path handling, per-project namespace, recoverable journals, Unix Rust 1.88 CAS portability, and 6/6 real child-death recovery cases (`3b77843`, `126e27d`, `628ee9a`, `17a08b8`, `a3d6d23`); the all-feature workspace suite passed remotely on all three operating systems |
 | Authenticated registries | **Accepted at component/composition scope** | Scoped environment lookup, redirect re-scoping, redaction, distinct missing/rejected outcomes, actionable variable names (`df5a8d8`, `a177c78`); their committed suites passed remotely on all three operating systems (the workflow does not contact a live authenticated registry) |
 | Terminal behavior | **Accepted on supported desktops** | Live width and resize, two-stage interrupt/restoration, quiet-work pumping, structured cancellation ordering, and explicit terminal barrier (`6d8df1a`, `2f7f46e`, `f6b9f1e`, `1137239`, `a8084d6`, `be625af`, `b870c84`); the PTY suite passed in all three remote Rust-test jobs |
-| MSRV quality | **Accepted remotely** | Rust 1.88 check, formatting, and strict all-target/all-feature Clippy passed in the Ubuntu quality job of run 34955324426 |
-| Documentation and site | **Accepted remotely** | Current manager workflow and artifacts in `8b856f6`, `a9d29f7`, and `4fff0dc`; Astro/TypeScript checks and the site build passed in run 34955324426 |
-| Supported desktops | **Complete for the milestone** | Run 34955324426 passed the full workspace build/test and composed manager smoke on hosted Linux, macOS, and Windows; Linux additionally passed source installation and installed-binary smoke |
+| MSRV quality | **Accepted remotely** | Rust 1.88 check, formatting, and strict all-target/all-feature Clippy passed in the Ubuntu quality job of run 34968311247 |
+| Documentation and site | **Accepted remotely** | Current six-command manager workflow and artifacts; Astro/TypeScript checks and the site build passed in run 34968311247 |
+| Supported desktops | **Complete for the six-command milestone** | Run 34968311247 passed Rust quality, the full workspace build/test and composed six-command manager smoke on hosted Linux, macOS, and Windows, plus Site; Linux additionally passed source installation and installed-binary smoke |
 
 ### 8.3 Local Windows validation record
 
@@ -222,7 +228,45 @@ The workspace run included 24 root process tests, typed inspect-selector coverag
 
 This local record is retained to distinguish what was known before remote execution. It did **not** predict the Unix defects found by runs 34947807569 and 34948934092. The later remote acceptance claims come exclusively from run 34955324426, not from extrapolating this Windows record.
 
-### 8.4 Remote job evidence at `b870c84`
+### 8.4 Local six-command validation record
+
+The final local validation report exercised Rust 1.88 and the complete `new`
+surface before the remote portability fixes. The fixes `bd5e10b`, `938f3c0`,
+and `92b2a03` are test-only changes; their exact supported-platform result is
+recorded in the next section rather than inferred from this Windows run.
+
+| Gate | Local Windows result |
+|---|---|
+| Rust 1.88 workspace tests, all targets and all features | **Passed: 505 tests, 0 failed** |
+| Root `new` process suite | **Passed: 32 tests** |
+| Fault-injected process-death recovery suite | **Passed: 8/8** |
+| Rust 1.88 formatting, check, and strict Clippy | **Passed** |
+| Locked release build and default-binary fault-selector scan | **Passed; 0/9 test selector literals present** |
+| Composed CI smoke and fresh `new --vcs none` project `fmt`/offline `build` | **Passed** |
+| Site checks/build and browser suite | **Passed; browser 35/35** |
+
+These counts are evidence of the named local execution, not estimates of what
+the remote workflow ran. The remote jobs independently exercised their
+committed commands at the exact accepted snapshot.
+
+### 8.5 Remote job evidence at `92b2a03`
+
+[Run 34968311247](https://github.com/kleedaisuki/prompt-squish/actions/runs/34968311247)
+completed successfully with all five jobs at exact snapshot
+`92b2a03c0bbe5c25321d414c43944111ee0ea04f`:
+
+| Job | Result and evidential scope |
+|---|---|
+| Rust quality (Ubuntu, MSRV 1.88) | Passed committed check, formatting, and strict all-target/all-feature Clippy gates |
+| Rust test (Linux, MSRV 1.88) | Passed full workspace tests, composed six-command smoke, source install, and installed-binary smoke |
+| Rust test (macOS, MSRV 1.88) | Passed full workspace tests and composed six-command smoke, including the corrected platform-scoped fixtures |
+| Rust test (Windows, MSRV 1.88) | Passed full workspace tests and composed six-command smoke, including normalized creation-path assertions |
+| Site | Passed the committed site checks and production build |
+
+As in the earlier milestone, source installation is a Linux-only workflow step;
+this ledger does not infer macOS or Windows source-install coverage.
+
+### 8.6 Historical remote job evidence at `b870c84`
 
 [Run 34955324426](https://github.com/kleedaisuki/prompt-squish/actions/runs/34955324426) completed successfully with exactly five jobs:
 
@@ -236,7 +280,7 @@ This local record is retained to distinguish what was known before remote execut
 
 The source-install steps are intentionally Linux-only in the workflow and were skipped, not failed, on macOS and Windows. The run therefore does not claim source-install coverage on those two hosts.
 
-### 8.5 Closed findings trace
+### 8.7 Closed findings trace
 
 | Former blocker | Closing evidence |
 |---|---|
@@ -260,18 +304,23 @@ The source-install steps are intentionally Linux-only in the workflow and were s
 | Quiet work could starve dynamic rendering; terminal/cancellation output had a timing-sensitive order | Run 34948934092 exposed the Unix PTY failures; `a8084d6`, `be625af`, and `b870c84` added pumping, one structured pre-terminal notice, and an explicit ordering barrier; all three PTY suites passed in run 34955324426 |
 | Link completeness evidence used a tail scalar that could hide order sensitivity | `543b271` added a non-tail scalar witness; the full three-platform workspace suite passed in run 34955324426 |
 | Product/IR documents retained contracts not matching the implemented manager | `4fff0dc` reconciled the durable contracts; `bf3394f` removed the last stale `init` example |
+| Creation-location assertions compared canonical paths with host aliases | Run 34965531720 diagnosed macOS `/private/var` and Windows short-name spellings; `bd5e10b` compares normalized production paths |
+| Invalid-byte filename fixtures assumed every Unix host accepted the same byte paths | Runs 34966915998 and 34967638656 diagnosed the platform-filesystem and repository fixtures; `938f3c0` and `92b2a03` scoped them to systems supporting the premise |
 
-### 8.6 Milestone conclusion and successor scope
+### 8.8 Milestone conclusion
 
-The five-command Cargo-like manager cutover is **complete for the scope tested at
-its accepted snapshot**. The remotely accepted production snapshot is
-`b870c84`, and all five jobs in run 34955324426 passed. It is not complete for
-the successor six-command product scope: `new` is required and currently has
-specified, not accepted, status.
+The six-command Cargo-like manager cutover is **complete for the supported
+desktop scope tested at its accepted snapshot**. Exact production snapshot
+`92b2a03c0bbe5c25321d414c43944111ee0ea04f` passed all five jobs in run
+34968311247. This closes the successor gate opened by product decision
+`c6d26bb` and ADR 0010 without altering the historical attribution of the
+five-command evidence to `b870c84` and run 34955324426.
 
-`bf3394f` is a documentation-only descendant: `git diff --name-status b870c84..bf3394f` reports only `docs/product/cli-experience.md`, and the diff changes two documentation lines. `f2a75f5` updates only this ledger. The present reconciliation changes only `docs/design/refactor-map.md` and this ledger; it does not modify Rust sources, manifests, lockfiles, tests, `.github/`, or `site/`. Consequently, these documentation changes do not invalidate the executable, workflow, or site evidence from the accepted snapshot.
-
-Product decision `c6d26bb` and ADR 0010 likewise do not invalidate that
-historical executable evidence; they change what the next product milestone
-requires. The successor milestone closes only after the `new` acceptance
-boundaries in ADR 0010 and the product matrix pass at one exact remote snapshot.
+This conclusion is deliberately narrower than a universal durability claim.
+The eight `new` recovery cases prove convergence after controlled process death
+at the instrumented commit boundaries. They do **not** prove Windows sudden
+power-loss durability, storage-controller persistence, or behavior on every
+remote or otherwise unsupported filesystem. Native exclusive rename and
+journal guarantees remain conditional on the supported host/filesystem
+contracts documented by the implementation; the ledger does not extrapolate
+from hosted desktop CI beyond those contracts.
