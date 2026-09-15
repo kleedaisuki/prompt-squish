@@ -17,8 +17,8 @@ use std::{
 
 use squish_protocol::{
     ActionId, ActionKind, ArtifactKind, CacheKind, Digest, DigestAlgorithm, Event, EventPayload,
-    ExitStatus, FinalizationId, FinalizationKind, JobId, OperationResult, Phase, PlanCloseReason,
-    PlanId, PlanMode, PlanningStepKind, Severity,
+    ExitStatus, FinalizationId, FinalizationKind, JobId, NewResult, OperationResult, Phase,
+    PlanCloseReason, PlanId, PlanMode, PlanningStepKind, Severity, VcsChoice, VcsDisposition,
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -970,6 +970,7 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
             OperationResult::Unavailable { kind } => {
                 format!("{} result unavailable", operation_kind_name(*kind))
             }
+            OperationResult::New(result) => human_new_result(result),
             OperationResult::Build(result) => {
                 let artifacts: usize = result
                     .published
@@ -1810,6 +1811,7 @@ fn finalization_short_name(kind: Option<FinalizationKind>) -> &'static str {
 }
 fn action_kind_name(kind: ActionKind) -> &'static str {
     match kind {
+        ActionKind::CreateProject => "create-project",
         ActionKind::Resolve => "resolve",
         ActionKind::Snapshot => "snapshot",
         ActionKind::Scan => "scan",
@@ -1832,6 +1834,7 @@ fn cache_name(cache: CacheKind) -> &'static str {
 }
 fn operation_kind_name(kind: squish_protocol::OperationKind) -> &'static str {
     match kind {
+        squish_protocol::OperationKind::New => "new",
         squish_protocol::OperationKind::Build => "build",
         squish_protocol::OperationKind::Format => "format",
         squish_protocol::OperationKind::Add => "add",
@@ -1851,6 +1854,7 @@ fn short_operation_result(result: &OperationResult) -> String {
         OperationResult::Unavailable { kind } => {
             format!("{} unavailable", operation_kind_name(*kind))
         }
+        OperationResult::New(result) => short_new_result(result),
         OperationResult::Build(result) => format!("build published={}", result.published.len()),
         OperationResult::Format(result) => format!(
             "format selected={} changed={} check={}",
@@ -1869,6 +1873,79 @@ fn short_operation_result(result: &OperationResult) -> String {
             result.dry_run
         ),
         OperationResult::Inspect(result) => format!("inspect view={}", inspect_result_name(result)),
+    }
+}
+
+/// 生成面向日常终端的项目创建摘要，不暴露摘要或事务内部状态。 /
+/// Builds the ordinary terminal summary for project creation without exposing digests or transaction internals.
+fn human_new_result(result: &NewResult) -> String {
+    let files = result
+        .created
+        .iter()
+        .map(|file| sanitize(file.path.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let placement = result.workspace.as_ref().map_or_else(
+        || "standalone project".to_owned(),
+        |workspace| format!("workspace member {}", sanitize(workspace.member.as_str())),
+    );
+    format!(
+        "created package {} at {} (target {}; files: {}; {}; {})",
+        sanitize(result.package.as_str()),
+        sanitize(&result.path.as_path().to_string_lossy()),
+        sanitize(result.target.as_str()),
+        files,
+        placement,
+        vcs_description(result)
+    )
+}
+
+/// 生成稳定、紧凑的项目创建生命周期行。 / Builds the stable compact project-creation lifecycle line.
+fn short_new_result(result: &NewResult) -> String {
+    let files = result
+        .created
+        .iter()
+        .map(|file| sanitize(file.path.as_str()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let workspace = result.workspace.as_ref().map_or_else(
+        || "standalone".to_owned(),
+        |placement| sanitize(placement.member.as_str()),
+    );
+    format!(
+        "new package={} path={} target={} files={} workspace={} vcs={}",
+        sanitize(result.package.as_str()),
+        sanitize(&result.path.as_path().to_string_lossy()),
+        sanitize(result.target.as_str()),
+        files,
+        workspace,
+        vcs_short_name(result)
+    )
+}
+
+/// 把类型化 VCS 结果投影为简洁的人类描述。 / Projects the typed VCS result into a concise human description.
+fn vcs_description(result: &NewResult) -> &'static str {
+    match (result.vcs.kind, result.vcs.disposition) {
+        (VcsChoice::Git, VcsDisposition::Created) => "Git repository created",
+        (VcsChoice::Git, VcsDisposition::Reused) => "enclosing Git repository reused",
+        (VcsChoice::None, VcsDisposition::Disabled) => "version control disabled",
+        // 协议验证负责拒绝不一致组合；呈现器仍保持总函数以便展示诊断事件。 /
+        // Protocol validation rejects inconsistent pairs; rendering stays total for diagnostic streams.
+        (VcsChoice::Git, VcsDisposition::Disabled) => "Git disabled",
+        (VcsChoice::None, VcsDisposition::Created) => "repository created",
+        (VcsChoice::None, VcsDisposition::Reused) => "enclosing repository reused",
+    }
+}
+
+/// 把类型化 VCS 结果投影为稳定短标签。 / Projects the typed VCS result into a stable short label.
+fn vcs_short_name(result: &NewResult) -> &'static str {
+    match (result.vcs.kind, result.vcs.disposition) {
+        (VcsChoice::Git, VcsDisposition::Created) => "git-created",
+        (VcsChoice::Git, VcsDisposition::Reused) => "git-reused",
+        (VcsChoice::None, VcsDisposition::Disabled) => "none",
+        (VcsChoice::Git, VcsDisposition::Disabled) => "git-disabled",
+        (VcsChoice::None, VcsDisposition::Created) => "repository-created",
+        (VcsChoice::None, VcsDisposition::Reused) => "repository-reused",
     }
 }
 fn inspect_result_name(result: &squish_protocol::InspectResult) -> &'static str {
@@ -1905,12 +1982,14 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use squish_protocol::{
-        ActionKeyId, ActionTotals, Artifact, ArtifactId, CacheInspection, CachedAction, Diagnostic,
-        DiagnosticId, Digest, DigestAlgorithm, Event, EventPayload, ExitStatus, InspectResult,
-        InvocationId, IrInspection, JobId, JobSummary, LinkInspection, OpaqueSourceId,
-        OperationKind, OperationResult, PackageName, PlanDigest, PlanId, PlanInspection, PlanMode,
-        PlannedAction, PlanningAttemptId, PlanningStepId, PlanningStepKind, ProjectInspection,
-        ProvenanceInspection, SourceInspection, TargetName, Timing,
+        ActionKeyId, ActionTotals, Artifact, ArtifactId, CacheInspection, CachedAction,
+        CreatedProjectFile, Diagnostic, DiagnosticId, Digest, DigestAlgorithm, Event, EventPayload,
+        ExitStatus, InspectResult, InvocationId, IrInspection, JobId, JobSummary, LinkInspection,
+        NewPackageName, NewResult, OpaqueSourceId, OperationKind, OperationResult, PackageName,
+        PlanDigest, PlanId, PlanInspection, PlanMode, PlannedAction, PlanningAttemptId,
+        PlanningStepId, PlanningStepKind, ProjectDestination, ProjectFilePath, ProjectInspection,
+        ProvenanceInspection, SourceInspection, TargetName, Timing, VcsChoice, VcsDisposition,
+        VcsResult, WorkspacePlacement,
     };
 
     use super::*;
@@ -2027,6 +2106,93 @@ mod tests {
             size: 42,
             digest: Digest::new(DigestAlgorithm::Sha256, vec![7; 32]).unwrap(),
         }
+    }
+
+    fn new_result() -> NewResult {
+        NewResult {
+            package: id::<NewPackageName>("demo"),
+            path: ProjectDestination::new("/workspace/demo"),
+            manifest: ProjectDestination::new("/workspace/demo/xmlsquish.toml"),
+            target: id::<TargetName>("prompt"),
+            created: [".gitignore", "src/prompt.xml", "xmlsquish.toml"]
+                .into_iter()
+                .map(|path| CreatedProjectFile {
+                    path: ProjectFilePath::new(path).unwrap(),
+                    digest: Digest::new(DigestAlgorithm::Blake3, vec![7; 32]).unwrap(),
+                    size: 42,
+                })
+                .collect(),
+            workspace: Some(WorkspacePlacement {
+                manifest: ProjectDestination::new("/workspace/xmlsquish.toml"),
+                member: ProjectFilePath::new("tools/demo").unwrap(),
+            }),
+            vcs: VcsResult {
+                kind: VcsChoice::Git,
+                disposition: VcsDisposition::Reused,
+            },
+        }
+    }
+
+    #[test]
+    fn new_result_has_exact_human_project_summary() {
+        let output = render_plain(&[event(
+            0,
+            EventPayload::OperationCompleted {
+                job: id::<JobId>("new"),
+                result: OperationResult::New(new_result()),
+            },
+        )]);
+
+        assert_eq!(
+            output,
+            "Result new: created package demo at /workspace/demo (target prompt; files: .gitignore, src/prompt.xml, xmlsquish.toml; workspace member tools/demo; enclosing Git repository reused)\n"
+        );
+    }
+
+    #[test]
+    fn new_result_has_stable_short_summary_and_labels() {
+        let output = render_with_verbosity(
+            &[event(
+                0,
+                EventPayload::OperationCompleted {
+                    job: id::<JobId>("new"),
+                    result: OperationResult::New(new_result()),
+                },
+            )],
+            Verbosity::Short,
+        );
+
+        assert_eq!(
+            output,
+            "result new new package=demo path=/workspace/demo target=prompt files=.gitignore,src/prompt.xml,xmlsquish.toml workspace=tools/demo vcs=git-reused\n"
+        );
+        assert_eq!(operation_kind_name(OperationKind::New), "new");
+        assert_eq!(
+            action_kind_name(ActionKind::CreateProject),
+            "create-project"
+        );
+    }
+
+    #[test]
+    fn new_result_reports_standalone_and_disabled_vcs_without_internals() {
+        let mut result = new_result();
+        result.workspace = None;
+        result.vcs = VcsResult {
+            kind: VcsChoice::None,
+            disposition: VcsDisposition::Disabled,
+        };
+
+        let output = render_plain(&[event(
+            0,
+            EventPayload::OperationCompleted {
+                job: id::<JobId>("new"),
+                result: OperationResult::New(result),
+            },
+        )]);
+
+        assert!(output.contains("standalone project; version control disabled"));
+        assert!(!output.contains("blake3"));
+        assert!(!output.contains("transaction"));
     }
 
     fn render_inspect(result: &InspectResult, width: Option<usize>) -> String {
@@ -2990,6 +3156,27 @@ mod tests {
         renderer.render(&value).unwrap();
         renderer.finish().unwrap();
         let output = String::from_utf8(renderer.into_inner()).unwrap();
+        assert_eq!(output.lines().count(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(output.trim()).unwrap(),
+            serde_json::to_value(value).unwrap()
+        );
+    }
+
+    #[test]
+    fn ndjson_preserves_native_new_result_event() {
+        let value = event(
+            0,
+            EventPayload::OperationCompleted {
+                job: id::<JobId>("new"),
+                result: OperationResult::New(new_result()),
+            },
+        );
+        let mut renderer = NdjsonRenderer::new(Vec::new());
+        renderer.render(&value).unwrap();
+        renderer.finish().unwrap();
+        let output = String::from_utf8(renderer.into_inner()).unwrap();
+
         assert_eq!(output.lines().count(), 1);
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(output.trim()).unwrap(),
