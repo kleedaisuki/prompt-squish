@@ -132,6 +132,36 @@ impl ProjectSnapshot {
         &self.package_manifests
     }
 
+    /// 枚举仅由当前 workspace 拥有的 XML 源码，不访问远端依赖检出。 / Enumerates XML sources owned only by this workspace without accessing remote dependency checkouts.
+    pub fn owned_workspace_sources(&self) -> Result<Vec<ProjectSource>, RepositoryError> {
+        let mut output = BTreeMap::new();
+        for frozen in &self.manifests {
+            let Some(package) = &frozen.manifest.package else {
+                continue;
+            };
+            let relative_root = frozen.package_dir.strip_prefix(&self.root).map_err(|_| {
+                RepositoryError::Layout(format!(
+                    "package `{}` is outside workspace root",
+                    package.name
+                ))
+            })?;
+            let instance = PackageInstanceId {
+                source_kind: 4,
+                canonical_source: normalize_text(relative_root),
+                package_name: package.name.clone(),
+                exact_revision: frozen.digest.clone(),
+            };
+            append_manifest_sources(
+                &frozen.manifest,
+                &frozen.package_dir,
+                &self.target_dir,
+                &instance,
+                &mut output,
+            )?;
+        }
+        Ok(output.into_values().collect())
+    }
+
     /// 稳定枚举所有已解析包拥有的 XML 源码，以便在 frontend 前封闭源码快照。 / Stably enumerates every resolved package-owned XML source so the source snapshot can be sealed before the frontend runs.
     ///
     /// 目录遍历不会跟随目录符号链接，结果按逻辑源码身份排序。除递归扫描 `source-root`
@@ -469,6 +499,57 @@ fn collect_xml(
                 })?
                 .to_path_buf();
             output.insert(relative);
+        }
+    }
+    Ok(())
+}
+
+fn append_manifest_sources(
+    manifest: &Manifest,
+    root: &Path,
+    target_dir: &Path,
+    instance: &PackageInstanceId,
+    output: &mut BTreeMap<SourceId, ProjectSource>,
+) -> Result<(), RepositoryError> {
+    let declared = manifest.package.as_ref().ok_or_else(|| {
+        RepositoryError::Layout(format!("package root `{}` has no package", root.display()))
+    })?;
+    let mut paths = BTreeSet::new();
+    let excluded = [
+        root.join("target"),
+        root.join(".cache"),
+        root.join(".xmlsquish"),
+        target_dir.to_path_buf(),
+    ];
+    collect_xml(
+        &root.join(&declared.source_root),
+        root,
+        &excluded,
+        &mut paths,
+    )?;
+    paths.extend(manifest.targets.values().map(|target| target.entry.clone()));
+    paths.extend(manifest.exports.values().cloned());
+    let identity = PackageId::new(declared.name.clone())
+        .map_err(|e| RepositoryError::Layout(format!("invalid package source identity: {e}")))?;
+    for path in paths {
+        let logical = LogicalPath::new(normalize_text(&path)).map_err(|e| {
+            RepositoryError::Layout(format!(
+                "invalid source path `{}` for package `{}`: {e}",
+                path.display(),
+                declared.name
+            ))
+        })?;
+        let id = SourceId::new(identity.clone(), logical);
+        let source = ProjectSource {
+            id: id.clone(),
+            locator: SourceLocator::file(root.join(path)),
+            package: instance.clone(),
+        };
+        if output.insert(id, source).is_some() {
+            return Err(RepositoryError::Layout(format!(
+                "duplicate source identity in package `{}`",
+                declared.name
+            )));
         }
     }
     Ok(())

@@ -78,7 +78,17 @@ impl ProjectRepository {
 
     /// 冻结根清单、成员、锁和完整权威读集。 / Freezes the root manifest, members, lock, and complete authoritative read-set.
     pub fn snapshot(&self) -> Result<ProjectSnapshot, RepositoryError> {
-        self.snapshot_with_locations(&[])
+        self.snapshot_workspace()
+    }
+
+    /// 冻结工作区权威状态而不获取或物化远端依赖。 / Freezes authoritative workspace state without fetching or materializing remote dependencies.
+    pub fn snapshot_workspace(&self) -> Result<ProjectSnapshot, RepositoryError> {
+        self.authoritative_snapshot()
+    }
+
+    /// 冻结 root/member 清单、锁原始字节、读集和 glob 成员集合。 / Freezes root/member manifests, exact lock bytes, the read-set, and glob membership.
+    pub fn authoritative_snapshot(&self) -> Result<ProjectSnapshot, RepositoryError> {
+        self.snapshot_coordinated(&[], false)
     }
 
     /// 连同非本地锁包清单冻结完整项目状态。 / Freezes complete project state including non-local locked-package manifests.
@@ -86,17 +96,26 @@ impl ProjectRepository {
         &self,
         locations: &[crate::PackageLocation],
     ) -> Result<ProjectSnapshot, RepositoryError> {
+        self.snapshot_coordinated(locations, true)
+    }
+
+    fn snapshot_coordinated(
+        &self,
+        locations: &[crate::PackageLocation],
+        require_external: bool,
+    ) -> Result<ProjectSnapshot, RepositoryError> {
         with_locked_repository(&self.root, self.faults.as_ref(), || {
             self.faults
                 .check(crate::FaultPoint::SnapshotRead)
                 .map_err(|e| RepositoryError::io(&self.root, e))?;
-            self.snapshot_locked(locations)
+            self.snapshot_locked(locations, require_external)
         })
     }
 
     fn snapshot_locked(
         &self,
         locations: &[crate::PackageLocation],
+        require_external: bool,
     ) -> Result<ProjectSnapshot, RepositoryError> {
         let root_file = self.root.join(MANIFEST_FILE_NAME);
         let root_snapshot = read_manifest(&self.root, &root_file)?;
@@ -160,8 +179,13 @@ impl ProjectRepository {
                 |w| w.target_dir.clone(),
             ));
         validate_output_collisions(&manifests, &target_dir)?;
-        let package_manifests =
-            freeze_locked_manifests(&self.root, lockfile.as_ref(), locations, &manifests)?;
+        let package_manifests = freeze_locked_manifests(
+            &self.root,
+            lockfile.as_ref(),
+            locations,
+            &manifests,
+            require_external,
+        )?;
         Ok(ProjectSnapshot {
             root: self.root.clone(),
             manifests,
@@ -379,6 +403,7 @@ fn freeze_locked_manifests(
     lock: Option<&Lockfile>,
     locations: &[PackageLocation],
     workspace_manifests: &[ManifestSnapshot],
+    require_external: bool,
 ) -> Result<Vec<LockedManifestSnapshot>, RepositoryError> {
     let Some(lock) = lock else {
         return Ok(Vec::new());
@@ -392,10 +417,15 @@ fn freeze_locked_manifests(
         let candidate = match &package.source {
             LockedSource::Path { path, .. } => root.join(path),
             LockedSource::Workspace { member, .. } => root.join(member),
-            LockedSource::Registry { .. } | LockedSource::Git { .. } => supplied
-                .get(package.id.as_str())
-                .map(|path| path.to_path_buf())
-                .ok_or_else(|| RepositoryError::MissingPackageLocation(package.id.clone()))?,
+            LockedSource::Registry { .. } | LockedSource::Git { .. } => {
+                let Some(path) = supplied.get(package.id.as_str()) else {
+                    if require_external {
+                        return Err(RepositoryError::MissingPackageLocation(package.id.clone()));
+                    }
+                    continue;
+                };
+                path.to_path_buf()
+            }
         };
         let package_root = candidate
             .canonicalize()
@@ -797,5 +827,48 @@ source = { kind = "registry", registry = "test", checksum = "sha256:cccccccccccc
                 .name,
             "remote"
         );
+    }
+
+    #[test]
+    fn workspace_snapshot_with_remote_lock_needs_no_checkout() {
+        let temp = TempDir::new().unwrap();
+        write(
+            temp.path().join(MANIFEST_FILE_NAME),
+            "manifest-version = 1\n[workspace]\nmembers = [\"member\"]\n",
+        );
+        write(temp.path().join("member/xmlsquish.toml"), MEMBER);
+        write(temp.path().join("member/src/a.xml"), "<a/>");
+        write(temp.path().join("member/special/entry.xml"), "<entry/>");
+        write(temp.path().join("member/exports/api.xml"), "<api/>");
+        write(
+            temp.path().join(LOCK_FILE_NAME),
+            r#"lock-version = 1
+resolver-version = "test/1"
+manifest-digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[[package]]
+id = "remote@1"
+name = "remote"
+version = "1.0.0"
+manifest-digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+source = { kind = "registry", registry = "test", checksum = "sha256:cccccccccccccccccccccccccccccccc" }
+"#,
+        );
+        let repo = ProjectRepository::discover(Discovery::Explicit(temp.path().into())).unwrap();
+
+        let snapshot = repo.snapshot_workspace().unwrap();
+        let sources = snapshot.owned_workspace_sources().unwrap();
+
+        assert!(snapshot.lock_bytes().is_some());
+        assert!(snapshot.locked_manifests().is_empty());
+        assert!(
+            sources
+                .iter()
+                .all(|source| source.id.package().as_str() == "member")
+        );
+        assert!(matches!(
+            snapshot.owned_sources(&[]),
+            Err(RepositoryError::MissingPackageLocation(id)) if id == "remote@1"
+        ));
     }
 }
