@@ -2,12 +2,22 @@
 
 ## Ownership
 
-`squish-manager` is the single kernel capability for build, format, add, remove,
-and inspect operations. `src/lib.rs` owns static routing and invocation-scoped
-settings. `src/build.rs`, `src/fmt.rs`, `src/mutation.rs`, and `src/inspect.rs`
+`squish-manager` is the single kernel capability for new, build, format, add,
+remove, and inspect operations. `src/lib.rs` owns static routing and invocation-scoped
+settings. `src/new.rs`, `src/build.rs`, `src/fmt.rs`, `src/mutation.rs`, and `src/inspect.rs`
 own their domain-specific planning and workers. `src/orchestrator.rs` is the only
 place that drives `squish_build::Scheduler` or translates scheduler/worker facts
 into protocol lifecycle events. Workers return data and never print.
+
+`new` keeps prospective destinations out of existing-project discovery and
+storage bootstrap. A read-only `Locate` port freezes the absolute destination,
+effective Git placement, and optional workspace membership. `PrepareCandidate`
+generates canonical scaffold bytes, after which `ValidatePlan` seals exactly one
+truthful `CreateProject` `WriteEffect`. Cancellation returned before the durable
+commit decision is acknowledged through the scheduler and is not a root failure;
+publication that crossed the decision emits `CancellationDeferred` immediately
+before its successful action terminal, preserving both the created result and
+the invocation's interrupted status.
 
 `src/services.rs` defines external ports. Concrete registry, Git, checkout,
 filesystem, CAS, index, and artifact adapters remain composition-root concerns.
@@ -84,6 +94,10 @@ inventing keys or assuming missing outputs exist.
 Default `service_unavailable` methods exist only for command-scoped test doubles.
 A production host must implement every raw port and validate its adapter inputs:
 
+- `locate_project_creation`: perform no writes and return a normalized absolute
+  destination plus VCS/workspace placement consistent with the requested policy.
+- `create_project`: publish the exact candidate through the repository recovery
+  transaction and return `Cancelled` only before its commit decision.
 - `storage_layout`: return four absolute, normalized, non-overlapping paths for
   CAS blobs, the action-index database, generation publication, and durable
   catalogs. Production adapters must not infer these locations independently.

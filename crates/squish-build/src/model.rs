@@ -187,6 +187,7 @@ impl KeyRecipe {
 
 fn hash_kind(hash: &mut blake3::Hasher, kind: &ActionKind) {
     let tag = match kind {
+        ActionKind::CreateProject => b"create-project".as_slice(),
         ActionKind::Resolve => b"resolve".as_slice(),
         ActionKind::Snapshot => b"snapshot",
         ActionKind::Scan => b"scan",

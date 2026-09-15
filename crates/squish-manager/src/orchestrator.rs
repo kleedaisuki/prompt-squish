@@ -14,11 +14,11 @@ use squish_build::{
 };
 use squish_kernel::{CancellationToken, InvocationContext, OperationOutcome};
 use squish_protocol::{
-    ActionId, ActionKeyId, ActionTotals, Artifact, CacheKind, Diagnostic, DiagnosticId, Digest,
-    DigestAlgorithm, EventPayload, FinalizationId, FinalizationKind, JobId, OperationKind,
-    OperationResult, Phase, PlanCloseReason, PlanDigest, PlanId, PlanInspection, PlanMode,
-    PlanScopeId, PlannedAction, PlanningAttemptId, PlanningIssueId, PlanningStepId,
-    PlanningStepKind, Severity, SupersedeReason, Timing,
+    ActionId, ActionKeyId, ActionTotals, Artifact, CacheKind, CancellationDeferralReason,
+    Diagnostic, DiagnosticId, Digest, DigestAlgorithm, EventPayload, FinalizationId,
+    FinalizationKind, JobId, OperationKind, OperationResult, Phase, PlanCloseReason, PlanDigest,
+    PlanId, PlanInspection, PlanMode, PlanScopeId, PlannedAction, PlanningAttemptId,
+    PlanningIssueId, PlanningStepId, PlanningStepKind, Severity, SupersedeReason, Timing,
 };
 
 use crate::{Effect, InvocationSettings, ManagerError, PlannedWork, PreparedPlan};
@@ -91,6 +91,13 @@ pub trait WorkExecutor<W: PlannedWork>: Sync {
 pub enum WorkDisposition {
     /// 普通成功或失败结果。 / Ordinary success or failure result.
     Complete(ActionResult),
+    /// Worker 在权威提交决定前协作式停止。 / The worker stopped cooperatively before its authoritative commit decision.
+    Cancelled {
+        /// 停止前产生的事实。 / Facts produced before cancellation was honored.
+        events: Vec<ActionEvent>,
+    },
+    /// 动作已越过提交决定，取消只能在成功终态后生效。 / The action crossed its commit decision, so cancellation can take effect only after its successful terminal state.
+    CommittedAfterCancellation(ActionResult),
     /// 权威修订竞争使计划失效。 / An authoritative-revision race invalidated the plan.
     Superseded {
         /// 封闭原因。 / Closed reason.
@@ -663,8 +670,13 @@ pub fn run<W: PlannedWork + Sync>(
         &mut mapping,
         settings.jobs.max(1),
     )?;
+    let cancellation_observed = context.is_cancelled()
+        || prepared
+            .graph()
+            .actions()
+            .any(|action| matches!(scheduler.state(&action.id), Some(ActionState::Cancelled)));
     let mut report = mapping.report(
-        context.is_cancelled(),
+        cancellation_observed,
         &scheduler,
         prepared.graph(),
         superseded.is_some(),
@@ -856,6 +868,8 @@ fn drive<W: PlannedWork + Sync>(
 enum DispatchOutcome {
     Cached(CachedResult),
     Worker(ActionResult),
+    CommittedAfterCancellation(ActionResult),
+    Cancelled(Vec<ActionEvent>),
     Superseded {
         reason: SupersedeReason,
         events: Vec<ActionEvent>,
@@ -975,15 +989,29 @@ fn execute_dispatch<W: PlannedWork + Sync>(
         None
     };
     let disposition = executor.execute(&dispatch, work, plan, &inputs, cancellation);
-    let WorkDisposition::Complete(mut result) = disposition else {
-        let WorkDisposition::Superseded { reason, events } = disposition else {
-            unreachable!()
-        };
-        return CompletedDispatch {
-            dispatch,
-            outcome: DispatchOutcome::Superseded { reason, events },
-            timing: elapsed(started),
-        };
+    let mut result = match disposition {
+        WorkDisposition::Complete(result) => result,
+        WorkDisposition::Cancelled { events } => {
+            return CompletedDispatch {
+                dispatch,
+                outcome: DispatchOutcome::Cancelled(events),
+                timing: elapsed(started),
+            };
+        }
+        WorkDisposition::CommittedAfterCancellation(result) => {
+            return CompletedDispatch {
+                dispatch,
+                outcome: DispatchOutcome::CommittedAfterCancellation(result),
+                timing: elapsed(started),
+            };
+        }
+        WorkDisposition::Superseded { reason, events } => {
+            return CompletedDispatch {
+                dispatch,
+                outcome: DispatchOutcome::Superseded { reason, events },
+                timing: elapsed(started),
+            };
+        }
     };
     if let Some(error) = lookup_error {
         result.events.push(ActionEvent::Message {
@@ -1027,6 +1055,45 @@ fn complete_batch(
             DispatchOutcome::Worker(result) => scheduler
                 .complete(&action, result)
                 .map_err(|error| orchestration(error.to_string()))?,
+            DispatchOutcome::CommittedAfterCancellation(result) => {
+                if !context.is_cancelled() {
+                    return Err(orchestration(
+                        "worker deferred cancellation without a cancellation request",
+                    ));
+                }
+                emit(
+                    context,
+                    EventPayload::CancellationDeferred {
+                        job: mapping.job.clone(),
+                        plan: mapping.plan.clone(),
+                        action: action.clone(),
+                        reason: CancellationDeferralReason::IrreversibleCommit,
+                    },
+                )?;
+                scheduler
+                    .complete(&action, result)
+                    .map_err(|error| orchestration(error.to_string()))?;
+            }
+            DispatchOutcome::Cancelled(events) => {
+                if !context.is_cancelled() {
+                    return Err(orchestration(
+                        "worker acknowledged cancellation without a cancellation request",
+                    ));
+                }
+                for event in events {
+                    mapping.publish(
+                        vec![ScheduleEvent::Worker {
+                            action: action.clone(),
+                            event,
+                        }],
+                        context,
+                    )?;
+                }
+                scheduler.request_cancellation();
+                scheduler
+                    .complete_cancelled(&action)
+                    .map_err(|error| orchestration(error.to_string()))?;
+            }
             DispatchOutcome::Superseded { reason, events } => {
                 mapping.superseded_actions.insert(action.clone());
                 for event in events {

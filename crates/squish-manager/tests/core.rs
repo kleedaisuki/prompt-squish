@@ -199,13 +199,14 @@ impl Services for FakeServices {
 }
 
 #[test]
-fn manager_is_one_capability_for_all_five_operations() {
+fn manager_is_one_capability_for_all_six_operations() {
     let manager = ManagerCapability::new(FakeServices, InvocationSettings::default());
     let descriptor = manager.descriptor();
     assert_eq!(descriptor.id, "project-manager");
     assert_eq!(
         descriptor.operations,
         &[
+            OperationKind::New,
             OperationKind::Build,
             OperationKind::Format,
             OperationKind::Add,

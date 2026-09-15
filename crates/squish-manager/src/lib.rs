@@ -13,6 +13,7 @@ pub mod fmt;
 pub mod inspect;
 mod model;
 pub mod mutation;
+pub mod new;
 pub mod orchestrator;
 mod services;
 
@@ -22,12 +23,12 @@ pub use model::{
     PreparedPlanError,
 };
 pub use services::{
-    ProvenanceNonApplicability, ProvenanceRelation, ResolveRequest, ResolvedDependencies, Services,
-    StorageLayout, StorageLayoutError,
+    ProjectCreationLocation, ProjectCreationStatus, ProvenanceNonApplicability, ProvenanceRelation,
+    ResolveRequest, ResolvedDependencies, Services, StorageLayout, StorageLayoutError,
 };
 
 use squish_kernel::{Capability, CapabilityDescriptor, InvocationContext, OperationOutcome};
-use squish_protocol::{OperationKind, OperationRequest, PackageName};
+use squish_protocol::{OperationKind, OperationRequest, PackageName, VcsChoice};
 use squish_publish::{NoopObserver as NoopPublishObserver, PublishObserver};
 use squish_repository::{FaultInjector, NoFault};
 use std::sync::Arc;
@@ -88,6 +89,8 @@ impl Default for DurabilityPorts {
 /// 一次调用的组合根设置；不读取 CLI 或全局状态。 / Composition-root settings for one invocation; reads neither CLI nor global state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InvocationSettings {
+    /// 配置解析后的新项目默认 VCS；CLI 请求仍可覆盖。 / Config-resolved default VCS for new projects; an explicit CLI request still overrides it.
+    pub new_vcs: VcsChoice,
     /// 不参与本次操作的包。 / Packages excluded from this operation.
     pub excluded_packages: Vec<PackageName>,
     /// 最大并行作业数；零按一处理。 / Maximum parallel jobs; zero is treated as one.
@@ -101,6 +104,7 @@ pub struct InvocationSettings {
 impl Default for InvocationSettings {
     fn default() -> Self {
         Self {
+            new_vcs: VcsChoice::Git,
             excluded_packages: Vec::new(),
             jobs: 1,
             keep_going: true,
@@ -161,6 +165,7 @@ impl<S> ManagerCapability<S> {
 }
 
 static OPERATIONS: &[OperationKind] = &[
+    OperationKind::New,
     OperationKind::Build,
     OperationKind::Format,
     OperationKind::Add,
@@ -171,7 +176,7 @@ static OPERATIONS: &[OperationKind] = &[
 static DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
     id: "project-manager",
     operations: OPERATIONS,
-    summary: "Build, format, mutate, and inspect prompt-squish projects",
+    summary: "Create, build, format, mutate, and inspect prompt-squish projects",
 };
 
 impl<S: Services> Capability for ManagerCapability<S> {
@@ -193,6 +198,9 @@ impl<S: Services> Capability for ManagerCapability<S> {
             }
         };
         match operation {
+            OperationRequest::New(request) => {
+                new::execute(request, &self.services, &self.settings, context)
+            }
             OperationRequest::Build(request) => build::execute_with_durability(
                 request,
                 &self.services,

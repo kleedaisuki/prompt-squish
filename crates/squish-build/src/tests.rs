@@ -233,6 +233,10 @@ fn key_encoding_separates_sections_and_variants() {
         direct.materialize(&ActionKind::Compile, &schema, |_| None),
         direct.materialize(&ActionKind::Backend, &schema, |_| None),
     );
+    assert_ne!(
+        direct.materialize(&ActionKind::CreateProject, &schema, |_| None),
+        direct.materialize(&ActionKind::CommitTransaction, &schema, |_| None),
+    );
     let two_outputs = [
         schema[0].clone(),
         Output {

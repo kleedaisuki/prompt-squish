@@ -4,11 +4,40 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use squish_kernel::CancellationToken;
 use squish_project::{Lockfile, Manifest, ResolutionMode};
-use squish_protocol::{Artifact, ArtifactId, CachedAction, Digest, PlanInspection, TargetName};
-use squish_repository::PackageLocation;
+use squish_protocol::{
+    Artifact, ArtifactId, CachedAction, Digest, PlanInspection, TargetName, VcsChoice,
+};
+use squish_repository::{
+    CreateProjectRequest, CreatedProject, PackageLocation, ProjectVcs, WorkspaceMembership,
+};
 
 use crate::{ArtifactLocator, ServiceError};
+
+/// 创建目标经宿主定位后冻结的外部环境。 / Host-located external environment frozen for project creation.
+///
+/// 该值只描述权威输入，不创建目录；真正写入必须延后到唯一的 `CreateProject`
+/// 动作。 / This value describes authoritative inputs without creating directories; all writes
+/// remain deferred to the sole `CreateProject` action.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectCreationLocation {
+    /// 规范绝对目标路径。 / Normalized absolute destination path.
+    pub destination: PathBuf,
+    /// 实际 Git 落位。 / Effective Git placement.
+    pub vcs: ProjectVcs,
+    /// 可选外围工作区成员关系。 / Optional enclosing-workspace membership.
+    pub workspace: Option<WorkspaceMembership>,
+}
+
+/// 创建动作的封闭执行结果。 / Closed execution result of a creation action.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProjectCreationStatus {
+    /// 已跨过提交决定并完成或可恢复地发布。 / Publication crossed its commit decision and completed or is recoverable.
+    Created(CreatedProject),
+    /// 在提交决定前响应取消，未发布项目。 / Cancellation was honored before the commit decision; no project was published.
+    Cancelled,
+}
 
 /// 存储职责路径无效。 / Invalid storage-responsibility paths.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -226,6 +255,29 @@ pub enum ProvenanceNonApplicability {
 /// ports. A production composition root must implement every raw catalog and blob port and must
 /// never rely on these defaults.
 pub trait Services: Send + Sync {
+    /// 只读定位新项目的绝对目标、Git 与外围工作区语义。 / Read-only locates a new project's absolute destination, Git, and enclosing-workspace semantics.
+    fn locate_project_creation(
+        &self,
+        _destination: &Path,
+        _vcs: VcsChoice,
+    ) -> Result<ProjectCreationLocation, ServiceError> {
+        unavailable("project creation locator")
+    }
+
+    /// 以一个可恢复写边界发布完整项目。 / Publishes a complete project through one recoverable write boundary.
+    ///
+    /// 返回 [`ProjectCreationStatus::Cancelled`] 只允许发生在持久提交决定之前；决定之后即使
+    /// token 随后被设置，也必须返回成功。 / [`ProjectCreationStatus::Cancelled`] is valid only
+    /// before the durable commit decision; after that decision, success must be returned even if
+    /// the token is subsequently set.
+    fn create_project(
+        &self,
+        _request: &CreateProjectRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<ProjectCreationStatus, ServiceError> {
+        unavailable("project creation publisher")
+    }
+
     /// 返回生产适配器使用的显式持久存储布局。 / Returns the explicit persistent-storage layout used by production adapters.
     fn storage_layout(&self, project_root: &Path) -> Result<StorageLayout, ServiceError>;
 
