@@ -106,13 +106,13 @@ Regression coverage should include counter transfer, both branches, mutual recur
 验证入口、调用、参数/fill 与正则操作进入可重定位 IR；
 `crates/squish-link/src/tests.rs::import_cycles_link_and_runtime_preserves_scope_slot_regex_and_file_bindings`
 验证导入环、调用帧、slot、捕获与定义位置 `file.*`；同文件的
-`recursion_uses_explicit_frames_and_reports_the_complete_budget_chain` 验证递归预算及完整帧链。
+`recursion_uses_explicit_frames_and_reports_the_complete_budget_chain` 验证递归预算及完整帧链；
+`recursive_scalar_argument_body_composes_non_tail_results_exactly` 通过真实可重定位 IR 和静态链接，
+让递归 `reverse` 展开先在 `emit` 的标量参数 body 中返回、再追加当前捕获字符，断言
+`abcd -> dcba`，并核验完整文档 trace、调用来源和标量替换链。
 `crates/squish-manager/tests/build.rs::semantic_example_publishes_fully_traceable_debug_bundle`
 再通过真实多模块递归 XML 工程验证管理器构建与来源链。它们是具体实例的实现证据；
 两计数器机的一般性仍来自上面的有效翻译与不变量，而不是测试数量。
-这些具名测试没有单独实现上文 `abcd -> dcba` 的非尾标量 body 见证；当前对此行为的
-证据仍是 `Task::Arg`/`Task::ArgDone` 执行路径。本文明确保留这一测试覆盖缺口，而不把
-相邻递归测试或总数冒充为直接回归。
 
 Executable regressions are no longer summarized by a stale aggregate count.
 `crates/squish-xml-front/src/tests.rs::entry_lowers_all_operation_families_and_round_trips`
@@ -120,12 +120,12 @@ covers entry/call/argument/fill/regex lowering into relocatable IR;
 `crates/squish-link/src/tests.rs::import_cycles_link_and_runtime_preserves_scope_slot_regex_and_file_bindings`
 covers import cycles, frames, slots, captures, and definition-site `file.*`; and
 `recursion_uses_explicit_frames_and_reports_the_complete_budget_chain` covers recursive budgets
-and the complete frame chain. The manager-level
+and the complete frame chain. In the same file,
+`recursive_scalar_argument_body_composes_non_tail_results_exactly` uses real relocatable IR and
+static linking: recursive `reverse` expansion returns inside `emit`'s scalar argument body before
+the current captured character is appended. It asserts `abcd -> dcba` and validates the complete
+document trace, call origin, and scalar substitution chain. The manager-level
 `crates/squish-manager/tests/build.rs::semantic_example_publishes_fully_traceable_debug_bundle`
 runs a real multi-module recursive XML project through build and provenance publication. These
 are implementation witnesses for concrete instances; universality still follows from the
 effective translation and invariant above, not from a test count.
-The named tests do not separately implement the `abcd -> dcba` non-tail scalar-body witness above;
-current evidence for that behavior remains the `Task::Arg`/`Task::ArgDone` execution path. This
-document keeps that coverage gap explicit rather than treating a neighboring recursion test or
-an aggregate count as a direct regression.

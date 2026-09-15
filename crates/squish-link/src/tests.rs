@@ -342,6 +342,239 @@ fn linked() -> LinkOutput {
         .unwrap()
 }
 
+fn linked_non_tail_reverse() -> LinkOutput {
+    let entry_source = source("reverse-entry.xml");
+    let module_source = source("reverse-module.xml");
+    let reverse = ExpandedName {
+        namespace_uri: "urn:reverse".into(),
+        local_name: "reverse".into(),
+    };
+    let emit = ExpandedName {
+        namespace_uri: "urn:reverse".into(),
+        local_name: "emit".into(),
+    };
+
+    let (entry_origins, entry_sources, entry_attachment) = debug(entry_source.clone(), 2, 2, 0);
+    let mut entry_header = header(
+        entry_source.clone(),
+        vec![import(0, "reverse-module.xml")],
+        vec!["abcd".into()],
+        vec![],
+    );
+    entry_header.qnames = vec![ExpandedName {
+        namespace_uri: "".into(),
+        local_name: "Result".into(),
+    }];
+    let entry = EntryObject {
+        header: entry_header,
+        required_params: vec![],
+        root_region: RegionId(0),
+        external_symbols: vec![reverse.clone()],
+        regions: vec![
+            Region {
+                id: RegionId(0),
+                ops: vec![OpId(0)],
+            },
+            Region {
+                id: RegionId(1),
+                ops: vec![OpId(1)],
+            },
+        ],
+        ops: vec![
+            OpRecord {
+                id: OpId(0),
+                op: Op::EmitElement {
+                    name: QNameId(0),
+                    attributes: vec![],
+                    children: RegionId(1),
+                },
+            },
+            OpRecord {
+                id: OpId(1),
+                op: Op::Call {
+                    target: reverse.clone(),
+                    args: vec![Argument {
+                        name: "s".into(),
+                        value: ScalarExpr::Literal(StringId(0)),
+                    }],
+                    fills: vec![],
+                },
+            },
+        ],
+        origins: entry_origins,
+        sources: entry_sources,
+        attachment: entry_attachment,
+        producer: producer(),
+    };
+
+    let (module_origins, module_sources, module_attachment) = debug(module_source.clone(), 6, 5, 2);
+    let reverse_signature = Signature {
+        params: vec!["s".into()],
+        slots: vec![],
+    };
+    let emit_signature = Signature {
+        params: vec!["value".into()],
+        slots: vec![],
+    };
+    let module = ModuleObject {
+        header: header(
+            module_source.clone(),
+            vec![],
+            vec!["^$".into(), "^(?P<head>.)(?P<tail>.*)$".into()],
+            vec![
+                RegexPattern {
+                    pattern: StringId(0),
+                    named_captures: vec![],
+                },
+                RegexPattern {
+                    pattern: StringId(1),
+                    named_captures: vec!["head".into(), "tail".into()],
+                },
+            ],
+        ),
+        definitions: vec![
+            MacroDef {
+                id: LocalDefId(0),
+                symbol: reverse.clone(),
+                signature: reverse_signature.clone(),
+                body: RegionId(0),
+            },
+            MacroDef {
+                id: LocalDefId(1),
+                symbol: emit.clone(),
+                signature: emit_signature.clone(),
+                body: RegionId(1),
+            },
+        ],
+        external_symbols: vec![],
+        interface: InterfaceSummary {
+            definitions: vec![
+                InterfaceDef {
+                    id: LocalDefId(0),
+                    symbol: reverse.clone(),
+                    signature: reverse_signature,
+                },
+                InterfaceDef {
+                    id: LocalDefId(1),
+                    symbol: emit.clone(),
+                    signature: emit_signature,
+                },
+            ],
+        },
+        regions: vec![
+            Region {
+                id: RegionId(0),
+                ops: vec![OpId(0), OpId(1)],
+            },
+            Region {
+                id: RegionId(1),
+                ops: vec![OpId(2)],
+            },
+            Region {
+                id: RegionId(2),
+                ops: vec![],
+            },
+            Region {
+                id: RegionId(3),
+                ops: vec![OpId(3)],
+            },
+            Region {
+                id: RegionId(4),
+                // 递归结果必须先返回，再追加当前字符；这是非尾组合的关键顺序。
+                // The recursive result must return before the current character is appended.
+                ops: vec![OpId(4), OpId(5)],
+            },
+        ],
+        ops: vec![
+            OpRecord {
+                id: OpId(0),
+                op: Op::MatchRegex {
+                    input: MatchInput::ReadBinding(BindingRef::Arg("s".into())),
+                    pattern: RegexId(0),
+                    captures: vec![],
+                    matched: RegionId(2),
+                },
+            },
+            OpRecord {
+                id: OpId(1),
+                op: Op::MatchRegex {
+                    input: MatchInput::ReadBinding(BindingRef::Arg("s".into())),
+                    pattern: RegexId(1),
+                    captures: vec!["head".into(), "tail".into()],
+                    matched: RegionId(3),
+                },
+            },
+            OpRecord {
+                id: OpId(2),
+                op: Op::InsertScalar {
+                    value: BindingRef::Arg("value".into()),
+                },
+            },
+            OpRecord {
+                id: OpId(3),
+                op: Op::Call {
+                    target: emit,
+                    args: vec![Argument {
+                        name: "value".into(),
+                        value: ScalarExpr::RenderText(RegionId(4)),
+                    }],
+                    fills: vec![],
+                },
+            },
+            OpRecord {
+                id: OpId(4),
+                op: Op::Call {
+                    target: reverse,
+                    args: vec![Argument {
+                        name: "s".into(),
+                        value: ScalarExpr::ReadBinding(BindingRef::Match("tail".into())),
+                    }],
+                    fills: vec![],
+                },
+            },
+            OpRecord {
+                id: OpId(5),
+                op: Op::InsertScalar {
+                    value: BindingRef::Match("head".into()),
+                },
+            },
+        ],
+        origins: module_origins,
+        sources: module_sources,
+        attachment: module_attachment,
+        producer: producer(),
+    };
+    let snapshot = ResolutionSnapshot {
+        units: vec![
+            (
+                entry_source.clone(),
+                revision(UnitKind::Entry, "reverse-entry"),
+            ),
+            (
+                module_source.clone(),
+                revision(UnitKind::Module, "reverse-module"),
+            ),
+        ],
+        imports: vec![ImportBinding {
+            importer: entry_source.clone(),
+            import: ImportId(0),
+            target: module_source.clone(),
+        }],
+    };
+    StaticLinker
+        .link(
+            &entry_source,
+            UnitClosure {
+                snapshot,
+                units: BTreeMap::from([
+                    (entry_source.clone(), RelocatableUnitIr::Entry(entry)),
+                    (module_source, RelocatableUnitIr::Module(module)),
+                ]),
+            },
+        )
+        .unwrap()
+}
+
 #[test]
 fn import_cycles_link_and_runtime_preserves_scope_slot_regex_and_file_bindings() {
     let linked = linked();
@@ -563,6 +796,48 @@ fn recursion_uses_explicit_frames_and_reports_the_complete_budget_chain() {
         .unwrap_err();
     assert_eq!(error.code, "RUN012");
     assert_eq!(error.frame_chain.len(), 64);
+}
+
+#[test]
+fn recursive_scalar_argument_body_composes_non_tail_results_exactly() {
+    let linked = linked_non_tail_reverse();
+    let output = Instantiator
+        .instantiate(&linked.program, BTreeMap::new(), Budgets::default())
+        .unwrap();
+    let text: String = output
+        .document
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            DocumentItem::Text { value } => {
+                Some(output.document.strings[value.0 as usize].as_str())
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(text, "dcba");
+    assert_eq!(output.document.items.len(), 3);
+    assert_eq!(output.trace.frames.len(), 10);
+    assert_eq!(output.trace.document_items.len(), 3);
+    let text_trace = &output.trace.document_items[1];
+    assert!(text_trace.call_origin.is_some());
+    assert!(
+        text_trace
+            .substitution_chain
+            .iter()
+            .any(|step| step.kind == SubstitutionKind::ScalarBody)
+    );
+    assert!(
+        text_trace
+            .substitution_chain
+            .iter()
+            .any(|step| step.kind == SubstitutionKind::InsertScalar)
+    );
+    output
+        .trace
+        .validate_against_document(&output.document)
+        .unwrap();
 }
 
 #[test]
