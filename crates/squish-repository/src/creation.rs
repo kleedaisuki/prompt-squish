@@ -235,6 +235,11 @@ pub fn create_project(
         .as_ref()
         .map(|workspace| workspace_lock(&workspace.root))
         .transpose()?;
+    if let Some(workspace) = &workspace {
+        // Creation→workspace is the global lock order. Reconcile an older file transaction while
+        // already holding that workspace lock so validation never observes half-committed policy.
+        crate::transaction::recover_locked(&workspace.root, faults)?;
+    }
     let workspace_updated = workspace.as_ref().is_some_and(|workspace| {
         !membership_effective(workspace, &request.package_name).unwrap_or(false)
     });

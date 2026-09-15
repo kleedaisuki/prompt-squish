@@ -282,7 +282,10 @@ pub(crate) fn atomic_write_many(
     remove_transaction(&dir)
 }
 
-fn recover_locked(root: &Path, faults: &dyn FaultInjector) -> Result<(), RepositoryError> {
+pub(crate) fn recover_locked(
+    root: &Path,
+    faults: &dyn FaultInjector,
+) -> Result<(), RepositoryError> {
     let base = root.join(STATE_DIR).join(TRANSACTIONS_DIR);
     let entries = match fs::read_dir(&base) {
         Ok(entries) => entries,
