@@ -40,6 +40,13 @@ trees, verifies content identity, and materializes without consulting selector o
 may fetch the exact OID. The local Git regression deletes all selector observations after a branch
 fetch and proves exact locked reconstruction still succeeds.
 
+System Git invocations disable automatic GC and force any maintenance into the foreground, so a
+completed runner call cannot intentionally leave a detached maintenance process holding the private
+object database. Windows fixture cleanup releases all host/candidate/materialization owners first;
+after repeated full-suite evidence of transient sharing violations outside those lifetimes, the test
+helper retries only Win32 sharing-violation code 32 for a bounded interval and surfaces every other
+filesystem error immediately.
+
 ## Verified deviations and migration constraints
 
 * `squish-resolver` still exposes its lock-v1 `RegistryCandidate { checksum, manifest }` and
