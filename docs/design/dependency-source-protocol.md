@@ -222,8 +222,112 @@ When no validated config is cached, the client first tries `config.json`
 without a credential. A 401 causes one credential-port lookup and one
 authenticated retry, following Cargo's sparse-registry bootstrap behavior. A
 cached `auth-required = true` allows the lookup before the first request. The
-credential port returns an authorization value scoped to the registry ID and
-request origin; the source host neither persists nor prints that value.
+credential port returns an authorization value scoped to the registry ID,
+configured authentication scope, and request origin; the source host neither
+persists nor prints that value.
+
+#### 4.1.1 Production environment lookup
+
+The production CLI initially supplies an environment-backed credential port.
+There is deliberately no token field in either configuration file, no credential
+file, no `--token` argument, no interactive prompt, and no implicit plaintext
+fallback. This matches Cargo's useful registry-scoped environment injection while
+avoiding its historical unencrypted token-file fallback. Environment lookup is
+captured once at composition; the fetch layer never reads process-global state.
+
+The port contract becomes origin-aware *and* configuration-scope-aware:
+
+```rust
+/// A validated HTTP Authorization field value. Debug output is always redacted.
+pub struct AuthorizationValue(/* private */);
+
+pub trait CredentialPort: Send + Sync {
+    fn authorization(
+        &self,
+        registry_id: &str,
+        auth_scope: &str,
+        request_origin: &str,
+    ) -> Result<Option<AuthorizationValue>, CredentialError>;
+}
+```
+
+`RegistryConfig` consequently carries `auth_scope` in addition to stable `id`
+and `index`. `SparseRegistry` passes all three facts on every lookup. The stable
+ID checks route ownership; the exact configured `auth-scope` selects a secret
+namespace; the canonical origin decides whether that namespace authorizes this
+HTTP authority. The alias is absent by design: renaming a manifest-facing alias
+cannot change credentials, and aliases for the same stable ID already must have
+identical index and authentication scope.
+
+The environment naming algorithm is normative:
+
+- A scope matching `[A-Za-z][A-Za-z0-9_-]{0,63}` becomes ASCII uppercase with
+  `-` replaced by `_`. Any other non-empty scope becomes `H_` plus the complete
+  uppercase hexadecimal SHA-256 of its UTF-8 bytes. Distinct configured scopes
+  that produce one stem are rejected.
+- The configured sparse-index origin reads
+  `XMLSQUISH_REGISTRY_<STEM>_AUTHORIZATION`.
+- Any different canonical origin reads only
+  `XMLSQUISH_REGISTRY_<STEM>_ORIGIN_<H>_AUTHORIZATION`, where `H` is the complete
+  uppercase hexadecimal SHA-256 of the canonical ASCII
+  `https://host[:non-default-port]` origin.
+- Environment names are matched ASCII-case-insensitively on every OS; folded
+  duplicates are rejected so behavior is not host-dependent.
+- The variable contains the exact `Authorization` field value. It must be
+  non-empty Unicode accepted by the HTTP header implementation and contain no
+  newline. It is never trimmed or given an implicit authentication scheme.
+
+The primary variable is not a cross-origin wildcard. Same-origin redirects ask
+again and may obtain the same value. Cross-origin redirects and cross-origin
+download templates discard the previous value and require their exact
+origin-specific variable. No alias, stable-ID-derived name, primary-origin value,
+or global token is tried as a fallback. A missing value returns
+`AuthenticationUnavailable` with the non-secret expected variable name and
+canonical origin; an invalid value is `ConfigInvalid`; a 401/403 after use is
+`AuthenticationRejected`. None of those diagnostics includes a value, header,
+query, or response body.
+
+This contract intentionally prefers a small, reproducible CI/operator interface
+over a premature cross-platform credential-manager abstraction. The environment
+adapter does not claim at-rest protection; OS keychains, workload-identity
+brokers, and short-lived token subprocesses can later implement `CredentialPort`
+without changing the registry, resolver, lock, or event protocols.
+
+Implementation is split along existing ownership boundaries:
+
+```rust
+// squish-config: pure naming, no process-global read.
+impl AuthScope {
+    pub fn environment_stem(&self) -> String;
+}
+
+// squish-fetch: transport-facing facts and an opaque value.
+pub struct RegistryConfig {
+    pub id: String,
+    pub index: String,
+    pub auth_scope: String,
+}
+
+// squish-host: production adapter over an injected startup snapshot.
+pub struct CredentialRoute {
+    pub registry_id: String,
+    pub auth_scope: String,
+    pub primary_origin: String,
+}
+
+impl EnvironmentCredentials {
+    pub fn from_snapshot(
+        routes: impl IntoIterator<Item = CredentialRoute>,
+        variables: impl IntoIterator<Item = (OsString, OsString)>,
+    ) -> Result<Self, CredentialConfigError>;
+}
+```
+
+`EnvironmentCredentials` retains only variables in its reserved prefix and does
+not implement value-revealing formatting or serialization. The executable is the
+only layer which calls `std::env::vars_os()`; `ProductionHost` continues to
+receive `Arc<dyn CredentialPort>`. `NoCredentials` remains available and explicit,
+but it is no longer unconditionally selected by the production executable.
 
 ### 4.2 Package index path
 
@@ -847,6 +951,23 @@ availability.
    candidate.
 9. **Cross-registry edge:** a dependency's registry ID resolves through a
    differently named local alias; endpoint names do not enter the lock graph.
+10. **Credential namespace:** `corp-read` maps to
+    `XMLSQUISH_REGISTRY_CORP_READ_AUTHORIZATION`; the existing stable-ID default
+    maps to the documented full-digest stem; no secret is accepted from TOML or
+    a CLI argument.
+11. **Alias invariance:** renaming an alias, or selecting a second alias for the
+    same stable ID/index/scope, performs the identical credential lookup.
+12. **Portable environment names:** mixed-case environment names behave
+    identically on Linux and Windows fixtures; case-fold duplicates and distinct
+    scopes that normalize to one stem fail before network access.
+13. **Origin confinement:** the primary-origin credential is present on a
+    same-origin redirect, absent on a cross-origin redirect, and the latter is
+    present only when the exact origin-digest variable exists. A redirect back to
+    the primary origin reselects the primary value rather than retaining the
+    preceding one.
+14. **Secret opacity:** missing, invalid, rejected, retry, verbose, trace, JSON,
+    and human paths contain the expected variable name and redacted origin but
+    not the authorization value or any distinctive substring of it.
 
 ### 13.2 Archives and content identity
 
