@@ -53,6 +53,64 @@ pub struct ActionEntry {
     pub last_used_unix_ms: i64,
 }
 
+/// 单个可检查的完整动作清单。 / One inspectable, complete action manifest.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActionManifest {
+    /// 构建边界使用的完整类型化记录。 / Fully typed record used at the build boundary.
+    pub record: ActionRecord,
+    /// 快照中记录的最近使用时间。 / Last-use time recorded in the snapshot.
+    pub last_used_unix_ms: i64,
+}
+
+/// 清单目录中被省略候选项的原因。 / Reason a catalog candidate was omitted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CatalogIssueKind {
+    /// 旧式轻量摘要行不是完整清单。 / A legacy digest-only row is not a complete manifest.
+    DigestOnly,
+    /// SQLite 行不能解码为领域清单。 / SQLite rows could not be decoded as a domain manifest.
+    InvalidManifest(String),
+    /// 至少一个声明的 CAS blob 缺失或摘要校验失败。 / A declared CAS blob was missing or failed digest verification.
+    OutputUnavailable,
+    /// CAS blob 的长度与清单不符。 / A CAS blob length disagreed with the manifest.
+    OutputSizeMismatch,
+}
+
+/// 一个被省略的目录候选项。 / One omitted catalog candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogIssue {
+    /// 候选动作键。 / Candidate action key.
+    pub key: ActionKey,
+    /// 省略原因。 / Omission reason.
+    pub kind: CatalogIssueKind,
+}
+
+/// 有界、稳定排序的动作清单页。 / A bounded, stably ordered page of action manifests.
+///
+/// `next_after` 是本页最后扫描的键，而不一定是最后返回的记录；这保证损坏或旧式行
+/// 不会令调用方分页停滞。每次调用来自一个 SQLite 读快照，因此并发 `clear` 或写入
+/// 不会产生撕裂清单。跨页写入可能自然出现在后续页中；需要全局冻结视图的调用方应
+/// 在上层持有维护租约。 / `next_after` is the last scanned key, not necessarily the
+/// last returned record, so corrupt or legacy rows cannot stall pagination. Each call
+/// comes from one SQLite read snapshot, preventing concurrent clears or writes from
+/// producing torn manifests. Writes between pages may naturally appear on later pages;
+/// callers needing a globally frozen view should hold an upper-layer maintenance lease.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActionManifestPage {
+    /// 已解码的完整清单，按动作键升序；验证索引还会完成 CAS 校验。 / Decoded complete manifests in ascending action-key order; the verified index also completes CAS validation.
+    pub manifests: Vec<ActionManifest>,
+    /// 下一页的排他游标；`None` 表示快照中已无更多候选。 / Exclusive cursor for the next page; `None` means the snapshot had no more candidates.
+    pub next_after: Option<ActionKey>,
+    /// 本页检查的候选数。 / Number of candidates inspected by this page.
+    pub scanned: usize,
+    /// 被安全省略的候选及原因。 / Candidates safely omitted, with reasons.
+    pub issues: Vec<CatalogIssue>,
+    /// 验证层从可重建索引删除的失效行数。 / Invalid rebuildable rows removed by the verification layer.
+    pub repaired: usize,
+}
+
+/// 单页最多扫描的动作数。 / Maximum number of actions scanned by one page.
+pub const MAX_MANIFEST_PAGE_SIZE: usize = 4096;
+
 /// 一条轻量运行事件索引；详细负载应放入 CAS。 / A lightweight run-event index; detailed payload belongs in the CAS.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunEvent {
@@ -182,7 +240,7 @@ impl SqliteActionIndex {
         retry_locked(|| connection.pragma_update(None, "journal_mode", "WAL"))?;
         connection.pragma_update(None, "foreign_keys", true)?;
         retry_locked(|| {
-            connection.execute_batch(
+            let result = connection.execute_batch(
             "BEGIN;
              CREATE TABLE IF NOT EXISTS actions (
                  action_key BLOB PRIMARY KEY CHECK(length(action_key) = 32),
@@ -217,7 +275,16 @@ impl SqliteActionIndex {
              ) STRICT;
              CREATE INDEX IF NOT EXISTS actions_lru ON actions(last_used_unix_ms, action_key);
              COMMIT;",
-        )
+            );
+            // execute_batch may encounter a schema lock after BEGIN and leave the
+            // connection inside that transaction. Roll it back before retrying so
+            // the next attempt (or migrate_schema) starts from a clean state.
+            // execute_batch 可能在 BEGIN 后遇到 schema 锁并遗留活动事务；重试前
+            // 回滚，确保下一次尝试（或 migrate_schema）从干净连接状态开始。
+            if result.is_err() {
+                connection.execute_batch("ROLLBACK").ok();
+            }
+            result
         })?;
         migrate_schema(&mut connection)?;
         Ok(Self {
@@ -350,6 +417,116 @@ impl SqliteActionIndex {
             .collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// 从一个一致的读快照枚举完整清单。 / Enumerates complete manifests from one consistent read snapshot.
+    ///
+    /// `after` 是排他动作键游标。`limit` 必须非零，并会被限制为
+    /// [`MAX_MANIFEST_PAGE_SIZE`]，从而避免检查接口意外分配无界内存。旧式
+    /// digest-only 行和无法解码的清单不会作为有效记录返回，而会出现在
+    /// [`ActionManifestPage::issues`] 中。 / `after` is an exclusive action-key cursor.
+    /// `limit` must be non-zero and is capped at [`MAX_MANIFEST_PAGE_SIZE`] to keep
+    /// inspection memory bounded. Legacy digest-only rows and undecodable manifests
+    /// are reported in [`ActionManifestPage::issues`] rather than returned as valid.
+    ///
+    /// # Example / 示例
+    /// ```no_run
+    /// # use squish_store::{ActionKey, IndexError, VerifiedActionIndex};
+    /// # fn inspect(index: &VerifiedActionIndex) -> Result<(), IndexError> {
+    /// let mut after: Option<ActionKey> = None;
+    /// loop {
+    ///     let page = index.manifest_page(after, 256)?;
+    ///     for manifest in page.manifests {
+    ///         println!("{}", manifest.record.key.as_str());
+    ///     }
+    ///     let Some(next) = page.next_after else { break };
+    ///     after = Some(next);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn manifest_page(
+        &self,
+        after: Option<ActionKey>,
+        limit: usize,
+    ) -> Result<ActionManifestPage, IndexError> {
+        if limit == 0 {
+            return Err(IndexError("manifest page limit must be non-zero".into()));
+        }
+        let limit = limit.min(MAX_MANIFEST_PAGE_SIZE);
+        let fetch = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+        let mut connection = self
+            .connection
+            .lock()
+            .expect("SQLite action index poisoned");
+        let transaction = connection.transaction()?;
+        let candidates = {
+            let mut statement = transaction.prepare(
+                "SELECT action_key, record_kind, last_used_unix_ms
+                 FROM actions
+                 WHERE (?1 IS NULL OR action_key > ?1)
+                 ORDER BY action_key
+                 LIMIT ?2",
+            )?;
+            let after = after.map(|key| key.digest().as_bytes().to_vec());
+            statement
+                .query_map(params![after, fetch], |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let has_more = candidates.len() > limit;
+        let candidates = &candidates[..candidates.len().min(limit)];
+        let mut manifests = Vec::with_capacity(candidates.len());
+        let mut issues = Vec::new();
+        for (key_bytes, record_kind, last_used_unix_ms) in candidates {
+            let key = ActionKey::from_digest(digest_from_sql(key_bytes)?);
+            if record_kind != "manifest" {
+                issues.push(CatalogIssue {
+                    key,
+                    kind: CatalogIssueKind::DigestOnly,
+                });
+                continue;
+            }
+            match load_manifest_from(&transaction, key) {
+                Ok(Some(outputs)) => manifests.push(ActionManifest {
+                    record: ActionRecord {
+                        key: build_key(key),
+                        outputs,
+                    },
+                    last_used_unix_ms: *last_used_unix_ms,
+                }),
+                Ok(None) => issues.push(CatalogIssue {
+                    key,
+                    kind: CatalogIssueKind::InvalidManifest(
+                        "manifest disappeared inside its read snapshot".into(),
+                    ),
+                }),
+                Err(error) => issues.push(CatalogIssue {
+                    key,
+                    kind: CatalogIssueKind::InvalidManifest(error.to_string()),
+                }),
+            }
+        }
+        transaction.commit()?;
+        Ok(ActionManifestPage {
+            manifests,
+            next_after: has_more
+                .then(|| {
+                    candidates
+                        .last()
+                        .expect("a full page has a final candidate")
+                })
+                .map(|(bytes, _, _)| digest_from_sql(bytes).map(ActionKey::from_digest))
+                .transpose()?,
+            scanned: candidates.len(),
+            issues,
+            repaired: 0,
+        })
+    }
+
     /// 插入或替换一条运行事件索引。 / Inserts or replaces one run-event index row.
     pub fn record_event(&self, event: &RunEvent) -> Result<(), IndexError> {
         let connection = self
@@ -442,6 +619,53 @@ impl VerifiedActionIndex {
     pub fn index(&self) -> &SqliteActionIndex {
         &self.index
     }
+
+    /// 枚举并逐输出验证一页完整清单。 / Enumerates and validates every output in one page of complete manifests.
+    ///
+    /// SQLite 快照先产生类型化候选，随后每个输出通过 CAS 重新计算摘要并检查长度。
+    /// 失效记录不会返回；若记录在并发修复期间未改变，验证器会删除旧索引行并增加
+    /// `repaired`。 / A SQLite snapshot first produces typed candidates, after which
+    /// every output is rehashed by the CAS and length-checked. Invalid records are
+    /// omitted; if a record did not change during a concurrent repair, its stale index
+    /// row is deleted and `repaired` is incremented.
+    pub fn manifest_page(
+        &self,
+        after: Option<ActionKey>,
+        limit: usize,
+    ) -> Result<ActionManifestPage, IndexError> {
+        let mut page = self.index.manifest_page(after, limit)?;
+        let candidates = std::mem::take(&mut page.manifests);
+        for manifest in candidates {
+            let key = parse_build_key(&manifest.record.key)?;
+            let mut failure = None;
+            for output in &manifest.record.outputs {
+                let digest = match blob_digest(&output.digest) {
+                    Ok(digest) => digest,
+                    Err(error) => {
+                        failure = Some(CatalogIssueKind::InvalidManifest(error.to_string()));
+                        break;
+                    }
+                };
+                let Some(bytes) = self.cas.get(digest)? else {
+                    failure = Some(CatalogIssueKind::OutputUnavailable);
+                    break;
+                };
+                if u64::try_from(bytes.len()).ok() != Some(output.size) {
+                    failure = Some(CatalogIssueKind::OutputSizeMismatch);
+                    break;
+                }
+            }
+            if let Some(kind) = failure {
+                page.issues.push(CatalogIssue { key, kind });
+                if self.remove_manifest_if_unchanged(key, &manifest)? {
+                    page.repaired += 1;
+                }
+            } else {
+                page.manifests.push(manifest);
+            }
+        }
+        Ok(page)
+    }
 }
 
 impl BuildIndex for VerifiedActionIndex {
@@ -525,72 +749,134 @@ impl VerifiedActionIndex {
             .connection
             .lock()
             .expect("SQLite action index poisoned");
-        // 单条 LEFT JOIN 在一个 SQLite statement snapshot 中同时判定记录类型与读取
-        // 清单。这样并发 clear 不可能落在“存在性检查”和结果读取之间制造假空清单。
-        // One LEFT JOIN determines the record kind and reads the manifest from one
-        // SQLite statement snapshot. A concurrent clear therefore cannot fabricate
-        // an empty manifest between a separate existence check and result query.
-        let mut statement = connection.prepare(
-            "SELECT a.record_kind, r.digest, r.output_name, r.artifact_kind,
+        load_manifest_from(&connection, key)
+    }
+
+    fn remove_manifest_if_unchanged(
+        &self,
+        key: ActionKey,
+        expected: &ActionManifest,
+    ) -> Result<bool, IndexError> {
+        let mut connection = self
+            .index
+            .connection
+            .lock()
+            .expect("SQLite action index poisoned");
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current_time = transaction
+            .query_row(
+                "SELECT last_used_unix_ms FROM actions
+                 WHERE action_key=?1 AND record_kind='manifest'",
+                [key.digest().as_bytes().as_slice()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let unchanged = current_time == Some(expected.last_used_unix_ms)
+            && load_manifest_from(&transaction, key)?.as_deref()
+                == Some(expected.record.outputs.as_slice());
+        // Recheck the authoritative CAS while holding the index write transaction.
+        // A concurrent producer may have repaired the blob after the first check but
+        // before publishing its index record; deleting then would discard good work.
+        // 持有索引写事务时再次检查权威 CAS。并发生产者可能在首次检查后修复 blob、
+        // 尚未来得及发布索引记录；此时删除会误丢弃有效工作。
+        let still_invalid = unchanged && !self.outputs_available(&expected.record.outputs)?;
+        let removed = if still_invalid {
+            transaction.execute(
+                "DELETE FROM actions WHERE action_key=?1 AND record_kind='manifest'",
+                [key.digest().as_bytes().as_slice()],
+            )?
+        } else {
+            0
+        };
+        transaction.commit()?;
+        Ok(removed != 0)
+    }
+
+    fn outputs_available(&self, outputs: &[ProducedOutput]) -> Result<bool, IndexError> {
+        for output in outputs {
+            let digest = blob_digest(&output.digest)?;
+            let Some(bytes) = self.cas.get(digest)? else {
+                return Ok(false);
+            };
+            if u64::try_from(bytes.len()).ok() != Some(output.size) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+fn load_manifest_from(
+    connection: &Connection,
+    key: ActionKey,
+) -> Result<Option<Vec<ProducedOutput>>, IndexError> {
+    // 单条 LEFT JOIN 在一个 SQLite statement snapshot 中同时判定记录类型与读取
+    // 清单。这样并发 clear 不可能落在“存在性检查”和结果读取之间制造假空清单。
+    // One LEFT JOIN determines the record kind and reads the manifest from one
+    // SQLite statement snapshot. A concurrent clear therefore cannot fabricate
+    // an empty manifest between a separate existence check and result query.
+    let mut statement = connection.prepare(
+        "SELECT a.record_kind, r.digest, r.output_name, r.artifact_kind,
                     r.artifact_other, r.size
              FROM actions AS a
              LEFT JOIN action_results AS r ON r.action_key = a.action_key
              WHERE a.action_key=?1
              ORDER BY r.ordinal",
-        )?;
-        let rows = statement.query_map([key.digest().as_bytes().as_slice()], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<Vec<u8>>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<i64>>(5)?,
-            ))
-        })?;
-        let mut outputs = Vec::new();
-        let mut saw_action = false;
-        for row in rows {
-            saw_action = true;
-            let (record_kind, digest, name, kind, other, size) = row?;
-            if record_kind != "manifest" {
-                return Ok(None);
-            }
-            let Some(digest) = digest else {
-                // LEFT JOIN 的全 NULL 右侧唯一表示一个合法的零输出 manifest。
-                // An all-NULL right side is the sole representation of a valid
-                // zero-output manifest produced by the LEFT JOIN.
-                if name.is_none() && kind.is_none() && other.is_none() && size.is_none() {
-                    continue;
-                }
-                return Err(IndexError("partial output manifest row".into()));
-            };
-            let digest = digest_from_sql(&digest)?;
-            let name = OutputName::new(
-                name.ok_or_else(|| IndexError("missing output name in manifest".into()))?,
-            )
-            .map_err(|_| IndexError("empty output name in rebuildable index".into()))?;
-            let kind = decode_kind(
-                &kind.ok_or_else(|| IndexError("missing artifact kind in manifest".into()))?,
-                other,
-            )?;
-            let size = u64::try_from(
-                size.ok_or_else(|| IndexError("missing output size in manifest".into()))?,
-            )
-            .map_err(|_| IndexError("negative output size in rebuildable index".into()))?;
-            outputs.push(ProducedOutput {
-                name,
-                kind,
-                digest: content_digest(digest),
-                size,
-            });
-        }
-        if !saw_action {
+    )?;
+    let rows = statement.query_map([key.digest().as_bytes().as_slice()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<Vec<u8>>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<i64>>(5)?,
+        ))
+    })?;
+    let mut outputs = Vec::new();
+    let mut saw_action = false;
+    for row in rows {
+        saw_action = true;
+        let (record_kind, digest, name, kind, other, size) = row?;
+        if record_kind != "manifest" {
             return Ok(None);
         }
-        Ok(Some(outputs))
+        let Some(digest) = digest else {
+            // LEFT JOIN 的全 NULL 右侧唯一表示一个合法的零输出 manifest。
+            // An all-NULL right side is the sole representation of a valid
+            // zero-output manifest produced by the LEFT JOIN.
+            if name.is_none() && kind.is_none() && other.is_none() && size.is_none() {
+                continue;
+            }
+            return Err(IndexError("partial output manifest row".into()));
+        };
+        let digest = digest_from_sql(&digest)?;
+        let name = OutputName::new(
+            name.ok_or_else(|| IndexError("missing output name in manifest".into()))?,
+        )
+        .map_err(|_| IndexError("empty output name in rebuildable index".into()))?;
+        let kind = decode_kind(
+            &kind.ok_or_else(|| IndexError("missing artifact kind in manifest".into()))?,
+            other,
+        )?;
+        let size = u64::try_from(
+            size.ok_or_else(|| IndexError("missing output size in manifest".into()))?,
+        )
+        .map_err(|_| IndexError("negative output size in rebuildable index".into()))?;
+        outputs.push(ProducedOutput {
+            name,
+            kind,
+            digest: content_digest(digest),
+            size,
+        });
     }
+    if !saw_action {
+        return Ok(None);
+    }
+    Ok(Some(outputs))
+}
 
+impl VerifiedActionIndex {
     fn touch(&self, key: ActionKey, time: i64) -> Result<(), IndexError> {
         self.index
             .connection
@@ -630,6 +916,11 @@ fn parse_build_key(key: &BuildKey) -> Result<ActionKey, IndexError> {
         ));
     }
     Ok(ActionKey::from_digest(digest))
+}
+
+fn build_key(key: ActionKey) -> BuildKey {
+    BuildKey::new(format!("blake3:{}", key.digest().to_hex()))
+        .expect("a stored BLAKE3 action key is canonical")
 }
 
 fn blob_digest(digest: &ContentDigest) -> Result<BlobDigest, IndexError> {
@@ -1153,5 +1444,158 @@ mod tests {
         for worker in workers {
             worker.join().unwrap().unwrap();
         }
+    }
+
+    fn catalog_record(cas: &Cas, label: &str, bytes: &[u8]) -> ActionRecord {
+        let digest = cas.put(bytes).unwrap();
+        let key = ActionKey::of(label.as_bytes());
+        ActionRecord {
+            key: build_key(key),
+            outputs: vec![ProducedOutput {
+                name: OutputName::new("main").unwrap(),
+                kind: ArtifactKind::Prompt,
+                digest: content_digest(digest),
+                size: bytes.len() as u64,
+            }],
+        }
+    }
+
+    #[test]
+    fn catalog_returns_complete_and_zero_output_manifests_but_not_digest_only_rows() {
+        let (directory, path) = database_path();
+        let cas = Arc::new(Cas::open(directory.path().join("cas")).unwrap());
+        let index = VerifiedActionIndex::open(path, Arc::clone(&cas)).unwrap();
+        let complete = catalog_record(&cas, "complete", b"contents");
+        let zero = ActionRecord {
+            key: build_key(ActionKey::of(b"zero")),
+            outputs: Vec::new(),
+        };
+        BuildIndex::record(&index, &complete).unwrap();
+        BuildIndex::record(&index, &zero).unwrap();
+        index
+            .index()
+            .put(
+                ActionKey::of(b"legacy"),
+                &ActionEntry {
+                    results: vec![BlobDigest::of(b"digest")],
+                    last_used_unix_ms: 1,
+                },
+            )
+            .unwrap();
+
+        let page = index.manifest_page(None, 10).unwrap();
+        let records: Vec<_> = page
+            .manifests
+            .iter()
+            .map(|manifest| manifest.record.clone())
+            .collect();
+        assert!(records.contains(&complete));
+        assert!(records.contains(&zero));
+        assert_eq!(
+            page.issues
+                .iter()
+                .filter(|issue| issue.kind == CatalogIssueKind::DigestOnly)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn verified_catalog_omits_and_repairs_missing_or_corrupt_outputs() {
+        let (directory, path) = database_path();
+        let cas = Arc::new(Cas::open(directory.path().join("cas")).unwrap());
+        let index = VerifiedActionIndex::open(path, Arc::clone(&cas)).unwrap();
+        let missing = catalog_record(&cas, "missing", b"missing bytes");
+        let corrupt = catalog_record(&cas, "corrupt", b"correct bytes");
+        BuildIndex::record(&index, &missing).unwrap();
+        BuildIndex::record(&index, &corrupt).unwrap();
+        fs::remove_file(cas.path_for(blob_digest(&missing.outputs[0].digest).unwrap())).unwrap();
+        fs::write(
+            cas.path_for(blob_digest(&corrupt.outputs[0].digest).unwrap()),
+            b"wrong bytes",
+        )
+        .unwrap();
+
+        let page = index.manifest_page(None, 10).unwrap();
+        assert!(page.manifests.is_empty());
+        assert_eq!(page.repaired, 2);
+        assert_eq!(
+            page.issues
+                .iter()
+                .filter(|issue| issue.kind == CatalogIssueKind::OutputUnavailable)
+                .count(),
+            2
+        );
+        assert!(
+            index
+                .index()
+                .manifest_page(None, 10)
+                .unwrap()
+                .manifests
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn catalog_paging_is_bounded_and_ordered_by_action_key() {
+        let (directory, path) = database_path();
+        let cas = Arc::new(Cas::open(directory.path().join("cas")).unwrap());
+        let index = VerifiedActionIndex::open(path, Arc::clone(&cas)).unwrap();
+        for label in ["delta", "alpha", "charlie", "bravo", "echo"] {
+            BuildIndex::record(&index, &catalog_record(&cas, label, label.as_bytes())).unwrap();
+        }
+
+        let mut after = None;
+        let mut keys = Vec::new();
+        loop {
+            let page = index.manifest_page(after, 2).unwrap();
+            assert!(page.scanned <= 2);
+            keys.extend(
+                page.manifests
+                    .iter()
+                    .map(|manifest| parse_build_key(&manifest.record.key).unwrap()),
+            );
+            let Some(next) = page.next_after else { break };
+            after = Some(next);
+        }
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(keys, sorted);
+        assert_eq!(keys.len(), 5);
+        assert!(index.manifest_page(None, 0).is_err());
+    }
+
+    #[test]
+    fn catalog_snapshot_never_observes_a_torn_manifest_during_clear_and_write() {
+        let (directory, path) = database_path();
+        let cas = Arc::new(Cas::open(directory.path().join("cas")).unwrap());
+        let reader = VerifiedActionIndex::open(&path, Arc::clone(&cas)).unwrap();
+        let writer = VerifiedActionIndex::open(&path, Arc::clone(&cas)).unwrap();
+        let record = catalog_record(&cas, "racing record", b"stable output");
+        BuildIndex::record(&writer, &record).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let writer_barrier = Arc::clone(&barrier);
+        let expected = record.clone();
+        let worker = std::thread::spawn(move || {
+            writer_barrier.wait();
+            for _ in 0..50 {
+                writer.index().clear().unwrap();
+                BuildIndex::record(&writer, &expected).unwrap();
+            }
+        });
+        barrier.wait();
+        for _ in 0..50 {
+            let page = reader.manifest_page(None, 10).unwrap();
+            assert!(page.issues.is_empty());
+            assert!(
+                page.manifests.is_empty()
+                    || page.manifests
+                        == vec![ActionManifest {
+                            record: record.clone(),
+                            last_used_unix_ms: page.manifests[0].last_used_unix_ms,
+                        }]
+            );
+        }
+        worker.join().unwrap();
     }
 }
