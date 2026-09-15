@@ -1,0 +1,23 @@
+[package]
+name = "squish-host"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Explicit production composition root for prompt-squish"
+
+[dependencies]
+semver = "1.0"
+squish-build = { path = "../squish-build" }
+squish-fetch = { path = "../squish-fetch" }
+squish-manager = { path = "../squish-manager" }
+squish-project = { path = "../squish-project" }
+squish-protocol = { path = "../squish-protocol" }
+squish-repository = { path = "../squish-repository" }
+squish-resolver = { path = "../squish-resolver" }
+squish-store = { path = "../squish-store" }
+
+[dev-dependencies]
+tempfile = "3.23"
+
