@@ -69,6 +69,7 @@ type Messages = {
     title: string;
     intro: string;
     install: string;
+    new: string;
     format: string;
     build: string;
     add: string;
@@ -114,7 +115,7 @@ const zh: Messages = {
   meta: {
     title: "xmlsquish — XML 提示词项目管理器",
     description:
-      "用统一项目管理器格式化、解析依赖并构建多文件 XML 提示词；复用二进制 XSIR，链接后发布 .prompt 与可选 .psdbg。",
+      "用统一项目管理器创建、格式化并构建多文件 XML 提示词；解析依赖、复用二进制 XSIR，并发布 .prompt 与可选 .psdbg。",
   },
   nav: {
     build: "看一次构建",
@@ -126,10 +127,10 @@ const zh: Messages = {
   },
   hero: {
     badge: "XML PROMPT PROJECT MANAGER",
-    revision: "项目管理器 · fmt / build / add / remove / inspect",
+    revision: "项目管理器 · new / fmt / build / add / remove / inspect",
     title: "提示词项目，也值得",
     accent: "好好构建。",
-    lead: "从 xmlsquish.toml 发现项目与工作区：格式化源码、解析锁定依赖、把 XML 编译成可缓存的二进制 XSIR，再链接并发布 .prompt 与 .psdbg。",
+    lead: "创建项目，或从 xmlsquish.toml 发现已有项目与工作区：格式化源码、解析锁定依赖、把 XML 编译成可缓存的二进制 XSIR，再链接并发布 .prompt 与 .psdbg。",
     primary: "看一次真实构建",
     secondary: "安装 CLI",
     footnote: "Rust 2024 · 项目级增量构建 · Human / Short / NDJSON",
@@ -142,8 +143,8 @@ const zh: Messages = {
     steps: [
       {
         label: "01 / AUTHOR",
-        title: "声明项目与依赖",
-        body: "在 xmlsquish.toml 声明包、目标与依赖；add / remove 以事务方式更新清单和锁文件。",
+        title: "创建项目，声明依赖",
+        body: "new 在尚不存在的目录生成规范项目；随后在 xmlsquish.toml 声明目标，add / remove 以事务方式更新依赖。",
       },
       {
         label: "02 / COMPILE",
@@ -221,8 +222,9 @@ const zh: Messages = {
     eyebrow: "FROM SOURCE TO YOUR WORKFLOW",
     title: "管理整个项目，再交付给 Agent。",
     intro:
-      "fmt、build、add、remove 与 inspect 共享同一项目发现、配置、依赖解析和事件协议；build 默认继续独立工作，并原子发布成功目标。",
+      "new、fmt、build、add、remove 与 inspect 共享同一管理器与事件协议；new 创建项目，build 默认继续独立工作并原子发布成功目标。",
     install: "从当前工作区源码安装（Rust 1.88+）",
+    new: "在尚不存在的目录创建规范项目",
     format: "格式化项目源码；--check 只检查",
     build: "构建 prompt、XSIR 与调试伴随文件",
     add: "添加依赖并更新清单与锁文件",
@@ -230,7 +232,7 @@ const zh: Messages = {
     inspect: "检查类型化 IR、链接、来源、缓存或产物",
     optimize: "构建 prompt、XSIR 与调试伴随文件",
     color: "NDJSON 事件流，适合 CI 与工具",
-    note: "命令向上发现 xmlsquish.toml，也可显式传 --manifest-path；Human 面向终端，Short 稳定逐行，json 为 NDJSON。",
+    note: "new 要求目标尚不存在；它与面向已有目录的 init 不同。其他命令向上发现 xmlsquish.toml，也可显式传 --manifest-path。",
     diagnosticTitle: "一种事件协议，三种终端体验。",
     diagnosticBody:
       "Human 提供进度与摘要，Short 逐行且可 grep，--message-format=json 输出带版本与序号的换行分隔 JSON（NDJSON）事件。--plain 提供无装饰追加输出。",
@@ -271,7 +273,7 @@ const en: Messages = {
   meta: {
     title: "xmlsquish — The project manager for XML prompts",
     description:
-      "Format sources, resolve dependencies, and build multi-file XML prompts with one project manager. Reuse binary XSIR, link, then publish .prompt and optional .psdbg artifacts.",
+      "Create, format, and build multi-file XML prompt projects with one manager. Resolve dependencies, reuse binary XSIR, then publish .prompt and optional .psdbg artifacts.",
   },
   nav: {
     build: "See a build",
@@ -283,10 +285,10 @@ const en: Messages = {
   },
   hero: {
     badge: "XML PROMPT PROJECT MANAGER",
-    revision: "Project manager · fmt / build / add / remove / inspect",
+    revision: "Project manager · new / fmt / build / add / remove / inspect",
     title: "Your prompt projects deserve",
     accent: "a proper build.",
-    lead: "Discover projects and workspaces from xmlsquish.toml, format sources, resolve locked dependencies, compile XML to cacheable binary XSIR, then link and publish .prompt and .psdbg.",
+    lead: "Create a project, or discover an existing project and workspace from xmlsquish.toml; format sources, resolve locked dependencies, compile cacheable binary XSIR, then publish .prompt and .psdbg.",
     primary: "See a real build",
     secondary: "Install the CLI",
     footnote: "Rust 2024 · Project-level incremental builds · Human / Short / NDJSON",
@@ -299,8 +301,8 @@ const en: Messages = {
     steps: [
       {
         label: "01 / AUTHOR",
-        title: "Declare project and dependencies",
-        body: "Declare packages, targets, and dependencies in xmlsquish.toml; add / remove update manifests and lockfiles transactionally.",
+        title: "Create a project. Declare dependencies.",
+        body: "new generates a canonical project in an absent directory; then declare targets in xmlsquish.toml while add / remove update dependencies transactionally.",
       },
       {
         label: "02 / COMPILE",
@@ -379,8 +381,9 @@ const en: Messages = {
     eyebrow: "FROM SOURCE TO YOUR WORKFLOW",
     title: "Manage the project. Then ship to your agent.",
     intro:
-      "fmt, build, add, remove, and inspect share project discovery, configuration, dependency resolution, and one event protocol. Build keeps independent work moving and publishes successful targets atomically.",
+      "new, fmt, build, add, remove, and inspect share one manager and event protocol. New creates projects; build keeps independent work moving and publishes successful targets atomically.",
     install: "Install from the current workspace source (Rust 1.88+)",
+    new: "Create a canonical project in an absent directory",
     format: "Format project sources; --check only reports",
     build: "Build prompt, XSIR, and debug companion",
     add: "Add a dependency and update manifest plus lockfile",
@@ -388,7 +391,7 @@ const en: Messages = {
     inspect: "Inspect typed IR, links, sources, cache, or artifacts",
     optimize: "Build prompt, XSIR, and debug companion",
     color: "NDJSON events for CI and tools",
-    note: "Commands discover xmlsquish.toml upward or accept --manifest-path. Human targets terminals, Short is stable line output, and json is NDJSON.",
+    note: "new requires an absent destination; it is distinct from init for existing directories. Other commands discover xmlsquish.toml upward or accept --manifest-path.",
     diagnosticTitle: "One event protocol. Three terminal experiences.",
     diagnosticBody:
       "Human offers progress and summaries; Short is line-oriented and grep-friendly; --message-format=json emits versioned, sequenced newline-delimited JSON (NDJSON). --plain is undecorated and append-only.",

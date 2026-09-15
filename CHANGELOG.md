@@ -8,8 +8,10 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 
 ### 项目管理器切换 / Project-manager cutover
 
-- 公共命令改为直接的 `xmlsquish build|fmt|add|remove|inspect`；移除松散文件编译和过渡期命令命名空间。
-  The public surface is now direct `build`, `fmt`, `add`, `remove`, and `inspect`; loose-file compilation and the transitional command namespace are removed.
+- 公共命令改为直接的 `xmlsquish new|fmt|build|add|remove|inspect`；移除松散文件编译和过渡期命令命名空间。
+  The public surface is now direct `new`, `fmt`, `build`, `add`, `remove`, and `inspect`; loose-file compilation and the transitional command namespace are removed.
+- `new PATH` 在尚不存在的目标原子创建规范项目，可选择包名与 Git 策略；生成结果可直接通过 `fmt --check` 并以 `build --offline` 构建。它不会覆盖已有路径；面向已有目录的 `init` 保持为不同的未来工作流。
+  `new PATH` atomically creates a canonical project in an absent destination, with optional package-name and Git policy overrides. The result passes `fmt --check` and builds with `build --offline`. It never overwrites an existing path; `init` remains a distinct future workflow for existing directories.
 - 加入版本化 `xmlsquish.toml`、向上项目发现、`--manifest-path`、命名目标、profile、工作区包选择和入口即链接根模型。
   Add versioned manifests, upward discovery, explicit manifest selection, named targets, profiles, workspace package selection, and entry-as-link-root semantics.
 - 构建现在发布 `.prompt` 产品；可重复 `--emit prompt|ir|debug` 选择 `.prompt`、可复用 `.xsir` 和自包含 `.psdbg`。
@@ -31,7 +33,7 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 
 ### 破坏性变化 / Breaking changes
 
-- `build`、`fmt`、`add`、`remove` 与 `inspect` 成为保留命令；旧路径首参数不再解释为输入文件。
+- `new`、`fmt`、`build`、`add`、`remove` 与 `inspect` 成为保留命令；旧路径首参数不再解释为输入文件。
 - 旧的 sibling XML 中间/最终产物不再属于产品契约；迁移到清单目标和 `.prompt` / `.xsir` / `.psdbg`。
 - 当前仓库和安装包不发布到 crates.io；使用 Git 源码安装或 GitHub Releases 二进制。
 

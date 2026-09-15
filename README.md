@@ -37,6 +37,21 @@ cargo install --path . --locked
 
 ## 五分钟上手 / Five-minute start
 
+从一个不存在的目录创建项目，然后检查格式并离线构建：
+
+Create a project in a destination that does not yet exist, then check formatting and build offline:
+
+```bash
+xmlsquish new hello-prompts
+cd hello-prompts
+xmlsquish fmt --check
+xmlsquish build --offline
+```
+
+`new` 生成 `xmlsquish.toml` 与 `src/prompt.xml`，默认在不属于现有 Git 工作树时初始化 Git；`--vcs none` 可禁用。它拒绝覆盖任何已存在的文件、目录或符号链接。`init` 是未来面向已有目录的独立工作流，不是 `new` 的别名。
+
+`new` creates `xmlsquish.toml` and `src/prompt.xml`, initializing Git by default when the destination is not already inside a Git worktree; use `--vcs none` to disable it. It never overwrites an existing file, directory, or symlink. `init` is a distinct future workflow for existing directories, not an alias for `new`.
+
 每个示例目录都是可运行项目：
 
 ```bash
@@ -83,15 +98,16 @@ name = "Klee"
 
 | 命令 | 作用 | 常用选项 |
 | --- | --- | --- |
+| `xmlsquish new PATH` | 在尚不存在的目标创建可立即构建的项目 | `--name`, `--vcs git\|none` |
 | `xmlsquish build` | 解析依赖、冻结源码、编译 IR、链接、实例化并发布 | `-t/--target`, `-p/--package`, `--profile`, `-j/--jobs`, `--emit`, `--arg TARGET.NAME=VALUE` |
 | `xmlsquish fmt` | 格式化项目自有 XML；保持 DSL 语义 | `--check`, `--diff`, `--path`, `--style-edition` |
 | `xmlsquish add SPEC` | 新增或更新有类型依赖，并协调清单与锁文件 | `--path`, `--git`, `--rev/--tag/--branch`, `--registry`, `--rename`, `--dry-run` |
 | `xmlsquish remove ALIAS` | 按别名移除直接依赖 | `-p/--package`, `--dev`, `--build`, `--dry-run` |
 | `xmlsquish inspect …` | 只读检查 IR、链接、源码来源、缓存键或产物 | `ir`, `link`, `source`, `cache`, `artifact`; `--format human|json` |
 
-所有项目命令从当前目录向上发现 `xmlsquish.toml`；`--manifest-path PATH` 显式选择清单。不存在松散文件编译语法：路径必须通过清单目标或 `fmt --path` 等有类型选项表达。
+除 `new` 外，项目命令从当前目录向上发现 `xmlsquish.toml`；`--manifest-path PATH` 显式选择清单。`new` 接受待创建的目标路径，并在适用时把项目加入外围工作区。不存在松散文件编译语法：路径必须通过清单目标或 `fmt --path` 等有类型选项表达。
 
-All project commands discover `xmlsquish.toml` upward from the current directory; `--manifest-path PATH` selects it explicitly. Loose-file compilation is no longer a command grammar.
+Except for `new`, project commands discover `xmlsquish.toml` upward from the current directory; `--manifest-path PATH` selects it explicitly. `new` accepts the destination to create and joins an enclosing workspace when applicable. Loose-file compilation is no longer a command grammar.
 
 ### 依赖来源与锁定模式 / Dependency sources and lock modes
 

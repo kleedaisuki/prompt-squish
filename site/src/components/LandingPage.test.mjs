@@ -139,6 +139,25 @@ for (const locale of ["zh", "en"]) {
 }
 
 for (const locale of ["zh", "en"]) {
+  test(`${locale}: project creation flow and new/init boundary stay visible`, async () => {
+    const page = await browser.newPage();
+    await page.goto(base + (locale === "en" ? "/en/" : "/"), {
+      waitUntil: "networkidle",
+    });
+    const commands = await page
+      .locator(".command-terminal pre code")
+      .allTextContents();
+    assert(commands.some((command) => command.includes("xmlsquish new hello-prompts")));
+    assert(commands.some((command) => command.includes("xmlsquish fmt --check")));
+    assert(commands.some((command) => command.includes("xmlsquish build --offline")));
+    const note = await page.locator(".cli-copy .small-note").textContent();
+    assert(note.includes(locale === "en" ? "absent destination" : "目标尚不存在"));
+    assert(note.includes("init"));
+    await page.close();
+  });
+}
+
+for (const locale of ["zh", "en"]) {
   for (const width of [320, 390, 768, 1440]) {
     for (const theme of ["light", "dark"]) {
       test(`${locale}: ${width}px ${theme}, no document overflow`, async () => {
