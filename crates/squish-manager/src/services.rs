@@ -272,9 +272,9 @@ pub trait Services: Send + Sync {
     ///
     /// 返回 [`ProjectCreationStatus::Cancelled`] 只允许发生在持久提交决定之前；决定之后即使
     /// token 随后被设置，也必须返回成功。 / [`ProjectCreationStatus::Cancelled`] is valid only
-    /// before the durable commit decision; after that decision, success must be returned even if
-    /// the token is subsequently set. A created receipt must describe the request's destination;
-    /// adapters may preserve an equivalent platform-native spelling rather than byte equality.
+    /// before the durable commit decision; after that decision, the adapter must return either
+    /// `Created` or `CommittedFailure`, even if the token is subsequently set. A created receipt
+    /// must describe the request's normalized destination exactly.
     fn create_project(
         &self,
         _request: &CreateProjectRequest,
