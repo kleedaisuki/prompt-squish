@@ -36,6 +36,21 @@ npm run test:browser
 
 Tests use temporary directories. Do not commit generated XML, build directories, or browser caches. Isolate environment changes in child processes.
 
+### IntelliJ IDEA / RustRover indexing diagnostics
+
+Treat Cargo as the source of truth when an editor reports missing trait members. In the
+2026-09-15 `Renderer::cancellation_requested` incident,
+`cargo +1.88.0 check -p xmlsquish --all-targets --locked` succeeded and Cargo resolved the
+single local `squish-presentation` crate. The ignored `.idea/prompt-squish.iml` still listed
+deleted `xmlsquish-app`, `xmlsquish-cli`, and `xmlsquish-core` modules and based source roots
+on `$MODULE_DIR$`; the errors were therefore attributed to a stale IDE project model, not to
+the Rust trait contract. Reload the project from the root `Cargo.toml` using JetBrains'
+[Cargo project workflow](https://www.jetbrains.com/help/rust/loading-cargo-projects.html),
+then use [Repair IDE](https://www.jetbrains.com/help/idea/repair-ide.html) if reloading does
+not clear the index. Do not rewrite a compiling public API or commit personal `.idea` state
+to suppress an editor-only diagnostic. The editor-side recovery for this incident has not
+yet been independently verified.
+
 ## 结构与测试 / Structure and tests
 
 保持一个 Cargo package 和一个 binary target，以 `src/main.rs` 为唯一入口，不保留库门面。编译器负责源码装载、静态验证、展开与来源记录；CLI 负责路径发现、预算/参数、诊断展示、统计和原子写入。词法转换器不参与宏求值，但负责最终产品空白压缩。
