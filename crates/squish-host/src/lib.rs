@@ -8,7 +8,7 @@
 #![deny(missing_docs)]
 
 use std::{
-    collections::BTreeSet,
+    collections::BTreeMap,
     fmt,
     path::{Path, PathBuf},
     sync::Arc,
@@ -16,7 +16,8 @@ use std::{
 
 use squish_fetch::{
     CredentialPort, FetchError, GitHost, GitRunner, HostContext, HttpRequest, HttpResponse,
-    HttpTransport, Limits, Materializer, Observer, RegistryConfig, SparseRegistry, SystemGitRunner,
+    HttpTransport, Limits, Materializer, Observer, RegistryConfig, SourceEvent, SparseRegistry,
+    SystemGitRunner,
 };
 use squish_manager::{
     ArtifactLocator, ProvenanceNonApplicability, ProvenanceRelation, ResolveRequest,
@@ -143,6 +144,7 @@ impl HttpTransport for SharedHttp {
 
 struct RegistryEntry {
     name: String,
+    identity: String,
     registry: SparseRegistry<SharedCredentials>,
 }
 
@@ -188,24 +190,14 @@ impl ProductionHost {
     pub fn open(config: HostConfig) -> Result<Self, HostError> {
         let project_root = std::fs::canonicalize(&config.project_root)?;
         std::fs::create_dir_all(&config.source_cache_root)?;
-        let source_cache_root = std::fs::canonicalize(&config.source_cache_root)?;
-        let context = HostContext {
-            cache: source_cache_root.clone(),
-            limits: config.limits,
-            observer: config.observer,
-        };
-        let mut names = BTreeSet::new();
-        let mut identities = BTreeSet::new();
+        let source_cache_root = native_host_path(std::fs::canonicalize(&config.source_cache_root)?);
+        let mut context = HostContext::new(source_cache_root.clone())?;
+        context.limits = config.limits;
+        context.observer = config.observer;
+        validate_registry_routes(&config.registries)?;
         let mut registries = Vec::with_capacity(config.registries.len());
         for endpoint in config.registries {
-            if endpoint.name.trim().is_empty()
-                || !names.insert(endpoint.name.clone())
-                || !identities.insert(endpoint.config.id.clone())
-            {
-                return Err(HostError::Config(
-                    "registry names and stable identities must be non-empty and unique".into(),
-                ));
-            }
+            let identity = endpoint.config.id.clone();
             let registry = SparseRegistry::with_dependencies(
                 context.clone(),
                 endpoint.config,
@@ -214,19 +206,34 @@ impl ProductionHost {
             )?;
             registries.push(RegistryEntry {
                 name: endpoint.name,
+                identity,
                 registry,
             });
         }
-        for (name, path) in [
+        let storage_paths = [
             ("build CAS", config.storage.cas_root()),
             ("action index", config.storage.action_index()),
             ("publication root", config.storage.publication_root()),
             ("catalog root", config.storage.catalog_root()),
-        ] {
-            if paths_overlap(&source_cache_root, path) {
+        ]
+        .map(|(name, path)| Ok((name, normalize_from_existing_ancestor(path)?)))
+        .into_iter()
+        .collect::<Result<Vec<_>, std::io::Error>>()?;
+        for (name, physical) in &storage_paths {
+            if paths_overlap(&source_cache_root, physical) {
                 return Err(HostError::Config(format!(
                     "source cache overlaps the {name} responsibility"
                 )));
+            }
+        }
+        for left in 0..storage_paths.len() {
+            for right in left + 1..storage_paths.len() {
+                if paths_overlap(&storage_paths[left].1, &storage_paths[right].1) {
+                    return Err(HostError::Config(format!(
+                        "{} physically overlaps the {} responsibility",
+                        storage_paths[left].0, storage_paths[right].0
+                    )));
+                }
             }
         }
         let git_runner: Arc<dyn GitRunner> = match config.git {
@@ -265,7 +272,7 @@ impl ProductionHost {
     fn registry(&self, name: &str) -> Result<&RegistryEntry, SourceUnavailable> {
         self.registries
             .iter()
-            .find(|entry| entry.name == name)
+            .find(|entry| entry.name == name || entry.identity == name)
             .ok_or_else(|| SourceUnavailable {
                 identity: name.into(),
                 detail: "registry is not configured".into(),
@@ -288,45 +295,79 @@ impl ProductionHost {
             let materialized = match &package.source {
                 LockedSource::Registry { registry, checksum } => {
                     let entry = self.registry(registry)?;
-                    let candidates = entry
-                        .registry
-                        .candidates(&package.name, access)
-                        .map_err(|error| unavailable(registry, error))?;
-                    let candidate = candidates.into_iter().find(|candidate| {
-                        candidate.version == package.version
-                            && format!("sha256:{}", candidate.archive.digest.0.0) == *checksum
-                    });
-                    let candidate = candidate.ok_or_else(|| SourceUnavailable {
-                        identity: package.id.clone(),
-                        detail: "locked registry candidate is absent from exact metadata".into(),
-                    })?;
-                    Some(
-                        entry
-                            .registry
-                            .materialize(&package.name, &candidate, access, &materializer)
-                            .map_err(|error| unavailable(&package.id, error))?,
-                    )
+                    let mut result = self.materialize_registry(
+                        entry,
+                        package,
+                        checksum,
+                        squish_fetch::Access::LocalOnly,
+                        &materializer,
+                    );
+                    if let Err(error) = &result {
+                        self.observe_local_miss(&package.id, error);
+                    }
+                    if result.as_ref().is_err_and(retryable_registry_miss)
+                        && access == squish_fetch::Access::Online
+                    {
+                        result = self.materialize_registry(
+                            entry,
+                            package,
+                            checksum,
+                            squish_fetch::Access::Online,
+                            &materializer,
+                        );
+                    }
+                    Some(result.map_err(|error| unavailable(&package.id, error))?)
                 }
                 LockedSource::Git {
                     repository,
                     revision,
                     checksum,
                 } => {
-                    let candidate = self
-                        .git
-                        .resolve_exact(
-                            repository,
-                            &squish_fetch::GitSelector::Rev(revision.clone()),
-                            ".",
-                            access,
-                        )
+                    let format = match revision.len() {
+                        40 => squish_fetch::GitObjectFormat::Sha1,
+                        64 => squish_fetch::GitObjectFormat::Sha256,
+                        _ => {
+                            return Err(SourceUnavailable {
+                                identity: package.id.clone(),
+                                detail: "locked Git revision has no supported object format".into(),
+                            });
+                        }
+                    };
+                    let commit = squish_fetch::GitOid::new(format, revision.clone())
                         .map_err(|error| unavailable(&package.id, error))?;
-                    if format!("sha256:{}", candidate.content_digest.0.0) != *checksum {
-                        return Err(SourceUnavailable {
-                            identity: package.id.clone(),
-                            detail: "locked Git content checksum mismatch".into(),
-                        });
+                    let content =
+                        checksum
+                            .strip_prefix("sha256:")
+                            .ok_or_else(|| SourceUnavailable {
+                                identity: package.id.clone(),
+                                detail: "locked Git checksum is not SHA-256".into(),
+                            })?;
+                    let content = squish_fetch::ContentDigest(
+                        squish_fetch::Sha256Digest::parse(content.to_owned())
+                            .map_err(|error| unavailable(&package.id, error))?,
+                    );
+                    let mut candidate = self.git.materialize_locked_revision(
+                        repository,
+                        &commit,
+                        ".",
+                        &content,
+                        squish_fetch::Access::LocalOnly,
+                    );
+                    if let Err(error) = &candidate {
+                        self.observe_local_miss(&package.id, error);
                     }
+                    if matches!(&candidate, Err(FetchError::OfflineMiss(_)))
+                        && access == squish_fetch::Access::Online
+                    {
+                        candidate = self.git.materialize_locked_revision(
+                            repository,
+                            &commit,
+                            ".",
+                            &content,
+                            squish_fetch::Access::Online,
+                        );
+                    }
+                    let candidate = candidate.map_err(|error| unavailable(&package.id, error))?;
                     Some(
                         self.git
                             .materialize_locked(
@@ -335,7 +376,7 @@ impl ProductionHost {
                                 &candidate.package_tree,
                                 ".",
                                 &candidate.content_digest,
-                                access,
+                                squish_fetch::Access::LocalOnly,
                             )
                             .map_err(|error| unavailable(&package.id, error))?,
                     )
@@ -351,6 +392,38 @@ impl ProductionHost {
         }
         locations.sort_by(|left, right| left.lock_id.cmp(&right.lock_id));
         Ok(locations)
+    }
+
+    fn materialize_registry(
+        &self,
+        entry: &RegistryEntry,
+        package: &squish_project::LockedPackage,
+        checksum: &str,
+        access: squish_fetch::Access,
+        materializer: &Materializer,
+    ) -> Result<squish_fetch::MaterializedPackage, FetchError> {
+        let candidates = entry.registry.candidates(&package.name, access)?;
+        let candidate = candidates.into_iter().find(|candidate| {
+            candidate.version == package.version
+                && format!("sha256:{}", candidate.archive.digest.0.0) == checksum
+        });
+        let candidate = candidate.ok_or_else(|| {
+            FetchError::OfflineMiss(format!(
+                "locked registry candidate {} is absent from exact metadata",
+                package.id
+            ))
+        })?;
+        entry
+            .registry
+            .materialize(&package.name, &candidate, access, materializer)
+    }
+
+    fn observe_local_miss(&self, identity: &str, error: &FetchError) {
+        self.context.observer.emit(SourceEvent::SourceUnavailable {
+            identity: identity.into(),
+            mode: "local-only".into(),
+            reason: error.to_string(),
+        });
     }
 
     fn resolve_dependencies(
@@ -378,10 +451,73 @@ impl ProductionHost {
     }
 }
 
+fn retryable_registry_miss(error: &FetchError) -> bool {
+    match error {
+        FetchError::OfflineMiss(_)
+        | FetchError::Metadata(_)
+        | FetchError::Integrity(_)
+        | FetchError::Json(_)
+        | FetchError::Manifest(_) => true,
+        FetchError::Io(error) => error.kind() == std::io::ErrorKind::NotFound,
+        FetchError::Config(_)
+        | FetchError::Path(_)
+        | FetchError::Unsupported(_)
+        | FetchError::Git(_)
+        | FetchError::Http(_) => false,
+    }
+}
+
+fn normalize_from_existing_ancestor(path: &Path) -> Result<PathBuf, std::io::Error> {
+    let mut cursor = path;
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::canonicalize(cursor) {
+            Ok(mut canonical) => {
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = cursor.file_name().ok_or(error)?;
+                missing.push(name.to_os_string());
+                cursor = cursor.parent().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("storage path `{}` has no existing ancestor", path.display()),
+                    )
+                })?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn validate_registry_routes(endpoints: &[RegistryEndpoint]) -> Result<(), HostError> {
+    let mut routes = BTreeMap::<&str, usize>::new();
+    for (index, endpoint) in endpoints.iter().enumerate() {
+        if endpoint.name.trim().is_empty() || endpoint.config.id.trim().is_empty() {
+            return Err(HostError::Config(
+                "registry names and stable identities must be non-empty".into(),
+            ));
+        }
+        for route in [&*endpoint.name, &*endpoint.config.id] {
+            if let Some(owner) = routes.insert(route, index)
+                && owner != index
+            {
+                return Err(HostError::Config(format!(
+                    "registry route `{route}` ambiguously names multiple endpoints"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn paths_overlap(left: &Path, right: &Path) -> bool {
     if cfg!(windows) {
-        let left = left.to_string_lossy().to_lowercase();
-        let right = right.to_string_lossy().to_lowercase();
+        let left = windows_path_key(left);
+        let right = windows_path_key(right);
         left == right
             || left
                 .strip_prefix(&right)
@@ -392,6 +528,32 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
     } else {
         left == right || left.starts_with(right) || right.starts_with(left)
     }
+}
+
+fn native_host_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let value = path.to_string_lossy();
+        if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = value.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    path
+}
+
+fn windows_path_key(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    let normalized = if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = value.strip_prefix(r"\\?\") {
+        rest.to_owned()
+    } else {
+        value.into_owned()
+    };
+    normalized.replace('/', "\\").to_lowercase()
 }
 
 impl Services for ProductionHost {
@@ -705,9 +867,15 @@ fn unavailable(identity: &str, error: FetchError) -> SourceUnavailable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::{Compression, write::GzEncoder};
+    use sha2::{Digest as _, Sha256};
     use squish_build::{ActionIndex, ActionRecord, ProducedOutput};
     use squish_fetch::{GitInvocation, GitRunOutput, NoCredentials, NoopObserver};
     use squish_protocol::{ActionKeyId, ArtifactKind, Digest, DigestAlgorithm};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     struct NoHttp;
     impl HttpTransport for NoHttp {
@@ -722,6 +890,30 @@ mod tests {
     impl GitRunner for NoGit {
         fn execute(&self, _invocation: GitInvocation) -> std::io::Result<GitRunOutput> {
             Err(std::io::Error::other("Git is forbidden by the fixture"))
+        }
+    }
+
+    struct RegistryHttp {
+        calls: Arc<AtomicUsize>,
+        bodies: Mutex<BTreeMap<String, Vec<u8>>>,
+    }
+    impl HttpTransport for RegistryHttp {
+        fn execute(&self, request: HttpRequest) -> Result<HttpResponse, FetchError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let body = self
+                .bodies
+                .lock()
+                .unwrap()
+                .get(request.url.as_str())
+                .cloned()
+                .ok_or_else(|| {
+                    FetchError::Http(format!("unexpected fixture URL {}", request.url))
+                })?;
+            Ok(HttpResponse {
+                status: 200,
+                headers: BTreeMap::new(),
+                body,
+            })
         }
     }
 
@@ -828,6 +1020,383 @@ mod tests {
         assert_eq!(
             Services::read_blob(&host, host.project_root(), &output_digest).unwrap(),
             Some(bytes.to_vec())
+        );
+    }
+
+    #[test]
+    fn registry_routes_accept_aliases_and_stable_cross_registry_identities() {
+        let (_temporary, mut host, _) = fixture();
+        let make = |name: &str, identity: &str| RegistryEntry {
+            name: name.into(),
+            identity: identity.into(),
+            registry: SparseRegistry::with_dependencies(
+                host.context.clone(),
+                RegistryConfig {
+                    id: identity.into(),
+                    index: "sparse+https://index.example/".into(),
+                },
+                SharedCredentials(Arc::new(NoCredentials)),
+                Box::new(NoHttp),
+            )
+            .unwrap(),
+        };
+        host.registries = vec![
+            make("default", "https://registry.example/a"),
+            make("secondary", "https://registry.example/b"),
+        ];
+
+        assert_eq!(host.registry("default").unwrap().name, "default");
+        assert_eq!(
+            host.registry("https://registry.example/a").unwrap().name,
+            "default"
+        );
+        assert_eq!(
+            host.registry("https://registry.example/b").unwrap().name,
+            "secondary"
+        );
+        let collision = vec![
+            RegistryEndpoint {
+                name: "default".into(),
+                config: RegistryConfig {
+                    id: "https://registry.example/a".into(),
+                    index: "sparse+https://a.example/".into(),
+                },
+            },
+            RegistryEndpoint {
+                name: "https://registry.example/a".into(),
+                config: RegistryConfig {
+                    id: "https://registry.example/b".into(),
+                    index: "sparse+https://b.example/".into(),
+                },
+            },
+        ];
+        assert!(validate_registry_routes(&collision).is_err());
+    }
+
+    #[test]
+    fn transitive_cross_registry_stable_id_routes_to_the_intended_endpoint() {
+        let (_temporary, mut host, _) = fixture();
+        let a = "https://registry.example/a";
+        let b = "https://registry.example/b";
+        let row = |name: &str, dependency: &str| {
+            format!(
+                "{{\"v\":1,\"name\":\"{name}\",\"vers\":\"1.0.0\",\"package\":{{\"dialect\":\"xmlsquish/1\",\"source-root\":\"src\"}},\"deps\":{dependency},\"archive\":{{\"format\":\"xspkg-tar-gzip/1\",\"size\":1,\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"content-sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"manifest-sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"yanked\":false}}"
+            )
+        };
+        let http = Arc::new(RegistryHttp {
+            calls: Arc::new(AtomicUsize::new(0)),
+            bodies: Mutex::new(BTreeMap::from([
+                ("https://a.example/config.json".into(), format!("{{\"v\":1,\"registry-id\":\"{a}\",\"dl\":\"https://download.example/{{package}}/{{version}}/{{archive-sha256}}\"}}").into_bytes()),
+                ("https://a.example/ro/ot/root".into(), row("root", &format!("[{{\"alias\":\"dep\",\"package\":\"dep\",\"req\":\"^1\",\"registry-id\":\"{b}\",\"optional\":false,\"default-features\":true,\"features\":[]}}]" )).into_bytes()),
+                ("https://b.example/config.json".into(), format!("{{\"v\":1,\"registry-id\":\"{b}\",\"dl\":\"https://download.example/{{package}}/{{version}}/{{archive-sha256}}\"}}").into_bytes()),
+                ("https://b.example/3/d/dep".into(), row("dep", "[]").into_bytes()),
+            ])),
+        });
+        let make = |name: &str, identity: &str, index: &str| RegistryEntry {
+            name: name.into(),
+            identity: identity.into(),
+            registry: SparseRegistry::with_dependencies(
+                host.context.clone(),
+                RegistryConfig {
+                    id: identity.into(),
+                    index: index.into(),
+                },
+                SharedCredentials(Arc::new(NoCredentials)),
+                Box::new(SharedHttp(http.clone())),
+            )
+            .unwrap(),
+        };
+        host.registries = vec![
+            make("default", a, "sparse+https://a.example/"),
+            make("secondary", b, "sparse+https://b.example/"),
+        ];
+        let roots = RegistryPort::candidates(
+            &RegistryView(&host),
+            "default",
+            "root",
+            ResolverAccess::Online,
+        )
+        .unwrap();
+        let detail = match &roots[0].manifest.dependencies["dep"] {
+            squish_project::DependencySpec::Detail(detail) => detail,
+            squish_project::DependencySpec::Version(_) => panic!("projection lost registry ID"),
+        };
+        assert_eq!(detail.registry.as_deref(), Some(b));
+        assert_eq!(
+            RegistryPort::candidates(&RegistryView(&host), b, "dep", ResolverAccess::Online,)
+                .unwrap()[0]
+                .manifest
+                .package
+                .as_ref()
+                .unwrap()
+                .name,
+            "dep"
+        );
+    }
+
+    #[test]
+    fn nonexistent_storage_descendant_cannot_alias_source_cache() {
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.temp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let temporary = tempfile::Builder::new()
+            .prefix("squish-host-overlap-")
+            .tempdir_in(std::fs::canonicalize(scratch).unwrap())
+            .unwrap();
+        let root = temporary.path().join("project");
+        let shared = temporary.path().join("shared");
+        std::fs::create_dir_all(&root).unwrap();
+        let filesystem = Arc::new(squish_fetch::FilesystemHost::new(&root).unwrap());
+        let storage = StorageLayout::new(
+            shared.join("not-yet/cas"),
+            temporary.path().join("actions.sqlite"),
+            temporary.path().join("publish"),
+            temporary.path().join("catalog"),
+        )
+        .unwrap();
+        let result = ProductionHost::open(HostConfig {
+            project_root: root,
+            source_cache_root: shared,
+            storage,
+            registries: Vec::new(),
+            credentials: Arc::new(NoCredentials),
+            http: Arc::new(NoHttp),
+            git: GitExecution::Runner(Arc::new(NoGit)),
+            limits: Limits::default(),
+            observer: Arc::new(NoopObserver),
+            filesystem,
+        });
+        assert!(matches!(result, Err(HostError::Config(_))));
+    }
+
+    #[test]
+    fn locked_registry_materialization_uses_verified_local_content_before_http() {
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.temp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let temporary = tempfile::Builder::new()
+            .prefix("squish-host-registry-")
+            .tempdir_in(std::fs::canonicalize(scratch).unwrap())
+            .unwrap();
+        let root = temporary.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let manifest = b"manifest-version = 1\n[package]\nname = \"demo\"\nversion = \"1.0.0\"\ndialect = \"xmlsquish/1\"\nsource-root = \"src\"\n";
+        let tree = squish_fetch::LogicalTree::build(
+            vec![squish_fetch::LogicalFile {
+                path: "xmlsquish.toml".into(),
+                bytes: manifest.to_vec(),
+            }],
+            &Limits::default(),
+        )
+        .unwrap();
+        let mut archive = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::default()));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(manifest.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "demo-1.0.0/xmlsquish.toml", &manifest[..])
+            .unwrap();
+        let bytes = archive.into_inner().unwrap().finish().unwrap();
+        let archive_digest = hex::encode(Sha256::digest(&bytes));
+        let manifest_digest = hex::encode(Sha256::digest(manifest));
+        let identity = "https://registry.example/v1";
+        let download = format!("https://download.example/demo/1.0.0/{archive_digest}.xspkg");
+        let row = format!(
+            "{{\"v\":1,\"name\":\"demo\",\"vers\":\"1.0.0\",\"package\":{{\"dialect\":\"xmlsquish/1\",\"source-root\":\"src\"}},\"deps\":[],\"archive\":{{\"format\":\"xspkg-tar-gzip/1\",\"size\":{},\"sha256\":\"{}\",\"content-sha256\":\"{}\"}},\"manifest-sha256\":\"{}\",\"yanked\":false}}",
+            bytes.len(),
+            archive_digest,
+            tree.content_digest.0.0,
+            manifest_digest
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let http = Arc::new(RegistryHttp {
+            calls: calls.clone(),
+            bodies: Mutex::new(BTreeMap::from([
+                ("https://index.example/config.json".into(), format!("{{\"v\":1,\"registry-id\":\"{identity}\",\"dl\":\"https://download.example/{{package}}/{{version}}/{{archive-sha256}}.xspkg\"}}").into_bytes()),
+                ("https://index.example/de/mo/demo".into(), row.into_bytes()),
+                (download, bytes),
+            ])),
+        });
+        let storage = StorageLayout::new(
+            temporary.path().join("cas"),
+            temporary.path().join("actions.sqlite"),
+            temporary.path().join("publish"),
+            temporary.path().join("catalog"),
+        )
+        .unwrap();
+        let host = ProductionHost::open(HostConfig {
+            project_root: root.clone(),
+            source_cache_root: temporary.path().join("sources"),
+            storage,
+            registries: vec![RegistryEndpoint {
+                name: "default".into(),
+                config: RegistryConfig {
+                    id: identity.into(),
+                    index: "sparse+https://index.example/".into(),
+                },
+            }],
+            credentials: Arc::new(NoCredentials),
+            http,
+            git: GitExecution::Runner(Arc::new(NoGit)),
+            limits: Limits::default(),
+            observer: Arc::new(NoopObserver),
+            filesystem: Arc::new(squish_fetch::FilesystemHost::new(root).unwrap()),
+        })
+        .unwrap();
+        let lock = Lockfile {
+            lock_version: squish_project::LOCK_VERSION,
+            resolver_version: "fixture/1".into(),
+            manifest_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            packages: vec![squish_project::LockedPackage {
+                id: "demo@1.0.0#registry".into(),
+                name: "demo".into(),
+                version: "1.0.0".parse().unwrap(),
+                source: LockedSource::Registry {
+                    registry: identity.into(),
+                    checksum: format!("sha256:{archive_digest}"),
+                },
+                manifest_digest: format!("sha256:{manifest_digest}"),
+                dependencies: BTreeMap::new(),
+            }],
+        };
+        assert_eq!(
+            Services::materialize_locked(&host, host.project_root(), &lock, ResolutionMode::Online)
+                .unwrap()
+                .len(),
+            1
+        );
+        let after_online = calls.load(Ordering::SeqCst);
+        assert!(after_online > 0);
+        for mode in [ResolutionMode::Locked, ResolutionMode::Frozen] {
+            assert_eq!(
+                Services::materialize_locked(&host, host.project_root(), &lock, mode)
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), after_online);
+        }
+    }
+
+    #[test]
+    fn frozen_git_materialization_needs_no_revision_selector_observation() {
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.temp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let scratch = std::fs::canonicalize(scratch).unwrap();
+        #[cfg(windows)]
+        let scratch = PathBuf::from(scratch.to_string_lossy().trim_start_matches(r"\\?\"));
+        let temporary = tempfile::Builder::new()
+            .prefix("squish-host-git-")
+            .tempdir_in(scratch)
+            .unwrap();
+        let repository = temporary.path().join("repository");
+        std::fs::create_dir_all(repository.join("src")).unwrap();
+        std::fs::write(
+            repository.join("xmlsquish.toml"),
+            "manifest-version = 1\n[package]\nname = \"demo\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(repository.join("src/main.xml"), "<prompt />").unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "fixture@example.invalid"],
+            vec!["config", "user.name", "Fixture"],
+            vec!["add", "."],
+            vec!["commit", "--quiet", "-m", "fixture"],
+        ] {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repository)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let canonical_repository = std::fs::canonicalize(&repository).unwrap();
+        let raw = canonical_repository.to_string_lossy().replace('\\', "/");
+        let spelling = raw.strip_prefix("//?/").unwrap_or(&raw);
+        let repository_url = if spelling.starts_with('/') {
+            format!("file://{spelling}")
+        } else {
+            format!("file:///{spelling}")
+        };
+        let discovery = GitHost::with_runner(
+            HostContext::new(temporary.path().join("discovery-cache")).unwrap(),
+            Arc::new(SystemGitRunner::new("git")),
+        );
+        let candidate = discovery
+            .resolve_exact(
+                &repository_url,
+                &squish_fetch::GitSelector::Head,
+                ".",
+                squish_fetch::Access::Online,
+            )
+            .unwrap();
+
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let storage = StorageLayout::new(
+            temporary.path().join("cas"),
+            temporary.path().join("actions.sqlite"),
+            temporary.path().join("publish"),
+            temporary.path().join("catalog"),
+        )
+        .unwrap();
+        let host = ProductionHost::open(HostConfig {
+            project_root: project.clone(),
+            source_cache_root: temporary.path().join("exact-cache"),
+            storage,
+            registries: Vec::new(),
+            credentials: Arc::new(NoCredentials),
+            http: Arc::new(NoHttp),
+            git: GitExecution::Runner(Arc::new(SystemGitRunner::new("git"))),
+            limits: Limits::default(),
+            observer: Arc::new(NoopObserver),
+            filesystem: Arc::new(squish_fetch::FilesystemHost::new(project).unwrap()),
+        })
+        .unwrap();
+        let lock = Lockfile {
+            lock_version: squish_project::LOCK_VERSION,
+            resolver_version: "fixture/1".into(),
+            manifest_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            packages: vec![squish_project::LockedPackage {
+                id: "demo@1.0.0#git".into(),
+                name: "demo".into(),
+                version: "1.0.0".parse().unwrap(),
+                source: LockedSource::Git {
+                    repository: repository_url,
+                    revision: candidate.commit.hex,
+                    checksum: format!("sha256:{}", candidate.content_digest.0.0),
+                },
+                manifest_digest: format!("sha256:{}", candidate.manifest_digest.0.0),
+                dependencies: BTreeMap::new(),
+            }],
+        };
+        assert_eq!(
+            Services::materialize_locked(&host, host.project_root(), &lock, ResolutionMode::Online)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            Services::materialize_locked(&host, host.project_root(), &lock, ResolutionMode::Frozen)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_and_drive_spelling_are_the_same_storage_identity() {
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.temp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let scratch = std::fs::canonicalize(scratch).unwrap();
+        let ordinary = PathBuf::from(scratch.to_string_lossy().trim_start_matches(r"\\?\"));
+        let verbatim = PathBuf::from(format!(r"\\?\{}", ordinary.display()));
+        assert_eq!(
+            normalize_from_existing_ancestor(&ordinary).unwrap(),
+            normalize_from_existing_ancestor(&verbatim).unwrap()
         );
     }
 

@@ -63,9 +63,25 @@ representations:
 6. Artifact ID/path, target link map, provenance relation, and full `PlanInspection` are queried
    only through `BuildCatalogSnapshot`; the host never derives publisher hashes or paths.
 7. Locked Git materialization first resolves the already-full revision (never a branch/tag),
-   checks its locked content checksum, then calls `GitHost::materialize_locked` with the recovered
-   typed commit and package-tree identities. `Frozen` performs this sequence using local state
+   with `GitHost::materialize_locked_revision`, which derives the tree directly from the local
+   object DB without requiring a selector observation. The recovered typed package-tree identity
+   is passed to `GitHost::materialize_locked`. `Frozen` performs this sequence using local state
    only; absence is an observable cache miss rather than a remote fallback.
+
+Registry aliases and stable registry identities share one explicitly validated routing namespace.
+This is essential because a root manifest may use a friendly alias while registry metadata uses
+stable IDs for transitive or cross-registry dependencies. Any alias/identity token owned by two
+different endpoints is rejected during construction.
+
+Exact lock materialization always attempts fully verified `LocalOnly` acquisition first. `Online`
+and `Locked` retry with network access only after that attempt reports unavailable or invalid
+local state; `Offline` and `Frozen` never retry. Both attempts flow through the same fetch
+observer, preserving local-hit, corruption-recovery, miss, and network observability.
+
+Before responsibility-overlap checks, every possibly nonexistent configured storage path is
+normalized by canonicalizing its longest existing ancestor and reattaching the missing suffix.
+This resolves junctions/symlinks and normalizes Windows verbatim (`\\?\`) versus drive spelling;
+case folding is applied only for the Windows identity comparison.
 
 ## Corruption policy
 
