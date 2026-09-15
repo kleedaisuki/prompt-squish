@@ -3,6 +3,8 @@
 //! 只负责参数解析、项目定位、显式服务组合、事件呈现与退出码。 / Owns only argv parsing,
 //! project location, explicit service composition, event presentation, and exit status.
 
+mod interrupt;
+
 use std::{
     ffi::OsString,
     io::{self, Write},
@@ -32,7 +34,8 @@ use squish_manager::{
 };
 use squish_presentation::{
     ColorMode, Environment, HumanRenderer, InspectHumanRenderer, NdjsonRenderer,
-    PresentationOptions, ProgressMode, Renderer, TerminalCapabilities, Verbosity,
+    PresentationOptions, ProgressMode, Renderer, SystemClock, SystemTerminal, TerminalProbe,
+    Verbosity,
 };
 use squish_protocol::{
     ActionKeyId, Event, EventPayload, ExitStatus, InvocationId, OperationRequest, OperationResult,
@@ -40,6 +43,8 @@ use squish_protocol::{
 };
 use squish_repository::{Discovery, ProjectRepository};
 use squish_store::{BlobDigest, Cas};
+
+use crate::interrupt::{InterruptCoordinator, StdProcessTerminator, StderrEmergencyRestore};
 
 /// 内核启动前的稳定机器记录。 / Stable machine record for failures before kernel dispatch.
 #[derive(serde::Serialize)]
@@ -142,10 +147,30 @@ fn execute(
 ) -> Result<u8, Box<dyn std::error::Error>> {
     // 在任何文件系统工作前安装处理器；定位期到达的信号会在进入内核时继续生效。
     // Install before filesystem work; a signal received during location remains set on kernel entry.
-    let cancellation = CancellationToken::default();
-    let signal_token = cancellation.clone();
-    ctrlc::set_handler(move || signal_token.cancel())?;
     let bootstrap_json = bootstrap_json_requested(&invocation);
+    let terminal = SystemTerminal::stderr();
+    let terminal_capabilities = terminal.capabilities();
+    let cancellation = CancellationToken::default();
+    let coordinator = Arc::new(InterruptCoordinator::new(
+        cancellation,
+        Arc::new(StderrEmergencyRestore::capture(
+            terminal_capabilities.is_terminal
+                && terminal_capabilities.supports_ansi
+                && terminal_capabilities.supports_dynamic,
+        )),
+        Arc::new(StdProcessTerminator),
+    ));
+    if let Err(error) = coordinator.install_with(ctrlc::set_handler) {
+        let message = format!("could not install interrupt handler: {error}");
+        return Ok(bootstrap_failure(
+            bootstrap_json,
+            "signal",
+            "SIGNAL001",
+            &message,
+            1,
+            true,
+        ));
+    }
     let explicit = requested_project(&invocation.request);
     let discovery = if explicit == Path::new(".") {
         Discovery::Implicit(std::env::current_dir()?)
@@ -217,7 +242,7 @@ fn execute(
     };
 
     let query = matches!(invocation.request, OperationRequest::Inspect(_));
-    let sink = Arc::new(rendering_sink(&invocation, &config, query));
+    let sink = Arc::new(rendering_sink(&invocation, &config, query, terminal));
     let settings = InvocationSettings {
         excluded_packages: invocation.execution.excluded_packages,
         jobs: invocation
@@ -235,7 +260,11 @@ fn execute(
     let capabilities: [&dyn squish_kernel::Capability; 1] = [&manager];
     let kernel = Kernel::new(&capabilities)?;
 
-    let context = InvocationContext::new(invocation_id(), cancellation, sink.clone());
+    let context = InvocationContext::new(
+        invocation_id(),
+        coordinator.cancellation_token(),
+        sink.clone(),
+    );
     let outcome = match kernel.dispatch(&invocation.request, &context) {
         Ok(outcome) => outcome,
         Err(KernelError::Emit(error)) => {
@@ -373,7 +402,12 @@ fn project_namespace(root: &Path) -> String {
 }
 
 /// 构造符合 stdout/stderr 边界的呈现目的地。 / Builds a renderer honoring the stdout/stderr boundary.
-fn rendering_sink(invocation: &ParsedInvocation, config: &Config, query: bool) -> RenderingSink {
+fn rendering_sink(
+    invocation: &ParsedInvocation,
+    config: &Config,
+    query: bool,
+    terminal: SystemTerminal,
+) -> RenderingSink {
     let message_format = if query {
         MessageFormat::Human
     } else {
@@ -417,11 +451,12 @@ fn rendering_sink(invocation: &ParsedInvocation, config: &Config, query: bool) -
             },
             ..PresentationOptions::default()
         };
-        Box::new(HumanRenderer::new(
+        Box::new(HumanRenderer::with_clock_and_terminal(
             stderr,
-            TerminalCapabilities::detect(&io::stderr()),
+            terminal,
             Environment::capture(),
             options,
+            SystemClock,
         ))
     };
     RenderingSink {
