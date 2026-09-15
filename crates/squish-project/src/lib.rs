@@ -24,7 +24,7 @@ pub use model::{
 };
 pub use resolver::{DependencyResolver, ResolutionInput, ResolutionMode};
 pub use scaffold::{NewProjectSpec, ProjectScaffold, STARTER_SOURCE, ScaffoldFile, ScaffoldVcs};
-pub use squish_protocol::{InvalidPackageName, PackageName};
+pub use squish_protocol::{InvalidNewPackageName, NewPackageName};
 pub use transaction::{
     CommitPreparation, JournalRecord, MutationFile, MutationKind, MutationPlan, MutationPlanner,
     TransactionId,
@@ -42,14 +42,14 @@ pub const LOCK_FILE_NAME: &str = "xmlsquish.lock";
 /// 根据协议与清单共享的唯一包名文法验证文本。 / Validates text with the single package-name grammar shared by protocol and manifests.
 ///
 /// This helper lets manifest validation retain its path-addressable [`ValidationIssue`] mapping
-/// while all package identities use [`PackageName`] as the authoritative implementation.
+/// while project creation uses [`NewPackageName`] as the authoritative strict implementation.
 ///
 /// # Errors
 ///
-/// Returns [`InvalidPackageName`] for an empty name or for any byte outside ASCII letters,
+/// Returns [`InvalidNewPackageName`] for an empty name or for any byte outside ASCII letters,
 /// digits, `-`, and `_`. Input is never normalized.
-pub fn validate_package_name(value: &str) -> Result<(), InvalidPackageName> {
-    PackageName::new(value).map(|_| ())
+pub fn validate_package_name(value: &str) -> Result<(), InvalidNewPackageName> {
+    squish_protocol::validate_new_package_name(value)
 }
 
 #[cfg(test)]
@@ -60,11 +60,11 @@ mod package_name_tests {
     fn manifest_helper_delegates_to_protocol_identity() {
         for valid in ["a", "Agent42", "support-agent", "support_agent", "0"] {
             validate_package_name(valid).unwrap();
-            assert_eq!(PackageName::new(valid).unwrap().as_str(), valid);
+            assert_eq!(NewPackageName::new(valid).unwrap().as_str(), valid);
         }
         for invalid in ["", "a b", "agent.", "代理", "a/b", "a\\b", "a:b"] {
-            assert_eq!(validate_package_name(invalid), Err(InvalidPackageName));
-            assert_eq!(PackageName::new(invalid), Err(InvalidPackageName));
+            assert_eq!(validate_package_name(invalid), Err(InvalidNewPackageName));
+            assert_eq!(NewPackageName::new(invalid), Err(InvalidNewPackageName));
         }
     }
 }

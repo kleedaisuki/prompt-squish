@@ -9,7 +9,7 @@ use std::{collections::BTreeMap, path::Path};
 use semver::Version;
 
 use crate::{
-    MANIFEST_FILE_NAME, MANIFEST_VERSION, Manifest, Package, PackageName, ProjectError, Target,
+    MANIFEST_FILE_NAME, MANIFEST_VERSION, Manifest, NewPackageName, Package, ProjectError, Target,
 };
 
 /// 新项目的规范入口源码。 / Canonical starter source for a new project.
@@ -37,20 +37,20 @@ pub enum ScaffoldVcs {
 /// 纯粹的新项目生成输入。 / Pure new-project generation input.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewProjectSpec {
-    package: PackageName,
+    package: NewPackageName,
     vcs: ScaffoldVcs,
 }
 
 impl NewProjectSpec {
     /// 从已验证包名和 manager 已解析的 VCS 策略创建规范。 / Creates a spec from a validated name and manager-resolved VCS policy.
     #[must_use]
-    pub const fn new(package: PackageName, vcs: ScaffoldVcs) -> Self {
+    pub const fn new(package: NewPackageName, vcs: ScaffoldVcs) -> Self {
         Self { package, vcs }
     }
 
     /// 返回稳定包身份。 / Returns the stable package identity.
     #[must_use]
-    pub const fn package(&self) -> &PackageName {
+    pub const fn package(&self) -> &NewPackageName {
         &self.package
     }
 
@@ -150,7 +150,7 @@ impl ProjectScaffold {
     }
 }
 
-fn canonical_manifest(package: &PackageName) -> Manifest {
+fn canonical_manifest(package: &NewPackageName) -> Manifest {
     let mut targets = BTreeMap::new();
     targets.insert(
         TARGET_NAME.to_owned(),
@@ -212,7 +212,7 @@ backend = "squish"
 "#;
 
     fn spec(vcs: ScaffoldVcs) -> NewProjectSpec {
-        NewProjectSpec::new(PackageName::new("hello").unwrap(), vcs)
+        NewProjectSpec::new(NewPackageName::new("hello").unwrap(), vcs)
     }
 
     #[test]
