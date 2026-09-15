@@ -1,6 +1,7 @@
 # Cache semantics are independent of CLI presentation
 
-Status: verified on 2026-09-16 for the human-output change from `694bd18` to `9d8dd43`.
+Status: verified on 2026-09-16 for the human-output change from `694bd18` through
+`5c726b3`. The last production presentation change is `8b2f8f0`; `5c726b3` adds only this report.
 
 ## Decision
 
@@ -63,7 +64,7 @@ that the experiment did not accidentally execute the same file:
 | Executable | Source | Executable SHA-256 |
 | --- | --- | --- |
 | Baseline | `694bd18b2e8de3a457421404e0ead8922633f60e` | `82049648ba49019beacae1c5a52978eedfba2a9eeb625794b9bec4549e0ef645` |
-| Human-output revision | `9d8dd43050972d3e11cd4b0ba10bce31c295a0cf` | `6905d61c2614c2166d146e6e19b0843520d49e2dd25b413fddcf423e87ebbbaa` |
+| Human-output revision | `5c726b3a1126c97ec8b4aa5472b702d1fa0c7c59` | `23cf7706eb60ae2143591271f501774191a0ee73f0601ad925b1c1e54be8ff85` |
 
 The source difference from baseline to tested revision contains only:
 
@@ -82,7 +83,7 @@ No build, manager, store, host, protocol, IR, compiler, linker, backend, or publ
 2. Create a fresh project and fresh storage roots.
 3. Run one cold baseline build with `--message-format=json --emit=prompt --emit=ir --emit=debug`.
 4. Run the same baseline executable seven times against the warmed state.
-5. Build `9d8dd43` independently and run it seven times against the **same** project, action index,
+5. Build `5c726b3` independently and run it seven times against the **same** project, action index,
    CAS, source cache, and published target.
 6. For every run, parse native v2.1 NDJSON and compare cache-hit action keys, cached result digests,
    published artifacts, and a normalized BuildRecord v2 projection.
@@ -151,15 +152,16 @@ recorded invocation look like a cache miss even when every cacheable compile act
 
 ## Timing observation, not an optimization claim
 
-The seven-run batches had wall-time medians of 104.506 ms (baseline) and 106.243 ms (post-change),
-which was too sensitive to sequential-order and host noise to interpret. A follow-up with 30
-alternating AB/BA warmed pairs produced medians of 128.470 ms and 131.987 ms respectively; native
-event medians were 105.5 ms and 111.5 ms.
+The seven-run batches had wall-time medians of 104.506 ms (baseline) and 110.782 ms (final
+post-change), which is too sensitive to sequential-order and host noise to interpret. Every sample
+still reported the same four cache hits. An earlier intermediate presentation revision (`9d8dd43`)
+was also measured with 30 alternating AB/BA warmed pairs; its baseline/current wall medians were
+128.470/131.987 ms and native event medians were 105.5/111.5 ms.
 
 These debug-build, single-host measurements are not a release-performance equivalence claim. They
-do show that the initial batch difference was not evidence of recomputation: every measured run had
-four cache hits, and the interleaved wall medians differed by about 3.5 milliseconds. Release-profile,
-cross-platform benchmarking would be required before setting a latency budget.
+do show that timing variation was not evidence of recomputation: every measured run had four cache
+hits. Release-profile, cross-platform benchmarking would be required before setting a latency
+budget.
 
 ## Conclusion and limits
 
