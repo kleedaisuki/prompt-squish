@@ -11,6 +11,9 @@ pub enum RepositoryError {
     /// 工作区不能无歧义地接纳新成员。 / A workspace cannot accept the new member unambiguously.
     #[error("workspace membership conflict: {0}")]
     WorkspaceConflict(String),
+    /// 项目创建在不可逆发布前被取消。 / Project creation was cancelled before irreversible publication.
+    #[error("project creation cancelled before publication: {0}")]
+    CreationCancelled(PathBuf),
     /// 项目目录已不可逆发布，但提交后收尾尚需恢复。 / The project directory was irreversibly published but post-commit completion still needs recovery.
     #[error("project creation committed at {destination}, but completion failed: {source}")]
     CreationCommitted {

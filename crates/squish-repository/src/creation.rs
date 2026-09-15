@@ -148,6 +148,15 @@ pub fn inspect_new_destination(path: &Path) -> Result<NewProjectLocation, Reposi
 pub trait StagePreparer {
     /// 在候选项目根执行外部准备，例如 `git init`。 / Performs external preparation such as `git init` in the candidate project root.
     fn prepare(&self, candidate_root: &Path, vcs: ProjectVcs) -> io::Result<()>;
+
+    /// 返回提交前是否已请求取消。 / Returns whether cancellation was requested before commit.
+    ///
+    /// The repository samples this once at the final pre-publication boundary. Cancellation after
+    /// that sample races with an irreversible rename and is therefore a deferred, post-commit
+    /// concern rather than grounds for rollback.
+    fn cancellation_requested(&self) -> bool {
+        false
+    }
 }
 
 /// 不执行外部准备的默认端口。 / Default port that performs no external preparation.
@@ -319,6 +328,11 @@ pub fn create_project(
         cleanup_predecision(&stage_root)?;
         cleanup_predecision(&tx)?;
         return Err(RepositoryError::DestinationExists(destination));
+    }
+    if preparer.cancellation_requested() {
+        cleanup_predecision(&stage_root)?;
+        cleanup_predecision(&tx)?;
+        return Err(RepositoryError::CreationCancelled(receipt_destination));
     }
     fs::rename(&staged_publish, &publish_path).map_err(|e| {
         if fs::symlink_metadata(&publish_path).is_ok() {
@@ -946,6 +960,17 @@ mod tests {
         }
     }
 
+    struct CancelBeforePublication;
+    impl StagePreparer for CancelBeforePublication {
+        fn prepare(&self, _candidate_root: &Path, _vcs: ProjectVcs) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn cancellation_requested(&self) -> bool {
+            true
+        }
+    }
+
     fn request(destination: PathBuf) -> CreateProjectRequest {
         CreateProjectRequest {
             destination: normalize_new_destination(&destination).unwrap(),
@@ -1003,6 +1028,32 @@ mod tests {
         );
         assert!(!destination.exists());
         recover_project_creations(temp.path(), &NoFault).unwrap();
+    }
+
+    #[test]
+    fn final_prepublication_cancellation_removes_stage_and_journal() {
+        let temp = tempdir().unwrap();
+        let destination = normalize_new_destination(&temp.path().join("new")).unwrap();
+        let error = create_project(
+            &request(destination.clone()),
+            &CancelBeforePublication,
+            &NoFault,
+        )
+        .unwrap_err();
+        assert!(matches!(error, RepositoryError::CreationCancelled(path) if path == destination));
+        assert!(!destination.exists());
+        recover_project_creations(temp.path(), &NoFault).unwrap();
+        let stages = fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".xmlsquish-new-stage-")
+            })
+            .count();
+        assert_eq!(stages, 0);
     }
 
     #[test]
