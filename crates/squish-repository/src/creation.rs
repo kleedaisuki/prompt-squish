@@ -186,7 +186,6 @@ struct Journal {
     destination: PathBuf,
     publish_path: PathBuf,
     stage_root: PathBuf,
-    state_dir: String,
     missing_tail: PathBuf,
     marker_name: String,
     workspace: Option<WorkspaceMembership>,
@@ -224,6 +223,11 @@ pub fn create_project(
         .map(normalize_workspace)
         .transpose()?;
     if let Some(workspace) = &workspace {
+        if Path::new(&workspace.member) == Path::new(STATE_DIR) {
+            return Err(RepositoryError::WorkspaceConflict(format!(
+                "top-level member `{STATE_DIR}` is reserved for workspace manager state"
+            )));
+        }
         let expected = normalize_new_destination(&workspace.root.join(&workspace.member))?;
         if expected != destination {
             return Err(RepositoryError::WorkspaceConflict(format!(
@@ -248,7 +252,7 @@ pub fn create_project(
     }
     let _workspace_lock = workspace
         .as_ref()
-        .map(|workspace| workspace_lock(&workspace.root, state_dir))
+        .map(|workspace| workspace_lock(&workspace.root))
         .transpose()?;
     if let Some(workspace) = &workspace {
         // Creation→workspace is the global lock order. Reconcile an older file transaction while
@@ -281,7 +285,6 @@ pub fn create_project(
         destination: destination.clone(),
         publish_path: publish_path.clone(),
         stage_root: stage_root.clone(),
-        state_dir: state_dir.to_owned(),
         missing_tail,
         marker_name,
         workspace,
@@ -460,12 +463,7 @@ fn finish_published(
 ) -> Result<(), RepositoryError> {
     if journal.phase != Phase::WorkspaceReplaced && journal.phase != Phase::Completed {
         if let Some(workspace) = &journal.workspace {
-            ensure_membership(
-                workspace,
-                &journal.package_name,
-                &journal.state_dir,
-                workspace_already_locked,
-            )?;
+            ensure_membership(workspace, &journal.package_name, workspace_already_locked)?;
         }
         // Ensure-member is semantic and idempotent, so fault before recording the phase tests
         // the workspace-replace→journal recovery boundary rather than the easy side of it.
@@ -579,13 +577,12 @@ fn membership_effective(
 fn ensure_membership(
     workspace: &WorkspaceMembership,
     package: &str,
-    state_dir: &str,
     already_locked: bool,
 ) -> Result<bool, RepositoryError> {
     let _lock = if already_locked {
         None
     } else {
-        Some(workspace_lock(&workspace.root, state_dir)?)
+        Some(workspace_lock(&workspace.root)?)
     };
     preflight_membership_after_publish(workspace, package)?;
     if membership_effective(workspace, package)? {
@@ -802,8 +799,8 @@ fn absolute_lexical(path: &Path) -> Result<PathBuf, RepositoryError> {
 fn creation_lock(anchor: &Path, state_dir: &str) -> Result<Lock, RepositoryError> {
     lock_file(&anchor.join(state_dir).join(LOCK_NAME))
 }
-fn workspace_lock(root: &Path, state_dir: &str) -> Result<Lock, RepositoryError> {
-    lock_file(&root.join(state_dir).join("repository.lock"))
+fn workspace_lock(root: &Path) -> Result<Lock, RepositoryError> {
+    lock_file(&root.join(STATE_DIR).join("repository.lock"))
 }
 
 fn lock_file(path: &Path) -> Result<Lock, RepositoryError> {
@@ -845,6 +842,12 @@ fn store_journal(tx: &Path, journal: &Journal) -> Result<(), RepositoryError> {
         sync_directory(parent)?;
         if let Some(state) = parent.parent() {
             sync_directory(state)?;
+            if let Some(anchor) = state.parent() {
+                // `create_dir_all` may have created state, transaction collection, and id in one
+                // call. Syncing every parent persists each directory entry up to the pre-existing
+                // transaction anchor rather than only the journal file itself.
+                sync_directory(anchor)?;
+            }
         }
     }
     Ok(())
@@ -1250,7 +1253,6 @@ mod tests {
             destination: destination.clone(),
             publish_path: destination,
             stage_root: stage_root.clone(),
-            state_dir: STATE_DIR.into(),
             missing_tail: PathBuf::from("new"),
             marker_name: ".xmlsquish-published-crashed".into(),
             workspace: None,
@@ -1265,7 +1267,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_can_create_a_member_named_like_the_default_state_directory() {
+    fn workspace_rejects_reserved_state_member_without_changes() {
         let temp = tempdir().unwrap();
         fs::write(
             temp.path().join(MANIFEST_FILE_NAME),
@@ -1273,19 +1275,21 @@ mod tests {
         )
         .unwrap();
         let root = temp.path().canonicalize().unwrap();
+        let manifest = root.join(MANIFEST_FILE_NAME);
+        let before = fs::read(&manifest).unwrap();
         let destination = normalize_new_destination(&root.join(STATE_DIR)).unwrap();
         let mut req = request(destination.clone());
         req.workspace = Some(WorkspaceMembership {
             root: root.clone(),
             member: STATE_DIR.into(),
         });
-        create_project(&req, &NoStagePreparation, &NoFault).unwrap();
-        assert!(destination.join(MANIFEST_FILE_NAME).is_file());
-        assert!(
-            fs::read_to_string(root.join(MANIFEST_FILE_NAME))
-                .unwrap()
-                .contains(STATE_DIR)
-        );
+        assert!(matches!(
+            create_project(&req, &NoStagePreparation, &NoFault),
+            Err(RepositoryError::WorkspaceConflict(message)) if message.contains("reserved")
+        ));
+        assert!(!destination.exists());
+        assert!(!root.join(".xmlsquish-state").exists());
+        assert_eq!(fs::read(manifest).unwrap(), before);
     }
 
     #[cfg(windows)]
