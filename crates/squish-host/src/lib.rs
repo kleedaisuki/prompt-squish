@@ -37,8 +37,8 @@ use squish_project::{
 };
 use squish_protocol::VcsChoice;
 use squish_repository::{
-    CreateProjectRequest, NoFault, PackageLocation, ProjectVcs, StagePreparer, WorkspaceMembership,
-    create_project,
+    CreateProjectRequest, FaultInjector, PackageLocation, ProjectVcs, RepositoryError,
+    StagePreparer, WorkspaceMembership, create_project,
 };
 use squish_resolver::{
     Access as ResolverAccess, FilesystemPort, GitCandidate, GitPort, LocalPackage, LocalRequest,
@@ -329,14 +329,22 @@ impl StagePreparer for ProjectCreationHost {
         if vcs != ProjectVcs::InitializeGit {
             return Ok(());
         }
-        let output = self.git.execute(GitInvocation {
-            cwd: Some(candidate_root.to_path_buf()),
-            args: ["init", "--quiet"]
-                .into_iter()
-                .map(OsString::from)
-                .collect(),
-            env: BTreeMap::new(),
-        })?;
+        let output = self
+            .git
+            .execute(GitInvocation {
+                cwd: Some(candidate_root.to_path_buf()),
+                args: ["init", "--quiet"]
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect(),
+                env: BTreeMap::new(),
+            })
+            .map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("could not run git init: {error}; retry with --vcs=none"),
+                )
+            })?;
         if output.success {
             return Ok(());
         }
@@ -379,6 +387,10 @@ impl<P: StagePreparer> StagePreparer for CancellablePreparation<'_, P> {
             ));
         }
         Ok(())
+    }
+
+    fn cancellation_requested(&self) -> bool {
+        self.cancellation.is_cancelled()
     }
 }
 
@@ -958,8 +970,9 @@ impl Services for ProjectCreationHost {
         &self,
         request: &CreateProjectRequest,
         cancellation: squish_kernel::CancellationToken,
+        faults: Arc<dyn FaultInjector>,
     ) -> Result<ProjectCreationStatus, ServiceError> {
-        publish_project(request, self, cancellation)
+        publish_project(request, self, cancellation, faults)
     }
 
     fn storage_layout(&self, _project_root: &Path) -> Result<StorageLayout, ServiceError> {
@@ -988,7 +1001,7 @@ impl ProjectCreationHost {
             .git
             .execute(GitInvocation {
                 cwd: Some(cwd),
-                args: ["rev-parse", "--show-toplevel"]
+                args: ["rev-parse", "--is-inside-work-tree"]
                     .into_iter()
                     .map(OsString::from)
                     .collect(),
@@ -997,7 +1010,12 @@ impl ProjectCreationHost {
                     (OsString::from("LANG"), OsString::from("C")),
                 ]),
             })
-            .map_err(|error| external_service_error("git_discovery_failed", error))?;
+            .map_err(|error| {
+                ServiceError::new(
+                    "git_discovery_failed",
+                    format!("could not run Git worktree discovery: {error}; retry with --vcs=none"),
+                )
+            })?;
         if !output.success {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.contains("not a git repository") {
@@ -1015,22 +1033,15 @@ impl ProjectCreationHost {
                 ),
             ));
         }
-        let root = std::str::from_utf8(&output.stdout)
-            .map_err(|_| {
-                ServiceError::new(
-                    "git_discovery_failed",
-                    "Git returned a non-UTF-8 worktree root; retry with --vcs=none",
-                )
-            })?
-            .trim();
-        let root = native_host_path(
-            std::fs::canonicalize(root)
-                .map_err(|error| external_service_error("git_discovery_failed", error))?,
-        );
-        if !destination.starts_with(&root) {
+        let state = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+        let state = state.strip_suffix(b"\r").unwrap_or(state);
+        if state == b"false" {
+            return Ok(ProjectVcs::InitializeGit);
+        }
+        if state != b"true" {
             return Err(ServiceError::new(
                 "git_discovery_failed",
-                "Git returned a worktree that does not contain the destination; retry with --vcs=none",
+                "Git returned an invalid worktree status; retry with --vcs=none",
             ));
         }
         Ok(ProjectVcs::InheritedGit)
@@ -1048,6 +1059,7 @@ fn publish_project<P: StagePreparer>(
     request: &CreateProjectRequest,
     preparer: &P,
     cancellation: squish_kernel::CancellationToken,
+    faults: Arc<dyn FaultInjector>,
 ) -> Result<ProjectCreationStatus, ServiceError> {
     if cancellation.is_cancelled() {
         return Ok(ProjectCreationStatus::Cancelled);
@@ -1058,9 +1070,15 @@ fn publish_project<P: StagePreparer>(
         cancellation: cancellation.clone(),
         observed: &observed,
     };
-    match create_project(request, &cancellable, &NoFault) {
+    match create_project(request, &cancellable, faults.as_ref()) {
         Ok(created) => Ok(ProjectCreationStatus::Created(created)),
         Err(_) if observed.load(Ordering::Acquire) => Ok(ProjectCreationStatus::Cancelled),
+        Err(RepositoryError::CreationCancelled(_)) => Ok(ProjectCreationStatus::Cancelled),
+        Err(error) if error.committed_creation().is_some() => {
+            Ok(ProjectCreationStatus::CommittedFailure(
+                external_service_error("project_creation_committed_failure", error),
+            ))
+        }
         Err(error) => Err(external_service_error("project_creation_failed", error)),
     }
 }
@@ -1188,8 +1206,9 @@ impl Services for ProductionHost {
         &self,
         request: &CreateProjectRequest,
         cancellation: squish_kernel::CancellationToken,
+        faults: Arc<dyn FaultInjector>,
     ) -> Result<ProjectCreationStatus, ServiceError> {
-        publish_project(request, self, cancellation)
+        publish_project(request, self, cancellation, faults)
     }
 
     fn storage_layout(&self, project_root: &Path) -> Result<StorageLayout, ServiceError> {
@@ -1523,7 +1542,6 @@ mod tests {
 
     struct RecordingGit {
         calls: Mutex<Vec<GitInvocation>>,
-        worktree: PathBuf,
     }
 
     impl GitRunner for RecordingGit {
@@ -1537,7 +1555,7 @@ mod tests {
                 success: true,
                 code: Some(0),
                 stdout: if discovery {
-                    format!("{}\n", self.worktree.display()).into_bytes()
+                    b"true\n".to_vec()
                 } else {
                     Vec::new()
                 },
@@ -1556,6 +1574,17 @@ mod tests {
                 stdout: Vec::new(),
                 stderr: self.0.as_bytes().to_vec(),
             })
+        }
+    }
+
+    struct MissingGit;
+
+    impl GitRunner for MissingGit {
+        fn execute(&self, _invocation: GitInvocation) -> std::io::Result<GitRunOutput> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "git executable missing",
+            ))
         }
     }
 
@@ -2317,7 +2346,6 @@ mod tests {
         std::fs::create_dir(temp.path().join(".git")).unwrap();
         let git = Arc::new(RecordingGit {
             calls: Mutex::new(Vec::new()),
-            worktree: temp.path().to_path_buf(),
         });
         let host = ProjectCreationHost::new(GitExecution::Runner(git.clone())).unwrap();
         let destination = temp.path().join("nested/project");
@@ -2332,7 +2360,7 @@ mod tests {
         assert!(!destination.exists());
         let calls = git.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].args, ["rev-parse", "--show-toplevel"]);
+        assert_eq!(calls[0].args, ["rev-parse", "--is-inside-work-tree"]);
     }
 
     #[test]
@@ -2340,7 +2368,6 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let git = Arc::new(RecordingGit {
             calls: Mutex::new(Vec::new()),
-            worktree: temp.path().to_path_buf(),
         });
         let host = ProjectCreationHost::new(GitExecution::Runner(git.clone())).unwrap();
 
@@ -2381,5 +2408,23 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code(), "git_discovery_failed");
         assert!(error.message().contains("--vcs=none"));
+    }
+
+    #[test]
+    fn missing_git_is_actionable_during_discovery_and_initialization() {
+        let temp = tempfile::tempdir().unwrap();
+        let host = ProjectCreationHost::new(GitExecution::Runner(Arc::new(MissingGit))).unwrap();
+
+        let discovery = host
+            .locate_project_creation(&temp.path().join("demo"), VcsChoice::Git)
+            .unwrap_err();
+        assert_eq!(discovery.code(), "git_discovery_failed");
+        assert!(discovery.message().contains("--vcs=none"));
+
+        let initialization = host
+            .prepare(temp.path(), ProjectVcs::InitializeGit)
+            .unwrap_err();
+        assert_eq!(initialization.kind(), std::io::ErrorKind::NotFound);
+        assert!(initialization.to_string().contains("--vcs=none"));
     }
 }

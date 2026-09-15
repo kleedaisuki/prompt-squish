@@ -77,6 +77,12 @@ fn parse(value: &str) -> Result<Selection, FaultConfigurationError> {
         }
         "repository.candidates-staged" => Ok(Selection::Repository(FaultPoint::CandidatesStaged)),
         "repository.commit-decided" => Ok(Selection::Repository(FaultPoint::CommitDecided)),
+        "repository.creation-prepared" => Ok(Selection::Repository(FaultPoint::CreationPrepared)),
+        "repository.creation-published" => Ok(Selection::Repository(FaultPoint::CreationPublished)),
+        "repository.creation-workspace-replaced" => {
+            Ok(Selection::Repository(FaultPoint::CreationWorkspaceReplaced))
+        }
+        "repository.creation-completed" => Ok(Selection::Repository(FaultPoint::CreationCompleted)),
         _ => Err(FaultConfigurationError(format!(
             "unsupported {SELECTOR_VARIABLE} value `{value}`"
         ))),
@@ -116,5 +122,17 @@ mod tests {
         )];
         let error = from_environment(&environment).err().unwrap();
         assert!(error.to_string().contains("unsupported"));
+    }
+
+    #[test]
+    fn selector_language_covers_project_creation_boundaries() {
+        for selector in [
+            "repository.creation-prepared",
+            "repository.creation-published",
+            "repository.creation-workspace-replaced",
+            "repository.creation-completed",
+        ] {
+            assert!(matches!(parse(selector), Ok(Selection::Repository(_))));
+        }
     }
 }
