@@ -172,7 +172,7 @@ the durable locator when later edits move the lines.
 | `src/cli/mod.rs:214-331` renders summaries and stage-specific prose. | Move to `presentation`, consuming ordered structured events and job results. |
 | `src/cli/console.rs:12-61` implements color policy and safe clap styling. | Preserve as presentation infrastructure; extend it with TTY-aware progress/spinners and stable redirected output. |
 | `src/cli/diagnostics.rs:5-140`, `:161-188` buffer diagnostic rendering and sanitize displayed text. | Retain these observable qualities, but render a shared structured diagnostic type rather than compiler-formatted messages. |
-| `src/cli/pipeline.rs:96-132` is the sequential batch loop; `:143-240` combines loading, compilation, squishing, metrics, writes, cleanup, and log output. | Replace with `ProjectSnapshot -> BuildPlan -> Scheduler -> JobResult -> ArtifactStore`. Executors return data; they never print. |
+| `src/cli/pipeline.rs:96-132` is the sequential batch loop; `:143-240` combines loading, compilation, squishing, metrics, writes, cleanup, and log output. | Replace with `Job -> PlanningAttempt -> PreparedPlan -> Scheduler -> JobResult -> ArtifactStore`. Planning emits real step events while it resolves, fetches, reconciles locks, seals sources, and discovers the graph. Executors return data; they never print. |
 | `src/cli/pipeline.rs:172-189` builds a read snapshot separately per entry. | Use one immutable invocation `ContentStore`, sealed before execution, so all selected targets observe the same source outcomes. |
 | `src/cli/pipeline.rs:219-237` publishes sibling XML IR/output files. | Persist binary module IR through `cache`; publish final products through `ArtifactStore` as `*.prompt`. |
 | `src/cli/files.rs:14-36` reads XML and atomically replaces a file. | Split into `SourceStore` and `ArtifactStore` ports. BOM is metadata of an XML source envelope, not an IR property. Retain durable staging/replacement semantics. |
@@ -219,42 +219,80 @@ rather than retaining the existing pipeline.
 
 ## Scheduling and state model
 
-The planner creates a closed, immutable plan before scheduling:
+ADR 0009's job/plan lifecycle is normative. The whole request is a `Job`; a
+`PreparedPlan` is one sealed execution attempt inside it:
 
 ```text
-BuildPlan {
+JobLifecycle {
+    job_id,
+    active_planning_attempt,
+    plans: PlanId -> PlanRecord,
+    final_plan,
+}
+
+PreparedPlan {
+    plan_id,       // unique attempt identity
+    plan_digest,   // semantic identity of snapshot + issues + DAG
     snapshot_id,
-    jobs: [Job],
+    mode,          // Execute | ReportOnly
+    actions: [Action],
     artifact_set,
     stable_order,
 }
-
-JobResult {
-    job_id,
-    status,
-    products,
-    diagnostics,
-    events,
-    metrics,
-}
 ```
 
+Resolve/fetch, lock reconciliation needed to establish a build snapshot,
+source sealing, static-closure discovery, and graph validation are planning
+steps. They emit typed start/terminal events around the real port calls and
+receive cooperative cancellation; they are not completed eagerly and then
+replayed as empty `Action`s. Only after those steps finish does `PlanReady`
+seal the immutable execution DAG. No action may be added after the seal or
+started before every declared vertex has been published.
+
 The plan validates source identities, target/product collisions, dependency
-edges, cache keys, and output destinations before workers run. The scheduler
-may execute ready independent jobs concurrently with an explicit bound. A
-failure prevents only jobs that depend on its unavailable product; unrelated
-jobs continue. Workers write neither terminal streams nor final artifacts.
-They return buffered structured results, and the artifact store commits staged
-products. Presentation sorts by stable plan/job identity, never by completion
-time, so colored interactive output and redirected logs communicate the same
-facts.
+edges, complete key recipes, and output destinations before workers run. The
+scheduler may execute ready independent actions concurrently with an explicit
+bound. A failure prevents only actions that depend on its unavailable product;
+unrelated actions continue. Workers write neither terminal streams nor final
+artifacts. They return buffered structured results, and the artifact store
+commits staged products. Presentation sorts by stable job/plan/action identity,
+never by completion time, so colored interactive output and redirected logs
+communicate the same facts.
 
 Project and dependency mutation uses typed manifest editing and full candidate
-resolution. `add` and `remove` serialize mutation only for the selected project,
-compute coherent candidate manifest and lock bytes, recheck the observed
-generation/digests, and publish them with a journaled recoverable transaction.
-Structured events describe recovery and commit state. Builds consume a coherent
-frozen manifest/lock generation and never observe a half-mutated project state.
+resolution. `add` and `remove` seal an exact candidate and revision set, then a
+non-cacheable commit action rechecks them under the selected project's writer
+lock. A pre-decision mismatch closes that immutable plan as `Superseded` and
+starts a new planning attempt with a new `PlanId`; it never mutates the old DAG
+or asks the user to repair manager-owned state. Durable commit and recovery
+events describe the actual work. Builds consume a coherent frozen
+manifest/lock generation and never observe a half-mutated project state.
+
+`--dry-run` uses `ReportOnly`: it executes all planning reads and validations,
+declares the exact graph, closes it as `Reported`, and starts no action. A fatal
+pre-plan failure or cancellation has zero action totals. The kernel reduces
+these cases from planning events rather than requiring a fabricated one-node
+failure plan.
+
+### Concrete manager lifecycle migration
+
+The currently inspected manager implementation exposes the exact seam to
+change. This is an ordered migration, not permission to maintain both lifecycle
+models indefinitely:
+
+| Slice | Required change |
+| --- | --- |
+| `squish-protocol` | Bump the event protocol major version; add `PlanningAttemptId`, `PlanningStepId`, `PlanId`, `PlanDigest`, `PlanMode`, typed planning-step/issue/terminal events, `ActionDeclared`, `ActionSuperseded`, and `PlanClosed`. Add `plan: PlanId` to every action lifecycle event. Preserve a v1 decoder that maps one old `PlanReady`/`ActionQueued` stream to one legacy executable plan; never put v2 semantics in a v1 envelope. |
+| `squish-kernel::Lifecycle` | Replace the single `job/planned/actions` record with the job/attempt/plan records in ADR 0009. Validate one active attempt/plan, one seal per plan ID, complete declaration before action start, terminal steps, and closed plans before `OperationCompleted`. Reduce the final non-superseded plan plus its planning issues. Permit a failed/cancelled pre-plan job with zero action totals; derive failure from `root_failures`, not only `ActionTotals.failed`. |
+| `squish-manager::build` | Split `prepare_excluding` into observable planning steps around discovery, materialization/fetch, resolution, lock reconciliation, repository snapshot, source sealing, target/closure scan, and graph validation. Remove `BuildWork::{Resolve, Snapshot, Scan}` and the `execute_work` branches that only revalidate already-produced planning data and return no outputs; `PreparedBuild` carries that immutable evidence as input to real compile/link/backend actions. |
+| `squish-manager::orchestrator` | Add a planning-attempt driver outside `Scheduler`. Replace `fail` and its synthetic `manager.failure` action with `PlanningFailed`/`PlanningCancelled`. Change `announce` to emit the plan identity/digest/mode and `ActionDeclared`; create `Scheduler` only after announcement succeeds. `run` accepts one already sealed plan and can neither call planning ports nor append actions. |
+| resolver/repository/source ports | Take a cancellation token or typed operation context on every potentially blocking call. Expose typed fetch units so parallel downloads receive distinct planning-step IDs. Check cancellation at bounded file/scan units and adapter waits; transaction code defers it only after the durable commit decision until recovery is coherent. Ports return domain progress/evidence and never emit wire events directly. |
+| mutation manager | Put candidate computation in planning and the exact compare-and-swap transaction in the sealed plan. Map a pre-decision revision mismatch to `ActionSuperseded -> PlanClosed(Superseded) -> PlanningStarted(new attempt)`. Preserve the bounded retry policy and make retry exhaustion one final planning failure, not a partially rewritten plan. |
+
+Remove the compatibility implementation after all manager operations and
+presenters consume the v2 reducer. In particular, retaining the no-op analysis
+actions “for event compatibility” is forbidden: the versioned projection, not
+fake execution, owns compatibility.
 
 ## Test migration and new proof obligations
 
@@ -268,7 +306,7 @@ suite into a facade around the old pipeline.
 | Instantiation and document IR | `src/compiler/runtime.contract.test.rs:42-260`; `src/compiler/runtime.xml.test.rs:16-126`; `src/compiler/runtime.rs:647-881` | compare structured documents/traces/spans; backend-independent expansion equivalence |
 | IR codec and cache | upgrade `src/compiler/reuse.test.rs:19-83` | serialize-deserialize-link equivalence, canonical deterministic bytes, schema rejection/migration, complete cache keys, corruption recovery, relocation after checkout movement |
 | Squish backend | `src/squish.test.rs`; process coverage from `src/cli/binary.integration.test.rs:61` | identical semantic output through `LinkedDocument`, `*.prompt` publication, backend diagnostics |
-| Manager and transactions | `src/cli/mod.pipeline_tests.test.rs:96-217`; `src/cli/pipeline.semantic.test.rs:25-82` | all four commands, immutable plans, dependency blocking, independent keep-going jobs, atomic publication, interrupted/candidate manifest mutations |
+| Manager and transactions | `src/cli/mod.pipeline_tests.test.rs:96-217`; `src/cli/pipeline.semantic.test.rs:25-82` | all commands; real planning-step observation and cancellation; no placeholder analysis actions; immutable plan sealing; report-only dry-run; pre-plan zero-action failure; dependency blocking; independent keep-going work; supersede/re-plan on revision conflict; atomic publication; interrupted/candidate manifest mutations |
 | Presentation | existing console and diagnostics unit/integration tests | color modes, TTY progress lifecycle, spinner cleanup, safe user text, stable non-TTY snapshots, deterministic concurrent results |
 | Source identity | retain only relevant cases from `src/cli/paths.test.rs` | lexical identity, symlinks, non-UTF-8 platform paths, source display versus program identity |
 | Performance | retain and divide `src/compiler/perf.test.rs:121` onward | parse, encode/decode, cache hit/miss, relocation/link, instantiation/backend, cold and warm end-to-end measurements |

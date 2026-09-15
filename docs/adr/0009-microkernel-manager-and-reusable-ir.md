@@ -385,15 +385,19 @@ export; cache or checkout paths never become `SourceId`.
    intent without holding the writer lock;
 2. perform registry/network work, resolve, and validate the candidate graph
    optimistically;
-3. acquire the selected workspace's short-duration writer lock and re-read the
-   authoritative revision digests;
-4. if they changed, release the lock and automatically recompute from the new
-   state, subject to a bounded, observable retry policy;
-5. while revisions still match, stage all affected manifest and lock bytes plus
+3. seal a plan containing the exact candidate bytes, their observed revision
+   set, and one non-cacheable `CommitTransaction` action;
+4. in that action, acquire the selected workspace's short-duration writer lock
+   and re-read the authoritative revision digests;
+5. if they changed before the commit decision, release the lock, close the plan
+   as superseded, and automatically recompute from the new state under a new
+   planning-attempt/plan identity, subject to a bounded, observable retry
+   policy;
+6. while revisions still match, stage all affected manifest and lock bytes plus
    a recovery record;
-6. atomically commit a transaction marker and replace the staged files;
-7. reconcile or recover any interrupted commit on the next manager invocation;
-8. publish structured change events and release the lock.
+7. atomically commit a transaction marker and replace the staged files;
+8. reconcile or recover any interrupted commit on the next manager invocation;
+9. publish structured change events and release the lock.
 
 Failure before the commit decision changes no authoritative file. Recovery
 makes a decided transaction converge to either the complete old set or the
@@ -401,7 +405,8 @@ complete new set; users are not asked to repair partial manager state. Unrelated
 dependencies are retained from the prior lock when they still satisfy intent.
 `remove` prunes unreachable lock entries but never deletes shared CAS content as
 part of the foreground command. `--dry-run` performs the identical candidate
-resolution and validation without the commit steps.
+resolution and validation, seals the same plan as `ReportOnly`, and performs no
+commit step.
 
 The writer lock is never held across ordinary network latency. Exhausting the
 conflict retry budget produces a precise concurrent-modification diagnostic and
@@ -410,19 +415,30 @@ manager rather than immediately delegated to the user.
 
 ## Mathematical action model
 
-The scheduler operates on nodes, while the cache operates only on deterministic
-transform actions. A schedulable node is
+The scheduler operates only on nodes in a **sealed execution plan**. Project
+location, dependency solving and fetching, authoritative lock reconciliation,
+source sealing, static-closure discovery, and plan validation happen before
+that seal. They are real, observable, cancellable planning work, but they are
+not scheduler nodes: pretending that already-completed I/O is a later empty
+`Action` makes cancellation, timing, failure attribution, and dry-run output
+false. The job/plan protocol below gives that work a lifecycle without making
+the execution DAG dynamic.
+
+Within a sealed plan, the cache operates only on deterministic transform
+actions. A schedulable node is
 
 \[
 N=(id,k,D,r,e,p),
 \]
 
-where `id` is stable within the invocation, `k` is its kind, `D` its
+where `id` is stable within its plan, `k` is its kind, `D` its
 prerequisites, `r` its resource class, `e` is `Transform`, `ReadEffect`,
 `WriteEffect`, or `Coordination`, and `p` is a typed payload. Network resolve,
-filesystem snapshot, publication, and transaction commit are effect nodes.
-They have invocation identities, retry/idempotency contracts, and recovery
-rules, but are never treated as pure merely to fit the cache model.
+filesystem snapshot, and source scan are planning steps when their results are
+needed to determine the graph. Publication and a transaction commit whose
+complete candidate is already represented by the sealed plan are effect nodes.
+Both planning steps and effect nodes have retry/idempotency contracts and
+recovery rules, but neither is treated as pure merely to fit the cache model.
 
 A cacheable transform action is the immutable tuple
 
@@ -517,48 +533,222 @@ encoding, and code must not assume that equality.
 
 ### Action DAG
 
-Planning has an analysis segment followed by a closed execution segment:
+The whole user request is a `Job`; a `Plan` is one immutable execution attempt
+inside that job. Planning and execution are deliberately different state
+machines:
 
 ```text
-Resolve -> Snapshot -> Scan
-                         |
-                         +--> CompileUnit(source A) --+
-                         +--> CompileUnit(source B) --+--> Link
-                         +--> CompileUnit(source C) --+      |
-                                                            v
-                                                       Instantiate
-                                                            |
-                                                            v
-                                                         Backend
-                                                            |
-                                                            v
-                                                         Publish
+Job(request)
+  |
+  +-- PlanningAttempt(a1)
+  |      recover -> locate -> resolve/fetch -> reconcile lock
+  |                -> seal sources -> scan closure -> validate
+  |                                      |
+  |                                      v
+  |                              PlanReady(p1, digest)
+  |                                      |
+  |                          closed execution DAG only
+  |                                      |
+  |                    +-----------------+-----------------+
+  |                    |                                   |
+  |              PlanClosed(executed/reported)       PlanClosed(superseded)
+  |                                                        |
+  +------------------------------------------------ PlanningAttempt(a2)
 ```
 
-`Resolve`, `Snapshot`, and `Scan` are analysis nodes. `Resolve` fixes the package
-graph; `Snapshot` fixes every logical source outcome; `Scan` discovers the
-complete static closure. Their results deterministically materialize a closed
-execution DAG before any `CompileUnit` becomes runnable. `CompileUnit` creates
-relocatable modules independently; `Link` relocates and verifies their graph;
-`Instantiate` applies one entry, arguments, and execution budgets; `Backend`
-produces product bytes; `Publish` reserves and commits user-visible artifacts.
+A planning attempt may finish without producing a plan when location,
+resolution, source sealing, or graph validation fails or is cancelled. A plan
+never grows or changes after `PlanReady`. Optimistic transaction invalidation
+does not mutate a published plan: it closes that plan as `Superseded` and starts
+a new, uniquely identified planning attempt in the same job. This is the only
+reason an ordinary job has more than one plan, and the conflict retry policy is
+bounded and observable.
 
-The graph above is the build specialization, not a build-only orchestrator.
-`fmt` plans `Snapshot -> ParseLossless* -> Rewrite* -> VerifyEquivalent* ->
-PublishTransaction`; `add` and `remove` plan `LoadIntent -> EditCandidate ->
-ResolveCandidate -> ValidateCandidate -> CommitTransaction`. All command plans
-use the same action IDs, readiness states, resource permits, cancellation,
-event, dry-run, and result model. Mutation commit actions are deliberately
-non-cacheable; their pure candidate-computation predecessors may be cached when
-their complete inputs are declared.
+The build specialization is therefore:
 
-An invocation therefore has a stable request identity during analysis and a
-`PlanId = H(request identity, resolved graph, snapshot digest, canonical closed
-execution DAG)` after Scan. The scheduler may execute the known analysis prefix,
-but it cannot admit compile, link, backend, or publication work until the closed
-execution plan has passed destination, capability, key-completeness, cycle, and
-resource validation. `--dry-run` performs analysis and reports that exact closed
-plan without executing its transform or effect nodes.
+```text
+planning: Recover -> Locate -> Resolve/Fetch -> ReconcileLock
+                      -> Snapshot -> Scan -> ValidatePlan
+                                             || PlanReady seal
+execution: CompileUnit(source A) --+
+           CompileUnit(source B) --+--> Link -> Instantiate -> Backend -> Publish
+           CompileUnit(source C) --+
+```
+
+`CompileUnit` creates relocatable modules independently; `Link` relocates and
+verifies their graph; `Instantiate` applies one entry, arguments, and execution
+budgets; `Backend` produces product bytes; and `Publish` reserves and commits
+user-visible artifacts. There are no `Resolve`, `Snapshot`, or `Scan` actions in
+that execution graph because those operations have already happened. Their
+immutable results are inputs of the prepared work and of `PlanDigest`, rather
+than empty work replayed by the scheduler.
+
+The same split applies to every operation. `fmt` plans by locating and sealing
+the selected source tape, then executes `ParseLossless* -> Rewrite* ->
+VerifyEquivalent* -> PublishTransaction`. `add` and `remove` plan the typed edit,
+candidate resolution, and validation, then execute a non-cacheable
+`CommitTransaction` over the exact candidate and observed revision set.
+`inspect` locates and validates its subject during planning and executes only
+the requested decoding/query work. Pure planning computations may use a
+separate memo table, but they do not acquire action keys or appear as cache hits
+in the execution plan.
+
+Two identities must not be conflated:
+
+```text
+PlanId     = invocation-scoped identity (job, monotonically increasing attempt)
+PlanDigest = H(request identity, resolved graph, snapshot digest,
+               canonical planning issues, canonical closed execution DAG)
+Action identity = (PlanId, ActionId)
+```
+
+`PlanId` remains unique when an identical candidate is planned twice;
+`PlanDigest` establishes semantic equality. The scheduler receives a
+`PreparedPlan { id, digest, snapshot, graph, work }` only after destination,
+capability, key-recipe completeness, cycle, resource, and graph/work
+correspondence validation. `--dry-run` performs the same planning steps, emits
+the same `PlanReady` and action declarations with mode `ReportOnly`, then closes
+the plan as `Reported` without starting, cancelling, or pretending to execute
+any action.
+
+#### Protocol lifecycle
+
+The next protocol major version introduces `PlanningAttemptId`,
+`PlanningStepId`, `PlanningIssueId`, `PlanScopeId`, `PlanId`, `PlanDigest`,
+`PlanMode { Execute, ReportOnly }`, and the following event families. Every
+plan-scoped action event carries both `job` and `plan`. The normative payload
+shapes are:
+
+```text
+PlanningStarted       { job, attempt }
+PlanningStepStarted   { job, attempt, step, kind }
+PlanningStepSucceeded { job, attempt, step, timing }
+PlanningStepFailed    { job, attempt, step, timing, diagnostic }
+PlanningStepCancelled { job, attempt, step, timing }
+PlanningIssue         { job, attempt, issue, affected: [PlanScopeId], diagnostic }
+PlanningFailed        { job, attempt, diagnostic }
+PlanningCancelled     { job, attempt }
+PlanReady             { job, attempt, plan, digest, mode, actions, issues }
+ActionDeclared        { job, plan, action, kind, dependencies }
+ActionStarted/...     { job, plan, action, ... }
+ActionSuperseded      { job, plan, action, timing, reason }
+PlanClosed            { job, plan, reason }
+```
+
+`SupersedeReason` initially has only `AuthoritativeRevisionChanged`; it is not
+a free-form diagnostic code. `PlanCloseReason` is the closed enum `Executed`,
+`Reported`, or `Superseded`. Counts are unsigned and must equal the subsequent
+unique declaration/issue events associated with that plan. A protocol
+diagnostic may explain an event but never substitutes for its state transition.
+
+| Event | Meaning and required transition |
+| --- | --- |
+| `PlanningStarted { job, attempt }` | Opens one attempt; at most one attempt or plan is active in a job. |
+| `PlanningStepStarted { job, attempt, step, kind }` | Starts real manager work. `kind` is a non-exhaustive typed value including `Recover`, `Locate`, `Resolve`, `Fetch`, `ReconcileLock`, `Snapshot`, `Scan`, `ValidatePlan`, and `PrepareCandidate`. Parallel fetches use distinct step IDs. |
+| `PlanningStepSucceeded/Failed/Cancelled { ..., timing }` | Terminates that step exactly once. A failed step carries a diagnostic. Cancellation is not encoded as failure. |
+| `PlanningIssue { job, attempt, issue, affected, diagnostic }` | Records a target/source-scoped error that does not prevent sealing independent subgraphs. The canonical issue is included in `PlanDigest`; no synthetic failing action is created. |
+| `PlanningFailed` / `PlanningCancelled` | Terminates an attempt and the job path without a plan, unless this follows a superseded plan and the retry controller starts another attempt. |
+| `PlanReady { job, attempt, plan, digest, mode, actions, issues }` | Atomically seals one complete plan. It occurs exactly once for a `PlanId`, not once for the entire job. All planning steps in the attempt are terminal. |
+| `ActionDeclared { job, plan, action, kind, dependencies }` | Declares one vertex of the sealed DAG. Exactly `actions` unique vertices are declared before execution starts. This replaces the misleading `ActionQueued` name. |
+| existing action lifecycle events | Add `plan`; their state transitions are otherwise unchanged. An action can start only in an `Execute` plan after every vertex has been declared. |
+| `ActionSuperseded { job, plan, action, timing }` | Terminates work discarded solely because an optimistic authoritative-revision check failed before the commit decision. It is neither failure nor user cancellation. |
+| `PlanClosed { job, plan, reason }` | `reason` is `Executed`, `Reported`, or `Superseded`. `Executed` requires every action terminal; `Reported` requires `ReportOnly` and no action start; `Superseded` requires that no authoritative commit decision was made. |
+
+The reducer enforces these state machines (arrows not shown are invalid):
+
+```text
+PlanningStep: Started -> Succeeded | Failed | Cancelled
+
+Plan(Execute):
+  Sealed -> Declaring -> Declared -> Executing -> Closed(Executed)
+                                           \----> Closed(Superseded)
+
+Plan(ReportOnly):
+  Sealed -> Declaring -> Declared -> Closed(Reported)
+
+Job:
+  New -> Planning(attempt)
+  Planning -> Plan(active) | Terminal(Failed) | Terminal(Cancelled)
+  Plan -> Terminal(Completed)                         [Executed/Reported]
+  Plan -> Planning(next attempt)                     [Superseded only]
+  Terminal -> OperationCompleted -> JobFinished
+```
+
+`ActionDeclared` moves `Sealed/Declaring` toward `Declared`; the declared-count
+match closes that sub-state. In an executable plan an action transitions
+`Declared -> Running -> Succeeded | Failed | Cancelled | Superseded`, or
+`Declared -> Blocked | Cancelled | Superseded`. `PlanClosed(Superseded)`
+atomically closes any remaining declared but unstarted vertices as superseded;
+the running action that detected revision drift first emits
+`ActionSuperseded`. No attempt ID, plan ID, step ID, action ID, or issue ID may
+be reused within its documented scope.
+
+Detailed byte/download progress remains a replaceable presentation event; step
+start and terminal events, issues, plan seals, action declarations, recovery,
+and commit facts are lossless contract events. `PlanningStepKind` describes
+user-meaningful work, not internal functions, and its event payload must not
+contain credentials, checkout cache paths, or registry authentication data.
+
+This change is a protocol-major change because action identity becomes
+plan-scoped and a job can publish more than one immutable plan. A version-1
+decoder remains supported during the compatibility window by mapping its sole
+`PlanReady`/`ActionQueued` stream to one executable legacy plan. Version-2
+events are never serialized under a version-1 envelope, and a version-1 output
+projection exposes only the final plan rather than emitting a stream that old
+reducers would reject.
+
+#### Kernel and manager responsibilities
+
+The kernel reducer changes from one `planned/actions` slot to a job record with
+`active_attempt`, `plans: PlanId -> PlanRecord`, and `final_plan`. It validates
+step closure, unique IDs, declared plan counts, nonempty plan-digest identity,
+plan-scoped action transitions, and the single-active-attempt rule. It does not
+recompute the domain digest from a lossy event projection; the build planner
+owns canonical `PlanDigest` computation and verifies it against the complete
+`PreparedPlan`. A normal successful or failed
+job has exactly one final `Executed` or `Reported` plan; a pre-plan failure or
+cancellation has none; any earlier plan must be `Superseded`. `OperationCompleted`
+still occurs exactly once and only after the final planning/plan state is
+closed.
+
+The kernel reduces action totals from the final non-superseded plan only.
+`root_failures` is the number of final-plan planning issues plus independent
+failed actions, or one for a fatal final planning failure. Superseded attempts
+do not make the job fail and are reported separately as an attempt count.
+Cancelled planning or actions set cancellation without manufacturing a failed
+action. Consequently a pre-plan failure legitimately has zero action totals
+and an unavailable domain result; kernel exit status is based on reduced root
+failures and cancellation, not on `ActionTotals.failed` alone. `PlanClosed`
+closes declared-but-unstarted vertices in `ReportOnly`/`Superseded` plans, so
+the kernel no longer requires fake terminal action events for them.
+
+The manager owns the attempt loop. A `PlanningContext` supplies the job and
+attempt IDs, cooperative cancellation token, typed step observer, and issue
+collector. Resolver, fetch/materialization, repository snapshot, source
+provider, scan, and transaction ports accept cancellation explicitly (or an
+operation object carrying it) and return typed data; they do not emit protocol
+events directly. The manager wraps each port call in a planning step, freezes
+its returned evidence, validates the complete DAG, emits `PlanReady`, and only
+then constructs the scheduler. The generic scheduler never invokes a planner
+and has no API for adding a vertex.
+
+Cancellation is checked before and after each filesystem operation, between
+bounded scan units, while waiting for coordination, and through abortable or
+time-bounded network adapters. Once a durable transaction commit decision is
+recorded, cancellation is deferred until commit/recovery reaches a coherent
+old or new authoritative state; the terminal step then reports the committed
+fact before the job reports cancellation. Before that decision, cancellation
+or revision mismatch changes no authoritative files. A build's lock
+reconciliation is a planning step because the committed lock is part of the
+source snapshot used to determine its DAG. An `add`/`remove` commit is an
+execution action because the exact candidate mutation is the requested
+product; a pre-decision revision mismatch yields `ActionSuperseded` and a new
+planning attempt, never in-place mutation of the old plan. For an executable
+build, `ReconcileLock` writes the candidate lock through the recoverable
+repository transaction and then re-snapshots that committed generation before
+`Snapshot`/`Scan`. For `ReportOnly`, it validates and carries the candidate lock
+in the planning evidence but performs no authoritative write; the reported plan
+is conditional on the observed revision set and says so in machine output.
 
 The source import graph may contain strongly connected components. Scan interns
 a `SourceId` before traversal; compile actions are per source; link processes
@@ -570,19 +760,22 @@ product.
 ### Scheduling
 
 The scheduler maintains `pending`, `ready`, `running`, `succeeded`, `failed`,
-and `blocked` state for immutable action IDs. A ready action may run when all
+`blocked`, and `superseded` state for immutable `(PlanId, ActionId)`
+identities. A ready action may run when all
 required predecessors succeeded and its resource permit is available. Global
 and resource-class bounds control CPU, memory-heavy linking, filesystem work,
-and network resolution without spawning an unbounded task per source.
+and publication without spawning an unbounded task per source. The planning
+controller separately bounds concurrent fetch steps; fetches do not enter the
+execution scheduler merely to reuse its semaphore.
 
 Failure blocks only transitive dependents whose required product is missing.
 Independent actions continue. Cancellation stops admitting work, propagates a
 token to cooperative executors, waits for or safely abandons staged work, and
 leaves authoritative project state recoverable. Workers never write terminal
 streams or final destinations; they return `ActionResult`, diagnostics,
-metrics, and structured events. Reports use stable plan identity, not completion
-order. Concurrency can change latency but not product bytes, diagnostic facts,
-summary counts, or exit status.
+metrics, and structured events. Reports use stable job, plan, and action
+identity, not completion order. Concurrency can change latency but not product
+bytes, diagnostic facts, summary counts, or exit status.
 
 Planning validates destinations, collisions, capabilities, key completeness,
 resource declarations, and cycles before execution. `--dry-run` and machine
@@ -760,12 +953,13 @@ silently reported as wholly complete.
 ## Invariants
 
 1. **One entry, one orchestration model.** Every command enters through the
-   kernel and manager; no retained compiler pipeline bypasses action planning.
+   kernel and manager; no retained compiler pipeline bypasses the job,
+   planning-attempt, sealed-plan, and result protocol.
 2. **One owner per invariant.** Domain rules live in their bounded context;
    adapters may not duplicate them.
 3. **Frozen observation.** A plan refers to one exact project, lock, dependency,
    source, option, and toolchain snapshot. An invocation never observes half of
-   an edit.
+   an edit, and an announced plan is never extended or rewritten.
 4. **Declared inputs.** Every fact capable of changing a cacheable action result
    participates in its key; undeclared ambient state cannot affect semantics.
 5. **Portable identity.** `SourceId`, package identity, canonical IR, and output
@@ -788,8 +982,9 @@ silently reported as wholly complete.
     semantics.
 11. **Bounded execution.** Scheduler concurrency and runtime evaluation consume
     explicit resource permits and budgets.
-12. **Isolated failure.** A failed action blocks only true dependents; unrelated
-    work continues and all facts are reported deterministically.
+12. **Isolated failure.** A target/source-scoped planning issue removes only
+    its affected subgraph; a failed action blocks only true dependents.
+    Unrelated work continues and all facts are reported deterministically.
 13. **Single publication authority.** Workers never write final destinations;
     the artifact publisher validates collisions and commits staged bytes.
 14. **Recoverable mutation.** Manifest/lock and multi-file formatting
@@ -802,6 +997,19 @@ silently reported as wholly complete.
     uncertain whitespace is preserved.
 18. **Product contract.** Build products are `*.prompt`; complete optional debug
     companions are `.psdbg`; intermediate XML is not a compiler interface.
+19. **Truthful phase boundary.** Resolve, fetch, lock reconciliation, source
+    sealing, and scan events describe the real calls while they happen. None is
+    replayed later as an empty action, and no execution action starts before
+    its plan is sealed and fully declared.
+20. **Attempt, plan, and content identity.** At most one attempt or plan is
+    active in a job. Each `PlanId` is sealed once; re-planning creates a new
+    ID, while `PlanDigest` alone denotes content equivalence.
+21. **Cancellation and commit coherence.** Every planning and execution wait
+    observes cooperative cancellation. A durable commit decision is completed
+    or recovered to coherence before cancellation becomes terminal; cancellation
+    never manufactures failure work or deletes the last committed generation.
+22. **Honest dry-run.** `ReportOnly` plans declare the exact graph and candidate
+    effects but start no actions and publish no authoritative bytes.
 
 ## Implementation topology
 
@@ -828,7 +1036,7 @@ T1  protocol/diagnostic IDs + four IR schemas + wire/container specification
          |
          +--> P2 resolver + exact lock + transaction/recovery
 
-T6 + P2 --> P3 action algebra + closed planner + scheduler
+T6 + P2 --> P3 planning lifecycle + action algebra + closed planner + scheduler
 T2 + P3 --> P4 concrete CAS/SQLite and artifact transaction adapters
 
 T3 + T6 + P4 --> K1 microkernel/manager composition with all commands wired
@@ -938,11 +1146,30 @@ Rejected. Such caches are invalidation heuristics, not deterministic action
 memoization. Cache identity derives from complete declared content and semantic
 configuration.
 
+### Put planning and execution in one dynamically growing action DAG
+
+Rejected. The compiler actions cannot be known before resolution and static
+source discovery, while calling those effects before publishing the graph and
+then scheduling empty `Resolve`/`Snapshot`/`Scan` actions lies about what ran.
+Allowing actions to append vertices instead makes `PlanReady`, cycle and
+collision validation, action counts, dry-run, and plan identity provisional.
+The job/plan split keeps observable work truthful and keeps the execution DAG
+mathematically closed.
+
+### Permit only one `PlanReady` event per job
+
+Rejected as an implementation accident, not a semantic invariant. Optimistic
+manifest/lock commit must automatically re-plan after a pre-decision revision
+conflict without mutating the old graph or asking the user to repair manager
+state. One seal per `PlanId`, with sequential plans inside one job, preserves
+both immutability and recovery. The common path still has exactly one plan.
+
 ### Make the import graph the scheduler graph
 
 Rejected. Import cycles are legal and source modules do not necessarily produce
-independently ordered target artifacts. Scan/compile/link actions model the
-real producer relationships without inventing cycle errors.
+independently ordered target artifacts. Source scan closes that graph during
+planning; the compile/link execution actions then model only real producer
+relationships without inventing cycle errors.
 
 ### Use semantic IR or the squish backend for formatting
 
@@ -983,6 +1210,17 @@ Implementation of this accepted decision is complete only when evidence demonstr
 - cold and warm builds produce byte-identical `*.prompt` and `.psdbg` results;
 - changing each semantic input changes the responsible action key, while
   relocation of an unchanged checkout does not;
+- contract traces prove that real resolve, fetch, lock reconciliation, source
+  sealing, and scan work occurs between matching planning-step start/terminal
+  events; the sealed execution graph contains no already-completed placeholder
+  action;
+- kernel reducer tests cover pre-plan failure and cancellation with zero action
+  totals, `ReportOnly` plans with no action start, rejection of an action before
+  complete declaration, and two immutable plans separated by a superseding
+  revision conflict;
+- cancellation injection at every planning wait and transaction durable point
+  either stops before mutation or completes/recoverably records the commit; it
+  never leaves a half-written authoritative manifest/lock generation;
 - manifest/lock edits and multi-file format operations recover correctly from
   interruption at every durable commit point;
 - dependency and source cycles follow their separately documented policies;
@@ -1000,7 +1238,7 @@ Implementation of this accepted decision is complete only when evidence demonstr
 - Mokhov, Mitchell, and Peyton Jones, [“Build Systems à la Carte”](https://doi.org/10.1145/3236774), *Proceedings of the ACM on Programming Languages* 2 (ICFP), 2018. The separation of scheduler and rebuilder motivates an explicit action algebra rather than cache logic inside executors.
 - LLVM, [LLVM Language Reference Manual](https://llvm.org/docs/LangRef.html) and [Link Time Optimization](https://llvm.org/docs/LinkTimeOptimization.html). LLVM demonstrates durable frontend/IR/backend boundaries and relocatable cross-module optimization, without implying that LLVM IR itself fits this DSL.
 - Cargo, [Workspaces](https://doc.rust-lang.org/cargo/reference/workspaces.html), [Cargo.toml versus Cargo.lock](https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html), and [External tools](https://doc.rust-lang.org/cargo/reference/external-tools.html). These support unified workspace state, intent/exact-state separation, and versioned machine interfaces.
-- Bazel, [Rules and build phases](https://bazel.build/extending/rules) and [Remote cache](https://bazel.build/remote/caching). These are production precedents for analysis before execution and content-addressed action results; they do not require adopting a general build language or remote execution.
+- Bazel, [Rules and build phases](https://bazel.build/extending/rules), [Build Event Protocol](https://bazel.build/remote/bep), and [Remote cache](https://bazel.build/remote/caching). These are production precedents for analysis producing an action graph, a structured invocation event graph distinct from the action graph, and content-addressed action results; they do not require adopting a general build language or remote execution.
 - Nix, Dolstra, de Jonge, and Visser, [“Nix: A Safe and Policy-Free System for Software Deployment”](https://doi.org/10.1145/945445.945450), *LISA*, 2004. It grounds derivation identity and immutable content reuse while leaving prompt-specific semantics to this design.
 - SQLite, [Write-Ahead Logging](https://sqlite.org/wal.html) and [Atomic Commit](https://sqlite.org/atomiccommit.html). These define the operational assumptions and limitations that the store adapter must test rather than hide.
 - rustfmt, [project repository and idempotence tests](https://github.com/rust-lang/rustfmt). Formatter idempotence is treated as a tested property, not an aesthetic expectation.
