@@ -83,7 +83,7 @@ const productJsonLd = page === "home" ? {
     <link rel="alternate" hreflang="en" href={new URL(paths.en[page], Astro.site)} />
     <link rel="alternate" hreflang="x-default" href={new URL(paths["zh-CN"][page], Astro.site)} />
     {page === "releases" && <link rel="alternate" type="application/json" title="xmlsquish 1.0.0 release metadata" href={releaseMetadata} />}
-    <link rel="describedby" type="text/plain" href={new URL("/llms.txt", Astro.site)} />
+    <link rel="alternate" type="text/plain" title="Experimental llms.txt agent navigation" href={new URL("/llms.txt", Astro.site)} />
     {productJsonLd && <script is:inline type="application/ld+json" set:html={JSON.stringify(productJsonLd).replaceAll("<", "\\u003c")} />}
     <slot name="head" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
