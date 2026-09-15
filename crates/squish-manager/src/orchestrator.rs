@@ -670,7 +670,7 @@ pub fn run<W: PlannedWork + Sync>(
         &mut mapping,
         settings.jobs.max(1),
     )?;
-    let cancellation_observed = context.is_cancelled()
+    let cancellation_observed = mapping.cancellation_deferred
         || prepared
             .graph()
             .actions()
@@ -1061,6 +1061,20 @@ fn complete_batch(
                         "worker deferred cancellation without a cancellation request",
                     ));
                 }
+                scheduler
+                    .complete(&action, result)
+                    .map_err(|error| orchestration(error.to_string()))?;
+                let mut events = scheduler.drain_events();
+                let terminal = events
+                    .iter()
+                    .position(|event| matches!(
+                        event,
+                        ScheduleEvent::StateChanged { action: event_action, state: ActionState::Succeeded | ActionState::Failed(_) }
+                            if event_action == &action
+                    ))
+                    .ok_or_else(|| orchestration("committed worker produced no terminal event"))?;
+                let terminal_and_after = events.split_off(terminal);
+                mapping.publish(events, context)?;
                 emit(
                     context,
                     EventPayload::CancellationDeferred {
@@ -1070,9 +1084,9 @@ fn complete_batch(
                         reason: CancellationDeferralReason::IrreversibleCommit,
                     },
                 )?;
-                scheduler
-                    .complete(&action, result)
-                    .map_err(|error| orchestration(error.to_string()))?;
+                mapping.cancellation_deferred = true;
+                mapping.publish(terminal_and_after, context)?;
+                continue;
             }
             DispatchOutcome::Cancelled(events) => {
                 if !context.is_cancelled() {
@@ -1160,6 +1174,7 @@ struct EventMapping {
     superseded_actions: BTreeSet<ActionId>,
     sources: BTreeMap<ActionId, ResultSource>,
     messages: u64,
+    cancellation_deferred: bool,
 }
 
 impl EventMapping {
@@ -1176,6 +1191,7 @@ impl EventMapping {
             superseded_actions: BTreeSet::new(),
             sources: BTreeMap::new(),
             messages: 0,
+            cancellation_deferred: false,
         }
     }
 

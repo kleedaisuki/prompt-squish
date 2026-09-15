@@ -10,8 +10,8 @@ use std::{
 };
 
 use squish_build::{
-    Action, ActionKind, ActionResult, BuildPlan, Dispatch, InputRef, KeyRecipe, Output, OutputName,
-    OutputRef, ProducedOutput, ResourceClass, Resources, ResultSource,
+    Action, ActionEvent, ActionKind, ActionResult, BuildPlan, Dispatch, InputRef, KeyRecipe,
+    Output, OutputName, OutputRef, ProducedOutput, ResourceClass, Resources, ResultSource,
 };
 use squish_kernel::{
     CancellationToken, Capability, CapabilityDescriptor, EventSink, InvocationContext, Kernel,
@@ -677,6 +677,86 @@ fn plan_digest_is_retry_stable_and_snapshot_sensitive() {
     assert_ne!(first.digest, changed.digest);
     assert_ne!(first.digest, changed_graph.digest);
     assert_ne!(first.digest, report_only.digest);
+}
+
+struct DeferredEventExecutor;
+
+impl WorkExecutor<TestWork> for DeferredEventExecutor {
+    fn lookup(
+        &self,
+        _: &Dispatch,
+        _: &TestWork,
+        _: &PreparedPlan<TestWork>,
+        _: &ResolvedInputs,
+    ) -> Result<Option<squish_manager::orchestrator::CachedResult>, ManagerError> {
+        Ok(None)
+    }
+
+    fn execute(
+        &self,
+        _: &Dispatch,
+        _: &TestWork,
+        _: &PreparedPlan<TestWork>,
+        _: &ResolvedInputs,
+        cancellation: CancellationToken,
+    ) -> WorkDisposition {
+        cancellation.cancel();
+        let mut result = ActionResult::success();
+        result.events.push(ActionEvent::Message {
+            code: "before-deferred".into(),
+            message: "worker fact before terminal deferral".into(),
+        });
+        WorkDisposition::CommittedAfterCancellation(result)
+    }
+
+    fn record(&self, _: &Dispatch, _: &TestWork, _: &ActionResult) -> Result<(), ManagerError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn committed_cancellation_flushes_worker_events_before_exact_next_terminal() {
+    let events = Arc::new(Events::default());
+    let context = InvocationContext::new(
+        InvocationId::new("deferred-adjacency").unwrap(),
+        CancellationToken::default(),
+        events.clone(),
+    );
+    let sealed = PlanningRecorder::start(
+        JobId::new("deferred-job").unwrap(),
+        PlanningAttemptId::new("attempt-1").unwrap(),
+        &context,
+    )
+    .unwrap()
+    .seal(
+        one_plan("create", ActionKind::CreateProject, Effect::WriteEffect),
+        &Digest::new(DigestAlgorithm::Blake3, vec![7; 32]).unwrap(),
+        PlanMode::Execute,
+    )
+    .unwrap();
+    let report = run(
+        sealed,
+        &DeferredEventExecutor,
+        &context,
+        &InvocationSettings::default(),
+    )
+    .unwrap();
+    assert!(report.cancelled);
+    let events = events.0.lock().unwrap();
+    let diagnostic = events
+        .iter()
+        .position(|event| matches!(event.payload, EventPayload::Diagnostic(_)))
+        .unwrap();
+    let deferred = events
+        .iter()
+        .position(|event| matches!(event.payload, EventPayload::CancellationDeferred { .. }))
+        .unwrap();
+    let succeeded = events
+        .iter()
+        .position(|event| matches!(event.payload, EventPayload::ActionSucceeded { .. }))
+        .unwrap();
+    assert!(diagnostic < deferred);
+    assert_eq!(deferred + 1, succeeded);
 }
 
 #[test]

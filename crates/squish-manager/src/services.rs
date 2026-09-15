@@ -10,8 +10,10 @@ use squish_protocol::{
     Artifact, ArtifactId, CachedAction, Digest, PlanInspection, TargetName, VcsChoice,
 };
 use squish_repository::{
-    CreateProjectRequest, CreatedProject, PackageLocation, ProjectVcs, WorkspaceMembership,
+    CreateProjectRequest, CreatedProject, FaultInjector, PackageLocation, ProjectVcs,
+    WorkspaceMembership,
 };
+use std::sync::Arc;
 
 use crate::{ArtifactLocator, ServiceError};
 
@@ -35,6 +37,8 @@ pub struct ProjectCreationLocation {
 pub enum ProjectCreationStatus {
     /// 已跨过提交决定并完成或可恢复地发布。 / Publication crossed its commit decision and completed or is recoverable.
     Created(CreatedProject),
+    /// 已越过提交决定，但完成或恢复报告失败。 / The commit decision was crossed, but completion or recovery reported a failure.
+    CommittedFailure(ServiceError),
     /// 在提交决定前响应取消，未发布项目。 / Cancellation was honored before the commit decision; no project was published.
     Cancelled,
 }
@@ -269,11 +273,13 @@ pub trait Services: Send + Sync {
     /// 返回 [`ProjectCreationStatus::Cancelled`] 只允许发生在持久提交决定之前；决定之后即使
     /// token 随后被设置，也必须返回成功。 / [`ProjectCreationStatus::Cancelled`] is valid only
     /// before the durable commit decision; after that decision, success must be returned even if
-    /// the token is subsequently set.
+    /// the token is subsequently set. A created receipt must describe the request's destination;
+    /// adapters may preserve an equivalent platform-native spelling rather than byte equality.
     fn create_project(
         &self,
         _request: &CreateProjectRequest,
         _cancellation: CancellationToken,
+        _faults: Arc<dyn FaultInjector>,
     ) -> Result<ProjectCreationStatus, ServiceError> {
         unavailable("project creation publisher")
     }

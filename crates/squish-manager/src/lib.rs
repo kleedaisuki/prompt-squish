@@ -199,7 +199,7 @@ impl<S: Services> Capability for ManagerCapability<S> {
         };
         match operation {
             OperationRequest::New(request) => {
-                new::execute(request, &self.services, &self.settings, context)
+                new::execute(request, &self.services, &self.settings, durability, context)
             }
             OperationRequest::Build(request) => build::execute_with_durability(
                 request,

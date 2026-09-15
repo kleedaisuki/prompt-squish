@@ -20,8 +20,8 @@ use squish_protocol::{
 use squish_repository::{CreateProjectRequest, ProjectFile, ProjectVcs};
 
 use crate::{
-    Effect, InvocationSettings, ManagerError, PlannedWork, PreparedPlan, ProjectCreationLocation,
-    ProjectCreationStatus, Services,
+    DurabilityPorts, Effect, InvocationSettings, ManagerError, PlannedWork, PreparedPlan,
+    ProjectCreationLocation, ProjectCreationStatus, Services,
     orchestrator::{
         self, CachedResult, PlanningRecorder, ResolvedInputs, WorkDisposition, WorkExecutor,
     },
@@ -200,6 +200,7 @@ pub fn execute(
     request: &NewRequest,
     services: &dyn Services,
     settings: &InvocationSettings,
+    durability: &DurabilityPorts,
     context: &InvocationContext,
 ) -> OperationOutcome {
     let job = JobId::new(format!("new-{}", context.id())).expect("invocation IDs are non-empty");
@@ -247,6 +248,7 @@ pub fn execute(
         services,
         candidate: &package,
         committed: committed.clone(),
+        faults: durability.repository(),
     };
     match orchestrator::run(sealed, &executor, context, settings) {
         Ok(report) => {
@@ -346,6 +348,7 @@ struct NewExecutor<'a> {
     services: &'a dyn Services,
     candidate: &'a NewCandidate,
     committed: Arc<Mutex<bool>>,
+    faults: Arc<dyn squish_repository::FaultInjector>,
 }
 
 impl WorkExecutor<NewWork> for NewExecutor<'_> {
@@ -371,10 +374,11 @@ impl WorkExecutor<NewWork> for NewExecutor<'_> {
             return WorkDisposition::Cancelled { events: Vec::new() };
         }
         let completion_token = cancellation.clone();
-        match self
-            .services
-            .create_project(&self.candidate.request, cancellation)
-        {
+        match self.services.create_project(
+            &self.candidate.request,
+            cancellation,
+            self.faults.clone(),
+        ) {
             Ok(ProjectCreationStatus::Created(receipt)) => {
                 if receipt.destination != self.candidate.request.destination {
                     return ActionResult::failure(
@@ -388,6 +392,14 @@ impl WorkExecutor<NewWork> for NewExecutor<'_> {
                     WorkDisposition::CommittedAfterCancellation(ActionResult::success())
                 } else {
                     ActionResult::success().into()
+                }
+            }
+            Ok(ProjectCreationStatus::CommittedFailure(error)) => {
+                let result = ActionResult::failure(error.code(), error.message());
+                if completion_token.is_cancelled() {
+                    WorkDisposition::CommittedAfterCancellation(result)
+                } else {
+                    result.into()
                 }
             }
             Ok(ProjectCreationStatus::Cancelled) => {
