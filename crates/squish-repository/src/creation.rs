@@ -1186,6 +1186,57 @@ mod tests {
         assert!(!orphan.exists());
     }
 
+    #[test]
+    fn recovery_removes_a_partially_staged_journaled_tree() {
+        let temp = tempdir().unwrap();
+        let anchor = temp.path().canonicalize().unwrap();
+        let destination = normalize_new_destination(&anchor.join("new")).unwrap();
+        let stage_root = anchor.join(".xmlsquish-new-stage-crashed");
+        let tx = anchor.join(STATE_DIR).join(CREATIONS_DIR).join("crashed");
+        let journal = Journal {
+            version: 1,
+            phase: Phase::Prepared,
+            destination: destination.clone(),
+            publish_path: destination,
+            stage_root: stage_root.clone(),
+            state_dir: STATE_DIR.into(),
+            missing_tail: PathBuf::from("new"),
+            marker_name: ".xmlsquish-published-crashed".into(),
+            workspace: None,
+            package_name: "new".into(),
+        };
+        store_journal(&tx, &journal).unwrap();
+        fs::create_dir_all(stage_root.join("new/.git/objects")).unwrap();
+        fs::write(stage_root.join("new/.git/HEAD"), b"partial").unwrap();
+        recover_project_creations(&anchor, &NoFault).unwrap();
+        assert!(!tx.exists());
+        assert!(!stage_root.exists());
+    }
+
+    #[test]
+    fn workspace_can_create_a_member_named_like_the_default_state_directory() {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join(MANIFEST_FILE_NAME),
+            "manifest-version = 1\n[workspace]\nmembers = []\n",
+        )
+        .unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let destination = normalize_new_destination(&root.join(STATE_DIR)).unwrap();
+        let mut req = request(destination.clone());
+        req.workspace = Some(WorkspaceMembership {
+            root: root.clone(),
+            member: STATE_DIR.into(),
+        });
+        create_project(&req, &NoStagePreparation, &NoFault).unwrap();
+        assert!(destination.join(MANIFEST_FILE_NAME).is_file());
+        assert!(
+            fs::read_to_string(root.join(MANIFEST_FILE_NAME))
+                .unwrap()
+                .contains(STATE_DIR)
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn native_windows_destination_matches_canonical_workspace_root() {
