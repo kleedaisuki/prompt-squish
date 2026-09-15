@@ -24,7 +24,6 @@ const STATE_DIR: &str = ".xmlsquish";
 const CREATIONS_DIR: &str = "new-transactions";
 const LOCK_NAME: &str = "creation.lock";
 const JOURNAL_NAME: &str = "journal.json";
-const TREE_DIR: &str = "tree";
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
 /// 脚手架中的一个项目相对文件。 / One project-relative file in a scaffold.
@@ -177,6 +176,8 @@ struct Journal {
     phase: Phase,
     destination: PathBuf,
     publish_path: PathBuf,
+    stage_root: PathBuf,
+    state_dir: String,
     missing_tail: PathBuf,
     marker_name: String,
     workspace: Option<WorkspaceMembership>,
@@ -201,21 +202,19 @@ pub fn create_project(
     faults: &dyn FaultInjector,
 ) -> Result<CreatedProject, RepositoryError> {
     validate_request(request)?;
-    if !request.destination.is_absolute()
-        || absolute_lexical(&request.destination)? != request.destination
-    {
+    if !request.destination.is_absolute() {
         return Err(RepositoryError::Layout(
             "new-project destination must be absolute and normalized".into(),
         ));
     }
-    let destination = request.destination.clone();
+    let destination = normalize_new_destination(&request.destination)?;
     let workspace = request
         .workspace
         .as_ref()
         .map(normalize_workspace)
         .transpose()?;
     if let Some(workspace) = &workspace {
-        let expected = absolute_lexical(&workspace.root.join(&workspace.member))?;
+        let expected = normalize_new_destination(&workspace.root.join(&workspace.member))?;
         if expected != destination {
             return Err(RepositoryError::WorkspaceConflict(format!(
                 "member `{}` does not name destination `{}`",
@@ -224,16 +223,22 @@ pub fn create_project(
             )));
         }
     }
-    let (anchor, missing_tail) = nearest_existing(&destination)?;
-    let state_dir = state_dir_for(&missing_tail)?;
-    let _lock = creation_lock(&anchor, state_dir)?;
-    recover_locked(&anchor, state_dir, faults)?;
+    let transaction_anchor = workspace.as_ref().map_or_else(
+        || nearest_existing(&destination).map(|value| value.0),
+        |value| Ok(value.root.clone()),
+    )?;
+    let transaction_relative = destination.strip_prefix(&transaction_anchor).map_err(|_| {
+        RepositoryError::Layout("transaction anchor does not contain destination".into())
+    })?;
+    let state_dir = state_dir_for(transaction_relative)?;
+    let _lock = creation_lock(&transaction_anchor, state_dir)?;
+    recover_locked(&transaction_anchor, state_dir, faults)?;
     if fs::symlink_metadata(&destination).is_ok() {
         return Err(RepositoryError::DestinationExists(destination));
     }
     let _workspace_lock = workspace
         .as_ref()
-        .map(|workspace| workspace_lock(&workspace.root))
+        .map(|workspace| workspace_lock(&workspace.root, state_dir))
         .transpose()?;
     if let Some(workspace) = &workspace {
         // Creation→workspace is the global lock order. Reconcile an older file transaction while
@@ -244,25 +249,43 @@ pub fn create_project(
         !membership_effective(workspace, &request.package_name).unwrap_or(false)
     });
     if let Some(workspace) = &workspace {
-        preflight_membership(workspace, &request.package_name)?;
+        preflight_membership(workspace, &request.package_name, &destination)?;
     }
 
+    // A sibling creator may have published part of our formerly missing prefix while we waited.
+    // Replanning turns that race into the ordinary nearest-existing-ancestor case.
+    let (publish_anchor, missing_tail) = nearest_existing(&destination)?;
     let id = generation();
-    let tx = anchor.join(state_dir).join(CREATIONS_DIR).join(&id);
-    let staged_publish = tx.join(TREE_DIR).join(first_component(&missing_tail)?);
-    let staged_destination = tx.join(TREE_DIR).join(&missing_tail);
+    let tx = transaction_anchor
+        .join(state_dir)
+        .join(CREATIONS_DIR)
+        .join(&id);
+    let stage_root = publish_anchor.join(format!(".xmlsquish-new-stage-{id}"));
+    let staged_publish = stage_root.join(first_component(&missing_tail)?);
+    let staged_destination = stage_root.join(&missing_tail);
     let marker_name = format!(".xmlsquish-published-{id}");
-    let publish_path = anchor.join(first_component(&missing_tail)?);
+    let publish_path = publish_anchor.join(first_component(&missing_tail)?);
     let mut journal = Journal {
         version: 1,
         phase: Phase::Prepared,
         destination: destination.clone(),
         publish_path: publish_path.clone(),
+        stage_root: stage_root.clone(),
+        state_dir: state_dir.to_owned(),
         missing_tail,
         marker_name,
         workspace,
         package_name: request.package_name.clone(),
     };
+    // The journal precedes every staging side effect. A crash can therefore always identify and
+    // remove the exact candidate root without guessing from directory names.
+    if let Err(error) = store_journal(&tx, &journal) {
+        let _ = cleanup_predecision(&tx);
+        return Err(error);
+    }
+    faults
+        .check(FaultPoint::CreationPrepared)
+        .map_err(|e| RepositoryError::io(&tx, e))?;
     let preparation = (|| {
         fs::create_dir_all(&staged_destination)
             .map_err(|e| RepositoryError::io(&staged_destination, e))?;
@@ -281,19 +304,18 @@ pub fn create_project(
             .map_err(|e| RepositoryError::io(&staged_destination, e))?;
         write_new(&staged_publish.join(&journal.marker_name), id.as_bytes())?;
         sync_tree(&staged_publish)?;
-        store_journal(&tx, &journal)
+        Ok(())
     })();
     if let Err(error) = preparation {
+        let _ = cleanup_predecision(&stage_root);
         let _ = cleanup_predecision(&tx);
         return Err(error);
     }
-    faults
-        .check(FaultPoint::CreationPrepared)
-        .map_err(|e| RepositoryError::io(&tx, e))?;
 
     // The anchor lock serializes cooperative creators. The second check prevents ordinary races;
     // platform directory rename then provides the single publication boundary.
     if fs::symlink_metadata(&publish_path).is_ok() {
+        cleanup_predecision(&stage_root)?;
         cleanup_predecision(&tx)?;
         return Err(RepositoryError::DestinationExists(destination));
     }
@@ -304,7 +326,8 @@ pub fn create_project(
             RepositoryError::io(&publish_path, e)
         }
     })?;
-    sync_directory(&anchor)?;
+    sync_directory(&stage_root)?;
+    sync_directory(&publish_anchor)?;
     // Deliberately inject before the phase write: the in-tree marker closes this exact
     // rename→journal window and recovery must infer publication from it.
     faults
@@ -371,6 +394,12 @@ fn recover_locked(
             continue;
         }
         let tx = entry.path();
+        if !tx.join(JOURNAL_NAME).is_file() {
+            // The journal is created before staging, so an unjournaled directory is provably
+            // predecision and owns no external candidate path.
+            cleanup_predecision(&tx)?;
+            continue;
+        }
         let mut journal = load_journal(&tx)?;
         if journal.phase == Phase::Completed {
             let marker = journal.publish_path.join(&journal.marker_name);
@@ -379,10 +408,12 @@ fn recover_locked(
                 sync_directory(&journal.publish_path)?;
             }
             cleanup_predecision(&tx)?;
+            cleanup_predecision(&journal.stage_root)?;
             continue;
         }
         let marker = journal.publish_path.join(&journal.marker_name);
         if journal.phase == Phase::Prepared && !marker.is_file() {
+            cleanup_predecision(&journal.stage_root)?;
             cleanup_predecision(&tx)?;
             continue;
         }
@@ -406,7 +437,12 @@ fn finish_published(
 ) -> Result<(), RepositoryError> {
     if journal.phase != Phase::WorkspaceReplaced && journal.phase != Phase::Completed {
         if let Some(workspace) = &journal.workspace {
-            ensure_membership(workspace, &journal.package_name, workspace_already_locked)?;
+            ensure_membership(
+                workspace,
+                &journal.package_name,
+                &journal.state_dir,
+                workspace_already_locked,
+            )?;
         }
         // Ensure-member is semantic and idempotent, so fault before recording the phase tests
         // the workspace-replace→journal recovery boundary rather than the easy side of it.
@@ -424,6 +460,7 @@ fn finish_published(
     faults
         .check(FaultPoint::CreationCompleted)
         .map_err(|e| RepositoryError::io(tx, e))?;
+    cleanup_predecision(&journal.stage_root)?;
     fs::remove_dir_all(tx).map_err(|e| RepositoryError::io(tx, e))?;
     Ok(())
 }
@@ -470,6 +507,7 @@ fn validate_relative(path: &Path) -> Result<(), RepositoryError> {
 fn preflight_membership(
     workspace: &WorkspaceMembership,
     package: &str,
+    destination: &Path,
 ) -> Result<(), RepositoryError> {
     validate_member(workspace)?;
     let manifest_path = workspace.root.join(MANIFEST_FILE_NAME);
@@ -492,7 +530,7 @@ fn preflight_membership(
             workspace.member
         )));
     }
-    if package_occurrences(&workspace.root, &manifest, package)? != 0 {
+    if package_occurrences(&workspace.root, &manifest, package, Some(destination))? != 0 {
         return Err(RepositoryError::WorkspaceConflict(format!(
             "duplicate workspace package name `{package}`"
         )));
@@ -518,12 +556,13 @@ fn membership_effective(
 fn ensure_membership(
     workspace: &WorkspaceMembership,
     package: &str,
+    state_dir: &str,
     already_locked: bool,
 ) -> Result<bool, RepositoryError> {
     let _lock = if already_locked {
         None
     } else {
-        Some(workspace_lock(&workspace.root)?)
+        Some(workspace_lock(&workspace.root, state_dir)?)
     };
     preflight_membership_after_publish(workspace, package)?;
     if membership_effective(workspace, package)? {
@@ -577,7 +616,7 @@ fn preflight_membership_after_publish(
         )));
     }
     // When already effective, the just-published member is expected; only other packages conflict.
-    let duplicates = package_occurrences(&workspace.root, &manifest, package)?;
+    let duplicates = package_occurrences(&workspace.root, &manifest, package, None)?;
     if duplicates > 1 {
         return Err(RepositoryError::WorkspaceConflict(format!(
             "duplicate workspace package name `{package}`"
@@ -625,6 +664,7 @@ fn package_occurrences(
     root: &Path,
     manifest: &Manifest,
     package: &str,
+    allowed_missing: Option<&Path>,
 ) -> Result<usize, RepositoryError> {
     let mut count = usize::from(
         manifest
@@ -635,7 +675,7 @@ fn package_occurrences(
     let policy = manifest.workspace.as_ref().ok_or_else(|| {
         RepositoryError::WorkspaceConflict("workspace declaration disappeared".into())
     })?;
-    for directory in crate::repository::workspace_member_dirs(root, policy)? {
+    for directory in workspace_dirs_allowing(root, policy, allowed_missing)? {
         let path = directory.join(MANIFEST_FILE_NAME);
         let source = fs::read_to_string(&path).map_err(|e| RepositoryError::io(&path, e))?;
         let member = Manifest::parse(&source)?;
@@ -647,6 +687,21 @@ fn package_occurrences(
         );
     }
     Ok(count)
+}
+
+fn workspace_dirs_allowing(
+    root: &Path,
+    policy: &squish_project::Workspace,
+    allowed_missing: Option<&Path>,
+) -> Result<Vec<PathBuf>, RepositoryError> {
+    let mut effective = policy.clone();
+    if let Some(allowed) = allowed_missing.filter(|path| !path.exists()) {
+        let relative = allowed.strip_prefix(root).map_err(|_| {
+            RepositoryError::WorkspaceConflict("prospective member escapes workspace".into())
+        })?;
+        effective.members.retain(|member| member != relative);
+    }
+    crate::repository::workspace_member_dirs(root, &effective)
 }
 
 fn path_text(path: &Path) -> String {
@@ -724,8 +779,8 @@ fn absolute_lexical(path: &Path) -> Result<PathBuf, RepositoryError> {
 fn creation_lock(anchor: &Path, state_dir: &str) -> Result<Lock, RepositoryError> {
     lock_file(&anchor.join(state_dir).join(LOCK_NAME))
 }
-fn workspace_lock(root: &Path) -> Result<Lock, RepositoryError> {
-    lock_file(&root.join(STATE_DIR).join("repository.lock"))
+fn workspace_lock(root: &Path, state_dir: &str) -> Result<Lock, RepositoryError> {
+    lock_file(&root.join(state_dir).join("repository.lock"))
 }
 
 fn lock_file(path: &Path) -> Result<Lock, RepositoryError> {
@@ -762,7 +817,14 @@ fn store_journal(tx: &Path, journal: &Journal) -> Result<(), RepositoryError> {
         message: e.to_string(),
     })?;
     atomic_replace(&tx.join(JOURNAL_NAME), &bytes)?;
-    sync_directory(tx)
+    sync_directory(tx)?;
+    if let Some(parent) = tx.parent() {
+        sync_directory(parent)?;
+        if let Some(state) = parent.parent() {
+            sync_directory(state)?;
+        }
+    }
+    Ok(())
 }
 
 fn load_journal(tx: &Path) -> Result<Journal, RepositoryError> {
@@ -792,12 +854,26 @@ fn cleanup_predecision(tx: &Path) -> Result<(), RepositoryError> {
 fn sync_tree(path: &Path) -> Result<(), RepositoryError> {
     for entry in fs::read_dir(path).map_err(|e| RepositoryError::io(path, e))? {
         let entry = entry.map_err(|e| RepositoryError::io(path, e))?;
-        if entry
+        let kind = entry
             .file_type()
-            .map_err(|e| RepositoryError::io(entry.path(), e))?
-            .is_dir()
-        {
+            .map_err(|e| RepositoryError::io(entry.path(), e))?;
+        if kind.is_dir() {
             sync_tree(&entry.path())?;
+        } else if kind.is_file() {
+            match File::open(entry.path()).and_then(|file| file.sync_all()) {
+                Ok(()) => {}
+                Err(error)
+                    if cfg!(windows)
+                        && matches!(
+                            error.kind(),
+                            io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput
+                        ) =>
+                {
+                    // Windows may reject FlushFileBuffers on a read-only handle. Scaffold files
+                    // were synced by their writer; host-created metadata receives best effort.
+                }
+                Err(error) => return Err(RepositoryError::io(entry.path(), error)),
+            }
         }
     }
     sync_directory(path)
@@ -1000,6 +1076,125 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn sibling_creators_replan_a_shared_missing_parent() {
+        let temp = tempdir().unwrap();
+        let left = normalize_new_destination(&temp.path().join("a/left")).unwrap();
+        let right = normalize_new_destination(&temp.path().join("a/right")).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = [left.clone(), right.clone()]
+            .into_iter()
+            .map(|destination| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    create_project(&request(destination), &NoStagePreparation, &NoFault)
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+        assert!(left.join(MANIFEST_FILE_NAME).is_file());
+        assert!(right.join(MANIFEST_FILE_NAME).is_file());
+    }
+
+    #[test]
+    fn missing_exact_member_is_allowed_and_not_duplicated() {
+        let temp = tempdir().unwrap();
+        fs::create_dir(temp.path().join("packages")).unwrap();
+        let manifest = temp.path().join(MANIFEST_FILE_NAME);
+        fs::write(
+            &manifest,
+            "manifest-version = 1\n[workspace]\nmembers = [\"packages/new\"]\n",
+        )
+        .unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let destination = normalize_new_destination(&root.join("packages/new")).unwrap();
+        let mut req = request(destination.clone());
+        req.workspace = Some(WorkspaceMembership {
+            root,
+            member: "packages/new".into(),
+        });
+        create_project(&req, &NoStagePreparation, &NoFault).unwrap();
+        assert!(destination.is_dir());
+        assert_eq!(
+            fs::read_to_string(manifest)
+                .unwrap()
+                .matches("packages/new")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn workspace_root_recovers_when_packages_parent_preexisted() {
+        let temp = tempdir().unwrap();
+        fs::create_dir(temp.path().join("packages")).unwrap();
+        fs::write(
+            temp.path().join(MANIFEST_FILE_NAME),
+            "manifest-version = 1\n[workspace]\nmembers = []\n",
+        )
+        .unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let destination = normalize_new_destination(&root.join("packages/new")).unwrap();
+        let mut req = request(destination.clone());
+        req.workspace = Some(WorkspaceMembership {
+            root: root.clone(),
+            member: "packages/new".into(),
+        });
+        assert!(
+            create_project(
+                &req,
+                &NoStagePreparation,
+                &Fail(FaultPoint::CreationPublished)
+            )
+            .is_err()
+        );
+        assert!(root.join(STATE_DIR).join(CREATIONS_DIR).is_dir());
+        assert!(!root.join("packages").join(STATE_DIR).exists());
+        recover_project_creations(&root, &NoFault).unwrap();
+        assert!(destination.is_dir());
+        assert!(
+            fs::read_to_string(root.join(MANIFEST_FILE_NAME))
+                .unwrap()
+                .contains("packages/new")
+        );
+    }
+
+    #[test]
+    fn recovery_discards_unjournaled_predecision_directory() {
+        let temp = tempdir().unwrap();
+        let orphan = temp
+            .path()
+            .join(STATE_DIR)
+            .join(CREATIONS_DIR)
+            .join("orphan");
+        fs::create_dir_all(&orphan).unwrap();
+        fs::write(orphan.join("partial"), b"partial").unwrap();
+        recover_project_creations(temp.path(), &NoFault).unwrap();
+        assert!(!orphan.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_windows_destination_matches_canonical_workspace_root() {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join(MANIFEST_FILE_NAME),
+            "manifest-version = 1\n[workspace]\nmembers = []\n",
+        )
+        .unwrap();
+        let native_destination = temp.path().join("packages/new");
+        let mut req = request(normalize_new_destination(&native_destination).unwrap());
+        req.destination = native_destination;
+        req.workspace = Some(WorkspaceMembership {
+            root: temp.path().canonicalize().unwrap(),
+            member: "packages/new".into(),
+        });
+        create_project(&req, &NoStagePreparation, &NoFault).unwrap();
     }
 
     #[test]
