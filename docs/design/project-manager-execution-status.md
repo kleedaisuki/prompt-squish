@@ -23,12 +23,12 @@ The cutover does not preserve the old internal architecture. It does preserve th
 
 | Question | Durable artifact | Status |
 |---|---|---|
-| Why a microkernel manager and reusable IR? | [`../adr/0009-microkernel-manager-and-reusable-ir.md`](../adr/0009-microkernel-manager-and-reusable-ir.md) | Accepted; planning lifecycle amendment in progress |
+| Why a microkernel manager and reusable IR? | [`../adr/0009-microkernel-manager-and-reusable-ir.md`](../adr/0009-microkernel-manager-and-reusable-ir.md) | Accepted, including the observable planning lifecycle amendment |
 | What is the complete IR, linking, provenance, and debug model? | [`ir-model.md`](ir-model.md) | Implemented through canonical IR, link trace, and self-contained debug bundle |
 | How does the old tree map to the new architecture? | [`refactor-map.md`](refactor-map.md) | Active cutover map |
 | What should each CLI command feel like and how is cutover accepted? | [`../product/cli-experience.md`](../product/cli-experience.md) | Command contract and executable K3/K4 gates defined |
 | What is in and out of the project-manager product? | [`../product/project-manager-scope.md`](../product/project-manager-scope.md) | Product scope defined |
-| How do registry and Git dependencies work? | [`dependency-source-protocol.md`](dependency-source-protocol.md) | Protocol specified; fetch implementation in progress |
+| How do registry and Git dependencies work? | [`dependency-source-protocol.md`](dependency-source-protocol.md) | Protocol specified; fetch implementation and review fixes committed |
 | Which industry and academic systems informed the architecture? | [`../research/compiler-manager-ir-prior-art.md`](../research/compiler-manager-ir-prior-art.md) | Compiler/manager/IR synthesis complete |
 | Which mature project managers informed the product boundary? | [`../research/project-manager-prior-art.md`](../research/project-manager-prior-art.md) | Prior-art review complete |
 
@@ -38,18 +38,20 @@ The research is not an isolated literature dump. Each research artifact is conne
 
 | Area | Repository evidence | Verified contract |
 |---|---|---|
-| Protocol and kernel | `crates/squish-protocol`, `crates/squish-kernel` | Typed operation results, honest unavailable results, request/result identity validation, unique completion lifecycle |
+| Protocol and kernel | `crates/squish-protocol`, `crates/squish-kernel` | Protocol v2 Job → PlanningAttempt → immutable Plan lifecycle, strict reducer, supersede/replan, report-only, honest unavailable results, and unique completion |
 | CLI parser | `crates/squish-cli` | Direct command grammar, bare-help success, typed target arguments, feature parsing |
-| Build scheduler | `crates/squish-build` | Dependency blocking, keep-going semantics, cooperative cancellation, stable event behavior |
+| Build scheduler | `crates/squish-build` | Dependency blocking, keep-going semantics, cooperative cancellation, stable event behavior, and complete sealed-DAG semantic fingerprints |
 | Canonical IR and debug bundle | `crates/squish-ir` | Canonical encoding, link/expansion trace separation, self-contained `.psdbg`, provenance cross-reference validation |
 | XML frontend and backend pipeline | frontend/link/runtime/backend crates | XML to unit IR, link-root execution, prompt emission |
 | Repository model | `crates/squish-repository` | Frozen workspace observations, source ownership, lock/package identity, recoverable transactions |
 | Dependency resolver | `crates/squish-resolver` | Deterministic backtracking, single-version registry domains, lock-first Git behavior, workspace inheritance |
-| Content and action storage | `crates/squish-store` | Verified CAS and persistent action index with migration/concurrency handling |
+| Content and action storage | `crates/squish-store` | Verified CAS, persistent action index, bounded verified catalog paging, and canonical CAS-backed action-result records |
 | Artifact publication | `crates/squish-publish` | Crash-recoverable whole-target generation publication with one logical commit point |
+| Registry and Git fetch | `crates/squish-fetch` | Sparse registry, immutable Git-tree acquisition, offline cache repair, portable materialization, explicit HTTP/Git dependencies, and reviewed concurrency/integrity behavior |
+| Terminal presentation | `crates/squish-presentation` | Canonical NDJSON plus colored, TTY-aware planning/action progress that preserves truthful terminal state |
 | Cross-platform CI | `.github/workflows` | Workspace-aware desktop matrix |
 
-Relevant committed changes include `de3cbcf`, `b8f89fb`, `0ccfda8`, `c28a416`, `9f549e0`, `5260993`, `6d6853e`, `a8884f3`, `ad670dd`, `14ad2ff`, and `0b51912`.
+Relevant committed changes include `de3cbcf`, `b8f89fb`, `0ccfda8`, `c28a416`, `9f549e0`, `5260993`, `6d6853e`, `a8884f3`, `ad670dd`, `14ad2ff`, `0b51912`, `c690a9d`, `adfd9a1`, `bb0dbae`, `4388ff0`, `6a0b690`, `ba67f19`, `9b09465`, `c66bfee`, and `cd03464`.
 
 ## 4. Active Implementation Ownership
 
@@ -58,8 +60,8 @@ Parallel work uses single-writer ownership for each area to avoid shared-worktre
 | Workstream | Owner | Required durable output | Completion condition |
 |---|---|---|---|
 | Manager capability and orchestration | `manager_core2` tree | Manager code plus architecture/code mapping in the design docs | All five operations execute real scheduled work; persistent cache restoration and generation publication pass tests and review |
-| Planning lifecycle | `planning_lifecycle_arch` | Amendment to ADR 0009 | Planning I/O, cancellation, failure, immutable plan publication, and lock writes have one coherent observable state machine |
-| Registry/Git fetch host | `fetch_host` | `squish-fetch` code plus protocol implementation mapping | Online/offline/frozen behavior, immutable identity, cache repair, and platform path rules pass tests and review |
+| Production composition host | `production_host` | `squish-host` code plus explicit port/storage mapping | All manager service ports use configured fetch/store/catalog dependencies; no private-format parsing or unavailable defaults |
+| Root command cutover | Unassigned until manager/host contracts seal | Root bootstrap and process fixtures | Direct commands enter only the new CLI/kernel/manager path and pass process-level gates |
 
 Agent messages are not accepted as the only record of reusable conclusions. Each workstream must update a repository document and point it to code and tests before integration.
 
@@ -69,14 +71,13 @@ These are confirmed review findings or unresolved architecture decisions, not sp
 
 | Priority | Risk | Required resolution |
 |---|---|---|
-| P1 | Frontend ABI is not yet explicit in compile action identity | Include logical source identity and frontend ABI in the canonical compile key |
-| P1 | Single-flight or persistent hits for link/instantiate/backend can skip target-local in-memory state | Restore typed named outputs from CAS for every hit/follower; never depend on an executor having run for each `ActionId` |
-| P1 | Persistent action-result lookup currently covers compile more fully than later transforms | Implement and verify action-key-to-output manifests for every cacheable transform |
-| P1 | Build planning performs meaningful I/O before the immutable execution plan exists | Adopt the planning lifecycle amendment; make planning observable and cancellable without fake replay actions |
+| P1 | Manager fixes for all-transform persistent restoration and action identities are implemented but not yet independently re-reviewed | Re-run the focused manager review against the original eight failure paths after the manager commit |
+| P1 | Failed/cancelled executions and successful generations need one discoverable typed BuildRecordV2 catalog | Finish manager catalog tests and production-host consumption without parsing private JSON or SQLite |
+| P1 | Production storage roots and fetch/process dependencies were previously implicit | Complete the required StorageLayout and explicit host composition; no production fallback may use a hidden project cache |
 | P1 | Root binary still has not cut over to the new CLI/kernel/manager composition | Build the production host and process-level contract tests before deleting the legacy path |
-| P2 | Multi-origin provenance can be flattened if backend artifacts are attributed to the first source | Preserve the provenance DAG through backend emission and verify fused/concatenated origins |
+| P2 | Complete provenance relationships for prompt, XSIR, debug bundle, link map, and build record are still under integration | Read the typed BuildRecordV2 catalog and verify every public artifact maps to appropriate evidence without flattening the provenance DAG |
 
-Previously reported format precomputation, empty mutation stages, failure-path build-record panic, and per-file publication have implementation fixes, but they remain subject to focused re-review because the original reviewer supplied concrete failure evidence.
+Previously reported format precomputation, empty mutation stages, failure-path build-record panic, per-file publication, cache-follower hydration, and incomplete persistent transform caching have implementation fixes, but they remain subject to focused re-review because the original reviewer supplied concrete failure evidence.
 
 ## 6. Cutover Gates
 
