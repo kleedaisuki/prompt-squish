@@ -207,8 +207,9 @@ When no package or target is specified, the manifest's declared defaults apply. 
 be chosen unambiguously, the diagnostic names the available selectors and gives a copyable
 command. Selection is fully resolved before work begins.
 
-Selectors are names, not filesystem paths. Commands that legitimately accept paths label them:
-`fmt --path PATH`, `init PATH`, `add --path PATH`, and `--manifest-path PATH`.
+Selectors are names, not filesystem paths. Commands that legitimately accept paths label their
+type explicitly: `fmt --path PATH`, `init PATH`, `add --path PATH`, `--manifest-path PATH`, and
+`inspect artifact PATH` (where the typed `artifact` subject removes path/identity ambiguity).
 
 ### 3.4 Build
 
@@ -290,12 +291,12 @@ xmlsquish add SPEC
     [--rename ALIAS]
     [--path PATH | --git URL [--rev REV | --tag TAG] | --registry NAME]
     [--features LIST] [--optional]
-    [--locked] [--offline]
+    [--locked] [--offline] [--frozen]
     [--dry-run]
 
 xmlsquish remove ALIAS
     [-p PACKAGE]
-    [--locked] [--offline]
+    [--locked] [--offline] [--frozen]
     [--dry-run]
 ```
 
@@ -323,6 +324,59 @@ $ xmlsquish add prompt-common@^2 -p support --rename common
   Locking    3 packages
   Committed  xmlsquish.toml, xmlsquish.lock
 ```
+
+### 3.7 Inspect
+
+`inspect` is the supported way to understand manager state and products. It is not a raw database
+or Rust-structure dump:
+
+```text
+xmlsquish inspect ir IDENTIFIER [--format human|json]
+xmlsquish inspect link IDENTIFIER [--format human|json]
+xmlsquish inspect source IDENTIFIER [--format human|json]
+xmlsquish inspect cache ACTION-KEY [--format human|json]
+xmlsquish inspect artifact PATH [--format human|json]
+```
+
+The subject word gives `IDENTIFIER` its type, so a module digest cannot be silently interpreted as
+a path or target name. `ir` reports schema/dialect, module identity, imports, exports, semantic and
+provenance digests, and source identities. `link` reports resolved bindings and the selected entry.
+`source` follows provenance without printing source bodies unless the user explicitly requests
+them. `cache` explains the declared inputs and result digests for an action key. `artifact`
+validates the portable container or published-product digest and follows the committed artifact
+manifest: inspecting a prompt can find its `.psdbg` companion, and inspecting `.psdbg` identifies
+the exact prompt digest it describes.
+
+Human output is descriptive and may evolve. `--format=json` emits one versioned JSON document on
+stdout, not NDJSON events, and includes a stable `kind` discriminator plus typed identities and
+digests. A missing, corrupt, wrong-kind, or unsupported-version object is an operation failure
+(exit `1`) with a diagnostic on stderr. Inspection never repairs, fetches, recompiles, updates
+access-visible semantic state, or treats a stale file as a successful build. Recovery and repair
+remain explicit manager lifecycle/`doctor` responsibilities.
+
+### 3.8 Resolution-mode contract
+
+Commands that may resolve packages (`build`, `check`, `add`, `remove`, and `update`) share one
+mode algebra. `fmt` never fetches dependencies, and `inspect` observes an already named object, so
+neither accepts resolution flags.
+
+| Mode | Network | Lock mutation | Required behavior |
+| --- | --- | --- | --- |
+| default | Allowed | Allowed when intent requires it | Prefer still-valid locked versions and report every lock change |
+| `--locked` | Allowed | Forbidden | Require a present lock current for the resolution-relevant manifest projection |
+| `--offline` | Forbidden | Allowed | Resolve only from locally available index and content data; identify every unavailable item |
+| `--frozen` | Forbidden | Forbidden | Exactly `--locked --offline`; verified local content-store reads remain allowed |
+
+The flags compose by restriction. Supplying `--frozen` together with either implied flag is
+idempotent, not a conflict. No mode makes workspace or path-source bytes immutable: each operation
+still snapshots their current contents. `--offline` must be enforced at the network port, not by
+waiting for a connection failure, and presentation/configuration lookup must not create a hidden
+network path.
+
+For `add` and `remove`, `--locked`/`--frozen` may succeed only when the requested operation is
+already idempotently satisfied and therefore changes neither manifest intent nor exact lock state.
+Otherwise they fail with exit `1` before committing either file. `--dry-run` uses the same mode and
+would-succeed decision as the real operation; it merely removes the commit step.
 
 ## 4. Global interaction controls
 
@@ -452,6 +506,7 @@ diagnostic
 recovery-performed
 artifact-published
 manifest-change
+format-difference
 job-finished
 operation-finished
 trace
@@ -889,6 +944,145 @@ localized. Machine interfaces never contain a localized value where an enum is e
   parallel streams are not incorrectly required to have identical cross-job completion order.
 - [ ] Artifact snapshots remove only explicitly non-semantic duration fields; tests do not
   normalize away identity or artifact-ordering defects.
+
+### 12.6 Executable end-to-end contract matrix
+
+This matrix is normative. It turns the preceding product statements into process-level tests and
+is the cutover evidence for a project manager rather than a compiler-shaped CLI.
+
+**Gate legend:** **K3** means the contract test must pass before the old loose-file CLI, sibling
+`*.i.xml`/`*.o.xml` publication, or its temporary adapter may be deleted. **K4** means the same
+test must subsequently be part of the required Linux/macOS/Windows gate. A row marked **K3+K4**
+blocks deletion and remains a permanent three-platform regression test. ADR 0009 intentionally
+does not preserve the old command grammar or old artifact names; the K3 gate proves that the new
+manager route is complete, not that both public grammars coexist forever.
+
+#### Harness and fixtures
+
+The test runner executes the built binary directly with an argument array, never through a shell.
+For every case it creates a fresh temporary checkout, isolated user configuration directory,
+content store, target directory, and fake registry/network endpoint. It captures raw stdout,
+stderr, exit status, network calls, and a before/after digest inventory of all authoritative and
+published files. Wall-clock durations and platform-native display paths may be ignored only in
+fields the schema declares non-semantic; tests must not normalize event order, IDs, logical paths,
+digests, or summary counts merely to make a failure disappear.
+
+| Fixture | Required contents |
+| --- | --- |
+| `basic` | One package `app`, a current lock, one default target `chat`, and golden `chat.prompt` bytes |
+| `workspace` | Packages `core`, `app`, and `ops`; default targets `alpha` and `beta`; independently failing target `broken`; `needs-broken` depends on it |
+| `format` | Owned clean and dirty XML, mixed content, CDATA/entities/namespaces/comments, one malformed owned file, and an unowned neighboring file |
+| `deps` | Two workspace members, a direct alias `common`, a transitive package, current/stale/missing locks, a populated/empty local index, and a request-counting fake registry |
+| `artifacts` | Valid prompt, `.psdbg`, `.xsir`, action/build records, their artifact manifest, plus corrupt and unsupported-version copies |
+| `recovery` | Old/new manifest-lock generations, format files, prompt/debug generations, and fault injection at every documented durable commit point |
+
+`human` below means the default renderer with stdout and stderr captured as non-TTY streams.
+`pty` means a real PTY on Unix and ConPTY-compatible harness on Windows. `json` operation tests
+run a reference event reducer; query JSON tests parse exactly one complete document. “No writes”
+means byte-identical authoritative files and no newly committed artifact generation; disposable
+temporary evidence may exist only where recovery policy explicitly permits it.
+
+#### Dispatch, discovery, selection, and workspace
+
+| ID | Gate | Setup and invocation | Required observations |
+| --- | --- | --- | --- |
+| `CLI-01` | **K3+K4** | No project; `xmlsquish`, `xmlsquish --help`, `xmlsquish build --help`, `xmlsquish --version` | Each exits `0`, writes its requested text only to stdout, performs no project/config/network access, and does not create state. |
+| `CLI-02` | **K3+K4** | Create an existing file named `chat.xml`; run `xmlsquish chat.xml` | Exit `2`; stderr says the token is an unknown command; stdout is empty; the file is never compiled or modified. This is the decisive “no path dispatch” contract. |
+| `CLI-03` | **K3+K4** | From a nested directory of `basic`, run `xmlsquish build --message-format=json`; repeat with `--manifest-path` from outside the tree | Both resolve the same logical project and target, emit the selected manifest/root in `project-resolved`, and publish the same bytes. |
+| `CLI-04` | **K3+K4** | `xmlsquish --message-format=json unknown` and `xmlsquish build --emit=wat --message-format=json` | Each exits `2`; stdout contains a typed usage diagnostic and exactly one `operation-finished`; stderr is empty and no project is loaded after bootstrap rejection. |
+| `SEL-01` | **K3+K4** | Workspace with two targets and no default; `xmlsquish build` | Exit `1` because valid project intent is ambiguous, not `2`; the diagnostic enumerates names and one copyable `-t` command; no job starts. |
+| `WS-01` | **K3+K4** | `workspace`; `xmlsquish build --workspace --exclude ops --message-format=json` | Exactly the allowed `core`/`app` default targets are planned once in stable identity order; no `ops` action runs or publishes. |
+| `WS-02` | **K3+K4** | `workspace`; run `xmlsquish build -p app -t alpha`, `xmlsquish fmt -p app`, and `xmlsquish add helpers@^2 --registry test -p app --dry-run` | All commands resolve `app` through the same package identity and ownership rules; selector errors use the same diagnostic code family and suggestions. |
+
+#### Build, multiple targets, products, and debug evidence
+
+| ID | Gate | Setup and invocation | Required observations |
+| --- | --- | --- | --- |
+| `BLD-01` | **K3+K4** | `basic`; `xmlsquish build` in human mode | Exit `0`; stdout empty; stderr names loading/compiling/linking/squishing/publication and final summary; exactly the declared `chat.prompt` generation is committed with golden bytes. No sibling XML intermediate appears. |
+| `BLD-02` | **K3+K4** | `workspace`; `xmlsquish build -t alpha -t broken -t needs-broken -t beta` with default keep-going | Exit `1`; `alpha` and `beta` commit; `broken` is failed; `needs-broken` is blocked and never started; final counts distinguish all states and stable target IDs. |
+| `BLD-03` | **K3+K4** | Same fixture; `xmlsquish build -t broken -t alpha -t beta --no-keep-going --jobs=1` | After the first failure no new job is admitted; non-started independent jobs are cancelled, not mislabeled blocked unless a prerequisite actually failed. |
+| `BLD-04` | **K3+K4** | Give `broken` a previously committed golden artifact, then rebuild it unsuccessfully beside successful `beta` | The prior `broken` bytes and generation pointer survive but are not emitted/reported as produced by this invocation; `beta` commits independently. |
+| `BLD-05` | **K3+K4** | `basic`; `xmlsquish build --emit=ir --message-format=json` | Exit `0`; materializes canonical `.xsir` for the selected complete modules and reports their digests; no link/backend/prompt/`.psdbg` job or file exists. |
+| `BLD-06` | **K3+K4** | `basic`; `xmlsquish build --emit=prompt --emit=debug --message-format=json` | Exit `0`; one recoverable generation contains `chat.prompt`, `chat.psdbg`, and an artifact manifest naming both digests; `.psdbg` names the exact prompt digest; events identify each publication. |
+| `BLD-07` | **K3+K4** | Run duplicate `--emit=prompt` flags, then `--emit=debug`, then `--emit=prompt,debug` | Duplicate values are idempotent and publish once. The latter two invocations exit `2` before project loading, with no writes: debug has no primary output and comma syntax is invalid. |
+| `BLD-08` | **K3+K4** | Two selected targets are configured to publish the same destination | Planning exits `1` before executable jobs start; the diagnostic names both owners and the path; neither target changes its previous generation. |
+| `BLD-09` | **K3+K4** | Run `basic` cold, warm, then after deleting all disposable derived state | All successful runs produce byte-identical prompt/debug/IR where selected. Warm JSON reports legal cache-hit lifecycle and artifact metadata; the clean rebuild does not depend on SQLite/CAS leftovers. |
+| `BLD-10` | **K3+K4** | Repeat the workspace build under `--jobs=1`, `--jobs=2`, and `--jobs=0` with randomized worker completion | Artifacts, diagnostic facts, final job table, counts, and exit code are identical. Cross-job live event interleaving may differ but every per-job partial order and global sequence is legal. |
+
+#### Formatter
+
+| ID | Gate | Setup and invocation | Required observations |
+| --- | --- | --- | --- |
+| `FMT-01` | **K3+K4** | Clean `format`; `xmlsquish fmt --check` | Exit `0`; no writes; stdout empty; stderr has at most the single success summary. |
+| `FMT-02` | **K3+K4** | Dirty valid file; `xmlsquish fmt --check` | Exit `1`; no writes; diagnostic/status identifies the file as different without calling it malformed. |
+| `FMT-03` | **K3+K4** | Dirty valid file; `xmlsquish fmt --diff` | Exit `1`; stdout is an applicable unified diff and contains no status/ANSI; stderr contains status/diagnostics only. |
+| `FMT-04` | **K3+K4** | Same input; `xmlsquish fmt`, then run it again and compile/inspect before/after semantic IR | First run atomically changes only proven trivia and exits `0`; second run is byte-idempotent; semantic/provenance comparison differs only in permitted spans/trivia and output prompt bytes remain equal. |
+| `FMT-05` | **K3+K4** | Select dirty valid and malformed owned files together | Complete preflight exits `1` before the first replacement; neither file changes; parse/semantic failure is distinguished from a format difference. |
+| `FMT-06` | **K3+K4** | `xmlsquish fmt --diff --message-format=json` | Exit `1`; stdout is NDJSON containing structured `format-difference` edits and final outcome, not a textual diff; stderr is empty. |
+| `FMT-07` | **K3+K4** | Select the unowned neighbor with `fmt --path`; repeat workspace-wide | Explicit selection fails with an ownership diagnostic and no write; workspace traversal never discovers or modifies the file. |
+
+#### Dependency edits and resolution modes
+
+| ID | Gate | Setup and invocation | Required observations |
+| --- | --- | --- | --- |
+| `DEP-01` | **K3+K4** | `deps`; `xmlsquish add helpers@^2 --registry test -p app --rename helper` | Exit `0`; identity is resolved before editing; manifest and lock commit as one logical transaction; change events distinguish resolve, lock, and commit; unrelated valid lock selections are retained. |
+| `DEP-02` | **K3+K4** | Repeat `DEP-01`, then run it with `helpers@^3` | Identical add is a successful no-op with no duplicate key or generation. Changed intent is reported as an update and leaves one typed alias entry. |
+| `DEP-03` | **K3+K4** | Run `xmlsquish add helpers@^2 --registry test -p app --dry-run` and `xmlsquish remove common -p app --dry-run`, in human and JSON modes | Resolver/validation result and would-succeed exit match a real run from the same snapshot; manifest, lock, and journal remain byte-identical; JSON has typed `manifest-change` data. |
+| `DEP-04` | **K3+K4** | `add common --path ../common --git https://invalid.example/x` | Exit `2` during bootstrap option validation; no project, filesystem mutation, DNS, or network access occurs. |
+| `DEP-05` | **K3+K4** | Keep owned references to `common`; `xmlsquish remove common -p app` | Exit `1`; every remaining reference span is reported; manifest and lock are unchanged and no automatic source rewrite occurs. |
+| `DEP-06` | **K3+K4** | Remove those references; `xmlsquish remove common -p app` | Exit `0`; manifest removes exactly the alias; lock prunes only newly unreachable nodes; shared/transitively reachable entries and CAS content remain. |
+| `MODE-01` | **K3+K4** | Missing or stale lock; run `build --locked` and a state-changing `add --locked` | Exit `1`; no lock/manifest/artifact commit occurs. Build may contact the configured source only when needed to validate existing locked identities, but must never invent or write a selection. |
+| `MODE-02` | **K3+K4** | Locally populated index/content but changeable lock; run `build --offline`; repeat with required content absent | Populated case may resolve/update and succeeds with zero network calls. Missing case exits `1`, names all unavailable identities and searched local state, makes zero network calls, and commits no artifact/lock. |
+| `MODE-03` | **K3+K4** | Current lock and all remote blobs local; run `build --frozen`, then `build --locked --offline` | Both succeed with identical plan/products, zero network calls, and byte-identical lock. JSON exposes both restrictions as effective policy. |
+| `MODE-04` | **K3+K4** | Frozen build with missing blob, and frozen build with edited path/workspace source | Missing blob fails `1` without network or writes. Edited local source is freshly snapshotted and built; frozen never claims local bytes are immutable. |
+| `MODE-05` | **K3+K4** | Run idempotently satisfied and state-changing `add`/`remove` requests with `--frozen`, including `--dry-run` | Idempotent request may succeed if all content is local and writes nothing. Any request requiring manifest or lock mutation exits `1`; dry-run makes the same decision; all cases make zero network calls. |
+
+#### Inspection and machine/human presentation
+
+| ID | Gate | Setup and invocation | Required observations |
+| --- | --- | --- | --- |
+| `INSP-01` | **K3+K4** | `artifacts`; inspect each `ir`, `link`, `source`, `cache`, and `artifact` kind in human mode | Each valid object exits `0`, emits requested data on stdout and diagnostics on stderr only, shows its typed identity/digests, and performs no build, fetch, repair, or authoritative write. |
+| `INSP-02` | **K3+K4** | Inspect prompt and `.psdbg` with `--format=json` | Each emits exactly one versioned JSON document with stable `kind`; prompt resolves the committed debug companion when present and debug names the exact prompt digest. No event envelope or human prose is mixed in. |
+| `INSP-03` | **K3+K4** | Inspect corrupt, wrong-kind, unsupported-version, missing, and stale-uncommitted objects | Each valid invocation exits `1` with a precise diagnostic on stderr, emits no partial JSON result, never reports stale bytes as a build success, and changes nothing. Unknown inspect subject/options instead exit `2`. |
+| `IO-01` | **K3+K4** | Pipe/capture human build, format, add/remove, and inspect output without a TTY | Output is append-only with no ESC/OSC/carriage-return repaint; operation status is stderr; query/diff data is stdout; capability decisions for the two streams are independent. |
+| `IO-02` | **K3+K4** | Repeat representative operations with `--plain`, `--quiet`, and contradictory `--plain --color=always` | Plain is ASCII, linear, width-independent, and keeps diagnostics. Quiet preserves diagnostics/requested data. Contradiction exits `2` before project loading. |
+| `JSON-01` | **K3+K4** | Run successful, cache-hit, multi-failure, pre-plan failure, format-difference, manifest-change, recovery, and cancellation paths with `--message-format=json` | Every stdout line is one UTF-8 JSON object; stderr is empty; sequences are gapless; legal event lifecycles reduce to the actual exit/final counts; exactly one final event exists while stdout is writable. |
+| `JSON-02` | **K3+K4** | Feed version-1 event fixtures with an inserted unknown reason to the reference consumer | Consumer ignores the unknown event and computes the same supported result; removing/changing a required field is rejected rather than guessed. |
+| `TTY-01` | **K3+K4** | Run a long build under PTY at wide/narrow widths, resize during work, and finish successfully | Meaningful progress appears only when enabled, repaint stays within one bounded region and 10 Hz, narrow view preserves IDs via list fallback, and cursor/style/line state is restored. |
+| `TTY-02` | **K3+K4** | Under PTY trigger domain failure, panic-boundary test failure, first Ctrl-C, and second Ctrl-C | Dynamic region is cleared before durable diagnostics; terminal is restored on every path; cooperative cancellation reports once and exits `130`; immediate termination still restores the guard. |
+| `PIPE-01` | **K3+K4** | Close downstream pipe during `inspect`/`fmt --diff`, then during JSON build | Pure query/diff terminates quietly without panic. JSON sink loss requests cancellation, commits no unsafe partial generation, and exits `1` unless success had already completed. |
+
+#### Recovery, concurrency, and exit reduction
+
+| ID | Gate | Setup and invocation | Required observations |
+| --- | --- | --- | --- |
+| `REC-01` | **K3+K4** | Inject process death at every manifest/lock durable commit point, then run an ordinary manager command | Startup converges automatically to a coherent complete old or new pair from journal/digests; it never asks for deletion; recovery is emitted in human and JSON modes. |
+| `REC-02` | **K3+K4** | Inject death at every prompt/debug/artifact-manifest publication point with a prior good generation | No partial prompt/debug is observable as committed; next startup finishes or rolls back deterministically; the prior good generation survives unless the new complete generation commits. |
+| `REC-03` | **K3+K4** | Inject death during multi-file formatting after complete preflight | Each reported replacement is whole; next startup reconciles manager-owned transaction evidence and truthfully identifies committed/unchanged/not-attempted files without claiming cross-filesystem atomicity. |
+| `REC-04` | **K3+K4** | Corrupt/delete SQLite and one cached blob, preserving sources/manifest/lock; rebuild | Derived state is discarded/recomputed; correct clean bytes result. A corrupt blob is never accepted under its digest. |
+| `CONC-01` | **K3+K4** | Race two adds, add/remove, build/add, and fmt/build using barriers at plan and commit | Writers wait or re-plan with visible bounded progress; unambiguous intent converges without lost edits; true conflicts exit `1` with coherent files; no command observes a half transaction. |
+| `EXIT-00` | **K3+K4** | Successful build/edit/query, clean format check, and bare help | All exit `0`. |
+| `EXIT-01` | **K3+K4** | Compile/resolve/I/O failure, dirty format check, missing inspect object, and lost JSON sink | All valid invocations exit `1`; category remains in structured diagnostics rather than a new process code. |
+| `EXIT-02` | **K3+K4** | Unknown command/flag, conflicting source flags, malformed selector/argument, invalid emit combination | All exit `2` before domain execution; no later domain error is reduced to `2`. |
+| `EXIT-101` | **K3+K4** | Test-only kernel invariant/panic injection | Exit `101`; user files and last committed artifacts survive; human/JSON output uses the internal-failure diagnostic contract. |
+| `EXIT-130` | **K3+K4** | First Ctrl-C in locating, planning, running, and publication-safe-point scenarios | Each cooperatively cancels and exits `130`; priority over concurrent domain failures is stable; final JSON says `cancelled:true` when writable. |
+
+#### K3 deletion decision
+
+Deletion of the old CLI is permitted only when all **K3** rows above pass and the following two
+cutover checks are green:
+
+1. Representative ADR 0007 language fixtures are wrapped in explicit temporary projects and
+   built through `xmlsquish build`; their final prompt bytes and semantic diagnostic facts match
+   the accepted language goldens. Old sibling artifact names and old argv are deliberately not
+   compared.
+2. A repository search and architecture test show that every public command enters the manager
+   kernel/event/status path and no production code can dispatch an operand by filesystem existence
+   or publish `*.i.xml`/`*.o.xml`.
+
+If a K3 row is flaky, skipped on a supported platform, or asserted only through an in-process
+domain test, the gate is not met. The old route is not retained as a fallback; deletion waits until
+the replacement process contract is real.
 
 ## 13. Non-goals and rejected patterns
 

@@ -167,7 +167,7 @@ the durable locator when later edits move the lines.
 
 | Current implementation evidence | Destination and required change |
 | --- | --- |
-| `src/main.rs:2-4` declares private `cli`, `compiler`, and `squish` modules. | Retain one executable and reorganize its private modules around `kernel`, domain packages, adapters, and ports. No public library facade is required merely to obtain boundaries. |
+| `src/main.rs:2-4` declares private `cli`, `compiler`, and `squish` modules. | Retain one executable, but move domain ownership into the independent workspace crates required by ADR 0009. The root binary is only the bootstrap/composition adapter; compile-time crate edges enforce boundaries even though no public facade is required for the executable. |
 | `src/cli/mod.rs:32-60` defines the flat arguments; `src/cli/mod.rs:107-211` mixes decoding, discovery, option construction, execution, and reporting. | Replace with a `Command` enum for `fmt`, `build`, `add`, and `remove`. Reduce the root CLI to parsing plus microkernel dispatch. |
 | `src/cli/mod.rs:214-331` renders summaries and stage-specific prose. | Move to `presentation`, consuming ordered structured events and job results. |
 | `src/cli/console.rs:12-61` implements color policy and safe clap styling. | Preserve as presentation infrastructure; extend it with TTY-aware progress/spinners and stable redirected output. |
