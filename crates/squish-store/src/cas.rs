@@ -556,8 +556,22 @@ mod windows_atomic {
 
     /// 原子移动同卷文件且拒绝覆盖目标。 / Atomically moves a same-volume file without replacing the destination.
     pub(super) fn publish_noclobber(source: &Path, destination: &Path) -> io::Result<()> {
-        let source = wide_path(source)?;
-        let destination = wide_path(destination)?;
+        // canonicalize supplies Win32's verbatim path form, retaining long-path
+        // support that a raw UTF-16 conversion would otherwise lose.
+        // canonicalize 提供 Win32 verbatim 路径形式，避免直接转 UTF-16 丢失长路径支持。
+        let source = source.canonicalize()?;
+        let destination_name = destination.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "destination has no file name")
+        })?;
+        let destination = destination
+            .parent()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent")
+            })?
+            .canonicalize()?
+            .join(destination_name);
+        let source = wide_path(&source)?;
+        let destination = wide_path(&destination)?;
         // SAFETY / 安全性:
         // - both vectors are explicitly NUL-terminated and reject interior NULs;
         // - their allocations remain alive and immutable for the complete call;
