@@ -248,10 +248,42 @@ impl GitHost {
         expected_content: &ContentDigest,
         access: Access,
     ) -> Result<crate::MaterializedPackage, FetchError> {
+        let candidate =
+            self.materialize_locked_revision(repository, commit, subdir, expected_content, access)?;
+        if candidate.package_tree != *package_tree {
+            return Err(FetchError::Integrity(
+                "locked Git package-tree mismatch".into(),
+            ));
+        }
+        let db = self.db_path(repository, commit.format);
+        let tree = self.read_tree(&db, &candidate.package_tree.hex)?;
+        self.materializer.materialize(
+            &format!("git:{}#{}@{}", stable_repo(repository), subdir, commit.hex),
+            &tree,
+        )
+    }
+
+    /// 直接从 exact commit 推导并验证 root/package tree；LocalOnly 不需要 selector observation。 / Derives and verifies root/package trees directly from an exact commit; LocalOnly needs no selector observation.
+    pub fn materialize_locked_revision(
+        &self,
+        repository: &str,
+        commit: &GitOid,
+        subdir: &str,
+        expected_content: &ContentDigest,
+        access: Access,
+    ) -> Result<ExactGitCandidate, FetchError> {
         validate_repository(repository)?;
         validate_subdir(subdir)?;
         let db = self.db_path(repository, commit.format);
-        self.ensure_db(&db, commit.format)?;
+        if !db.join("HEAD").exists() {
+            if access == Access::LocalOnly {
+                return Err(FetchError::OfflineMiss(format!(
+                    "Git commit {}",
+                    commit.hex
+                )));
+            }
+            self.ensure_db(&db, commit.format)?;
+        }
         if self.require_type(&db, &commit.hex, "commit").is_err() {
             if access == Access::LocalOnly {
                 return Err(FetchError::OfflineMiss(format!(
@@ -262,7 +294,7 @@ impl GitHost {
             self.fetch_selector(&db, repository, &GitSelector::Rev(commit.hex.clone()))?;
             self.require_type(&db, &commit.hex, "commit")?;
         }
-        if self.object_format(&db)? != commit.format || package_tree.format != commit.format {
+        if self.object_format(&db)? != commit.format {
             return Err(FetchError::Integrity(
                 "locked Git object format mismatch".into(),
             ));
@@ -275,21 +307,25 @@ impl GitHost {
                 .trim()
                 .to_owned()
         };
-        if selected != package_tree.hex {
-            return Err(FetchError::Integrity(
-                "locked Git package-tree mismatch".into(),
-            ));
-        }
         let tree = self.read_tree(&db, &selected)?;
         if tree.content_digest != *expected_content {
             return Err(FetchError::Integrity(
                 "locked Git content digest mismatch".into(),
             ));
         }
-        self.materializer.materialize(
+        let materialized = self.materializer.materialize(
             &format!("git:{}#{}@{}", stable_repo(repository), subdir, commit.hex),
             &tree,
-        )
+        )?;
+        Ok(ExactGitCandidate {
+            commit: commit.clone(),
+            root_tree: GitOid::new(commit.format, root.trim().to_owned())?,
+            package_tree: GitOid::new(commit.format, selected)?,
+            subdir: subdir.into(),
+            content_digest: expected_content.clone(),
+            manifest_digest: materialized.manifest_digest,
+            manifest: materialized.manifest,
+        })
     }
 
     fn read_tree(&self, db: &Path, tree: &str) -> Result<LogicalTree, FetchError> {
@@ -756,7 +792,7 @@ mod tests {
         let candidate = host
             .resolve_exact(&url, &GitSelector::Branch(branch), ".", Access::Online)
             .unwrap();
-        assert_eq!(candidate.manifest.package.unwrap().name, "demo");
+        assert_eq!(candidate.manifest.package.as_ref().unwrap().name, "demo");
         assert_eq!(candidate.commit.hex.len(), 40);
         let expected = LogicalTree::build(
             vec![
@@ -777,6 +813,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(candidate.content_digest, expected.content_digest);
+        fs::remove_dir_all(root.join("cache/v1/git/observations")).unwrap();
+        let locked = host
+            .materialize_locked_revision(
+                &url,
+                &candidate.commit,
+                ".",
+                &candidate.content_digest,
+                Access::LocalOnly,
+            )
+            .unwrap();
+        assert_eq!(locked.package_tree, candidate.package_tree);
+        let missing = GitOid::new(GitObjectFormat::Sha1, "0".repeat(40)).unwrap();
+        assert!(matches!(
+            host.materialize_locked_revision(
+                &url,
+                &missing,
+                ".",
+                &candidate.content_digest,
+                Access::LocalOnly,
+            ),
+            Err(FetchError::OfflineMiss(_))
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 

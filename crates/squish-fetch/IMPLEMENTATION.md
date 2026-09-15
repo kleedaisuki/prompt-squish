@@ -33,6 +33,13 @@ Unit fakes prove these constructors perform no hidden socket or child-process ac
 interpretation, HTTPS preservation, and cross-origin credential re-scoping remain in the fetch
 layer rather than being delegated to the HTTP transport.
 
+Locked execution uses `GitHost::materialize_locked_revision`: it opens the object-format-partitioned
+bare database directly by the lock's algorithm-tagged commit, derives the root and explicit-subdir
+trees, verifies content identity, and materializes without consulting selector observations.
+`LocalOnly` returns a structured miss when the exact object database/commit is absent; only Online
+may fetch the exact OID. The local Git regression deletes all selector observations after a branch
+fetch and proves exact locked reconstruction still succeeds.
+
 ## Verified deviations and migration constraints
 
 * `squish-resolver` still exposes its lock-v1 `RegistryCandidate { checksum, manifest }` and
