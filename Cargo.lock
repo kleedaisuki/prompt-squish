@@ -2219,6 +2219,7 @@ name = "xmlsquish"
 version = "0.3.0"
 dependencies = [
  "ctrlc",
+ "serde",
  "serde_json",
  "squish-cli",
  "squish-config",
@@ -2229,6 +2230,7 @@ dependencies = [
  "squish-presentation",
  "squish-protocol",
  "squish-repository",
+ "squish-store",
  "tempfile",
 ]
 

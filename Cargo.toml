@@ -46,6 +46,7 @@ repository = "https://github.com/kleedaisuki/prompt-squish"
 [dependencies]
 ctrlc = "3.5"
 serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 squish-cli = { path = "crates/squish-cli" }
 squish-config = { path = "crates/squish-config" }
 squish-fetch = { path = "crates/squish-fetch" }
@@ -55,6 +56,7 @@ squish-manager = { path = "crates/squish-manager" }
 squish-presentation = { path = "crates/squish-presentation" }
 squish-protocol = { path = "crates/squish-protocol" }
 squish-repository = { path = "crates/squish-repository" }
+squish-store = { path = "crates/squish-store" }
 
 [dev-dependencies]
 tempfile = "3.23"

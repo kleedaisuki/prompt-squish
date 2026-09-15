@@ -1,6 +1,10 @@
 //! 根二进制的进程边界合同。 / Process-boundary contracts for the root binary.
 
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    path::Path,
+    process::{Command, Stdio},
+};
 
 fn binary() -> Command {
     Command::new(env!("CARGO_BIN_EXE_xmlsquish"))
@@ -71,6 +75,34 @@ fn parse_failure_is_stderr_with_usage_exit_status() {
 }
 
 #[test]
+fn json_parse_failures_are_diagnostic_plus_one_terminal_record() {
+    for args in [
+        vec!["legacy.xml", "--message-format=json"],
+        vec!["build", "--emit=debug", "--message-format=json"],
+    ] {
+        let output = binary().args(args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stderr.is_empty());
+        let lines: Vec<_> = output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        let value: serde_json::Value = serde_json::from_slice(lines[0]).unwrap();
+        let terminal: serde_json::Value = serde_json::from_slice(lines[1]).unwrap();
+        assert_eq!(value["schema"], "xmlsquish-bootstrap-v1");
+        assert_eq!(value["kind"], "diagnostic");
+        assert_eq!(value["phase"], "parse");
+        assert_eq!(value["exit_code"], 2);
+        assert_eq!(terminal["kind"], "finished");
+        assert_eq!(terminal["status"], "failed");
+        assert_eq!(terminal["exit_code"], 2);
+        assert!(terminal.get("invocation").is_none());
+    }
+}
+
+#[test]
 fn failed_project_discovery_is_a_domain_failure() {
     let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join(".temp/no-project");
     fs::create_dir_all(&scratch).unwrap();
@@ -78,6 +110,67 @@ fn failed_project_discovery_is_a_domain_failure() {
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("PROJECT001"));
+}
+
+#[test]
+fn json_pre_dispatch_failures_are_diagnostic_plus_terminal_on_stdout() {
+    let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join(".temp/no-json-project");
+    fs::create_dir_all(&scratch).unwrap();
+    let discovery = binary()
+        .current_dir(&scratch)
+        .args(["build", "--message-format=json"])
+        .output()
+        .unwrap();
+    assert_bootstrap_failure(discovery, "discover");
+
+    let invalid_config = project("root-invalid-config-");
+    fs::write(
+        invalid_config.path().join(".xmlsquish/config.toml"),
+        "unknown-key = true\n",
+    )
+    .unwrap();
+    let config = binary()
+        .current_dir(invalid_config.path())
+        .args(["build", "--message-format=json"])
+        .output()
+        .unwrap();
+    assert_bootstrap_failure(config, "config");
+
+    let invalid_host = project("root-invalid-host-");
+    fs::write(
+        invalid_host.path().join(".xmlsquish/config.toml"),
+        "[source]\ncache-root = \"shared\"\n[manager]\nstorage-root = \"shared\"\n",
+    )
+    .unwrap();
+    let host = binary()
+        .current_dir(invalid_host.path())
+        .args(["build", "--message-format=json"])
+        .output()
+        .unwrap();
+    assert_bootstrap_failure(host, "host");
+}
+
+fn assert_bootstrap_failure(output: std::process::Output, phase: &str) {
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    let lines: Vec<_> = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let diagnostic: serde_json::Value = serde_json::from_slice(lines[0]).unwrap();
+    let terminal: serde_json::Value = serde_json::from_slice(lines[1]).unwrap();
+    assert_eq!(diagnostic["kind"], "diagnostic");
+    assert_eq!(diagnostic["phase"], phase);
+    assert_eq!(terminal["kind"], "finished");
+    assert_eq!(terminal["status"], "failed");
+    assert!(diagnostic.get("invocation").is_none());
 }
 
 #[test]
@@ -319,6 +412,79 @@ fn build_warms_cache_and_publishes_all_selected_artifact_kinds() {
 }
 
 #[test]
+fn bare_build_defaults_to_a_prompt_artifact() {
+    let project = project("root-default-build-");
+    let output = binary()
+        .current_dir(project.path())
+        .args(["build", "--plain"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        walk(&project.path().join("target/xmlsquish"))
+            .iter()
+            .any(|path| path.extension().and_then(|value| value.to_str()) == Some("prompt"))
+    );
+}
+
+#[test]
+fn fmt_diff_is_unified_stdout_for_humans_and_artifact_based_json() {
+    let human_project = project("root-human-diff-");
+    let human = binary()
+        .current_dir(human_project.path())
+        .args(["fmt", "--diff", "--plain"])
+        .output()
+        .unwrap();
+    assert_eq!(human.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&human.stdout).contains("--- "));
+    assert!(String::from_utf8_lossy(&human.stdout).contains("+++ "));
+    assert!(!human.stdout.starts_with(b"{"));
+
+    let json_project = project("root-json-diff-");
+    let json = binary()
+        .current_dir(json_project.path())
+        .args(["fmt", "--diff", "--message-format=json"])
+        .output()
+        .unwrap();
+    assert_eq!(json.status.code(), Some(1));
+    assert!(json.stderr.is_empty());
+    for line in json
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        serde_json::from_slice::<serde_json::Value>(line).unwrap();
+    }
+}
+
+#[test]
+fn closed_fmt_diff_pipe_is_quiet_and_preserves_check_status() {
+    let project = project("root-broken-diff-");
+    let huge = format!(
+        "<xs:entry  xmlns:xs = 'https://xmlsquish.moesegfault.dev/ns' ><message>{}</message></xs:entry >",
+        "x".repeat(512 * 1024)
+    );
+    fs::write(project.path().join("src/main.xml"), huge).unwrap();
+    let mut child = binary()
+        .current_dir(project.path())
+        .args(["fmt", "--diff", "--plain"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("OUTPUT001"), "{stderr}");
+    assert!(!stderr.contains("internal error"), "{stderr}");
+}
+
+#[test]
 fn add_dry_run_then_add_and_remove_have_truthful_file_effects() {
     let project = project("root-mutate-");
     let dependency = project.path().join("dep");
@@ -413,6 +579,22 @@ fn inspect_json_is_one_stdout_document_after_build() {
     );
     assert!(String::from_utf8_lossy(&human.stdout).starts_with("Link\n"));
     assert!(!human.stdout.starts_with(b"{"));
+
+    for format in ["--format=human", "--format=json"] {
+        let mut broken = binary()
+            .current_dir(project.path())
+            .args(["inspect", "link", "chat", format])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(broken.stdout.take());
+        let broken = broken.wait_with_output().unwrap();
+        assert!(broken.status.success());
+        let stderr = String::from_utf8_lossy(&broken.stderr);
+        assert!(!stderr.contains("OUTPUT001"), "{stderr}");
+        assert!(!stderr.contains("internal error"), "{stderr}");
+    }
 }
 
 #[test]

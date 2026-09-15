@@ -36,6 +36,29 @@ use squish_protocol::{
     ProjectPath,
 };
 use squish_repository::{Discovery, ProjectRepository};
+use squish_store::{BlobDigest, Cas};
+
+/// 内核启动前的稳定机器记录。 / Stable machine record for failures before kernel dispatch.
+#[derive(serde::Serialize)]
+struct BootstrapRecord<'a> {
+    /// 根启动协议版本。 / Root bootstrap schema version.
+    schema: &'static str,
+    /// 记录类别：诊断或终态。 / Record kind: diagnostic or terminal.
+    kind: &'static str,
+    /// 失败所在的启动阶段。 / Bootstrap phase containing the failure.
+    phase: &'a str,
+    /// 稳定诊断代码。 / Stable diagnostic code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<&'a str>,
+    /// 人类可读说明。 / Human-readable explanation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<&'a str>,
+    /// 终态，仅终态记录携带。 / Terminal status, present only on terminal records.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<&'static str>,
+    /// 对应进程退出码。 / Corresponding process exit code.
+    exit_code: u8,
+}
 
 /// 将内核事件串行送入唯一呈现器。 / Serializes kernel events into the sole renderer.
 struct RenderingSink {
@@ -88,6 +111,8 @@ fn run() -> u8 {
             let code = error.exit_code();
             if code == 0 {
                 print_stdout(&error.to_string());
+            } else if error.json_requested() {
+                return bootstrap_failure(true, "parse", "CLI_USAGE", &error.to_string(), 2, true);
             } else {
                 print_stderr(&error.to_string());
             }
@@ -111,6 +136,7 @@ fn execute(mut invocation: ParsedInvocation) -> Result<u8, Box<dyn std::error::E
     let cancellation = CancellationToken::default();
     let signal_token = cancellation.clone();
     ctrlc::set_handler(move || signal_token.cancel())?;
+    let bootstrap_json = bootstrap_json_requested(&invocation);
     let explicit = requested_project(&invocation.request);
     let discovery = if explicit == Path::new(".") {
         Discovery::Implicit(std::env::current_dir()?)
@@ -120,10 +146,15 @@ fn execute(mut invocation: ParsedInvocation) -> Result<u8, Box<dyn std::error::E
     let repository = match ProjectRepository::discover(discovery) {
         Ok(repository) => repository,
         Err(error) => {
-            print_stderr(&format!(
-                "error[PROJECT001] could not discover project: {error}\n"
+            let message = format!("could not discover project: {error}");
+            return Ok(bootstrap_failure(
+                bootstrap_json,
+                "discover",
+                "PROJECT001",
+                &message,
+                1,
+                true,
             ));
-            return Ok(1);
         }
     };
     let root = repository.root().to_path_buf();
@@ -131,19 +162,48 @@ fn execute(mut invocation: ParsedInvocation) -> Result<u8, Box<dyn std::error::E
     let config = match load_config(&root, &invocation) {
         Ok(config) => config,
         Err(error) => {
-            print_stderr(&format!(
-                "error[CONFIG001] could not load configuration: {error}\n"
+            let message = format!("could not load configuration: {error}");
+            return Ok(bootstrap_failure(
+                bootstrap_json,
+                "config",
+                "CONFIG001",
+                &message,
+                1,
+                true,
             ));
-            return Ok(1);
         }
     };
-    let host = match compose_host(root, &config) {
-        Ok(host) => host,
+    let operation_json = !matches!(invocation.request, OperationRequest::Inspect(_))
+        && invocation.presentation.message_format.map_or(
+            config.term.message_format == squish_config::MessageFormat::Json,
+            |value| value == MessageFormat::Json,
+        );
+    let (host, storage) = match compose_host(root, &config) {
+        Ok(composed) => composed,
         Err(error) => {
-            print_stderr(&format!(
-                "error[HOST001] could not initialize project services: {error}\n"
+            let message = format!("could not initialize project services: {error}");
+            return Ok(bootstrap_failure(
+                operation_json,
+                "host",
+                "HOST001",
+                &message,
+                1,
+                true,
             ));
-            return Ok(1);
+        }
+    };
+    let cas = match Cas::open(storage.cas_root()) {
+        Ok(cas) => cas,
+        Err(error) => {
+            let message = format!("could not open output store: {error}");
+            return Ok(bootstrap_failure(
+                operation_json,
+                "host",
+                "HOST001",
+                &message,
+                1,
+                true,
+            ));
         }
     };
 
@@ -183,8 +243,24 @@ fn execute(mut invocation: ParsedInvocation) -> Result<u8, Box<dyn std::error::E
         ));
         return Ok(1);
     }
-    if query && outcome.summary.status == ExitStatus::Success {
-        render_query_result(&outcome.result, invocation.presentation.query_format)?;
+    if query
+        && outcome.summary.status == ExitStatus::Success
+        && let Err(error) =
+            render_query_result(&outcome.result, invocation.presentation.query_format)
+    {
+        return Ok(output_failure(
+            Box::new(error),
+            outcome.summary.status.code(),
+        ));
+    }
+    if !query
+        && !operation_json
+        && let Err(error) = render_format_diffs(&outcome.result, &cas)
+    {
+        return Ok(output_failure(
+            Box::new(error),
+            outcome.summary.status.code(),
+        ));
     }
     Ok(outcome.summary.status.code())
 }
@@ -193,7 +269,7 @@ fn execute(mut invocation: ParsedInvocation) -> Result<u8, Box<dyn std::error::E
 fn compose_host(
     root: std::path::PathBuf,
     config: &Config,
-) -> Result<ProductionHost, Box<dyn std::error::Error>> {
+) -> Result<(ProductionHost, StorageLayout), Box<dyn std::error::Error>> {
     let state = &config.manager.storage_root;
     let storage = StorageLayout::new(
         state.join("cas"),
@@ -202,10 +278,10 @@ fn compose_host(
         state.join("catalog"),
     )?;
     let filesystem = Arc::new(FilesystemHost::new(&root)?);
-    Ok(ProductionHost::open(HostConfig {
+    let host = ProductionHost::open(HostConfig {
         project_root: root,
         source_cache_root: config.source.cache_root.clone(),
-        storage,
+        storage: storage.clone(),
         registries: config
             .registries
             .iter()
@@ -223,7 +299,8 @@ fn compose_host(
         limits: Limits::default(),
         observer: Arc::new(NoopObserver),
         filesystem,
-    })?)
+    })?;
+    Ok((host, storage))
 }
 
 /// 构造符合 stdout/stderr 边界的呈现目的地。 / Builds a renderer honoring the stdout/stderr boundary.
@@ -330,16 +407,15 @@ fn requested_project(request: &OperationRequest) -> &Path {
 }
 
 /// 将纯查询负载写成单个 stdout 文档。 / Writes a pure-query payload as one stdout document.
-fn render_query_result(
-    result: &OperationResult,
-    format: Option<QueryFormat>,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn render_query_result(result: &OperationResult, format: Option<QueryFormat>) -> io::Result<()> {
     let OperationResult::Inspect(result) = result else {
         return Ok(());
     };
     let mut stdout = io::stdout().lock();
     match format.unwrap_or(QueryFormat::Human) {
-        QueryFormat::Json => serde_json::to_writer(&mut stdout, result)?,
+        QueryFormat::Json => {
+            serde_json::to_writer(&mut stdout, result).map_err(json_output_error)?
+        }
         QueryFormat::Human => {
             let mut renderer = InspectHumanRenderer::new(stdout);
             renderer.render(result)?;
@@ -349,6 +425,13 @@ fn render_query_result(
     }
     stdout.write_all(b"\n")?;
     Ok(())
+}
+
+fn json_output_error(error: serde_json::Error) -> io::Error {
+    match error.io_error_kind() {
+        Some(kind) => io::Error::new(kind, error),
+        None => io::Error::other(error.to_string()),
+    }
 }
 
 fn terminal_mode(
@@ -500,6 +583,99 @@ fn absolute(path: std::path::PathBuf) -> io::Result<std::path::PathBuf> {
 
 fn keep_going_was_explicit() -> bool {
     std::env::args_os().any(|argument| argument == "--keep-going" || argument == "--no-keep-going")
+}
+
+/// 判定命令行或环境是否已在访问项目前承诺 JSON。 /
+/// Determines whether argv or environment promised JSON before project access.
+fn bootstrap_json_requested(invocation: &ParsedInvocation) -> bool {
+    invocation.presentation.message_format == Some(MessageFormat::Json)
+        || std::env::var("XMLSQUISH_MESSAGE_FORMAT").is_ok_and(|value| value == "json")
+        || invocation.config_overrides.iter().any(|value| {
+            value.key() == "term.message-format"
+                && matches!(value.value().trim(), "json" | "\"json\"" | "'json'")
+        })
+}
+
+/// 输出一个启动诊断，并可选跟随一个无内核 ID 的终态记录。 /
+/// Emits one bootstrap diagnostic and optionally a terminal record carrying no kernel IDs.
+fn bootstrap_failure(
+    json: bool,
+    phase: &str,
+    code: &str,
+    message: &str,
+    exit_code: u8,
+    terminal: bool,
+) -> u8 {
+    if !json {
+        print_stderr(&format!("error[{code}] {message}\n"));
+        return exit_code;
+    }
+    let mut stdout = io::stdout().lock();
+    let diagnostic = BootstrapRecord {
+        schema: "xmlsquish-bootstrap-v1",
+        kind: "diagnostic",
+        phase,
+        code: Some(code),
+        message: Some(message),
+        status: None,
+        exit_code,
+    };
+    let write = serde_json::to_writer(&mut stdout, &diagnostic)
+        .and_then(|()| stdout.write_all(b"\n").map_err(serde_json::Error::io));
+    if write.is_ok() && terminal {
+        let finished = BootstrapRecord {
+            schema: "xmlsquish-bootstrap-v1",
+            kind: "finished",
+            phase,
+            code: None,
+            message: None,
+            status: Some("failed"),
+            exit_code,
+        };
+        let _ = serde_json::to_writer(&mut stdout, &finished)
+            .and_then(|()| stdout.write_all(b"\n").map_err(serde_json::Error::io));
+    }
+    exit_code
+}
+
+/// 将人类 fmt 差异产物按结果顺序流式写入 stdout。 / Streams human fmt diff artifacts to stdout in result order.
+fn render_format_diffs(result: &OperationResult, cas: &Cas) -> io::Result<()> {
+    let OperationResult::Format(result) = result else {
+        return Ok(());
+    };
+    if result.diffs.is_empty() {
+        return Ok(());
+    }
+    let mut stdout = io::stdout().lock();
+    for artifact in &result.diffs {
+        if *artifact.digest.algorithm() != squish_protocol::DigestAlgorithm::Blake3 {
+            return Err(io::Error::other("format diff uses an unsupported digest"));
+        }
+        let digest: BlobDigest = artifact.digest.hex().parse().map_err(io::Error::other)?;
+        let bytes = cas
+            .get(digest)
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::other("format diff is absent from the content store"))?;
+        stdout.write_all(&bytes)?;
+        if !bytes.ends_with(b"\n") {
+            stdout.write_all(b"\n")?;
+        }
+    }
+    Ok(())
+}
+
+/// 丢弃已关闭管道；其他输出错误保持可观测且返回 1。 / Ignores a closed pipe; other output failures remain observable and return 1.
+fn output_failure(error: Box<dyn std::error::Error>, broken_pipe_status: u8) -> u8 {
+    if error
+        .downcast_ref::<io::Error>()
+        .is_some_and(|error| error.kind() == io::ErrorKind::BrokenPipe)
+    {
+        return broken_pipe_status;
+    }
+    print_stderr(&format!(
+        "error[OUTPUT001] could not write output: {error}\n"
+    ));
+    1
 }
 
 fn invocation_id() -> InvocationId {
