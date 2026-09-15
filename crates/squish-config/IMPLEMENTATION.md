@@ -12,6 +12,14 @@ adapter. The load order is compiled defaults, `<home>/config.toml`,
 `<workspace>/.xmlsquish/config.toml`, and CLI strings in their supplied order.
 There are no process-global or network reads.
 
+`[new] vcs` is a closed, typed policy with the values `"git"` and `"none"`.
+It defaults to Git and participates in the same user → workspace → CLI
+precedence and provenance chain as every other scalar. The executable host may
+translate an environment value or `new --vcs` into a final invocation override;
+this pure crate deliberately does not read process environment variables. The
+resolved `Config::new.vcs` is therefore the single configuration-domain input
+to invocation assembly, avoiding separate stringly-typed defaults.
+
 `PartialConfig` is the deserialization boundary. `validate_keys` first walks the
 span-preserving immutable `toml_edit::Document` so key and value byte ranges refer
 to the exact original source. `merge` validates and normalizes domain values,

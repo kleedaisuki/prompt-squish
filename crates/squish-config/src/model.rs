@@ -60,6 +60,16 @@ pub enum Verbosity {
     Trace,
 }
 
+/// 新项目的版本控制策略。 / Version-control policy for newly created projects.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum NewVcs {
+    /// 在不属于现有工作树时创建 Git 仓库。 / Create a Git repository outside an existing worktree.
+    Git,
+    /// 不创建版本控制元数据。 / Do not create version-control metadata.
+    None,
+}
+
 /// 稳定注册表逻辑身份。 / Stable logical registry identity.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RegistryId(String);
@@ -141,6 +151,12 @@ pub struct BuildConfig {
     /// 失败后是否继续独立任务。 / Whether independent jobs continue after a failure.
     pub keep_going: bool,
 }
+/// 新项目脚手架设置。 / New-project scaffold settings.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewConfig {
+    /// 默认版本控制策略，可由 `new --vcs` 覆盖。 / Default VCS policy, overridable by `new --vcs`.
+    pub vcs: NewVcs,
+}
 /// 终端呈现设置。 / Terminal presentation settings.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TermConfig {
@@ -164,6 +180,8 @@ pub struct Config {
     pub manager: ManagerConfig,
     /// 构建设置。 / Build settings.
     pub build: BuildConfig,
+    /// 新项目设置。 / New-project settings.
+    pub new: NewConfig,
     /// 终端设置。 / Terminal settings.
     pub term: TermConfig,
 }
@@ -267,6 +285,7 @@ struct PartialConfig {
     source: Option<RawSource>,
     manager: Option<RawManager>,
     build: Option<RawBuild>,
+    new: Option<RawNew>,
     term: Option<RawTerm>,
 }
 #[derive(Debug, Deserialize)]
@@ -291,6 +310,11 @@ struct RawManager {
 struct RawBuild {
     jobs: Option<usize>,
     keep_going: Option<bool>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct RawNew {
+    vcs: Option<NewVcs>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -329,6 +353,7 @@ impl State {
                 jobs: 0,
                 keep_going: true,
             },
+            new: NewConfig { vcs: NewVcs::Git },
             term: TermConfig {
                 color: ColorPolicy::Auto,
                 progress: ProgressPolicy::Auto,
@@ -344,6 +369,7 @@ impl State {
             ),
             ("build.jobs", "0".into()),
             ("build.keep-going", "true".into()),
+            ("new.vcs", "git".into()),
             ("term.color", "auto".into()),
             ("term.progress", "auto".into()),
             ("term.message-format", "human".into()),
@@ -554,10 +580,11 @@ fn apply_text(
 }
 
 fn validate_keys(doc: &Document<String>, layer: &ConfigLayer) -> Result<(), ConfigError> {
-    const ROOT: &[&str] = &["registries", "source", "manager", "build", "term"];
+    const ROOT: &[&str] = &["registries", "source", "manager", "build", "new", "term"];
     const SOURCE: &[&str] = &["cache-root"];
     const MANAGER: &[&str] = &["storage-root"];
     const BUILD: &[&str] = &["jobs", "keep-going"];
+    const NEW: &[&str] = &["vcs"];
     const TERM: &[&str] = &["color", "progress", "message-format", "verbosity"];
     const REGISTRY: &[&str] = &["id", "index", "auth-scope"];
     for (key, item) in doc.iter() {
@@ -588,6 +615,7 @@ fn validate_keys(doc: &Document<String>, layer: &ConfigLayer) -> Result<(), Conf
                 "source" => SOURCE,
                 "manager" => MANAGER,
                 "build" => BUILD,
+                "new" => NEW,
                 _ => TERM,
             };
             check_table(table, key, allowed, layer)?;
@@ -717,6 +745,12 @@ fn merge(
             state.config.build.keep_going = v;
             record(state, "build.keep-going".into(), v.to_string(), &layer, doc);
         }
+    }
+    if let Some(new) = p.new
+        && let Some(v) = new.vcs
+    {
+        state.config.new.vcs = v;
+        record(state, "new.vcs".into(), enum_text(v), &layer, doc);
     }
     if let Some(term) = p.term {
         if let Some(v) = term.color {

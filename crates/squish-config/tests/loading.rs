@@ -5,7 +5,8 @@ use std::{
 };
 
 use squish_config::{
-    ColorPolicy, ConfigError, ConfigHome, ConfigLayer, ConfigLoader, MessageFormat, Verbosity,
+    ColorPolicy, ConfigError, ConfigHome, ConfigLayer, ConfigLoader, MessageFormat, NewVcs,
+    Verbosity,
 };
 
 static NEXT_DIR: AtomicUsize = AtomicUsize::new(0);
@@ -348,8 +349,65 @@ fn absent_and_empty_files_produce_complete_defaults() {
     let loaded = ConfigLoader::new(ConfigHome::new(&home)).load().unwrap();
     assert_eq!(loaded.config.build.jobs, 0);
     assert!(loaded.config.build.keep_going);
+    assert_eq!(loaded.config.new.vcs, NewVcs::Git);
     assert_eq!(loaded.config.source.cache_root, home.join("cache/sources"));
-    assert_eq!(loaded.provenance.iter().count(), 8);
+    assert_eq!(loaded.provenance.iter().count(), 9);
+}
+
+#[test]
+fn new_vcs_uses_normal_precedence_and_typed_cli_overrides() {
+    let tmp = TestDir::new();
+    let home = tmp.path().join("home");
+    let workspace = tmp.path().join("work");
+    write(&home.join("config.toml"), "[new]\nvcs='none'\n");
+    write(
+        &workspace.join(".xmlsquish/config.toml"),
+        "[new]\nvcs='git'\n",
+    );
+
+    let loaded = ConfigLoader::new(ConfigHome::new(&home))
+        .workspace_root(&workspace)
+        .cli_overrides(["new.vcs='none'"])
+        .load()
+        .unwrap();
+
+    assert_eq!(loaded.config.new.vcs, NewVcs::None);
+    let chain = loaded.explain("new.vcs").unwrap();
+    assert_eq!(chain.len(), 4);
+    assert!(matches!(chain[0].layer, ConfigLayer::Defaults));
+    assert!(matches!(chain[1].layer, ConfigLayer::User(_)));
+    assert!(matches!(chain[2].layer, ConfigLayer::Workspace(_)));
+    assert!(matches!(chain[3].layer, ConfigLayer::Cli { index: 0 }));
+}
+
+#[test]
+fn new_vcs_rejects_unknown_values_and_keys_with_exact_spans() {
+    let tmp = TestDir::new();
+    let home = tmp.path().join("home");
+    let bad_value = "[new]\nvcs='fossil'\n";
+    write(&home.join("config.toml"), bad_value);
+    match ConfigLoader::new(ConfigHome::new(&home))
+        .load()
+        .unwrap_err()
+    {
+        ConfigError::Parse { location, .. } => {
+            assert_eq!(&bad_value[location.span.unwrap()], "'fossil'");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    let bad_key = "[new]\nversion-control='git'\n";
+    write(&home.join("config.toml"), bad_key);
+    match ConfigLoader::new(ConfigHome::new(&home))
+        .load()
+        .unwrap_err()
+    {
+        ConfigError::UnknownKey { key, location } => {
+            assert_eq!(key, "new.version-control");
+            assert_eq!(&bad_key[location.span.unwrap()], "version-control");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 }
 
 #[test]
