@@ -8,7 +8,7 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 
 尚无已记录的面向用户变化。 / No user-facing changes recorded yet.
 
-## [1.0.0] — 2026-09-15 · prepared for release
+## [1.0.0] — 2026-09-15
 
 完整发布说明与安装方法 / Full release notes and installation: [1.0.0](docs/releases/1.0.0.md).
 
