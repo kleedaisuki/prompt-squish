@@ -293,9 +293,26 @@ for (const [path, locale, kind] of [
         assert.equal(await page.locator('a[href*="/releases/download/v1.0.0/"]').count(), 0);
         assert.equal(await page.locator('a[href$="SHA256SUMS"]').count(), 0);
 
-        const source = await page.locator('#source-title').locator("xpath=../following-sibling::pre/code").textContent();
-        assert(source.includes("--tag v1.0.0 --locked"));
-        assert(text.includes(locale === "en" ? "will succeed after" : "发布工作流创建该标签后生效"));
+        const candidateInstall = "cargo install --git https://github.com/kleedaisuki/prompt-squish --rev 2eb5834b15d47717a7b45092a3b72bfa475f4c79 --locked";
+        const taggedInstall = "cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v1.0.0 --locked";
+        assert.deepEqual(
+          await page.locator(".install-commands pre code").allTextContents(),
+          [candidateInstall, taggedInstall],
+        );
+        assert(text.includes(locale === "en"
+          ? "create and push the v1.0.0 tag first, then run the release workflow"
+          : "先创建并推送 v1.0.0 标签，再运行验证既有标签并发布资产的 release workflow"));
+
+        assert.deepEqual(
+          (await page.locator(".quickstart pre code").textContent()).split("\n"),
+          [
+            "xmlsquish new support --vcs=none",
+            "cd support",
+            "xmlsquish fmt --check",
+            "xmlsquish build --offline",
+            "xmlsquish inspect artifact target/xmlsquish/prompt.prompt --format=json",
+          ],
+        );
 
         assert.equal(await page.locator('link[rel="alternate"][type="application/json"]').getAttribute("href"),
           "https://xmlsquish.moesegfault.dev/releases/1.0.0.json");
@@ -306,9 +323,12 @@ for (const [path, locale, kind] of [
         const application = JSON.parse(jsonLd[0]);
         assert.equal(application["@type"], "SoftwareApplication");
         assert.equal(application.softwareVersion, "1.0.0");
-        assert.equal(application.additionalProperty?.value, "release candidate");
-        for (const dishonestClaim of ["downloadUrl", "aggregateRating", "rating", "review", "offers"])
+        assert.equal(application.creativeWorkStatus, "release candidate");
+        assert.equal(application.sameAs, "https://github.com/kleedaisuki/prompt-squish");
+        for (const dishonestClaim of ["downloadUrl", "aggregateRating", "rating", "review", "offers", "codeRepository", "additionalProperty"])
           assert.equal(dishonestClaim in application, false, dishonestClaim);
+        assert.equal(await page.locator("[itemscope], [itemprop]").count(), 0,
+          "release page must not duplicate JSON-LD with partial microdata");
       }
       if (process.env.UI_SCREENSHOT_DIR) {
         await mkdir(process.env.UI_SCREENSHOT_DIR, { recursive: true });
