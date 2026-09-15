@@ -9,7 +9,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env,
     io::{self, IsTerminal, Write},
     time::{Duration, Instant},
@@ -17,7 +17,8 @@ use std::{
 
 use squish_protocol::{
     ActionId, ActionKind, ArtifactKind, CacheKind, Digest, DigestAlgorithm, Event, EventPayload,
-    JobId, Phase, Severity,
+    ExitStatus, JobId, OperationResult, Phase, PlanCloseReason, PlanId, PlanMode, PlanningStepKind,
+    Severity,
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -237,17 +238,17 @@ struct ProgressState<I> {
     started: I,
     last_draw: Option<I>,
     message: String,
-    completed: u64,
-    total: u64,
+    completed: Option<u64>,
+    total: Option<u64>,
     visible: bool,
     rendered_width: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ActionState {
-    Queued,
+    Declared,
     Running,
-    Complete,
+    Terminal,
 }
 
 #[derive(Clone, Debug)]
@@ -257,23 +258,38 @@ struct ActionView {
 }
 
 #[derive(Clone, Debug, Default)]
-struct JobView {
+struct PlanView {
     declared_actions: u64,
+    mode: Option<PlanMode>,
     actions: BTreeMap<ActionId, ActionView>,
+    closed: bool,
 }
 
-/// 将协议事件稳定地编码成逐行 NDJSON。 / Encodes protocol events as stable line-delimited NDJSON.
+#[derive(Clone, Debug, Default)]
+struct JobView {
+    plans: BTreeMap<PlanId, PlanView>,
+}
+
+/// 将协议事件按规范编码成逐行 NDJSON。 / Encodes protocol events as canonical line-delimited NDJSON.
+///
+/// 每个事件立即写入并刷新，且使用 [`Event::encode_json`] 验证 v2 局部不变式；人类
+/// 呈现策略绝不会污染机器流。 / Each event is written and flushed immediately through
+/// [`Event::encode_json`], which validates the local v2 invariants; human presentation policy
+/// can never contaminate the machine stream.
 ///
 /// # 示例 / Example
 ///
 /// ```
 /// use squish_presentation::{NdjsonRenderer, Renderer};
-/// use squish_protocol::{Event, EventPayload, InvocationId, JobId};
+/// use squish_protocol::{Event, EventPayload, InvocationId, JobId, PlanningAttemptId};
 ///
 /// let event = Event::new(
 ///     InvocationId::new("example").unwrap(),
 ///     0,
-///     EventPayload::PlanReady { job: JobId::new("job").unwrap(), actions: 1 },
+///     EventPayload::PlanningStarted {
+///         job: JobId::new("job").unwrap(),
+///         attempt: PlanningAttemptId::new("attempt-1").unwrap(),
+///     },
 /// );
 /// let mut renderer = NdjsonRenderer::new(Vec::new());
 /// renderer.render(&event).unwrap();
@@ -298,7 +314,8 @@ impl<W: Write> NdjsonRenderer<W> {
 
 impl<W: Write> Renderer for NdjsonRenderer<W> {
     fn render(&mut self, event: &Event) -> io::Result<()> {
-        serde_json::to_writer(&mut self.writer, event).map_err(io::Error::other)?;
+        let bytes = event.encode_json().map_err(io::Error::other)?;
+        self.writer.write_all(&bytes)?;
         self.writer.write_all(b"\n")?;
         self.writer.flush()
     }
@@ -308,11 +325,13 @@ impl<W: Write> Renderer for NdjsonRenderer<W> {
     }
 }
 
-/// 面向人类的事件呈现器，不拥有或执行任何任务。 / Human event renderer that owns and executes no jobs.
+/// 面向人类的 v2 生命周期呈现器，不拥有或执行任何任务。 / Human v2 lifecycle renderer that owns and executes no jobs.
 ///
-/// 调用者应在事件暂时静默时调用 [`Renderer::tick`]，从而让延迟进度按时出现。
-/// The caller should invoke [`Renderer::tick`] while events are quiet so delayed
-/// progress can appear on time.
+/// 非 TTY 输出永远追加写入。TTY 上的临时进度会延迟出现、最多每 100 ms 重绘一次，并
+/// 在任何持久行或终态之前清除。宿主应在事件静默时调用 [`Renderer::tick`]。 /
+/// Non-TTY output is always append-only. On a TTY, transient progress is delayed, repainted at
+/// most every 100 ms, and cleared before every durable line or terminal event. The host should
+/// invoke [`Renderer::tick`] while events are quiet.
 pub struct HumanRenderer<W, C = SystemClock, T = FixedTerminal>
 where
     C: Clock,
@@ -327,6 +346,7 @@ where
     dynamic: bool,
     progress: Option<ProgressState<C::Instant>>,
     jobs: BTreeMap<JobId, JobView>,
+    rendered_diagnostics: BTreeSet<String>,
 }
 
 impl<W: Write> HumanRenderer<W, SystemClock, FixedTerminal> {
@@ -394,6 +414,7 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
             dynamic,
             progress: None,
             jobs: BTreeMap::new(),
+            rendered_diagnostics: BTreeSet::new(),
         }
     }
 
@@ -407,12 +428,12 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
         self.dynamic
     }
 
-    /// 返回探测到的能力。 / Returns the detected capabilities.
+    /// 返回当前探测能力。 / Returns the currently detected capabilities.
     pub fn capabilities(&self) -> TerminalCapabilities {
         self.terminal.capabilities()
     }
 
-    /// 返回环境快照。 / Returns the environment snapshot.
+    /// 返回稳定环境快照。 / Returns the stable environment snapshot.
     pub const fn environment(&self) -> &Environment {
         &self.environment
     }
@@ -443,137 +464,168 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
         Ok(())
     }
 
+    fn stop_progress(&mut self) -> io::Result<()> {
+        self.clear_progress()?;
+        self.progress = None;
+        Ok(())
+    }
+
     fn write_persistent(&mut self, line: &str) -> io::Result<()> {
         self.clear_progress()?;
-        // `line` 只由固定装饰和逐个净化的协议字段组成；再次净化会破坏本 crate 生成的 ANSI。
-        // `line` contains only fixed decorations and individually sanitized protocol fields;
-        // another sanitization pass would neutralize ANSI generated by this crate.
         writeln!(self.writer, "{line}")?;
         self.writer.flush()
     }
 
-    fn draw_progress(&mut self, now: C::Instant) -> io::Result<()> {
-        let Some(terminal_width) = self.terminal.width() else {
-            self.clear_progress()?;
+    fn begin_progress(
+        &mut self,
+        message: String,
+        completed: Option<u64>,
+        total: Option<u64>,
+    ) -> io::Result<()> {
+        if !self.dynamic || self.options.progress == ProgressMode::Never {
             return Ok(());
+        }
+        let now = self.clock.now();
+        let existing = self.progress.take();
+        let same_kind = existing
+            .as_ref()
+            .is_some_and(|state| state.total.is_some() == total.is_some());
+        self.progress = Some(ProgressState {
+            started: if same_kind {
+                existing.as_ref().map_or(now, |state| state.started)
+            } else {
+                now
+            },
+            last_draw: existing.as_ref().and_then(|state| state.last_draw),
+            message,
+            completed,
+            total,
+            visible: existing.as_ref().is_some_and(|state| state.visible),
+            rendered_width: existing.as_ref().map_or(0, |state| state.rendered_width),
+        });
+        self.draw_progress(now)
+    }
+
+    fn draw_progress(&mut self, now: C::Instant) -> io::Result<()> {
+        let Some(width) = self.terminal.width() else {
+            return self.stop_progress();
         };
         let Some(state) = &self.progress else {
             return Ok(());
         };
-        let delay = match self.options.progress {
-            ProgressMode::Always => Duration::ZERO,
-            ProgressMode::Auto | ProgressMode::Never => self.options.progress_delay,
+        let delay = if self.options.progress == ProgressMode::Always {
+            Duration::ZERO
+        } else {
+            self.options.progress_delay
         };
-        if self.clock.elapsed(state.started, now) < delay {
-            return Ok(());
-        }
-        if state
-            .last_draw
-            .is_some_and(|last| self.clock.elapsed(last, now) < self.options.progress_refresh)
+        if self.clock.elapsed(state.started, now) < delay
+            || state
+                .last_draw
+                .is_some_and(|last| self.clock.elapsed(last, now) < self.options.progress_refresh)
         {
             return Ok(());
         }
-        let percent = if state.total == 0 {
-            100
-        } else {
-            ((u128::from(state.completed) * 100) / u128::from(state.total)) as u64
+        let text = match (state.completed, state.total) {
+            (Some(completed), Some(total)) => {
+                let percent = if total == 0 {
+                    100
+                } else {
+                    ((u128::from(completed) * 100) / u128::from(total)) as u64
+                };
+                format!(
+                    "{} {:>3}% ({completed}/{total})",
+                    sanitize(&state.message),
+                    percent
+                )
+            }
+            _ => format!(
+                "{} ({:.1}s)",
+                sanitize(&state.message),
+                self.clock.elapsed(state.started, now).as_secs_f64()
+            ),
         };
-        let text = format!(
-            "{} {:>3}% ({}/{})",
-            sanitize(&state.message),
-            percent,
-            state.completed,
-            state.total
-        );
-        // 预留最后一列，避免恰好填满终端触发自动换行。
-        // Reserve the final column so an exactly full row cannot auto-wrap.
-        let columns = terminal_width.saturating_sub(1);
-        let text = truncate_middle(&text, columns);
+        let text = truncate_middle(&text, width.saturating_sub(1));
         let rendered_width = UnicodeWidthStr::width(text.as_str());
         if state.visible {
             self.clear_progress()?;
         }
         write!(self.writer, "{CLEAR_LINE}{text}")?;
         self.writer.flush()?;
-        let state = self.progress.as_mut().expect("progress state still exists");
+        let state = self.progress.as_mut().expect("progress state exists");
         state.visible = true;
         state.last_draw = Some(now);
         state.rendered_width = rendered_width;
         Ok(())
     }
 
-    fn update_progress(&mut self) -> io::Result<()> {
-        if self.options.progress == ProgressMode::Never || !self.dynamic {
-            return Ok(());
-        }
-        let now = self.clock.now();
-        let declared: u64 = self.jobs.values().map(|job| job.declared_actions).sum();
-        let observed = self.jobs.values().map(|job| job.actions.len() as u64).sum();
-        // 乱序或部分事件流也不应产生 `completed > total` 的荒谬 UI。
-        // Even partial or out-of-order streams must not render nonsensical `completed > total` UI.
-        let total = declared.max(observed);
-        let completed = self
-            .jobs
-            .values()
-            .flat_map(|job| job.actions.values())
-            .filter(|action| action.state == ActionState::Complete)
-            .count() as u64;
-        let active = self.jobs.iter().find_map(|(job, state)| {
-            state.actions.iter().find_map(|(action, view)| {
-                (view.state == ActionState::Running)
-                    .then(|| format!("{} {} ({})", action_kind_name(view.kind), action, job))
-            })
-        });
-        let message = active.unwrap_or_else(|| "Scheduling".to_owned());
-        let started = self.progress.as_ref().map_or(now, |state| state.started);
-        self.progress = Some(ProgressState {
-            started,
-            last_draw: self.progress.as_ref().and_then(|state| state.last_draw),
-            message,
-            completed,
-            total,
-            visible: self.progress.as_ref().is_some_and(|state| state.visible),
-            rendered_width: self
-                .progress
-                .as_ref()
-                .map_or(0, |state| state.rendered_width),
-        });
-        self.draw_progress(now)
+    fn plan_mut(&mut self, job: &JobId, plan: &PlanId) -> &mut PlanView {
+        self.jobs
+            .entry(job.clone())
+            .or_default()
+            .plans
+            .entry(plan.clone())
+            .or_default()
     }
 
-    fn queue_action(&mut self, job: &JobId, action: &ActionId, kind: ActionKind) {
-        self.jobs.entry(job.clone()).or_default().actions.insert(
-            action.clone(),
-            ActionView {
-                kind,
-                state: ActionState::Queued,
-            },
-        );
-    }
-
-    fn set_action_state(&mut self, job: &JobId, action: &ActionId, state: ActionState) {
-        let job = self.jobs.entry(job.clone()).or_default();
-        if let Some(view) = job.actions.get_mut(action) {
-            view.state = state;
-        } else {
-            job.actions.insert(
-                action.clone(),
-                ActionView {
-                    kind: ActionKind::Compile,
-                    state,
-                },
-            );
-        }
-    }
-
-    fn action_kind(&self, job: &JobId, action: &ActionId) -> ActionKind {
+    fn action_kind(&self, job: &JobId, plan: &PlanId, action: &ActionId) -> ActionKind {
         self.jobs
             .get(job)
-            .and_then(|job| job.actions.get(action))
+            .and_then(|job| job.plans.get(plan))
+            .and_then(|plan| plan.actions.get(action))
             .map_or(ActionKind::Compile, |view| view.kind)
     }
 
+    fn set_action_state(
+        &mut self,
+        job: &JobId,
+        plan: &PlanId,
+        action: &ActionId,
+        state: ActionState,
+    ) {
+        let view = self.plan_mut(job, plan);
+        if let Some(action) = view.actions.get_mut(action) {
+            action.state = state;
+        }
+    }
+
+    fn update_action_progress(&mut self, job: &JobId, plan: &PlanId) -> io::Result<()> {
+        let Some(view) = self.jobs.get(job).and_then(|job| job.plans.get(plan)) else {
+            return Ok(());
+        };
+        if view.closed || view.mode != Some(PlanMode::Execute) {
+            return self.stop_progress();
+        }
+        let total = view.declared_actions.max(view.actions.len() as u64);
+        let completed = view
+            .actions
+            .values()
+            .filter(|action| action.state == ActionState::Terminal)
+            .count() as u64;
+        let running: Vec<_> = view
+            .actions
+            .iter()
+            .filter(|(_, action)| action.state == ActionState::Running)
+            .collect();
+        if total == 0 || completed == total {
+            return self.stop_progress();
+        }
+        let message = match running.as_slice() {
+            [] => "Waiting for runnable actions".to_owned(),
+            [(action, view)] => format!("{} {}", action_kind_name(view.kind), action),
+            [(action, _), ..] => {
+                format!("Running {} actions (including {})", running.len(), action)
+            }
+        };
+        self.begin_progress(message, Some(completed), Some(total))
+    }
+
     fn render_diagnostic(&mut self, diagnostic: &squish_protocol::Diagnostic) -> io::Result<()> {
+        if !self
+            .rendered_diagnostics
+            .insert(diagnostic.id.as_str().to_owned())
+        {
+            return Ok(());
+        }
         let visible = match self.options.verbosity {
             Verbosity::Quiet => matches!(diagnostic.severity, Severity::Warning | Severity::Error),
             Verbosity::Normal => diagnostic.severity != Severity::Trace,
@@ -582,8 +634,11 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
         if !visible {
             return Ok(());
         }
-        let severity = severity_name(diagnostic.severity);
-        let label = styled(self.color, diagnostic.severity, severity);
+        let label = styled(
+            self.color,
+            diagnostic.severity,
+            severity_name(diagnostic.severity),
+        );
         let mut line = format!(
             "{label}[{}] {} ({})",
             sanitize(&diagnostic.code),
@@ -616,90 +671,233 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
         }
         Ok(())
     }
+
+    fn render_operation_result(&mut self, job: &JobId, result: &OperationResult) -> io::Result<()> {
+        if self.options.verbosity == Verbosity::Quiet {
+            return Ok(());
+        }
+        let detail = match result {
+            OperationResult::Unavailable { kind } => {
+                format!("{} result unavailable", operation_kind_name(*kind))
+            }
+            OperationResult::Build(result) => {
+                let artifacts: usize = result
+                    .published
+                    .iter()
+                    .map(|target| target.artifacts.len())
+                    .sum();
+                format!(
+                    "build: {} targets published, {artifacts} artifacts",
+                    result.published.len()
+                )
+            }
+            OperationResult::Format(result) => format!(
+                "format: {} selected, {} changed{}",
+                result.selected.len(),
+                result.changed.len(),
+                if result.check { " (check only)" } else { "" }
+            ),
+            OperationResult::Add(result) => format!(
+                "{} dependency {}",
+                if result.dry_run {
+                    "would update"
+                } else {
+                    "updated"
+                },
+                sanitize(result.dependency.as_str())
+            ),
+            OperationResult::Remove(result) => format!(
+                "{} dependency {}",
+                if result.dry_run {
+                    "would remove"
+                } else {
+                    "removed"
+                },
+                sanitize(result.dependency.as_str())
+            ),
+            OperationResult::Inspect(result) => {
+                format!("inspection: {}", inspect_result_name(result))
+            }
+        };
+        self.write_persistent(&format!(
+            "{} {}: {detail}",
+            styled_info(self.color, "Result"),
+            sanitize(job.as_str())
+        ))
+    }
 }
 
 impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
     fn render(&mut self, event: &Event) -> io::Result<()> {
         match &event.payload {
-            EventPayload::PlanReady { job, actions } => {
-                self.jobs.entry(job.clone()).or_default().declared_actions = *actions;
+            EventPayload::PlanningStarted { job, attempt } => {
                 if self.options.verbosity != Verbosity::Quiet {
                     self.write_persistent(&format!(
-                        "{} {} ({} actions)",
-                        styled_info(self.color, "Planned"),
+                        "{} {} ({})",
+                        styled_info(self.color, "Planning"),
                         sanitize(job.as_str()),
-                        actions
+                        sanitize(attempt.as_str())
                     ))?;
                 }
-                self.update_progress()?;
+                self.begin_progress(format!("Planning {}", job), None, None)?;
             }
-            EventPayload::ActionQueued {
+            EventPayload::PlanningStepStarted {
+                job, step, kind, ..
+            } => {
+                if !self.dynamic && self.options.verbosity != Verbosity::Quiet {
+                    self.write_persistent(&format!(
+                        "{} {} {} ({})",
+                        styled_info(self.color, "Planning"),
+                        planning_step_name(*kind),
+                        sanitize(step.as_str()),
+                        sanitize(job.as_str())
+                    ))?;
+                }
+                self.begin_progress(format!("{} {}", planning_step_name(*kind), job), None, None)?;
+            }
+            EventPayload::PlanningStepSucceeded {
+                job, step, timing, ..
+            } => {
+                self.stop_progress()?;
+                if self.options.verbosity == Verbosity::Verbose {
+                    self.write_persistent(&format!(
+                        "Planned step {} ({}, {} ms)",
+                        sanitize(step.as_str()),
+                        sanitize(job.as_str()),
+                        timing.elapsed_ms
+                    ))?;
+                }
+            }
+            EventPayload::PlanningStepFailed { diagnostic, .. } => {
+                self.stop_progress()?;
+                self.render_diagnostic(diagnostic)?;
+            }
+            EventPayload::PlanningStepCancelled { job, step, .. } => {
+                self.stop_progress()?;
+                if self.options.verbosity != Verbosity::Quiet {
+                    self.write_persistent(&format!(
+                        "Cancelled planning step {} ({})",
+                        sanitize(step.as_str()),
+                        sanitize(job.as_str())
+                    ))?;
+                }
+            }
+            EventPayload::PlanningIssue { diagnostic, .. } => self.render_diagnostic(diagnostic)?,
+            EventPayload::PlanningFailed { diagnostic, .. } => {
+                self.stop_progress()?;
+                self.render_diagnostic(diagnostic)?;
+            }
+            EventPayload::PlanningCancelled { job, .. } => {
+                self.stop_progress()?;
+                if self.options.verbosity != Verbosity::Quiet {
+                    self.write_persistent(&format!(
+                        "Cancelled planning {}",
+                        sanitize(job.as_str())
+                    ))?;
+                }
+            }
+            EventPayload::PlanReady {
                 job,
+                plan,
+                mode,
+                actions,
+                issues,
+                ..
+            } => {
+                self.stop_progress()?;
+                let view = self.plan_mut(job, plan);
+                view.declared_actions = *actions;
+                view.mode = Some(*mode);
+                if self.options.verbosity != Verbosity::Quiet {
+                    let mode_text = match mode {
+                        PlanMode::Execute => "execute",
+                        PlanMode::ReportOnly => "report only",
+                        PlanMode::Legacy => "legacy projection",
+                    };
+                    self.write_persistent(&format!(
+                        "{} {} for {}: {} actions, {} issues ({mode_text})",
+                        styled_info(self.color, "Planned"),
+                        sanitize(plan.as_str()),
+                        sanitize(job.as_str()),
+                        actions,
+                        issues
+                    ))?;
+                }
+            }
+            EventPayload::ActionDeclared {
+                job,
+                plan,
                 action,
                 kind,
                 dependencies,
             } => {
-                self.queue_action(job, action, *kind);
+                self.plan_mut(job, plan).actions.insert(
+                    action.clone(),
+                    ActionView {
+                        kind: *kind,
+                        state: ActionState::Declared,
+                    },
+                );
                 if self.options.verbosity == Verbosity::Verbose {
-                    let dependencies = dependencies
+                    let after = dependencies
                         .iter()
-                        .map(|dependency| sanitize(dependency.as_str()))
+                        .map(|id| sanitize(id.as_str()))
                         .collect::<Vec<_>>()
                         .join(", ");
                     self.write_persistent(&format!(
-                        "Queued {} {} ({}) after [{}]",
+                        "Declared {} {} ({}) after [{}]",
                         action_kind_name(*kind),
                         sanitize(action.as_str()),
                         sanitize(job.as_str()),
-                        dependencies
+                        after
                     ))?;
                 }
-                self.update_progress()?;
             }
-            EventPayload::ActionStarted { job, action } => {
-                self.set_action_state(job, action, ActionState::Running);
+            EventPayload::ActionStarted { job, plan, action } => {
+                self.set_action_state(job, plan, action, ActionState::Running);
                 if !self.dynamic && self.options.verbosity != Verbosity::Quiet {
                     self.write_persistent(&format!(
                         "{} {} {} ({})",
                         styled_info(self.color, "Running"),
-                        action_kind_name(self.action_kind(job, action)),
+                        action_kind_name(self.action_kind(job, plan, action)),
                         sanitize(action.as_str()),
                         sanitize(job.as_str())
                     ))?;
                 }
-                self.update_progress()?;
+                self.update_action_progress(job, plan)?;
             }
             EventPayload::CacheHit {
                 job,
+                plan,
                 action,
                 cache,
                 digest,
-                action_key,
                 outputs,
+                ..
             } => {
-                if self.options.verbosity == Verbosity::Verbose {
-                    let key = action_key
-                        .as_ref()
-                        .map_or("legacy-v1.0".to_owned(), |key| key.to_string());
+                self.set_action_state(job, plan, action, ActionState::Terminal);
+                if self.options.verbosity != Verbosity::Quiet {
                     self.write_persistent(&format!(
-                        "Cached {} ({}, {}, {}, key {}, {} outputs)",
+                        "{} {} ({}, {}, {}, {} outputs)",
+                        styled_success(self.color, "Cached"),
                         sanitize(action.as_str()),
                         sanitize(job.as_str()),
                         cache_name(*cache),
                         format_digest(digest),
-                        sanitize(&key),
                         outputs.len()
                     ))?;
                 }
+                self.update_action_progress(job, plan)?;
             }
             EventPayload::ActionSucceeded {
                 job,
+                plan,
                 action,
                 timing,
                 artifacts,
             } => {
-                let kind = self.action_kind(job, action);
-                self.set_action_state(job, action, ActionState::Complete);
+                let kind = self.action_kind(job, plan, action);
+                self.set_action_state(job, plan, action, ActionState::Terminal);
                 if self.options.verbosity != Verbosity::Quiet {
                     self.write_persistent(&format!(
                         "{} {} {} ({}, {} ms)",
@@ -720,28 +918,41 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                         ))?;
                     }
                 }
-                self.update_progress()?;
+                self.update_action_progress(job, plan)?;
             }
             EventPayload::ActionFailed {
                 job,
+                plan,
                 action,
-                timing: _,
+                timing,
                 diagnostic,
             } => {
-                self.set_action_state(job, action, ActionState::Complete);
+                let kind = self.action_kind(job, plan, action);
+                self.set_action_state(job, plan, action, ActionState::Terminal);
+                if self.options.verbosity != Verbosity::Quiet {
+                    self.write_persistent(&format!(
+                        "{} {} {} ({}, {} ms)",
+                        styled_error(self.color, "Failed"),
+                        action_kind_name(kind),
+                        sanitize(action.as_str()),
+                        sanitize(job.as_str()),
+                        timing.elapsed_ms
+                    ))?;
+                }
                 self.render_diagnostic(diagnostic)?;
-                self.update_progress()?;
+                self.update_action_progress(job, plan)?;
             }
             EventPayload::ActionBlocked {
                 job,
+                plan,
                 action,
                 blocked_by,
             } => {
-                self.set_action_state(job, action, ActionState::Complete);
+                self.set_action_state(job, plan, action, ActionState::Terminal);
                 if self.options.verbosity != Verbosity::Quiet {
                     let causes = blocked_by
                         .iter()
-                        .map(|cause| sanitize(cause.as_str()))
+                        .map(|id| sanitize(id.as_str()))
                         .collect::<Vec<_>>()
                         .join(", ");
                     self.write_persistent(&format!(
@@ -752,14 +963,12 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                         causes
                     ))?;
                 }
-                self.update_progress()?;
+                self.update_action_progress(job, plan)?;
             }
             EventPayload::ActionCancelled {
-                job,
-                action,
-                timing: _,
+                job, plan, action, ..
             } => {
-                self.set_action_state(job, action, ActionState::Complete);
+                self.set_action_state(job, plan, action, ActionState::Terminal);
                 if self.options.verbosity != Verbosity::Quiet {
                     self.write_persistent(&format!(
                         "Cancelled {} ({})",
@@ -767,44 +976,60 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                         sanitize(job.as_str())
                     ))?;
                 }
-                self.update_progress()?;
+                self.update_action_progress(job, plan)?;
+            }
+            EventPayload::ActionSuperseded {
+                job, plan, action, ..
+            } => {
+                self.set_action_state(job, plan, action, ActionState::Terminal);
+                self.stop_progress()?;
+                if self.options.verbosity != Verbosity::Quiet {
+                    self.write_persistent(&format!(
+                        "{} {} ({}) because project state changed",
+                        styled(self.color, Severity::Warning, "Superseded"),
+                        sanitize(action.as_str()),
+                        sanitize(job.as_str())
+                    ))?;
+                }
+            }
+            EventPayload::PlanClosed { job, plan, reason } => {
+                self.stop_progress()?;
+                self.plan_mut(job, plan).closed = true;
+                if self.options.verbosity != Verbosity::Quiet {
+                    match reason {
+                        PlanCloseReason::Executed => {}
+                        PlanCloseReason::Reported => self.write_persistent(&format!(
+                            "{} {} ({}) without execution",
+                            styled_success(self.color, "Reported"),
+                            sanitize(plan.as_str()),
+                            sanitize(job.as_str())
+                        ))?,
+                        PlanCloseReason::Superseded => self.write_persistent(&format!(
+                            "{} plan {} ({}); replanning",
+                            styled(self.color, Severity::Warning, "Superseded"),
+                            sanitize(plan.as_str()),
+                            sanitize(job.as_str())
+                        ))?,
+                    }
+                }
             }
             EventPayload::Diagnostic(diagnostic) => self.render_diagnostic(diagnostic)?,
             EventPayload::OperationCompleted { job, result } => {
-                if self.options.verbosity != Verbosity::Quiet {
-                    let value = serde_json::to_string(result).map_err(io::Error::other)?;
-                    self.write_persistent(&format!(
-                        "Result {}: {}",
-                        sanitize(job.as_str()),
-                        sanitize(&value)
-                    ))?;
-                }
+                self.stop_progress()?;
+                self.render_operation_result(job, result)?;
             }
             EventPayload::JobFinished(summary) => {
-                self.clear_progress()?;
+                self.stop_progress()?;
                 self.jobs.remove(&summary.job);
-                if self.options.verbosity != Verbosity::Quiet || summary.status.code() != 0 {
-                    let label = if summary.status.code() == 0 {
-                        styled_success(self.color, "Completed")
-                    } else {
-                        styled_error(self.color, "Failed")
+                if self.options.verbosity != Verbosity::Quiet
+                    || summary.status != ExitStatus::Success
+                {
+                    let label = match summary.status {
+                        ExitStatus::Success => styled_success(self.color, "Completed"),
+                        ExitStatus::Failed => styled_error(self.color, "Failed"),
+                        ExitStatus::Cancelled => styled(self.color, Severity::Warning, "Cancelled"),
                     };
-                    self.write_persistent(&format!(
-                        "{} {}: {} succeeded, {} failed, {} blocked, {} cancelled, {} cached ({} ms)",
-                        label,
-                        sanitize(summary.job.as_str()),
-                        summary.totals.succeeded,
-                        summary.totals.failed,
-                        summary.totals.blocked,
-                        summary.totals.cancelled,
-                        summary.cache_hits,
-                        summary.timing.elapsed_ms
-                    ))?;
-                }
-                if self.jobs.is_empty() {
-                    self.progress = None;
-                } else {
-                    self.update_progress()?;
+                    self.write_persistent(&format!("{} {}: {} succeeded, {} failed, {} blocked, {} cancelled, {} cached ({} ms)", label, sanitize(summary.job.as_str()), summary.totals.succeeded, summary.totals.failed, summary.totals.blocked, summary.totals.cancelled, summary.cache_hits, summary.timing.elapsed_ms))?;
                 }
             }
             _ => {}
@@ -820,8 +1045,7 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
     }
 
     fn finish(&mut self) -> io::Result<()> {
-        self.clear_progress()?;
-        self.progress = None;
+        self.stop_progress()?;
         self.writer.flush()
     }
 }
@@ -907,11 +1131,9 @@ fn styled(color: bool, severity: Severity, text: &str) -> String {
         text.to_owned()
     }
 }
-
 fn styled_info(color: bool, text: &str) -> String {
     styled(color, Severity::Info, text)
 }
-
 fn styled_success(color: bool, text: &str) -> String {
     if color {
         format!("\x1b[32;1m{text}\x1b[0m")
@@ -919,11 +1141,9 @@ fn styled_success(color: bool, text: &str) -> String {
         text.to_owned()
     }
 }
-
 fn styled_error(color: bool, text: &str) -> String {
     styled(color, Severity::Error, text)
 }
-
 fn severity_name(severity: Severity) -> &'static str {
     match severity {
         Severity::Trace => "trace",
@@ -932,7 +1152,6 @@ fn severity_name(severity: Severity) -> &'static str {
         Severity::Error => "error",
     }
 }
-
 fn phase_name(phase: Phase) -> &'static str {
     match phase {
         Phase::Discover => "discover",
@@ -951,7 +1170,20 @@ fn phase_name(phase: Phase) -> &'static str {
         Phase::Orchestrate => "orchestrate",
     }
 }
-
+fn planning_step_name(kind: PlanningStepKind) -> &'static str {
+    match kind {
+        PlanningStepKind::Recover => "Recovering",
+        PlanningStepKind::Locate => "Locating",
+        PlanningStepKind::Resolve => "Resolving",
+        PlanningStepKind::Fetch => "Fetching",
+        PlanningStepKind::ReconcileLock => "Reconciling lock",
+        PlanningStepKind::Snapshot => "Snapshotting",
+        PlanningStepKind::Scan => "Scanning",
+        PlanningStepKind::ValidatePlan => "Validating plan",
+        PlanningStepKind::PrepareCandidate => "Preparing candidate",
+        _ => "Planning",
+    }
+}
 fn action_kind_name(kind: ActionKind) -> &'static str {
     match kind {
         ActionKind::Resolve => "resolve",
@@ -963,18 +1195,37 @@ fn action_kind_name(kind: ActionKind) -> &'static str {
         ActionKind::Backend => "backend",
         ActionKind::Publish => "publish",
         ActionKind::Format => "format",
+        ActionKind::Inspect => "inspect",
         ActionKind::ResolveCandidate => "resolve-candidate",
         ActionKind::CommitTransaction => "commit-transaction",
     }
 }
-
 fn cache_name(cache: CacheKind) -> &'static str {
     match cache {
         CacheKind::Local => "local",
         CacheKind::Remote => "remote",
     }
 }
-
+fn operation_kind_name(kind: squish_protocol::OperationKind) -> &'static str {
+    match kind {
+        squish_protocol::OperationKind::Build => "build",
+        squish_protocol::OperationKind::Format => "format",
+        squish_protocol::OperationKind::Add => "add",
+        squish_protocol::OperationKind::Remove => "remove",
+        squish_protocol::OperationKind::Inspect => "inspect",
+    }
+}
+fn inspect_result_name(result: &squish_protocol::InspectResult) -> &'static str {
+    match result {
+        squish_protocol::InspectResult::Project(_) => "project",
+        squish_protocol::InspectResult::Plan(_) => "plan",
+        squish_protocol::InspectResult::Cache(_) => "cache",
+        squish_protocol::InspectResult::Ir(_) => "IR",
+        squish_protocol::InspectResult::Link(_) => "link",
+        squish_protocol::InspectResult::Source(_) => "source",
+        squish_protocol::InspectResult::Provenance(_) => "provenance",
+    }
+}
 fn format_digest(digest: &Digest) -> String {
     let algorithm = match digest.algorithm() {
         DigestAlgorithm::Sha256 => "sha256".to_owned(),
@@ -983,7 +1234,6 @@ fn format_digest(digest: &Digest) -> String {
     };
     format!("{algorithm}:{}", digest.hex())
 }
-
 fn artifact_kind(kind: &ArtifactKind) -> String {
     match kind {
         ArtifactKind::BinaryIr => "binary-ir".to_owned(),
@@ -999,400 +1249,428 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use squish_protocol::{
-        ActionId, ActionTotals, Artifact, ArtifactId, BuildResult, Diagnostic, DiagnosticId,
-        Digest, DigestAlgorithm, Event, ExitStatus, InvocationId, JobId, JobSummary,
-        OperationResult, Timing,
+        ActionKeyId, ActionTotals, Diagnostic, DiagnosticId, Digest, DigestAlgorithm, Event,
+        EventPayload, ExitStatus, InvocationId, JobId, JobSummary, OperationKind, OperationResult,
+        PlanDigest, PlanId, PlanMode, PlanningAttemptId, PlanningStepId, PlanningStepKind, Timing,
     };
 
     use super::*;
 
     #[derive(Clone, Default)]
-    struct FakeClock(Rc<Cell<Duration>>);
+    struct TestClock(Rc<Cell<u64>>);
 
-    impl FakeClock {
-        fn advance(&self, duration: Duration) {
-            self.0.set(self.0.get() + duration);
+    impl TestClock {
+        fn advance(&self, milliseconds: u64) {
+            self.0.set(self.0.get() + milliseconds);
         }
     }
 
-    impl Clock for FakeClock {
-        type Instant = Duration;
+    impl Clock for TestClock {
+        type Instant = u64;
 
         fn now(&self) -> Self::Instant {
             self.0.get()
         }
 
         fn elapsed(&self, earlier: Self::Instant, later: Self::Instant) -> Duration {
-            later.saturating_sub(earlier)
+            Duration::from_millis(later.saturating_sub(earlier))
         }
     }
 
-    #[derive(Clone)]
-    struct ResizableTerminal(Rc<Cell<usize>>);
-
-    impl TerminalProbe for ResizableTerminal {
-        fn capabilities(&self) -> TerminalCapabilities {
-            terminal()
-        }
-
-        fn width(&self) -> Option<usize> {
-            Some(self.0.get())
-        }
-    }
-
-    fn id(value: &str) -> JobId {
-        JobId::new(value).unwrap()
-    }
-
-    fn action(value: &str) -> ActionId {
-        ActionId::new(value).unwrap()
+    fn id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        <T as TryFrom<String>>::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).unwrap()
     }
 
     fn event(sequence: u64, payload: EventPayload) -> Event {
-        Event::new(InvocationId::new("run").unwrap(), sequence, payload)
+        Event::new(id::<InvocationId>("invocation"), sequence, payload)
     }
 
-    fn diagnostic(severity: Severity, message: &str) -> Event {
-        event(
-            20,
-            EventPayload::Diagnostic(Diagnostic {
-                id: DiagnosticId::new("diag").unwrap(),
-                code: "P001".to_owned(),
-                severity,
-                phase: Phase::Parse,
-                message: message.to_owned(),
-                primary: None,
-                related: Vec::new(),
-                help: None,
-            }),
-        )
-    }
-
-    fn plan(sequence: u64, actions: u64) -> Event {
-        event(
-            sequence,
-            EventPayload::PlanReady {
-                job: id("build:main"),
-                actions,
-            },
-        )
-    }
-
-    fn queued(sequence: u64) -> Event {
-        event(
-            sequence,
-            EventPayload::ActionQueued {
-                job: id("build:main"),
-                action: action("compile:main"),
-                kind: ActionKind::Compile,
-                dependencies: Vec::new(),
-            },
-        )
-    }
-
-    fn started(sequence: u64) -> Event {
-        event(
-            sequence,
-            EventPayload::ActionStarted {
-                job: id("build:main"),
-                action: action("compile:main"),
-            },
-        )
-    }
-
-    fn succeeded(sequence: u64) -> Event {
-        event(
-            sequence,
-            EventPayload::ActionSucceeded {
-                job: id("build:main"),
-                action: action("compile:main"),
-                timing: Timing { elapsed_ms: 12 },
-                artifacts: vec![Artifact {
-                    id: ArtifactId::new("prompt").unwrap(),
-                    kind: ArtifactKind::Prompt,
-                    uri: "target/main.prompt".to_owned(),
-                    size: 42,
-                    digest: Digest::new(DigestAlgorithm::Sha256, vec![0xab; 32]).unwrap(),
-                }],
-            },
-        )
-    }
-
-    fn terminal() -> TerminalCapabilities {
-        TerminalCapabilities {
-            is_terminal: true,
-            supports_ansi: true,
-            supports_dynamic: true,
+    fn diagnostic(message: &str) -> Diagnostic {
+        Diagnostic {
+            id: id::<DiagnosticId>("diagnostic"),
+            code: "PLAN001".to_owned(),
+            severity: Severity::Error,
+            phase: Phase::Orchestrate,
+            message: message.to_owned(),
+            primary: None,
+            related: Vec::new(),
+            help: Some("fix the manifest".to_owned()),
         }
     }
 
-    fn sized_terminal() -> FixedTerminal {
-        FixedTerminal::new(terminal()).with_width(Some(80))
+    fn plan_digest(byte: u8) -> PlanDigest {
+        PlanDigest::new(Digest::new(DigestAlgorithm::Sha256, vec![byte; 32]).unwrap())
     }
 
-    #[test]
-    fn ndjson_emits_exactly_one_unmodified_event_per_line() {
-        let first = plan(0, 1);
-        let second = queued(1);
-        let third = event(
-            2,
-            EventPayload::OperationCompleted {
-                job: id("build:main"),
-                result: OperationResult::Build(BuildResult {
-                    published: vec![],
-                    build_record: None,
-                }),
-            },
-        );
-        let mut renderer = NdjsonRenderer::new(Vec::new());
-        renderer.render(&first).unwrap();
-        renderer.render(&second).unwrap();
-        renderer.render(&third).unwrap();
-        renderer.finish().unwrap();
-        let output = String::from_utf8(renderer.into_inner()).unwrap();
-        let lines: Vec<_> = output.lines().collect();
-        assert_eq!(lines.len(), 3);
-        assert_eq!(serde_json::from_str::<Event>(lines[0]).unwrap(), first);
-        assert_eq!(serde_json::from_str::<Event>(lines[1]).unwrap(), second);
-        assert_eq!(serde_json::from_str::<Event>(lines[2]).unwrap(), third);
-        assert!(!output.contains('\r'));
-        assert!(!output.contains('\u{1b}'));
-    }
-
-    #[test]
-    fn auto_color_obeys_terminal_no_color_and_dumb_but_not_ci() {
-        let unknown_width = HumanRenderer::new(
-            Vec::new(),
-            terminal(),
-            Environment::default(),
-            PresentationOptions::default(),
-        );
-        assert!(unknown_width.uses_color());
-        assert!(!unknown_width.uses_dynamic_progress());
-        for environment in [
-            Environment {
-                no_color: true,
-                ..Environment::default()
-            },
-            Environment {
-                term: Some("dumb".to_owned()),
-                ..Environment::default()
-            },
-        ] {
-            assert!(
-                !HumanRenderer::new(
-                    Vec::new(),
-                    terminal(),
-                    environment,
-                    PresentationOptions::default(),
-                )
-                .uses_color()
-            );
-        }
-        let ci = HumanRenderer::new(
-            Vec::new(),
-            terminal(),
-            Environment {
-                ci: true,
-                ..Environment::default()
-            },
-            PresentationOptions::default(),
-        );
-        assert!(ci.uses_color());
-        assert!(!ci.uses_dynamic_progress());
-    }
-
-    #[test]
-    fn explicit_color_modes_override_environment_hint() {
-        let hostile = Environment {
-            no_color: true,
-            term: Some("dumb".to_owned()),
-            ci: true,
-        };
-        let always = PresentationOptions {
-            color: ColorMode::Always,
-            ..PresentationOptions::default()
-        };
-        assert!(
-            HumanRenderer::new(Vec::new(), TerminalCapabilities::plain(), hostile, always)
-                .uses_color()
-        );
-        let never = PresentationOptions {
-            color: ColorMode::Never,
-            ..PresentationOptions::default()
-        };
-        assert!(
-            !HumanRenderer::new(Vec::new(), terminal(), Environment::default(), never).uses_color()
-        );
-    }
-
-    #[test]
-    fn non_terminal_lifecycle_is_stable_append_only_output() {
+    fn render_plain(events: &[Event]) -> String {
         let mut renderer = HumanRenderer::new(
             Vec::new(),
             TerminalCapabilities::plain(),
             Environment::default(),
-            PresentationOptions {
-                color: ColorMode::Never,
-                ..PresentationOptions::default()
-            },
+            PresentationOptions::default(),
         );
-        for item in [plan(0, 1), queued(1), started(2), succeeded(3)] {
-            renderer.render(&item).unwrap();
+        for event in events {
+            renderer.render(event).unwrap();
         }
         renderer.finish().unwrap();
-        let output = String::from_utf8(renderer.into_inner()).unwrap();
+        String::from_utf8(renderer.into_inner()).unwrap()
+    }
+
+    #[test]
+    fn planning_failure_with_zero_actions_has_truthful_snapshot() {
+        let job = id::<JobId>("build");
+        let attempt = id::<PlanningAttemptId>("attempt-1");
+        let events = vec![
+            event(
+                0,
+                EventPayload::PlanningStarted {
+                    job: job.clone(),
+                    attempt: attempt.clone(),
+                },
+            ),
+            event(
+                1,
+                EventPayload::PlanningFailed {
+                    job: job.clone(),
+                    attempt,
+                    diagnostic: diagnostic("cannot select a target"),
+                },
+            ),
+            event(
+                2,
+                EventPayload::OperationCompleted {
+                    job: job.clone(),
+                    result: OperationResult::Unavailable {
+                        kind: OperationKind::Build,
+                    },
+                },
+            ),
+            event(
+                3,
+                EventPayload::JobFinished(JobSummary {
+                    job,
+                    totals: ActionTotals::default(),
+                    root_failures: 1,
+                    cache_hits: 0,
+                    timing: Timing { elapsed_ms: 12 },
+                    status: ExitStatus::Failed,
+                }),
+            ),
+        ];
         assert_eq!(
-            output,
-            concat!(
-                "Planned build:main (1 actions)\n",
-                "Running compile compile:main (build:main)\n",
-                "Finished compile compile:main (build:main, 12 ms)\n",
-                "Produced prompt target/main.prompt (42 bytes, sha256:abababababababababababababababababababababababababababababababab)\n",
+            render_plain(&events),
+            "Planning build (attempt-1)\nerror[PLAN001] cannot select a target (orchestrate); help: fix the manifest\nResult build: build result unavailable\nFailed build: 0 succeeded, 0 failed, 0 blocked, 0 cancelled, 0 cached (12 ms)\n"
+        );
+    }
+
+    #[test]
+    fn superseded_plan_and_replan_are_explicit_snapshot() {
+        let job = id::<JobId>("add");
+        let attempt1 = id::<PlanningAttemptId>("attempt-1");
+        let attempt2 = id::<PlanningAttemptId>("attempt-2");
+        let plan1 = id::<PlanId>("plan-1");
+        let plan2 = id::<PlanId>("plan-2");
+        let commit = id::<ActionId>("commit");
+        let compile = id::<ActionId>("compile");
+        let digest = Digest::new(DigestAlgorithm::Blake3, vec![9; 32]).unwrap();
+        let events = vec![
+            event(
+                0,
+                EventPayload::PlanningStarted {
+                    job: job.clone(),
+                    attempt: attempt1.clone(),
+                },
+            ),
+            event(
+                1,
+                EventPayload::PlanReady {
+                    job: job.clone(),
+                    attempt: attempt1,
+                    plan: plan1.clone(),
+                    digest: plan_digest(1),
+                    mode: PlanMode::Execute,
+                    actions: 1,
+                    issues: 0,
+                },
+            ),
+            event(
+                2,
+                EventPayload::ActionDeclared {
+                    job: job.clone(),
+                    plan: plan1.clone(),
+                    action: commit.clone(),
+                    kind: ActionKind::CommitTransaction,
+                    dependencies: vec![],
+                },
+            ),
+            event(
+                3,
+                EventPayload::ActionStarted {
+                    job: job.clone(),
+                    plan: plan1.clone(),
+                    action: commit.clone(),
+                },
+            ),
+            event(
+                4,
+                EventPayload::ActionSuperseded {
+                    job: job.clone(),
+                    plan: plan1.clone(),
+                    action: commit,
+                    timing: Timing { elapsed_ms: 2 },
+                    reason: squish_protocol::SupersedeReason::AuthoritativeRevisionChanged,
+                },
+            ),
+            event(
+                5,
+                EventPayload::PlanClosed {
+                    job: job.clone(),
+                    plan: plan1,
+                    reason: PlanCloseReason::Superseded,
+                },
+            ),
+            event(
+                6,
+                EventPayload::PlanningStarted {
+                    job: job.clone(),
+                    attempt: attempt2.clone(),
+                },
+            ),
+            event(
+                7,
+                EventPayload::PlanReady {
+                    job: job.clone(),
+                    attempt: attempt2,
+                    plan: plan2.clone(),
+                    digest: plan_digest(2),
+                    mode: PlanMode::Execute,
+                    actions: 1,
+                    issues: 0,
+                },
+            ),
+            event(
+                8,
+                EventPayload::ActionDeclared {
+                    job: job.clone(),
+                    plan: plan2.clone(),
+                    action: compile.clone(),
+                    kind: ActionKind::Compile,
+                    dependencies: vec![],
+                },
+            ),
+            event(
+                9,
+                EventPayload::CacheHit {
+                    job: job.clone(),
+                    plan: plan2.clone(),
+                    action: compile,
+                    cache: CacheKind::Local,
+                    digest,
+                    action_key: Some(id::<ActionKeyId>("key")),
+                    outputs: vec![],
+                },
+            ),
+            event(
+                10,
+                EventPayload::PlanClosed {
+                    job,
+                    plan: plan2,
+                    reason: PlanCloseReason::Executed,
+                },
+            ),
+        ];
+        assert_eq!(
+            render_plain(&events),
+            "Planning add (attempt-1)\nPlanned plan-1 for add: 1 actions, 0 issues (execute)\nRunning commit-transaction commit (add)\nSuperseded commit (add) because project state changed\nSuperseded plan plan-1 (add); replanning\nPlanning add (attempt-2)\nPlanned plan-2 for add: 1 actions, 0 issues (execute)\nCached compile (add, local, blake3:0909090909090909090909090909090909090909090909090909090909090909, 0 outputs)\n"
+        );
+    }
+
+    #[test]
+    fn report_only_plan_never_claims_execution_snapshot() {
+        let job = id::<JobId>("inspect-plan");
+        let attempt = id::<PlanningAttemptId>("attempt");
+        let plan = id::<PlanId>("plan");
+        let events = vec![
+            event(
+                0,
+                EventPayload::PlanningStarted {
+                    job: job.clone(),
+                    attempt: attempt.clone(),
+                },
+            ),
+            event(
+                1,
+                EventPayload::PlanReady {
+                    job: job.clone(),
+                    attempt,
+                    plan: plan.clone(),
+                    digest: plan_digest(3),
+                    mode: PlanMode::ReportOnly,
+                    actions: 1,
+                    issues: 0,
+                },
+            ),
+            event(
+                2,
+                EventPayload::ActionDeclared {
+                    job: job.clone(),
+                    plan: plan.clone(),
+                    action: id::<ActionId>("compile"),
+                    kind: ActionKind::Compile,
+                    dependencies: vec![],
+                },
+            ),
+            event(
+                3,
+                EventPayload::PlanClosed {
+                    job,
+                    plan,
+                    reason: PlanCloseReason::Reported,
+                },
+            ),
+        ];
+        assert_eq!(
+            render_plain(&events),
+            "Planning inspect-plan (attempt)\nPlanned plan for inspect-plan: 1 actions, 0 issues (report only)\nReported plan (inspect-plan) without execution\n"
+        );
+    }
+
+    #[test]
+    fn color_modes_no_color_and_non_tty_are_independent() {
+        let event = event(0, EventPayload::Diagnostic(diagnostic("bad input")));
+        let tty = TerminalCapabilities {
+            is_terminal: true,
+            supports_ansi: true,
+            supports_dynamic: false,
+        };
+        let render = |color, environment, capabilities| {
+            let mut renderer = HumanRenderer::new(
+                Vec::new(),
+                capabilities,
+                environment,
+                PresentationOptions {
+                    color,
+                    ..PresentationOptions::default()
+                },
+            );
+            renderer.render(&event).unwrap();
+            renderer.finish().unwrap();
+            String::from_utf8(renderer.into_inner()).unwrap()
+        };
+        assert_eq!(
+            render(ColorMode::Never, Environment::default(), tty),
+            "error[PLAN001] bad input (orchestrate); help: fix the manifest\n"
+        );
+        assert!(
+            render(
+                ColorMode::Always,
+                Environment::default(),
+                TerminalCapabilities::plain()
             )
+            .contains("\x1b[31;1merror\x1b[0m")
         );
-        assert!(!output.contains('\r'));
-        assert!(!output.contains('\u{1b}'));
+        assert!(
+            !render(
+                ColorMode::Auto,
+                Environment {
+                    no_color: true,
+                    ..Environment::default()
+                },
+                tty
+            )
+            .contains('\x1b')
+        );
+        let piped = render(
+            ColorMode::Auto,
+            Environment::default(),
+            TerminalCapabilities::plain(),
+        );
+        assert!(!piped.contains('\x1b'));
+        assert!(!piped.contains('\r'));
     }
 
     #[test]
-    fn dynamic_progress_waits_500ms_then_throttles_to_100ms() {
-        let clock = FakeClock::default();
+    fn delayed_progress_is_unicode_width_bounded_and_stops_at_terminal_event() {
+        let clock = TestClock::default();
+        let terminal = FixedTerminal::new(TerminalCapabilities {
+            is_terminal: true,
+            supports_ansi: true,
+            supports_dynamic: true,
+        })
+        .with_width(Some(24));
         let mut renderer = HumanRenderer::with_clock_and_terminal(
             Vec::new(),
-            sized_terminal(),
+            terminal,
             Environment::default(),
             PresentationOptions {
                 color: ColorMode::Never,
+                progress_delay: Duration::from_millis(500),
                 ..PresentationOptions::default()
             },
             clock.clone(),
         );
-        for item in [plan(0, 1), queued(1), started(2)] {
-            renderer.render(&item).unwrap();
-        }
-        let baseline = renderer.writer.len();
-        clock.advance(Duration::from_millis(499));
-        renderer.tick().unwrap();
-        assert_eq!(renderer.writer.len(), baseline);
-        clock.advance(Duration::from_millis(1));
-        renderer.tick().unwrap();
-        let once = renderer.writer.len();
-        assert!(once > baseline);
-        clock.advance(Duration::from_millis(99));
-        renderer.tick().unwrap();
-        assert_eq!(renderer.writer.len(), once);
-        clock.advance(Duration::from_millis(1));
-        renderer.tick().unwrap();
-        assert!(renderer.writer.len() > once);
-    }
-
-    #[test]
-    fn explicit_progress_always_skips_delay_and_never_suppresses_repaint() {
-        let clock = FakeClock::default();
-        let mut always = HumanRenderer::with_clock_and_terminal(
-            Vec::new(),
-            sized_terminal(),
-            Environment {
-                ci: true,
-                term: Some("dumb".to_owned()),
-                ..Environment::default()
-            },
-            PresentationOptions {
-                color: ColorMode::Never,
-                progress: ProgressMode::Always,
-                ..PresentationOptions::default()
-            },
-            clock.clone(),
-        );
-        always.render(&plan(0, 1)).unwrap();
-        assert!(always.uses_dynamic_progress());
-        assert!(String::from_utf8_lossy(&always.writer).contains("Scheduling"));
-
-        let mut never = HumanRenderer::with_clock_and_terminal(
-            Vec::new(),
-            sized_terminal(),
-            Environment::default(),
-            PresentationOptions {
-                verbosity: Verbosity::Quiet,
-                progress: ProgressMode::Never,
-                ..PresentationOptions::default()
-            },
-            clock,
-        );
-        for item in [plan(0, 1), queued(1), started(2)] {
-            never.render(&item).unwrap();
-        }
-        assert!(!never.uses_dynamic_progress());
-        assert!(never.writer.is_empty());
-    }
-
-    #[test]
-    fn durable_diagnostic_clears_a_visible_progress_line_first() {
-        let clock = FakeClock::default();
-        let mut renderer = HumanRenderer::with_clock_and_terminal(
-            Vec::new(),
-            sized_terminal(),
-            Environment::default(),
-            PresentationOptions {
-                color: ColorMode::Never,
-                progress: ProgressMode::Always,
-                ..PresentationOptions::default()
-            },
-            clock,
-        );
-        for item in [plan(0, 1), queued(1), started(2)] {
-            renderer.render(&item).unwrap();
-        }
+        let job = id::<JobId>("构建-job");
+        let attempt = id::<PlanningAttemptId>("attempt");
+        let step = id::<PlanningStepId>("resolve");
         renderer
-            .render(&diagnostic(Severity::Warning, "oops"))
+            .render(&event(
+                0,
+                EventPayload::PlanningStarted {
+                    job: job.clone(),
+                    attempt: attempt.clone(),
+                },
+            ))
             .unwrap();
-        let output = String::from_utf8(renderer.into_inner()).unwrap();
-        assert!(output.contains("\r\x1b[2Kwarning[P001] oops (parse)\n"));
-    }
-
-    #[test]
-    fn finished_job_cannot_resurrect_progress_on_later_tick() {
-        let clock = FakeClock::default();
-        let mut renderer = HumanRenderer::with_clock_and_terminal(
-            Vec::new(),
-            sized_terminal(),
-            Environment::default(),
-            PresentationOptions {
-                color: ColorMode::Never,
-                progress: ProgressMode::Always,
-                ..PresentationOptions::default()
-            },
-            clock.clone(),
-        );
-        renderer.render(&plan(0, 1)).unwrap();
         renderer
             .render(&event(
                 1,
-                EventPayload::JobFinished(JobSummary {
-                    job: id("build:main"),
-                    totals: ActionTotals {
-                        succeeded: 1,
-                        ..ActionTotals::default()
-                    },
-                    root_failures: 0,
-                    cache_hits: 0,
-                    timing: Timing { elapsed_ms: 2 },
-                    status: ExitStatus::Success,
-                }),
+                EventPayload::PlanningStepStarted {
+                    job: job.clone(),
+                    attempt: attempt.clone(),
+                    step: step.clone(),
+                    kind: PlanningStepKind::Resolve,
+                },
             ))
             .unwrap();
-        let length = renderer.writer.len();
-        clock.advance(Duration::from_secs(1));
+        assert!(!String::from_utf8_lossy(renderer.writer.as_slice()).contains("0.5s"));
+        clock.advance(500);
         renderer.tick().unwrap();
-        assert_eq!(renderer.writer.len(), length);
+        let before_terminal = String::from_utf8_lossy(renderer.writer.as_slice()).into_owned();
+        assert!(before_terminal.contains("0.5s"));
+        renderer
+            .render(&event(
+                2,
+                EventPayload::PlanningStepSucceeded {
+                    job,
+                    attempt,
+                    step,
+                    timing: Timing { elapsed_ms: 500 },
+                },
+            ))
+            .unwrap();
+        let after_terminal = String::from_utf8_lossy(renderer.writer.as_slice()).into_owned();
+        clock.advance(500);
+        renderer.tick().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(renderer.writer.as_slice()),
+            after_terminal
+        );
+        assert!(after_terminal.contains("\r\x1b[2K"));
     }
 
     #[test]
-    fn progress_tracks_resized_width_without_splitting_graphemes() {
-        let width = Rc::new(Cell::new(24));
-        let terminal = ResizableTerminal(width.clone());
-        let clock = FakeClock::default();
+    fn dynamic_progress_exposes_parallel_actions_without_a_spinner() {
+        let clock = TestClock::default();
+        let terminal = FixedTerminal::new(TerminalCapabilities {
+            is_terminal: true,
+            supports_ansi: true,
+            supports_dynamic: true,
+        })
+        .with_width(Some(80));
         let mut renderer = HumanRenderer::with_clock_and_terminal(
             Vec::new(),
             terminal,
@@ -1402,181 +1680,82 @@ mod tests {
                 progress: ProgressMode::Always,
                 ..PresentationOptions::default()
             },
-            clock.clone(),
+            clock,
         );
-        renderer
-            .render(&event(
-                0,
-                EventPayload::PlanReady {
-                    job: id("构建:very-long-target-name"),
-                    actions: 1,
-                },
-            ))
-            .unwrap();
-        renderer
-            .render(&event(
-                1,
-                EventPayload::ActionQueued {
-                    job: id("构建:very-long-target-name"),
-                    action: action("compile:👩‍💻-very-long-action"),
-                    kind: ActionKind::Compile,
-                    dependencies: Vec::new(),
-                },
-            ))
-            .unwrap();
-        renderer
-            .render(&event(
-                2,
-                EventPayload::ActionStarted {
-                    job: id("构建:very-long-target-name"),
-                    action: action("compile:👩‍💻-very-long-action"),
-                },
-            ))
-            .unwrap();
-        let first = String::from_utf8_lossy(&renderer.writer)
-            .rsplit(CLEAR_LINE)
-            .next()
-            .unwrap()
-            .to_owned();
-        assert!(UnicodeWidthStr::width(first.as_str()) <= 23);
-
-        width.set(12);
-        clock.advance(DEFAULT_PROGRESS_REFRESH);
-        let before_resize = renderer.writer.len();
+        let job = id::<JobId>("build");
+        let plan = id::<PlanId>("plan");
+        let attempt = id::<PlanningAttemptId>("attempt");
+        let first = id::<ActionId>("alpha");
+        let second = id::<ActionId>("beta");
+        for value in [
+            EventPayload::PlanReady {
+                job: job.clone(),
+                attempt,
+                plan: plan.clone(),
+                digest: plan_digest(4),
+                mode: PlanMode::Execute,
+                actions: 2,
+                issues: 0,
+            },
+            EventPayload::ActionDeclared {
+                job: job.clone(),
+                plan: plan.clone(),
+                action: first.clone(),
+                kind: ActionKind::Compile,
+                dependencies: vec![],
+            },
+            EventPayload::ActionDeclared {
+                job: job.clone(),
+                plan: plan.clone(),
+                action: second.clone(),
+                kind: ActionKind::Link,
+                dependencies: vec![],
+            },
+            EventPayload::ActionStarted {
+                job: job.clone(),
+                plan: plan.clone(),
+                action: second,
+            },
+            EventPayload::ActionStarted {
+                job,
+                plan,
+                action: first,
+            },
+        ] {
+            renderer.render(&event(0, value)).unwrap();
+        }
+        renderer.clock.advance(100);
         renderer.tick().unwrap();
-        let repaint = &renderer.writer[before_resize..];
-        assert_eq!(
-            String::from_utf8_lossy(repaint).matches(CLEAR_LINE).count(),
-            3,
-            "two reflowed rows are cleared before the new frame is drawn"
-        );
-        let second = String::from_utf8_lossy(&renderer.writer)
-            .rsplit(CLEAR_LINE)
-            .next()
-            .unwrap()
-            .to_owned();
-        assert!(UnicodeWidthStr::width(second.as_str()) <= 11);
-        assert!(!second.contains('\u{fffd}'));
+        let output = String::from_utf8_lossy(renderer.writer.as_slice());
+        assert!(output.contains("Running 2 actions (including alpha)"));
+        assert!(!output.contains("|") && !output.contains("/ build"));
     }
 
     #[test]
-    fn control_characters_cannot_inject_lines_or_ansi() {
-        let mut renderer = HumanRenderer::new(
-            Vec::new(),
-            TerminalCapabilities::plain(),
-            Environment::default(),
-            PresentationOptions::default(),
+    fn ndjson_is_one_canonical_object_per_line() {
+        let value = event(
+            0,
+            EventPayload::PlanningStarted {
+                job: id::<JobId>("job"),
+                attempt: id::<PlanningAttemptId>("attempt"),
+            },
         );
-        renderer
-            .render(&diagnostic(
-                Severity::Error,
-                "bad\nforged\r\x1b[31mred\tend",
-            ))
-            .unwrap();
+        let mut renderer = NdjsonRenderer::new(Vec::new());
+        renderer.render(&value).unwrap();
+        renderer.finish().unwrap();
         let output = String::from_utf8(renderer.into_inner()).unwrap();
         assert_eq!(output.lines().count(), 1);
-        assert!(!output.contains('\u{1b}'));
-        assert!(output.contains(r"bad\nforged\r\u{1b}[31mred\tend"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(output.trim()).unwrap(),
+            serde_json::to_value(value).unwrap()
+        );
     }
 
     #[test]
-    fn color_is_applied_only_to_renderer_owned_labels() {
-        let mut renderer = HumanRenderer::new(
-            Vec::new(),
-            terminal(),
-            Environment::default(),
-            PresentationOptions {
-                color: ColorMode::Always,
-                ..PresentationOptions::default()
-            },
-        );
-        renderer
-            .render(&diagnostic(Severity::Error, "user\x1b[32mtext"))
-            .unwrap();
-        let output = String::from_utf8(renderer.into_inner()).unwrap();
-        assert!(output.starts_with("\x1b[31;1merror\x1b[0m"));
-        assert!(output.contains(r"user\u{1b}[32mtext"));
-        assert_eq!(output.matches('\u{1b}').count(), 2);
-    }
-
-    #[test]
-    fn quiet_hides_status_but_preserves_errors_and_failed_summary() {
-        let mut renderer = HumanRenderer::new(
-            Vec::new(),
-            TerminalCapabilities::plain(),
-            Environment::default(),
-            PresentationOptions {
-                verbosity: Verbosity::Quiet,
-                ..PresentationOptions::default()
-            },
-        );
-        renderer.render(&plan(0, 1)).unwrap();
-        renderer
-            .render(&diagnostic(Severity::Info, "hidden"))
-            .unwrap();
-        renderer
-            .render(&diagnostic(Severity::Error, "shown"))
-            .unwrap();
-        renderer
-            .render(&event(
-                30,
-                EventPayload::JobFinished(JobSummary {
-                    job: id("build:main"),
-                    totals: ActionTotals {
-                        failed: 1,
-                        ..ActionTotals::default()
-                    },
-                    root_failures: 1,
-                    cache_hits: 0,
-                    timing: Timing { elapsed_ms: 9 },
-                    status: ExitStatus::Failed,
-                }),
-            ))
-            .unwrap();
-        let output = String::from_utf8(renderer.into_inner()).unwrap();
-        assert!(!output.contains("Planned"));
-        assert!(!output.contains("hidden"));
-        assert!(output.contains("error[P001] shown"));
-        assert!(output.contains("Failed build:main"));
-    }
-
-    #[test]
-    fn verbose_includes_queue_parent_and_cache_identity() {
-        let mut renderer = HumanRenderer::new(
-            Vec::new(),
-            TerminalCapabilities::plain(),
-            Environment::default(),
-            PresentationOptions {
-                verbosity: Verbosity::Verbose,
-                ..PresentationOptions::default()
-            },
-        );
-        renderer
-            .render(&event(
-                1,
-                EventPayload::ActionQueued {
-                    job: id("build:main"),
-                    action: action("link:main"),
-                    kind: ActionKind::Link,
-                    dependencies: vec![action("compile:main")],
-                },
-            ))
-            .unwrap();
-        renderer
-            .render(&event(
-                2,
-                EventPayload::CacheHit {
-                    job: id("build:main"),
-                    action: action("link:main"),
-                    cache: CacheKind::Local,
-                    digest: Digest::new(DigestAlgorithm::Blake3, vec![1; 32]).unwrap(),
-                    action_key: Some(squish_protocol::ActionKeyId::new("key:link").unwrap()),
-                    outputs: vec![],
-                },
-            ))
-            .unwrap();
-        let output = String::from_utf8(renderer.into_inner()).unwrap();
-        assert!(output.contains("Queued link link:main (build:main) after [compile:main]"));
-        assert!(output.contains("Cached link:main (build:main, local, blake3:0101010101010101010101010101010101010101010101010101010101010101, key key:link, 0 outputs)"));
+    fn sanitizer_and_middle_truncation_preserve_graphemes() {
+        assert_eq!(sanitize("x\n\u{1b}[31m"), "x\\n\\u{1b}[31m");
+        let truncated = truncate_middle("解析-👩‍💻-a-very-long-target", 14);
+        assert!(UnicodeWidthStr::width(truncated.as_str()) <= 14);
+        assert!(!truncated.contains('�'));
     }
 }
