@@ -288,10 +288,9 @@ for (const [path, locale, kind] of [
           "xmlsquish-1.0.0-aarch64-apple-darwin.tar.gz",
         ];
         const downloadBase = "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.0.0/";
-        assert.deepEqual(
-          await page.locator(".download-actions a[download]").evaluateAll(links => links.map(link => link.href)),
-          expectedAssets.map(asset => downloadBase + asset),
-        );
+        const assetLinks = await page.locator(".download-actions a[download]")
+          .evaluateAll(links => links.map(link => link.href));
+        assert.deepEqual(assetLinks, expectedAssets.map(asset => downloadBase + asset));
         assert.equal(await page.locator('.download-actions [aria-disabled="true"]').count(), 0);
         assert.equal(await page.locator('a[href$="SHA256SUMS"]').getAttribute("href"), downloadBase + "SHA256SUMS");
 
@@ -321,7 +320,9 @@ for (const [path, locale, kind] of [
         assert.equal(application.softwareVersion, "1.0.0");
         assert.equal(application.creativeWorkStatus, "Published");
         assert.equal(application.sameAs, "https://github.com/kleedaisuki/prompt-squish");
-        assert.equal(application.downloadUrl, "https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.0");
+        assert(Array.isArray(application.downloadUrl));
+        assert.equal(application.downloadUrl.length, 6);
+        assert.deepEqual([...application.downloadUrl].sort(), [...assetLinks].sort());
         for (const dishonestClaim of ["aggregateRating", "rating", "review", "offers", "codeRepository", "additionalProperty"])
           assert.equal(dishonestClaim in application, false, dishonestClaim);
         assert.equal(await page.locator("[itemscope], [itemprop]").count(), 0,
