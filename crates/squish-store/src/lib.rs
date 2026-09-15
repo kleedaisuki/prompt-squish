@@ -6,7 +6,7 @@
 //! rebuildable action-index adapters. The CAS is authoritative for blobs; SQLite
 //! contains only small coordination metadata and never large blobs.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 mod action;
 mod cas;

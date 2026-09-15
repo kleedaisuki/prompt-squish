@@ -227,6 +227,9 @@ impl Cas {
                     fs::remove_file(&temporary).ok();
                     Ok(CasEventKind::Reused)
                 }
+                Err(error) if is_cross_device(&error) => {
+                    self.publish_cross_device(&temporary, &destination, digest)
+                }
                 Err(error) => Err(error.into()),
             }
         })();
@@ -292,6 +295,21 @@ impl Cas {
     }
 
     fn publish_temporary(&self, temporary: &Path, digest: BlobDigest) -> Result<(), CasError> {
+        self.publish_temporary_with(
+            temporary,
+            digest,
+            |source, destination| fs::rename(source, destination),
+            is_cross_device,
+        )
+    }
+
+    fn publish_temporary_with(
+        &self,
+        temporary: &Path,
+        digest: BlobDigest,
+        mut rename: impl FnMut(&Path, &Path) -> io::Result<()>,
+        cross_device: impl Fn(&io::Error) -> bool,
+    ) -> Result<(), CasError> {
         let destination = self.path_for(digest);
         fs::create_dir_all(destination.parent().expect("CAS path has a bucket parent"))?;
         if self.valid_file(&destination, digest)? {
@@ -299,19 +317,113 @@ impl Cas {
             self.emit(CasEventKind::Reused, digest, None);
             return Ok(());
         }
-        match fs::rename(temporary, &destination) {
-            Ok(()) => {
-                sync_parent(&destination)?;
-                self.emit(CasEventKind::Written, digest, None);
-                Ok(())
-            }
+        let kind = match rename(temporary, &destination) {
+            Ok(()) => CasEventKind::Written,
             Err(_error) if destination.exists() && self.valid_file(&destination, digest)? => {
                 fs::remove_file(temporary).ok();
-                self.emit(CasEventKind::Reused, digest, None);
-                Ok(())
+                CasEventKind::Reused
             }
-            Err(error) => Err(error.into()),
+            Err(error) if cross_device(&error) => {
+                self.publish_cross_device(temporary, &destination, digest)?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if kind == CasEventKind::Written {
+            sync_parent(&destination)?;
         }
+        self.emit(kind, digest, None);
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    fn copy_and_publish_bucket_local(
+        &self,
+        source: &Path,
+        destination: &Path,
+        digest: BlobDigest,
+        rename: &mut impl FnMut(&Path, &Path) -> io::Result<()>,
+    ) -> Result<CasEventKind, CasError> {
+        let bucket_temporary = temporary_path(destination);
+        let result = (|| {
+            let mut input = fs::File::open(source)?;
+            let mut output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&bucket_temporary)?;
+            let mut hash = blake3::Hasher::new();
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let count = input.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                hash.update(&buffer[..count]);
+                output.write_all(&buffer[..count])?;
+            }
+            output.sync_all()?;
+            drop(output);
+            if hash.finalize().as_bytes() != digest.as_bytes() {
+                return Err(CasError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "staged CAS blob changed before bucket-local publication",
+                )));
+            }
+            let kind = match rename(&bucket_temporary, destination) {
+                Ok(()) => CasEventKind::Written,
+                Err(_error) if destination.exists() && self.valid_file(destination, digest)? => {
+                    fs::remove_file(&bucket_temporary).ok();
+                    CasEventKind::Reused
+                }
+                Err(error) => return Err(error.into()),
+            };
+            fs::remove_file(source)?;
+            Ok(kind)
+        })();
+        if result.is_err() {
+            fs::remove_file(&bucket_temporary).ok();
+        }
+        result
+    }
+
+    #[cfg(windows)]
+    fn publish_cross_device(
+        &self,
+        temporary: &Path,
+        destination: &Path,
+        digest: BlobDigest,
+    ) -> Result<CasEventKind, CasError> {
+        // Rust's Windows fs::rename calls MoveFileExW, which this EFS environment
+        // rejects even with flags=0. The narrow wrapper uses MoveFileW's atomic,
+        // no-replace semantics, matching the successful native control operation.
+        // Rust 的 Windows fs::rename 调用 MoveFileExW，而该 EFS 环境即使 flags=0
+        // 也会拒绝。窄封装改用 MoveFileW 的原子、不覆盖语义，与成功的原生对照一致。
+        for attempt in 0..2 {
+            match windows_atomic::publish_noclobber(temporary, destination) {
+                Ok(()) => return Ok(CasEventKind::Written),
+                Err(error) => {
+                    if destination.exists() && self.valid_file(destination, digest)? {
+                        fs::remove_file(temporary).ok();
+                        return Ok(CasEventKind::Reused);
+                    }
+                    if destination.exists() && attempt == 0 {
+                        fs::remove_file(destination)?;
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
+        unreachable!("the second no-clobber publication attempt always returns")
+    }
+
+    #[cfg(not(windows))]
+    fn publish_cross_device(
+        &self,
+        temporary: &Path,
+        destination: &Path,
+        digest: BlobDigest,
+    ) -> Result<CasEventKind, CasError> {
+        self.copy_and_publish_bucket_local(temporary, destination, digest, &mut fs::rename)
     }
 
     fn copy_verified(&self, digest: BlobDigest, sink: &mut dyn Write) -> Result<bool, CasError> {
@@ -406,6 +518,15 @@ fn temporary_path(destination: &Path) -> PathBuf {
     destination.with_extension(format!("tmp-{}-{sequence}", std::process::id()))
 }
 
+fn is_cross_device(error: &io::Error) -> bool {
+    // ERROR_NOT_SAME_DEVICE is 17 on Windows. `CrossesDevices` also covers
+    // platform-native EXDEV without hard-coding Unix errno values.
+    // Windows 的 ERROR_NOT_SAME_DEVICE 为 17；`CrossesDevices` 同时覆盖其他
+    // 平台原生 EXDEV，无需硬编码 Unix errno。
+    error.kind() == io::ErrorKind::CrossesDevices
+        || cfg!(windows) && error.raw_os_error() == Some(17)
+}
+
 #[cfg(unix)]
 fn sync_parent(destination: &Path) -> Result<(), CasError> {
     // 持久化目录项，使断电后的可见性与已同步内容一致。
@@ -419,6 +540,52 @@ fn sync_parent(_destination: &Path) -> Result<(), CasError> {
     // Windows 的稳定 Rust API 无法以可移植方式打开目录并 flush；文件自身已同步。
     // Stable Rust cannot portably open and flush a directory on Windows; the file itself is synced.
     Ok(())
+}
+
+/// Windows EFS-compatible atomic publication primitives. / 与 Windows EFS 兼容的原子发布原语。
+///
+/// 此模块是 crate 内唯一允许 unsafe 的位置；公开面仍是安全、窄化且不覆盖的路径操作。
+/// This is the crate's sole unsafe allowance; its surface remains a safe, narrow,
+/// no-clobber path operation.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows_atomic {
+    use std::{ffi::OsStr, io, os::windows::ffi::OsStrExt, path::Path};
+
+    use windows_sys::Win32::Storage::FileSystem::MoveFileW;
+
+    /// 原子移动同卷文件且拒绝覆盖目标。 / Atomically moves a same-volume file without replacing the destination.
+    pub(super) fn publish_noclobber(source: &Path, destination: &Path) -> io::Result<()> {
+        let source = wide_path(source)?;
+        let destination = wide_path(destination)?;
+        // SAFETY / 安全性:
+        // - both vectors are explicitly NUL-terminated and reject interior NULs;
+        // - their allocations remain alive and immutable for the complete call;
+        // - MoveFileW only reads both pointers and provides atomic same-volume,
+        //   no-replace rename semantics; callers create both paths below one CAS;
+        // - a zero return is converted immediately from GetLastError via std.
+        // - 两个向量均显式以 NUL 结尾并拒绝内部 NUL；
+        // - 分配在整个调用期间保持存活且不可变；
+        // - MoveFileW 只读取指针，并为同一 CAS 下的同卷路径提供原子、不覆盖 rename；
+        // - 返回零时立即通过标准库读取 GetLastError。
+        if unsafe { MoveFileW(source.as_ptr(), destination.as_ptr()) } == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
+        let mut wide: Vec<_> = OsStr::new(path).encode_wide().collect();
+        if wide.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Windows path contains an interior NUL",
+            ));
+        }
+        wide.push(0);
+        Ok(wide)
+    }
 }
 
 #[cfg(test)]
@@ -538,6 +705,104 @@ mod tests {
                 .map(|event| event.kind)
                 .collect::<Vec<_>>(),
             vec![CasEventKind::Written, CasEventKind::Reused]
+        );
+    }
+
+    #[test]
+    fn cross_device_publish_falls_back_to_atomic_platform_publication() {
+        let directory = test_dir();
+        let events = Arc::new(Events::default());
+        let store = Cas::with_observer(directory.path(), events.clone()).unwrap();
+        let bytes = b"streamed across an EFS rename boundary";
+        let digest = BlobDigest::of(bytes);
+        let staging = store
+            .root()
+            .join("blobs")
+            .join(FORMAT_VERSION)
+            .join(ALGORITHM)
+            .join(".incoming-deterministic-test");
+        fs::write(&staging, bytes).unwrap();
+        let calls = std::cell::Cell::new(0);
+
+        store
+            .publish_temporary_with(
+                &staging,
+                digest,
+                |source, destination| {
+                    let call = calls.get();
+                    calls.set(call + 1);
+                    if call == 0 {
+                        Err(io::Error::other("injected cross-device rename"))
+                    } else {
+                        fs::rename(source, destination)
+                    }
+                },
+                |_| true,
+            )
+            .unwrap();
+
+        #[cfg(windows)]
+        assert_eq!(calls.get(), 1);
+        #[cfg(not(windows))]
+        assert_eq!(calls.get(), 2);
+        assert!(!staging.exists());
+        assert_eq!(store.get(digest).unwrap().unwrap(), bytes);
+        assert_eq!(
+            events.0.lock().unwrap().as_slice(),
+            &[CasEvent {
+                kind: CasEventKind::Written,
+                digest,
+                actual: None,
+            }]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_atomic_publication_never_clobbers_an_existing_target() {
+        let directory = test_dir();
+        let source = directory.path().join("source");
+        let destination = directory.path().join("destination");
+        fs::write(&source, b"new").unwrap();
+        fs::write(&destination, b"existing").unwrap();
+
+        let error = windows_atomic::publish_noclobber(&source, &destination).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&source).unwrap(), b"new");
+        assert_eq!(fs::read(&destination).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn failed_stream_removes_unpublished_staging_file() {
+        struct FailedReader(bool);
+        impl Read for FailedReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if self.0 {
+                    return Err(io::Error::other("injected source failure"));
+                }
+                self.0 = true;
+                buffer[..4].copy_from_slice(b"part");
+                Ok(4)
+            }
+        }
+
+        let directory = test_dir();
+        let store = Cas::open(directory.path()).unwrap();
+        assert!(store.put_reader(&mut FailedReader(false)).is_err());
+        let staging = store
+            .root()
+            .join("blobs")
+            .join(FORMAT_VERSION)
+            .join(ALGORITHM);
+        assert!(
+            fs::read_dir(staging)
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".incoming-"))
         );
     }
 }
