@@ -1,0 +1,30 @@
+# xmlsquish
+
+> A local-first, deterministic project manager and compiler for XML prompt projects. It creates, formats, resolves, builds, and inspects reproducible prompt artifacts.
+
+This file follows the experimental community `llms.txt` proposal. It is an additive navigation aid for language-model agents, not a crawler-control, authorization, or normative protocol. Crawlers should use `/robots.txt`; product and release claims remain authoritative only in the linked repository, pages, and machine-readable release metadata.
+
+## Product
+
+- [English product page](https://xmlsquish.moesegfault.dev/en/): Product model, build pipeline, and CLI quick start.
+- [中文产品页](https://xmlsquish.moesegfault.dev/): 产品模型、构建流水线与 CLI 快速入门。
+- [Source repository](https://github.com/kleedaisuki/prompt-squish): Source code, tests, changelog, and license.
+
+## Version 1.0
+
+- [English release page](https://xmlsquish.moesegfault.dev/en/releases/): Human-oriented v1.0 release and migration information.
+- [中文发布页](https://xmlsquish.moesegfault.dev/releases/): 面向用户的 v1.0 发布与迁移说明。
+- [Machine-readable release metadata](https://xmlsquish.moesegfault.dev/releases/1.0.0.json): Stable JSON contract; `releaseStatus` distinguishes prepared metadata from published GitHub assets.
+
+## Specifications
+
+- [English XML namespace reference](https://xmlsquish.moesegfault.dev/en/ns/): Canonical element and attribute reference.
+- [中文 XML 命名空间参考](https://xmlsquish.moesegfault.dev/ns): 规范元素与属性参考。
+- [XML namespace identity](https://xmlsquish.moesegfault.dev/ns): Stable namespace URI; never localize this identity.
+
+## Operational facts
+
+- CLI commands: `new`, `fmt`, `build`, `add`, `remove`, `inspect`.
+- Source installation requires Rust 1.88 or newer and a locked Cargo workspace. xmlsquish is not published on crates.io.
+- Native release targets cover x86-64 and ARM64 on Linux, Windows, and macOS. Prepared asset URLs may not exist until the immutable `v1.0.0` Git tag is published.
+- License: GPL-3.0-or-later.

@@ -17,10 +17,39 @@ const canonicalPath = paths[locale][page];
 const pageTitle = title ?? m.meta.title;
 const pageDescription = description ?? m.meta.description;
 const canonical = new URL(canonicalPath, Astro.site);
-const socialImage = new URL("/social-card.png", Astro.site);
-const socialImageAlt = locale === "zh-CN"
-  ? "xmlsquish：组织多文件 XML 源码，构建可检查的提示词产物"
-  : "xmlsquish: compose multi-file XML sources into inspectable prompt artifacts";
+const hasSocialCard = page === "home" || page === "releases";
+const socialImage = new URL(page === "releases" ? "/release-v1.png" : "/social-card.png", Astro.site);
+const socialImageAlt = page === "releases"
+  ? locale === "zh-CN"
+    ? "xmlsquish 1.0：XML 提示词项目管理器发布页"
+    : "xmlsquish 1.0: XML prompt project manager release"
+  : locale === "zh-CN"
+    ? "xmlsquish：组织多文件 XML 源码，构建可检查的提示词产物"
+    : "xmlsquish: compose multi-file XML sources into inspectable prompt artifacts";
+const releaseMetadata = new URL("/releases/1.0.0.json", Astro.site);
+/**
+ * Keep product claims factual and rating-free; release availability lives in the machine contract.
+ * 仅声明可核实的产品事实，不伪造评分；发布可用性以机器合同为准。
+ */
+// The release component owns its versioned SoftwareApplication entity; never emit a duplicate here.
+// 发布组件独占版本化 SoftwareApplication 实体，此处不重复输出。
+const productJsonLd = page === "home" ? {
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "@id": new URL("/#xmlsquish", Astro.site).href,
+  name: "xmlsquish",
+  description: pageDescription,
+  url: canonical.href,
+  mainEntityOfPage: canonical.href,
+  applicationCategory: "DeveloperApplication",
+  applicationSubCategory: "XML prompt project manager and compiler",
+  operatingSystem: "Windows, Linux, macOS",
+  softwareVersion: "1.0.0",
+  isAccessibleForFree: true,
+  license: "https://www.gnu.org/licenses/gpl-3.0.html",
+  sameAs: "https://github.com/kleedaisuki/prompt-squish",
+  inLanguage: locale,
+} : undefined;
 ---
 
 <!doctype html>
@@ -35,25 +64,33 @@ const socialImageAlt = locale === "zh-CN"
     <meta property="og:title" content={pageTitle} />
     <meta property="og:description" content={pageDescription} />
     <meta property="og:url" content={canonical} />
-    {page === "home" && <>
+    {hasSocialCard && <>
       <meta property="og:image" content={socialImage} />
       <meta property="og:image:width" content="1200" />
       <meta property="og:image:height" content="630" />
       <meta property="og:image:alt" content={socialImageAlt} />
     </>}
     <meta property="og:locale" content={locale === "zh-CN" ? "zh_CN" : "en_US"} />
-    <meta name="twitter:card" content={page === "home" ? "summary_large_image" : "summary"} />
-    {page === "home" && <meta name="twitter:image" content={socialImage} />}
+    <meta name="twitter:card" content={hasSocialCard ? "summary_large_image" : "summary"} />
+    <meta name="twitter:title" content={pageTitle} />
+    <meta name="twitter:description" content={pageDescription} />
+    {hasSocialCard && <>
+      <meta name="twitter:image" content={socialImage} />
+      <meta name="twitter:image:alt" content={socialImageAlt} />
+    </>}
     <link rel="canonical" href={canonical} />
     <link rel="alternate" hreflang="zh-CN" href={new URL(paths["zh-CN"][page], Astro.site)} />
     <link rel="alternate" hreflang="en" href={new URL(paths.en[page], Astro.site)} />
     <link rel="alternate" hreflang="x-default" href={new URL(paths["zh-CN"][page], Astro.site)} />
+    {page === "releases" && <link rel="alternate" type="application/json" title="xmlsquish 1.0.0 release metadata" href={releaseMetadata} />}
+    <link rel="describedby" type="text/plain" href={new URL("/llms.txt", Astro.site)} />
+    {productJsonLd && <script is:inline type="application/ld+json" set:html={JSON.stringify(productJsonLd).replaceAll("<", "\\u003c")} />}
     <slot name="head" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link
       rel="stylesheet"
-      href="https://style.moesegfault.dev/v0.1.1/css/all.css"
-      integrity="sha384-sAbt4aFsZmeAtLPp+2KJShrwxa3361+DAzHTcDNGRVCNw+KNoYQH0JIIpdTddTjh"
+      href="https://style.moesegfault.dev/v0.1.2/css/all.css"
+      integrity="sha384-Tsj7ndpNmGrJTPrbAcVgLnpddldDQeHjlbEZRTpJmfvqM6xgXNrrqmsYK61doSFn"
       crossorigin="anonymous"
     />
     <script is:inline>

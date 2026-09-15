@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:xhtml="http://www.w3.org/1999/xhtml">
+  <url>
+    <loc>https://xmlsquish.moesegfault.dev/</loc>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://xmlsquish.moesegfault.dev/" />
+    <xhtml:link rel="alternate" hreflang="en" href="https://xmlsquish.moesegfault.dev/en/" />
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://xmlsquish.moesegfault.dev/" />
+  </url>
+  <url>
+    <loc>https://xmlsquish.moesegfault.dev/en/</loc>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://xmlsquish.moesegfault.dev/" />
+    <xhtml:link rel="alternate" hreflang="en" href="https://xmlsquish.moesegfault.dev/en/" />
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://xmlsquish.moesegfault.dev/" />
+  </url>
+  <url>
+    <loc>https://xmlsquish.moesegfault.dev/ns</loc>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://xmlsquish.moesegfault.dev/ns" />
+    <xhtml:link rel="alternate" hreflang="en" href="https://xmlsquish.moesegfault.dev/en/ns/" />
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://xmlsquish.moesegfault.dev/ns" />
+  </url>
+  <url>
+    <loc>https://xmlsquish.moesegfault.dev/en/ns/</loc>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://xmlsquish.moesegfault.dev/ns" />
+    <xhtml:link rel="alternate" hreflang="en" href="https://xmlsquish.moesegfault.dev/en/ns/" />
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://xmlsquish.moesegfault.dev/ns" />
+  </url>
+  <url>
+    <loc>https://xmlsquish.moesegfault.dev/releases/</loc>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://xmlsquish.moesegfault.dev/releases/" />
+    <xhtml:link rel="alternate" hreflang="en" href="https://xmlsquish.moesegfault.dev/en/releases/" />
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://xmlsquish.moesegfault.dev/releases/" />
+  </url>
+  <url>
+    <loc>https://xmlsquish.moesegfault.dev/en/releases/</loc>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://xmlsquish.moesegfault.dev/releases/" />
+    <xhtml:link rel="alternate" hreflang="en" href="https://xmlsquish.moesegfault.dev/en/releases/" />
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://xmlsquish.moesegfault.dev/releases/" />
+  </url>
+</urlset>
