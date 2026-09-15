@@ -82,7 +82,7 @@ fn bare_help_is_stdout_success_and_lists_only_direct_commands() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    for command in ["build", "fmt", "add", "remove", "inspect"] {
+    for command in ["new", "build", "fmt", "add", "remove", "inspect"] {
         assert!(stdout.contains(command), "missing direct command {command}");
     }
 }
@@ -1109,4 +1109,448 @@ fn walk(root: &Path) -> Vec<std::path::PathBuf> {
         }
     }
     files
+}
+
+/// Allocates an isolated process-test root under the repository-owned scratch directory.
+/// 在仓库自有暂存目录下分配隔离的进程测试根目录。
+fn new_scratch(name: &str) -> tempfile::TempDir {
+    let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join(".temp");
+    fs::create_dir_all(&scratch).unwrap();
+    tempfile::Builder::new()
+        .prefix(&format!("new-{name}-"))
+        .tempdir_in(scratch)
+        .unwrap()
+}
+
+/// Runs `new` with user configuration isolated from the developer or CI account.
+/// 在隔离用户配置的前提下运行 `new`，避免开发机或 CI 账户污染合同。
+fn run_new(root: &tempfile::TempDir, destination: &Path, args: &[&str]) -> std::process::Output {
+    let home = root.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let mut command = binary();
+    command
+        .current_dir(root.path())
+        .env("XMLSQUISH_HOME", home)
+        .arg("new")
+        .arg(destination)
+        .args(args);
+    command.output().unwrap()
+}
+
+fn assert_process_success(output: &std::process::Output) {
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn relative_files(root: &Path) -> Vec<String> {
+    let mut files = walk(root)
+        .into_iter()
+        .map(|path| {
+            path.strip_prefix(root)
+                .unwrap()
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    files
+}
+
+#[test]
+fn new_vcs_none_has_exact_public_tree_and_is_immediately_usable() {
+    let root = new_scratch("none-buildable");
+    let destination = root.path().join("deep/prompts/support");
+    let output = run_new(&root, &destination, &["--vcs=none", "--quiet"]);
+    assert_process_success(&output);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        relative_files(&destination),
+        ["src/prompt.xml", "xmlsquish.toml"]
+    );
+    assert!(!destination.join("xmlsquish.lock").exists());
+    assert!(!destination.join("target").exists());
+
+    let manifest = destination.join("xmlsquish.toml");
+    let formatted = binary()
+        .args(["fmt", "--manifest-path"])
+        .arg(&manifest)
+        .args(["--check", "--plain"])
+        .output()
+        .unwrap();
+    assert_process_success(&formatted);
+    let built = binary()
+        .args(["build", "--manifest-path"])
+        .arg(&manifest)
+        .args(["--offline", "--plain"])
+        .output()
+        .unwrap();
+    assert_process_success(&built);
+}
+
+#[test]
+fn new_default_initializes_git_outside_an_enclosing_worktree() {
+    let root = new_scratch("default-git");
+    let destination = root.path().join("standalone");
+    let home = root.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let output = binary()
+        .current_dir(root.path())
+        .env("XMLSQUISH_HOME", &home)
+        // The test itself must live below `.temp`; the ceiling makes that scratch root a genuine
+        // standalone Git context instead of inheriting this repository's worktree.
+        .env(
+            "GIT_CEILING_DIRECTORIES",
+            root.path().parent().expect("scratch root has a parent"),
+        )
+        .args(["new"])
+        .arg(&destination)
+        .arg("--quiet")
+        .output()
+        .unwrap();
+    assert_process_success(&output);
+    assert!(destination.join(".git").is_dir());
+    assert_eq!(
+        fs::read(destination.join(".gitignore")).unwrap(),
+        b"/target/\n"
+    );
+    for path in ["xmlsquish.toml", "src/prompt.xml"] {
+        assert!(destination.join(path).is_file(), "missing {path}");
+    }
+    assert!(!destination.join("xmlsquish.lock").exists());
+    assert!(!destination.join("target").exists());
+}
+
+#[test]
+fn new_rejects_invalid_names_at_the_correct_boundary() {
+    let explicit = new_scratch("bad-explicit");
+    let explicit_destination = explicit.path().join("valid-name");
+    let output = run_new(
+        &explicit,
+        &explicit_destination,
+        &["--name=Not Valid!", "--vcs=none"],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!explicit_destination.exists());
+
+    let inferred = new_scratch("bad-inferred");
+    let inferred_destination = inferred.path().join("Not Valid!");
+    let output = run_new(&inferred, &inferred_destination, &["--vcs=none"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--name"));
+    assert!(!inferred_destination.exists());
+}
+
+#[test]
+fn new_refuses_every_existing_destination_kind() {
+    let root = new_scratch("existing");
+    let directory = root.path().join("directory");
+    fs::create_dir(&directory).unwrap();
+    let file = root.path().join("file");
+    fs::write(&file, b"occupied").unwrap();
+    for destination in [&directory, &file] {
+        let output = run_new(&root, destination, &["--vcs=none"]);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+    }
+    assert_eq!(fs::read(file).unwrap(), b"occupied");
+}
+
+#[cfg(unix)]
+#[test]
+fn new_refuses_an_existing_symlink_without_following_it() {
+    use std::os::unix::fs::symlink;
+
+    let root = new_scratch("existing-symlink");
+    let target = root.path().join("target");
+    fs::create_dir(&target).unwrap();
+    let destination = root.path().join("link");
+    symlink(&target, &destination).unwrap();
+    let output = run_new(&root, &destination, &["--vcs=none"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        fs::symlink_metadata(destination)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+fn workspace_manifest(members: &str, exclude: &str) -> String {
+    format!("manifest-version = 1\n[workspace]\nmembers = [{members}]\nexclude = [{exclude}]\n")
+}
+
+#[test]
+fn new_joins_an_enclosing_workspace_once_and_preserves_existing_membership() {
+    let root = new_scratch("workspace");
+    let manifest = root.path().join("xmlsquish.toml");
+    fs::write(&manifest, workspace_manifest("", "")).unwrap();
+    let destination = root.path().join("packages/new-member");
+    assert_process_success(&run_new(&root, &destination, &["--vcs=none", "--quiet"]));
+    let updated = fs::read_to_string(&manifest).unwrap();
+    assert_eq!(updated.matches("packages/new-member").count(), 1);
+
+    let effective = new_scratch("workspace-effective");
+    let effective_manifest = effective.path().join("xmlsquish.toml");
+    fs::write(
+        &effective_manifest,
+        workspace_manifest("\"packages/already\"", ""),
+    )
+    .unwrap();
+    let before = fs::read(&effective_manifest).unwrap();
+    assert_process_success(&run_new(
+        &effective,
+        &effective.path().join("packages/already"),
+        &["--vcs=none", "--quiet"],
+    ));
+    assert_eq!(fs::read(effective_manifest).unwrap(), before);
+}
+
+#[test]
+fn new_rejects_workspace_exclusion_and_duplicate_package_name_without_publication() {
+    let excluded = new_scratch("workspace-excluded");
+    fs::write(
+        excluded.path().join("xmlsquish.toml"),
+        workspace_manifest("", "\"packages/*\""),
+    )
+    .unwrap();
+    let excluded_destination = excluded.path().join("packages/new");
+    let output = run_new(&excluded, &excluded_destination, &["--vcs=none"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!excluded_destination.exists());
+
+    let duplicate = new_scratch("workspace-duplicate");
+    fs::create_dir_all(duplicate.path().join("packages/existing")).unwrap();
+    fs::write(
+        duplicate.path().join("xmlsquish.toml"),
+        workspace_manifest("\"packages/existing\"", ""),
+    )
+    .unwrap();
+    fs::write(
+        duplicate.path().join("packages/existing/xmlsquish.toml"),
+        "manifest-version = 1\n[package]\nname = \"same-name\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let duplicate_destination = duplicate.path().join("packages/new");
+    let output = run_new(
+        &duplicate,
+        &duplicate_destination,
+        &["--name=same-name", "--vcs=none"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!duplicate_destination.exists());
+}
+
+#[test]
+fn new_human_short_quiet_and_ndjson_preserve_stream_contracts() {
+    let human = new_scratch("human");
+    let output = run_new(
+        &human,
+        &human.path().join("human-project"),
+        &["--vcs=none", "--plain"],
+    );
+    assert_process_success(&output);
+    assert!(output.stdout.is_empty());
+    assert!(!output.stderr.is_empty());
+
+    let short = new_scratch("short");
+    let output = run_new(
+        &short,
+        &short.path().join("short-project"),
+        &["--vcs=none", "--message-format=short"],
+    );
+    assert_process_success(&output);
+    assert!(output.stdout.is_empty());
+    assert!(!output.stderr.is_empty());
+    assert!(!output.stderr.contains(&b'\r'));
+
+    let quiet = new_scratch("quiet");
+    let output = run_new(
+        &quiet,
+        &quiet.path().join("quiet-project"),
+        &["--vcs=none", "--quiet"],
+    );
+    assert_process_success(&output);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+
+    let json = new_scratch("json");
+    let output = run_new(
+        &json,
+        &json.path().join("json-project"),
+        &["--vcs=none", "--message-format=json"],
+    );
+    assert_process_success(&output);
+    assert!(output.stderr.is_empty());
+    let documents = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert!(documents.len() > 2);
+    assert!(documents.iter().any(|document| {
+        document["payload"]["type"] == "operation_completed"
+            && document["payload"]["data"]["result"]["type"] == "new"
+    }));
+    assert_eq!(
+        documents.last().unwrap()["payload"]["data"]["status"],
+        "success"
+    );
+}
+
+#[test]
+fn concurrent_new_processes_serialize_same_and_shared_parent_destinations() {
+    use std::sync::{Arc, Barrier};
+
+    let root = new_scratch("concurrent");
+    let same = root.path().join("same");
+    let barrier = Arc::new(Barrier::new(2));
+    let handles = (0..2)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            let destination = same.clone();
+            let cwd = root.path().to_path_buf();
+            std::thread::spawn(move || {
+                barrier.wait();
+                binary()
+                    .current_dir(cwd)
+                    .arg("new")
+                    .arg(destination)
+                    .args(["--vcs=none", "--quiet"])
+                    .output()
+                    .unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let outputs = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        outputs
+            .iter()
+            .filter(|output| output.status.success())
+            .count(),
+        1
+    );
+    assert_eq!(
+        outputs
+            .iter()
+            .filter(|output| output.status.code() == Some(1))
+            .count(),
+        1
+    );
+
+    let shared = root.path().join("missing-parent");
+    let barrier = Arc::new(Barrier::new(2));
+    let handles = ["left", "right"]
+        .into_iter()
+        .map(|leaf| {
+            let barrier = Arc::clone(&barrier);
+            let destination = shared.join(leaf);
+            let cwd = root.path().to_path_buf();
+            std::thread::spawn(move || {
+                barrier.wait();
+                binary()
+                    .current_dir(cwd)
+                    .arg("new")
+                    .arg(destination)
+                    .args(["--vcs=none", "--quiet"])
+                    .output()
+                    .unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    for output in handles.into_iter().map(|handle| handle.join().unwrap()) {
+        assert_process_success(&output);
+    }
+    assert!(shared.join("left/xmlsquish.toml").is_file());
+    assert!(shared.join("right/xmlsquish.toml").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn first_interrupt_during_git_preparation_cancels_before_publication() {
+    use std::{
+        os::unix::fs::PermissionsExt,
+        time::{Duration, Instant},
+    };
+
+    let root = new_scratch("interrupt-precommit");
+    let tools = root.path().join("tools");
+    fs::create_dir(&tools).unwrap();
+    let marker = root.path().join("git-init-entered");
+    let release = root.path().join("release-git-init");
+    let shim = tools.join("git");
+    fs::write(
+        &shim,
+        b"#!/bin/sh\n\
+if [ \"$1\" = \"rev-parse\" ]; then printf 'false\\n'; exit 0; fi\n\
+if [ \"$1\" = \"init\" ]; then\n\
+  : > \"$XMLSQUISH_TEST_GIT_MARKER\"\n\
+  while [ ! -f \"$XMLSQUISH_TEST_GIT_RELEASE\" ]; do sleep 0.01; done\n\
+  mkdir .git\n\
+  exit 0\n\
+fi\n\
+exit 64\n",
+    )
+    .unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    let destination = root.path().join("cancelled");
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(tools.clone()).chain(std::env::split_paths(&inherited_path)),
+    )
+    .unwrap();
+    let child = binary()
+        .current_dir(root.path())
+        .env("PATH", path)
+        .env("XMLSQUISH_HOME", root.path().join("home"))
+        .env("XMLSQUISH_TEST_GIT_MARKER", &marker)
+        .env("XMLSQUISH_TEST_GIT_RELEASE", &release)
+        .arg("new")
+        .arg(&destination)
+        .arg("--quiet")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !marker.is_file() {
+        assert!(
+            Instant::now() < deadline,
+            "Git preparation barrier timed out"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let interrupted = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(interrupted.success());
+    fs::write(&release, b"release").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(130),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!destination.exists());
+    assert!(walk(root.path()).iter().all(|path| {
+        !path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(".xmlsquish-published-"))
+    }));
 }

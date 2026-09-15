@@ -162,6 +162,134 @@ fn assert_transactions_empty(path: &Path) {
     );
 }
 
+/// Workspace fixture for real process-death tests of `new` publication.
+/// 用于 `new` 发布真实进程死亡测试的工作区夹具。
+struct NewRecoveryFixture {
+    root: tempfile::TempDir,
+    home: tempfile::TempDir,
+    destination: PathBuf,
+}
+
+impl NewRecoveryFixture {
+    fn new(name: &str) -> Self {
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join(".temp");
+        fs::create_dir_all(&scratch).unwrap();
+        let root = tempfile::Builder::new()
+            .prefix(&format!("recovery-new-{name}-workspace-"))
+            .tempdir_in(&scratch)
+            .unwrap();
+        let home = tempfile::Builder::new()
+            .prefix(&format!("recovery-new-{name}-home-"))
+            .tempdir_in(&scratch)
+            .unwrap();
+        fs::write(
+            root.path().join("xmlsquish.toml"),
+            "manifest-version = 1\n[workspace]\nmembers = []\n",
+        )
+        .unwrap();
+        let destination = root.path().join("packages/new-member");
+        Self {
+            root,
+            home,
+            destination,
+        }
+    }
+
+    fn command(&self) -> Command {
+        let mut command = binary();
+        command
+            .current_dir(self.root.path())
+            .env("XMLSQUISH_HOME", self.home.path());
+        command
+    }
+
+    fn crash_new(&self, selector: &str) -> Output {
+        self.command()
+            .env(SELECTOR, selector)
+            .arg("new")
+            .arg(&self.destination)
+            .args(["--vcs=none", "--quiet"])
+            .output()
+            .unwrap()
+    }
+
+    fn retry_new(&self) -> Output {
+        self.command()
+            .arg("new")
+            .arg(&self.destination)
+            .args(["--vcs=none", "--quiet"])
+            .output()
+            .unwrap()
+    }
+
+    fn recover_through_fmt(&self) -> Output {
+        self.command()
+            .args(["fmt", "--manifest-path"])
+            .arg(self.root.path().join("xmlsquish.toml"))
+            .args(["--workspace", "--check", "--plain"])
+            .output()
+            .unwrap()
+    }
+
+    fn assert_complete(&self) {
+        assert!(self.destination.join("xmlsquish.toml").is_file());
+        assert!(self.destination.join("src/prompt.xml").is_file());
+        let workspace = fs::read_to_string(self.root.path().join("xmlsquish.toml")).unwrap();
+        assert_eq!(workspace.matches("packages/new-member").count(), 1);
+        let stale = walk_named(self.root.path(), |name| {
+            name.starts_with(".xmlsquish-new-stage-") || name.starts_with(".xmlsquish-published-")
+        });
+        assert!(stale.is_empty(), "stale creation state: {stale:?}");
+    }
+}
+
+fn walk_named(root: &Path, predicate: impl Fn(&str) -> bool) -> Vec<PathBuf> {
+    fn visit(root: &Path, predicate: &dyn Fn(&str) -> bool, found: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if predicate(&entry.file_name().to_string_lossy()) {
+                found.push(path.clone());
+            }
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                visit(&path, predicate, found);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    visit(root, &predicate, &mut found);
+    found
+}
+
+#[test]
+fn new_creation_prepared_death_rolls_back_then_retry_creates_once() {
+    let fixture = NewRecoveryFixture::new("prepared");
+    assert_crashed(&fixture.crash_new("repository.creation-prepared"));
+    assert!(!fixture.destination.exists());
+    assert_success(&fixture.retry_new());
+    fixture.assert_complete();
+}
+
+#[test]
+fn new_postpublication_deaths_roll_forward_via_ordinary_project_discovery() {
+    for selector in [
+        "repository.creation-published",
+        "repository.creation-workspace-replaced",
+        "repository.creation-completed",
+    ] {
+        let fixture = NewRecoveryFixture::new(selector.rsplit('-').next().unwrap());
+        assert_crashed(&fixture.crash_new(selector));
+        assert!(
+            fixture.destination.join("xmlsquish.toml").is_file(),
+            "{selector} must be post-publication"
+        );
+        assert_success(&fixture.recover_through_fmt());
+        fixture.assert_complete();
+    }
+}
+
 #[test]
 fn unknown_selector_is_a_deterministic_configuration_failure() {
     let fixture = Fixture::new("invalid-selector");
