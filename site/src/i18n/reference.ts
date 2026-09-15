@@ -77,11 +77,14 @@ const en = {
     "journey": [
       { "command": "new support", "title": "Create", "body": "Start a complete project and optionally register it in the enclosing workspace." },
       { "command": "fmt", "title": "Format", "body": "Canonicalize project XML without changing its meaning." },
-      { "command": "add policy", "title": "Add", "body": "Resolve and record a dependency through the project model." },
-      { "command": "remove policy", "title": "Remove", "body": "Remove a dependency while keeping project state coherent." },
+      { "command": "add common --path ../common", "title": "Add", "body": "Resolve and record a real local project dependency; registry or Git sources may be used instead." },
+      { "command": "remove common", "title": "Remove", "body": "Remove that declared dependency while keeping project state coherent." },
       { "command": "build", "title": "Build", "body": "Lower, link, and publish deterministic Prompt artifacts." },
-      { "command": "inspect artifact", "title": "Inspect", "body": "Trace outputs, inputs, and provenance without rebuilding." }
+      { "command": "inspect artifact target/xmlsquish/prompt.prompt", "title": "Inspect", "body": "Trace a concrete artifact, its inputs, and provenance without rebuilding." }
     ],
+    "quickstartLabel": "Runnable quickstart",
+    "quickstartTitle": "Create, verify, build, inspect.",
+    "quickstartBody": "This minimal project needs no Git repository or network dependency. Run the five commands in order.",
     "featuresLabel": "Project management, not command accumulation",
     "featuresTitle": "A coherent manager around the compiler.",
     "features": [
@@ -105,7 +108,10 @@ const en = {
     "binaryNote": "Release status: candidate. Native archives are unsigned and not notarized. SHA-256 verifies integrity, not publisher identity.",
     "sourceLabel": "Release candidate",
     "sourceTitle": "Install the v1 source candidate.",
-    "sourceBody": "Rust 1.88 or newer is required. The command is pinned to the v1.0.0 tag and will succeed after the release workflow publishes that tag; before then, build the current release branch directly.",
+    "sourceBody": "Rust 1.88 or newer is required. Install the immutable v1 candidate by commit now; use the separate tag command only after maintainers create and push v1.0.0.",
+    "candidateInstall": "Immutable candidate commit (works before the tag)",
+    "taggedInstall": "Final tag (after maintainers publish it)",
+    "publishOrder": "Maintainers must create and push the v1.0.0 tag first, then run the release workflow that validates the existing tag and publishes its assets. The workflow does not create tags.",
     "github": "Follow the v1.0.0 release on GitHub",
     "migrationLabel": "Moving from the compiler-era CLI",
     "migrationTitle": "Adopt the project model deliberately.",
@@ -198,11 +204,14 @@ const zh: typeof en = {
     "journey": [
       { "command": "new support", "title": "创建", "body": "创建完整项目，并可登记到外围工作区。" },
       { "command": "fmt", "title": "格式化", "body": "规范化项目 XML，不改变语义。" },
-      { "command": "add policy", "title": "添加", "body": "通过项目模型解析并记录依赖。" },
-      { "command": "remove policy", "title": "移除", "body": "移除依赖，同时保持项目状态一致。" },
+      { "command": "add common --path ../common", "title": "添加", "body": "解析并记录真实的本地项目依赖；也可改用 Registry 或 Git 来源。" },
+      { "command": "remove common", "title": "移除", "body": "移除这个已声明依赖，同时保持项目状态一致。" },
       { "command": "build", "title": "构建", "body": "降低、链接并发布确定性的 Prompt 产物。" },
-      { "command": "inspect artifact", "title": "检查", "body": "无需重建即可追踪输出、输入与来源。" }
+      { "command": "inspect artifact target/xmlsquish/prompt.prompt", "title": "检查", "body": "无需重建即可追踪具体产物、输入与来源。" }
     ],
+    "quickstartLabel": "可执行快速开始",
+    "quickstartTitle": "创建、验证、构建、检查。",
+    "quickstartBody": "这个最小项目不需要 Git 仓库或网络依赖；请依次运行五条命令。",
     "featuresLabel": "项目管理，不是命令堆积",
     "featuresTitle": "编译器之外，是一个完整管理器。",
     "features": [
@@ -226,7 +235,10 @@ const zh: typeof en = {
     "binaryNote": "发布状态：候选。原生压缩包未签名、未经 Apple 公证；SHA-256 校验完整性，不证明发布者身份。",
     "sourceLabel": "即将可用",
     "sourceTitle": "安装 v1 源码候选版。",
-    "sourceBody": "需要 Rust 1.88 或更高版本。命令固定到 v1.0.0 标签，将在发布工作流创建该标签后生效；在此之前可直接构建当前发布分支。",
+    "sourceBody": "需要 Rust 1.88 或更高版本。现在可按不可变提交安装 v1 候选版；只有维护者创建并推送 v1.0.0 后，才能使用另一条标签安装命令。",
+    "candidateInstall": "不可变候选提交（标签创建前即可使用）",
+    "taggedInstall": "最终标签（维护者发布后使用）",
+    "publishOrder": "维护者必须先创建并推送 v1.0.0 标签，再运行验证既有标签并发布资产的 release workflow；该 workflow 不负责创建标签。",
     "github": "在 GitHub 跟踪 v1.0.0 发布",
     "migrationLabel": "从编译器时代的 CLI 迁移",
     "migrationTitle": "有意识地采用项目模型。",

@@ -7,7 +7,13 @@ const m = messages[locale].reference.release;
 const version = "1.0.0";
 const tag = `v${version}`;
 const repo = "https://github.com/kleedaisuki/prompt-squish";
-const install = `cargo install --git ${repo} --tag ${tag} --locked`;
+const candidateInstall = `cargo install --git ${repo} --rev 2eb5834b15d47717a7b45092a3b72bfa475f4c79 --locked`;
+const taggedInstall = `cargo install --git ${repo} --tag ${tag} --locked`;
+const quickstart = `xmlsquish new support --vcs=none
+cd support
+xmlsquish fmt --check
+xmlsquish build --offline
+xmlsquish inspect artifact target/xmlsquish/prompt.prompt --format=json`;
 /** Native archives mirror the release workflow matrix. / 原生安装包与发布工作流矩阵保持一致。 */
 const platforms = [
   { name: "Windows", note: m.platformNotes[0], targets: [["x64", "x86_64-pc-windows-msvc"], ["ARM64", "aarch64-pc-windows-msvc"]], ext: "zip" },
@@ -28,32 +34,25 @@ const structuredData = JSON.stringify({
   softwareVersion: version,
   isAccessibleForFree: true,
   license: "https://www.gnu.org/licenses/gpl-3.0.html",
-  codeRepository: repo,
+  sameAs: repo,
   releaseNotes: releaseUrl,
   inLanguage: locale,
-  additionalProperty: {
-    "@type": "PropertyValue",
-    name: "Release status",
-    value: "release candidate",
-  },
+  creativeWorkStatus: "release candidate",
 }).replaceAll("<", "\\u003c");
 ---
 <ReferenceLayout locale={locale} page="releases" title={m.title} description={m.description} product>
   <script is:inline slot="head" type="application/ld+json" set:html={structuredData}></script>
-  <article class="release" itemscope itemtype="https://schema.org/SoftwareApplication">
-    <meta itemprop="softwareVersion" content={version} />
+  <article class="release">
     <header class="hero">
-      <div><p class="eyebrow">xmlsquish {tag} · <time datetime="2026-09-15">{m.date}</time></p><h1 itemprop="name">{m.heroTitle}<em>{m.heroAccent}</em></h1><p class="lead" itemprop="description">{m.heroBody}</p><nav class="actions" aria-label={m.releaseActions}><a class="button primary" href="#install">{m.installCta}<span aria-hidden="true">↓</span></a><a class="button secondary" href="#journey">{m.exploreCta}</a></nav><p class="fine">{m.platformLine}</p></div>
+      <div><p class="eyebrow">xmlsquish {tag} · <time datetime="2026-09-15">{m.date}</time></p><h1>{m.heroTitle}<em>{m.heroAccent}</em></h1><p class="lead">{m.heroBody}</p><nav class="actions" aria-label={m.releaseActions}><a class="button primary" href="#install">{m.installCta}<span aria-hidden="true">↓</span></a><a class="button secondary" href="#journey">{m.exploreCta}</a></nav><p class="fine">{m.platformLine}</p></div>
       <figure class="product-map" aria-labelledby="product-map-title"><figcaption id="product-map-title">{m.pipelineTitle}</figcaption><ol>{m.pipeline.map((step, index) => <li><small>0{index + 1}</small><strong>{step.title}</strong><span>{step.body}</span></li>)}</ol></figure>
     </header>
     <section id="journey" class="section" aria-labelledby="journey-title"><p class="eyebrow">{m.journeyLabel}</p><h2 id="journey-title">{m.journeyTitle}</h2><p class="section-lead">{m.journeyBody}</p><ol class="command-journey">{m.journey.map((step, index) => <li><span>{String(index + 1).padStart(2, "0")}</span><code>xmlsquish {step.command}</code><h3>{step.title}</h3><p>{step.body}</p></li>)}</ol></section>
+    <section class="section split quickstart" aria-labelledby="quickstart-title"><div><p class="eyebrow">{m.quickstartLabel}</p><h2 id="quickstart-title">{m.quickstartTitle}</h2><p>{m.quickstartBody}</p></div><pre><code>{quickstart}</code></pre></section>
     <section class="section" aria-labelledby="features-title"><p class="eyebrow">{m.featuresLabel}</p><h2 id="features-title">{m.featuresTitle}</h2><div class="grid">{m.features.map(feature => <article><code>{feature.code}</code><h3>{feature.title}</h3><p>{feature.body}</p></article>)}</div></section>
     <section class="section split" aria-labelledby="output-title"><div><p class="eyebrow">{m.outputLabel}</p><h2 id="output-title">{m.outputTitle}</h2><p>{m.outputBody}</p></div><ul class="outputs">{m.outputs.map(output => <li><code>{output.name}</code><span>{output.body}</span></li>)}</ul></section>
     <section id="install" class="section" aria-labelledby="install-title"><p class="eyebrow">xmlsquish {tag}</p><h2 id="install-title">{m.downloadsTitle}</h2><p class="section-lead">{m.downloadsBody}</p><div class="download-grid">{platforms.map(platform => <article><h3>{platform.name}</h3><p>{platform.note}</p><div class="download-actions">{platform.targets.map(([label, target]) => <span class="button secondary pending" aria-disabled="true" title={`xmlsquish-${version}-${target}.${platform.ext}`}>{label}<small>{m.pending}</small></span>)}</div></article>)}</div><p><code>SHA256SUMS</code> · {m.checksums}</p><p class="fine">{m.binaryNote}</p></section>
-    <section class="section split" aria-labelledby="source-title"><div><p class="eyebrow">{m.sourceLabel}</p><h2 id="source-title">{m.sourceTitle}</h2><p>{m.sourceBody}</p><a href={`${repo}/actions/workflows/release.yml`}>{m.github} ↗</a></div><pre><code>{install}
-
-xmlsquish --version
-# xmlsquish {version}</code></pre></section>
+    <section class="section split" aria-labelledby="source-title"><div><p class="eyebrow">{m.sourceLabel}</p><h2 id="source-title">{m.sourceTitle}</h2><p>{m.sourceBody}</p><p class="fine">{m.publishOrder}</p><a href={`${repo}/actions/workflows/release.yml`}>{m.github} ↗</a></div><div class="install-commands"><h3>{m.candidateInstall}</h3><pre><code>{candidateInstall}</code></pre><h3>{m.taggedInstall}</h3><pre><code>{taggedInstall}</code></pre></div></section>
     <section class="section" aria-labelledby="migration-title"><p class="eyebrow">{m.migrationLabel}</p><h2 id="migration-title">{m.migrationTitle}</h2><p class="section-lead">{m.migrationBody}</p><div class="grid migration">{m.migrationRows.map(row => <article><h3>{row.title}</h3><p>{row.body}</p></article>)}</div></section>
     <aside class="boundary" aria-labelledby="boundary-title"><span aria-hidden="true">◌</span><div><h2 id="boundary-title">{m.boundaryTitle}</h2><p>{m.boundaryBody}</p></div></aside>
     <footer class="closing"><h2>{m.closeTitle}</h2><p>{m.closeBody}</p><a class="button primary" href="#install">{m.installCta}<span aria-hidden="true">↑</span></a></footer>
@@ -77,7 +76,7 @@ xmlsquish --version
   .section { padding-block:clamp(2.5rem,7vw,5rem) }.section h2,.closing h2,.boundary h2{margin:.5rem 0 1rem;font-size:clamp(1.9rem,4vw,3.1rem);line-height:1.1;letter-spacing:-.04em}
   .command-journey { display:grid;grid-template-columns:repeat(6,minmax(0,1fr));margin:2.5rem 0 0;padding:0;list-style:none;border:1px solid var(--xs-line);border-radius:var(--moe-radius-lg,1rem);overflow:hidden }.command-journey li{min-width:0;padding:1.15rem;border-right:1px solid var(--xs-line)}.command-journey li:last-child{border:0}.command-journey>li>span{color:var(--moe-accent-strong);font:.72rem ui-monospace,monospace}.command-journey code{display:block;margin-block:.65rem 1.5rem;overflow-wrap:anywhere;font-size:.73rem}.command-journey h3{font-size:1rem}.command-journey p{font-size:.82rem;line-height:1.55}
   .grid,.download-grid { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem;margin-top:2rem }.grid article,.download-grid article{padding:1.4rem;background:var(--card);border:1px solid var(--xs-line);border-radius:var(--moe-radius-md,.75rem)}.grid article>code{color:var(--moe-accent-strong);font-size:.75rem}.grid h3,.download-grid h3{margin-block:.75rem .4rem;font-size:1.18rem}.grid p,.download-grid p{margin-bottom:0;font-size:.9rem}
-  .split { display:grid;grid-template-columns:.8fr 1.2fr;gap:clamp(2rem,6vw,5rem);align-items:center }.outputs{margin:0;padding:0;list-style:none;border-block:1px solid var(--xs-line)}.outputs li{display:grid;grid-template-columns:7rem 1fr;gap:1rem;padding:1rem 0;border-bottom:1px solid var(--xs-line)}.outputs li:last-child{border:0}.split pre{margin:0;padding:1.4rem;color:var(--xs-code-text);background:var(--xs-code);border-radius:var(--moe-radius-md,.75rem);white-space:pre-wrap;overflow-wrap:anywhere}
+  .split { display:grid;grid-template-columns:.8fr 1.2fr;gap:clamp(2rem,6vw,5rem);align-items:center }.outputs{margin:0;padding:0;list-style:none;border-block:1px solid var(--xs-line)}.outputs li{display:grid;grid-template-columns:7rem 1fr;gap:1rem;padding:1rem 0;border-bottom:1px solid var(--xs-line)}.outputs li:last-child{border:0}.split pre{margin:0;padding:1.4rem;color:var(--xs-code-text);background:var(--xs-code);border-radius:var(--moe-radius-md,.75rem);white-space:pre-wrap;overflow-wrap:anywhere}.install-commands{min-width:0}.install-commands h3{margin:.9rem 0 .45rem;font-size:.9rem}.install-commands h3:first-child{margin-top:0}
   .boundary { display:grid;grid-template-columns:auto 1fr;gap:1.25rem;margin-block:2rem;padding:1.5rem;background:var(--xs-glow);border-left:.3rem solid var(--moe-accent-strong);border-radius:0 var(--moe-radius-md,.75rem) var(--moe-radius-md,.75rem) 0 }.boundary>span{color:var(--moe-accent-strong);font-size:2rem}.boundary h2{font-size:1.35rem}.boundary p{margin:0}.closing{padding-block:4rem 6rem;text-align:center}.closing p{max-width:40rem;margin:1rem auto 1.5rem}
   @media(max-width:900px){.hero,.split{grid-template-columns:1fr}.command-journey{grid-template-columns:repeat(3,1fr)}.command-journey li:nth-child(3){border-right:0}.command-journey li:nth-child(-n+3){border-bottom:1px solid var(--xs-line)}}
   @media(max-width:640px){.hero{padding-block:2.5rem}.command-journey,.grid,.download-grid{grid-template-columns:1fr}.command-journey li{border-right:0;border-bottom:1px solid var(--xs-line)}.outputs li{grid-template-columns:1fr;gap:.25rem}}
