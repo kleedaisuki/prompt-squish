@@ -166,7 +166,7 @@ and run 34968311247; it does not inherit acceptance from the earlier milestone.
 | Real process death at the supported durable boundaries converges without manual repair | **Satisfied** | `17a08b8`; 6/6 composed recovery-process tests passed locally and the all-feature workspace suite passed in all three remote Rust-test jobs |
 | Strict MSRV Clippy passes | **Satisfied** | `5f52c25`, `911304b`; the strict Rust 1.88 job passed remotely in run 34955324426 |
 | The committed workflow passes on supported GitHub-hosted desktops | **Satisfied** | [Run 34968311247](https://github.com/kleedaisuki/prompt-squish/actions/runs/34968311247) passed all five jobs at exact six-command snapshot `92b2a03` |
-| `new` creates the canonical project and optional workspace membership through the manager transaction | **Satisfied on supported desktops** | ADR 0010; 32 root process tests, 8 process-death recovery tests, and all five jobs in run 34968311247 passed at exact snapshot `92b2a03` |
+| `new` creates the canonical project and optional workspace membership through the manager transaction | **Satisfied on supported desktops** | ADR 0010; the 32-test root process suite includes `new` acceptance coverage, and two functions in the 8-test recovery suite exercise four `new` process-death boundary scenarios; all five jobs in run 34968311247 passed at exact snapshot `92b2a03` |
 
 ## 7. Evidence Discipline
 
@@ -203,7 +203,7 @@ This distinction prevents a design document, a green unit test, or an agent comp
 | `build` and reusable products | **Accepted on supported desktops** | Compile/link/instantiate/backend/publish/catalogue actions; default prompt; persistent cache; representative semantic `.psdbg` traceability (`c616fef`, `d5a7ea0`); workspace tests and composed smoke passed in run 34955324426 |
 | `add` / `remove` | **Accepted on supported desktops** | Coherent manifest/lock transaction, dry run, removal references, contention/replan, and root process round trip; the full workspace suite passed on all three hosted operating systems |
 | `inspect` | **Accepted on supported desktops** | Typed `ir`, `link`, `source`, `cache`, and `artifact` views; protocol-level artifact selectors; CAS/provenance validation; Windows path equivalence; quiet closed-pipe handling; workspace tests and composed JSON-link smoke passed in run 34955324426 |
-| `new` | **Accepted on supported desktops** | Canonical scaffold, prospective bootstrap, VCS/workspace transaction, no-replace publication, cancellation, and recovery are covered by 32 root process tests and 8 process-death tests; the exact snapshot passed all five jobs in run 34968311247 |
+| `new` | **Accepted on supported desktops** | Canonical scaffold, prospective bootstrap, VCS/workspace transaction, no-replace publication, cancellation, and recovery have coverage within the 32-test root process suite; two functions in the 8-test recovery suite exercise four `new` process-death boundary scenarios; the exact snapshot passed all five jobs in run 34968311247 |
 | Git packages | **Accepted on supported desktops** | Exact locked package-root return, owned materialization handle, documented child-process lifecycle, and platform-specific fixture cleanup (`8342d91`, `8455269`, `911304b`); workspace tests passed on Linux/macOS/Windows |
 | Storage and recovery mechanisms | **Accepted on supported desktops** | Verified CAS/action catalogues, EFS and long-path handling, per-project namespace, recoverable journals, Unix Rust 1.88 CAS portability, and 6/6 real child-death recovery cases (`3b77843`, `126e27d`, `628ee9a`, `17a08b8`, `a3d6d23`); the all-feature workspace suite passed remotely on all three operating systems |
 | Authenticated registries | **Accepted at component/composition scope** | Scoped environment lookup, redirect re-scoping, redaction, distinct missing/rejected outcomes, actionable variable names (`df5a8d8`, `a177c78`); their committed suites passed remotely on all three operating systems (the workflow does not contact a live authenticated registry) |
@@ -238,8 +238,8 @@ recorded in the next section rather than inferred from this Windows run.
 | Gate | Local Windows result |
 |---|---|
 | Rust 1.88 workspace tests, all targets and all features | **Passed: 505 tests, 0 failed** |
-| Root `new` process suite | **Passed: 32 tests** |
-| Fault-injected process-death recovery suite | **Passed: 8/8** |
+| Root process suite, including `new` acceptance | **Passed: 32/32** |
+| Fault-injected process-death recovery suite | **Passed: 8/8 overall; two `new` test functions cover four death-boundary scenarios** |
 | Rust 1.88 formatting, check, and strict Clippy | **Passed** |
 | Locked release build and default-binary fault-selector scan | **Passed; 0/9 test selector literals present** |
 | Composed CI smoke and fresh `new --vcs none` project `fmt`/offline `build` | **Passed** |
@@ -317,8 +317,9 @@ desktop scope tested at its accepted snapshot**. Exact production snapshot
 five-command evidence to `b870c84` and run 34955324426.
 
 This conclusion is deliberately narrower than a universal durability claim.
-The eight `new` recovery cases prove convergence after controlled process death
-at the instrumented commit boundaries. They do **not** prove Windows sudden
+Within the eight-test recovery suite, two `new` test functions exercise four
+instrumented process-death boundary scenarios and demonstrate convergence. They
+do **not** prove Windows sudden
 power-loss durability, storage-controller persistence, or behavior on every
 remote or otherwise unsupported filesystem. Native exclusive rename and
 journal guarantees remain conditional on the supported host/filesystem
