@@ -278,7 +278,7 @@ for (const [path, locale, kind] of [
         );
         assert.equal(await page.locator('.actions .primary[href="#install"]').count(), 1);
 
-        // Candidate assets are labels, not deceptive links. / 候选资产只是标签，不伪装成下载链接。
+        // Published assets are exact release-contract links. / 正式资产必须精确匹配发布合同链接。
         const expectedAssets = [
           "xmlsquish-1.0.0-x86_64-pc-windows-msvc.zip",
           "xmlsquish-1.0.0-aarch64-pc-windows-msvc.zip",
@@ -287,21 +287,17 @@ for (const [path, locale, kind] of [
           "xmlsquish-1.0.0-x86_64-apple-darwin.tar.gz",
           "xmlsquish-1.0.0-aarch64-apple-darwin.tar.gz",
         ];
-        const pending = page.locator('.download-actions [aria-disabled="true"]');
-        assert.equal(await pending.count(), 6);
-        assert.deepEqual(await pending.evaluateAll(nodes => nodes.map(node => node.title)), expectedAssets);
-        assert.equal(await page.locator('a[href*="/releases/download/v1.0.0/"]').count(), 0);
-        assert.equal(await page.locator('a[href$="SHA256SUMS"]').count(), 0);
-
-        const candidateInstall = "cargo install --git https://github.com/kleedaisuki/prompt-squish --rev 2eb5834b15d47717a7b45092a3b72bfa475f4c79 --locked";
-        const taggedInstall = "cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v1.0.0 --locked";
+        const downloadBase = "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.0.0/";
         assert.deepEqual(
-          await page.locator(".install-commands pre code").allTextContents(),
-          [candidateInstall, taggedInstall],
+          await page.locator(".download-actions a[download]").evaluateAll(links => links.map(link => link.href)),
+          expectedAssets.map(asset => downloadBase + asset),
         );
-        assert(text.includes(locale === "en"
-          ? "create and push the v1.0.0 tag first, then run the release workflow"
-          : "先创建并推送 v1.0.0 标签，再运行验证既有标签并发布资产的 release workflow"));
+        assert.equal(await page.locator('.download-actions [aria-disabled="true"]').count(), 0);
+        assert.equal(await page.locator('a[href$="SHA256SUMS"]').getAttribute("href"), downloadBase + "SHA256SUMS");
+
+        const taggedInstall = "cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v1.0.0 --locked";
+        assert.equal(await page.locator('#source-title').locator("xpath=../following-sibling::pre/code").textContent(), taggedInstall);
+        assert(!text.includes("--rev"));
 
         assert.deepEqual(
           (await page.locator(".quickstart pre code").textContent()).split("\n"),
@@ -323,9 +319,10 @@ for (const [path, locale, kind] of [
         const application = JSON.parse(jsonLd[0]);
         assert.equal(application["@type"], "SoftwareApplication");
         assert.equal(application.softwareVersion, "1.0.0");
-        assert.equal(application.creativeWorkStatus, "release candidate");
+        assert.equal(application.creativeWorkStatus, "Published");
         assert.equal(application.sameAs, "https://github.com/kleedaisuki/prompt-squish");
-        for (const dishonestClaim of ["downloadUrl", "aggregateRating", "rating", "review", "offers", "codeRepository", "additionalProperty"])
+        assert.equal(application.downloadUrl, "https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.0");
+        for (const dishonestClaim of ["aggregateRating", "rating", "review", "offers", "codeRepository", "additionalProperty"])
           assert.equal(dishonestClaim in application, false, dishonestClaim);
         assert.equal(await page.locator("[itemscope], [itemprop]").count(), 0,
           "release page must not duplicate JSON-LD with partial microdata");
@@ -365,15 +362,19 @@ for (const locale of ["zh-CN", "en"]) {
   }
 }
 
-test("release discovery files expose prepared, machine-readable v1 state", async () => {
+test("release discovery files expose published, machine-readable v1 state", async () => {
   const metadata = JSON.parse(await readFile(join(root, "releases/1.0.0.json"), "utf8"));
   assert.equal(metadata.schemaVersion, 1);
   assert.equal(metadata.release.version, "1.0.0");
   assert.equal(metadata.release.tag, "v1.0.0");
-  assert.equal(metadata.release.releaseStatus, "prepared");
+  assert.equal(metadata.release.releaseStatus, "published");
+  assert.equal(metadata.release.githubRelease, "https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.0");
+  assert.equal(metadata.release.checksums, "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.0.0/SHA256SUMS");
   assert.deepEqual(metadata.cli.commands, ["new", "fmt", "build", "add", "remove", "inspect"]);
+  assert.equal(metadata.cli.sourceInstall,
+    "cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v1.0.0 --locked");
   assert.equal(metadata.artifacts.length, 6);
-  assert(metadata.artifacts.every(asset => asset.intendedUrl.includes("/releases/download/v1.0.0/")));
+  assert(metadata.artifacts.every(asset => asset.url.includes("/releases/download/v1.0.0/")));
 
   const robots = await readFile(join(root, "robots.txt"), "utf8");
   assert.match(robots, /^User-agent: \*$/m);
@@ -387,8 +388,9 @@ test("release discovery files expose prepared, machine-readable v1 state", async
 
   const llms = await readFile(join(root, "llms.txt"), "utf8");
   assert(llms.includes("/releases/1.0.0.json"));
-  assert(llms.includes("releaseStatus"));
-  assert(llms.includes("Prepared asset URLs may not exist"));
+  assert(llms.includes("Stable JSON contract for the published v1.0.0 release"));
+  assert(llms.includes("v1.0.0 is published under the immutable `v1.0.0` Git tag"));
+  assert(!llms.includes("Prepared asset URLs may not exist"));
   for (const command of metadata.cli.commands) assert(llms.includes(`\`${command}\``));
 });
 
