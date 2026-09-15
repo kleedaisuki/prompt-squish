@@ -971,67 +971,67 @@ availability.
 
 ### 13.2 Archives and content identity
 
-10. **Archive byte digest:** one flipped compressed byte cannot enter the CAS as
+15. **Archive byte digest:** one flipped compressed byte cannot enter the CAS as
     the expected archive.
-11. **Size and expansion bounds:** short/long transport length, excessive
+16. **Size and expansion bounds:** short/long transport length, excessive
     expanded bytes, too many files, and excessive per-file size fail while
     leaving no complete marker.
-12. **Same tree, different archive:** two valid gzip/tar encodings have different
+17. **Same tree, different archive:** two valid gzip/tar encodings have different
     archive digests but the same content digest.
-13. **Non-files:** symlink, hard link, device, FIFO, sparse member, duplicate
+18. **Non-files:** symlink, hard link, device, FIFO, sparse member, duplicate
     member, second root, absolute path, and escaping path are rejected.
-14. **Exact bytes:** CRLF, LF, UTF-8 BOM, and non-ASCII source bytes materialize
+19. **Exact bytes:** CRLF, LF, UTF-8 BOM, and non-ASCII source bytes materialize
     byte-for-byte; no newline conversion occurs.
 
 ### 13.3 Git
 
-15. **Branch movement:** resolve branch to commit A and lock it; move branch to
+20. **Branch movement:** resolve branch to commit A and lock it; move branch to
     B; normal build with current lock still uses A; explicit update selects B.
-16. **Annotated/lightweight tags:** both peel to commits and record full commit,
+21. **Annotated/lightweight tags:** both peel to commits and record full commit,
     root-tree, and package-tree OIDs.
-17. **Object formats:** SHA-1 and, when supported by the test Git, SHA-256 repos
+22. **Object formats:** SHA-1 and, when supported by the test Git, SHA-256 repos
     round-trip algorithm-tagged full OIDs without assuming 40 hex digits.
-18. **Wrong object type:** a `rev` naming a blob/tree instead of a commit is
+23. **Wrong object type:** a `rev` naming a blob/tree instead of a commit is
     rejected before materialization.
-19. **Explicit subdir:** root and monorepo subdir resolve to the expected distinct
+24. **Explicit subdir:** root and monorepo subdir resolve to the expected distinct
     package-tree OIDs; missing manifest or subdir is precise.
-20. **No checkout transforms:** configured autocrlf and a smudge filter do not
+25. **No checkout transforms:** configured autocrlf and a smudge filter do not
     change materialized blob bytes and the filter is never invoked.
-21. **Git special modes:** executable blobs become ordinary semantic files;
+26. **Git special modes:** executable blobs become ordinary semantic files;
     symlinks and gitlinks are rejected with the exact logical path.
-22. **Unavailable full rev:** a remote refusing an unadvertised exact OID does
+27. **Unavailable full rev:** a remote refusing an unadvertised exact OID does
     not trigger a fetch of all refs and reports `RevisionNotFetchable`.
 
 ### 13.4 Offline, atomicity, paths, and events
 
-23. **Zero-network offline:** a transport that panics on any DNS/socket/fetch
+28. **Zero-network offline:** a transport that panics on any DNS/socket/fetch
     call still completes an offline cached build and produces no network event.
-24. **Frozen completeness:** cached metadata or archive alone is insufficient;
+29. **Frozen completeness:** cached metadata or archive alone is insufficient;
     a complete locally rematerializable archive/Git tree succeeds, while a
     missing blob is listed in one `FrozenContentMissing` diagnostic.
-25. **Fetch guarantee:** after `fetch --locked` succeeds, `build --frozen` with a
+30. **Fetch guarantee:** after `fetch --locked` succeeds, `build --frozen` with a
     disabled network succeeds for the same lock.
-26. **Interrupted stage:** termination before marker/rename leaves the previous
+31. **Interrupted stage:** termination before marker/rename leaves the previous
     complete tree visible; the next invocation cleans the stale stage and
     reconstructs without user repair.
-27. **Concurrent writers:** N processes materializing one content digest converge
+32. **Concurrent writers:** N processes materializing one content digest converge
     on one verified directory; losers verify the winner and report wait/reuse.
-28. **Cache fault recovery:** modify a cached file/marker; online and locally
+33. **Cache fault recovery:** modify a cached file/marker; online and locally
     reconstructible offline modes recover automatically and emit exactly one
     fault-recovery fact.
-29. **Portable collisions:** case-only, NFC/NFD-equivalent, Windows device,
+34. **Portable collisions:** case-only, NFC/NFD-equivalent, Windows device,
     trailing-dot, colon, backslash, and reserved-marker paths fail identically
     on Windows and Linux test runners.
-30. **Relocation invariance:** moving the cache root changes only physical
+35. **Relocation invariance:** moving the cache root changes only physical
     locators; `PackageInstanceId`, `SourceId`, action keys, IR, and final product
     bytes remain identical.
-31. **Event redaction:** a URL containing test credentials/query secrets and a
+36. **Event redaction:** a URL containing test credentials/query secrets and a
     credential-bearing HTTP exchange yields useful request/retry metrics with
     none of those secret strings in NDJSON or human diagnostics.
-32. **Deterministic event facts:** varied response timing/concurrent completion
+37. **Deterministic event facts:** varied response timing/concurrent completion
     changes timestamps and progress ordering only; final source facts and
     report counts remain stably ordered by action/source identity.
-33. **Lock-v1 compatibility:** registry and Git v1 fixtures remain readable;
+38. **Lock-v1 compatibility:** registry and Git v1 fixtures remain readable;
     normal verified migration writes v2, `--locked` does not mutate, and frozen
     reports the precise missing enrichment rather than a generic parse error.
 
