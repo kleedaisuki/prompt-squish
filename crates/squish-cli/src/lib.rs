@@ -41,9 +41,9 @@ use clap::{
 use squish_protocol::{
     AddRequest, ArgumentName, ArtifactId, BuildRequest, DependencyKind, DependencyName,
     DependencySource, EmitKind, FeatureName, FormatRequest, FormatSelection, GitBranch,
-    GitReference, GitRevision, GitTag, InspectRequest, InspectView, LockMode, NewRequest,
-    OpaqueSourceId, OperationRequest, PackageName, ProfileName, ProjectDestination, ProjectPath,
-    RegistryName, RemoveRequest, RepositoryUrl, StyleEdition, TargetName, VcsChoice,
+    GitReference, GitRevision, GitTag, InspectRequest, InspectView, LockMode, NewPackageName,
+    NewRequest, OpaqueSourceId, OperationRequest, PackageName, ProfileName, ProjectDestination,
+    ProjectPath, RegistryName, RemoveRequest, RepositoryUrl, StyleEdition, TargetName, VcsChoice,
     VersionRequirement, WorkspaceScope,
 };
 
@@ -658,7 +658,7 @@ fn new_invocation(
 ) -> Result<ParsedInvocation, clap::Error> {
     let name = args
         .name
-        .map(|value| package_name(value, "package name"))
+        .map(|value| new_package_name(value, "package name"))
         .transpose()?;
     let vcs = args.vcs.map(|vcs| match vcs {
         VcsArg::Git => VcsChoice::Git,
@@ -1123,8 +1123,8 @@ where
     constructor(value).map_err(|_| usage(format!("{label} must not be empty")))
 }
 
-fn package_name(value: String, label: &str) -> Result<PackageName, clap::Error> {
-    PackageName::new(value).map_err(|error| usage(format!("invalid {label}: {error}")))
+fn new_package_name(value: String, label: &str) -> Result<NewPackageName, clap::Error> {
+    NewPackageName::new(value).map_err(|error| usage(format!("invalid {label}: {error}")))
 }
 
 fn require_nonempty(value: &str, label: &str) -> Result<(), clap::Error> {

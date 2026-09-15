@@ -122,6 +122,7 @@ string_id!(
 );
 string_id!(TargetName, "项目目标名。 / Project target name.");
 string_id!(DependencyName, "依赖别名。 / Dependency alias.");
+string_id!(PackageName, "工作区包名。 / Workspace package name.");
 string_id!(ProfileName, "构建配置名。 / Build profile name.");
 string_id!(ArgumentName, "入口参数名。 / Entry argument name.");
 string_id!(FeatureName, "依赖特性名。 / Dependency feature name.");
@@ -136,11 +137,11 @@ string_id!(GitBranch, "Git 分支名。 / Git branch name.");
 string_id!(GitTag, "Git 标签名。 / Git tag name.");
 string_id!(StyleEdition, "格式样式版本。 / Formatting style edition.");
 
-/// 非法包名。 / Invalid package name.
+/// 非法新项目包名。 / Invalid new-project package name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct InvalidPackageName;
+pub struct InvalidNewPackageName;
 
-impl fmt::Display for InvalidPackageName {
+impl fmt::Display for InvalidNewPackageName {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(
             "package name must be a non-empty sequence of ASCII letters, digits, '-' or '_'",
@@ -148,24 +149,24 @@ impl fmt::Display for InvalidPackageName {
     }
 }
 
-impl std::error::Error for InvalidPackageName {}
+impl std::error::Error for InvalidNewPackageName {}
 
-/// 清单与创建操作共享的已验证包名。 / Validated package name shared by manifests and project creation.
+/// 项目创建与清单共享的严格包名。 / Strict package name shared by project creation and manifests.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct PackageName(String);
+pub struct NewPackageName(String);
 
-impl PackageName {
+impl NewPackageName {
     /// 按唯一的清单包名语法验证文本。 / Validates text using the single manifest package-name grammar.
-    pub fn new(value: impl Into<String>) -> Result<Self, InvalidPackageName> {
+    pub fn new(value: impl Into<String>) -> Result<Self, InvalidNewPackageName> {
         let value = value.into();
-        validate_package_name(&value)?;
+        validate_new_package_name(&value)?;
         Ok(Self(value))
     }
 
     /// 判断文本是否符合共享文法。 / Tests text against the shared grammar.
     pub fn is_valid(value: &str) -> bool {
-        validate_package_name(value).is_ok()
+        validate_new_package_name(value).is_ok()
     }
 
     /// 返回已验证的包名。 / Returns the validated package name.
@@ -180,7 +181,7 @@ impl PackageName {
 }
 
 /// 按清单与协议共享的唯一文法验证包名。 / Validates a package name using the single grammar shared by manifests and protocol requests.
-pub fn validate_package_name(value: &str) -> Result<(), InvalidPackageName> {
+pub fn validate_new_package_name(value: &str) -> Result<(), InvalidNewPackageName> {
     if !value.is_empty()
         && value
             .bytes()
@@ -188,34 +189,34 @@ pub fn validate_package_name(value: &str) -> Result<(), InvalidPackageName> {
     {
         Ok(())
     } else {
-        Err(InvalidPackageName)
+        Err(InvalidNewPackageName)
     }
 }
 
-impl fmt::Display for PackageName {
+impl fmt::Display for NewPackageName {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
     }
 }
 
-impl TryFrom<String> for PackageName {
-    type Error = InvalidPackageName;
+impl TryFrom<String> for NewPackageName {
+    type Error = InvalidNewPackageName;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Self::new(value)
     }
 }
 
-impl TryFrom<&str> for PackageName {
-    type Error = InvalidPackageName;
+impl TryFrom<&str> for NewPackageName {
+    type Error = InvalidNewPackageName;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         Self::new(value)
     }
 }
 
-impl From<PackageName> for String {
-    fn from(value: PackageName) -> Self {
+impl From<NewPackageName> for String {
+    fn from(value: NewPackageName) -> Self {
         value.0
     }
 }
@@ -334,7 +335,11 @@ impl ProjectFilePath {
     /// 验证规范的相对文件路径。 / Validates a normalized relative file path.
     pub fn new(value: impl Into<String>) -> Result<Self, InvalidProjectFilePath> {
         let value = value.into();
+        let bytes = value.as_bytes();
+        let windows_drive_prefixed =
+            bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
         let normalized = !value.is_empty()
+            && !windows_drive_prefixed
             && !value.contains('\\')
             && !value.contains('\0')
             && value
@@ -484,7 +489,7 @@ pub struct NewRequest {
     /// 用户提供且尚未存在的目标。 / User-provided destination that does not yet exist.
     pub destination: ProjectDestination,
     /// 显式、已验证的包名；空值要求管理器从目标叶名推断。 / Explicit validated package name; absence asks the manager to infer from the destination leaf.
-    pub name: Option<PackageName>,
+    pub name: Option<NewPackageName>,
     /// 显式 VCS 策略；空值让配置决定，并最终默认 Git。 / Explicit VCS policy; absence defers to configuration and ultimately defaults to Git.
     pub vcs: Option<VcsChoice>,
 }
@@ -1166,7 +1171,7 @@ pub struct VcsResult {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NewResult {
     /// 最终包身份。 / Final package identity.
-    pub package: PackageName,
+    pub package: NewPackageName,
     /// 创建后的绝对目标路径。 / Absolute destination path after creation.
     pub path: ProjectDestination,
     /// 创建后的绝对包清单路径。 / Absolute package manifest path after creation.
@@ -2518,16 +2523,27 @@ mod tests {
     }
 
     #[test]
-    fn package_name_has_one_strict_wire_and_constructor_grammar() {
-        for valid in ["a", "Prompt_2", "prompt-common"] {
-            let name = PackageName::new(valid).unwrap();
+    fn existing_package_name_retains_v2_0_nonempty_identifier_contract() {
+        for accepted in ["a", "prompt.common", "has space", "café", "slash/name"] {
+            let name = PackageName::new(accepted).unwrap();
             let json = serde_json::to_string(&name).unwrap();
             assert_eq!(serde_json::from_str::<PackageName>(&json).unwrap(), name);
         }
+        assert!(PackageName::new("").is_err());
+        assert!(serde_json::from_str::<PackageName>(r#"""#).is_err());
+    }
+
+    #[test]
+    fn new_package_name_has_strict_wire_and_constructor_grammar() {
+        for valid in ["a", "Prompt_2", "prompt-common"] {
+            let name = NewPackageName::new(valid).unwrap();
+            let json = serde_json::to_string(&name).unwrap();
+            assert_eq!(serde_json::from_str::<NewPackageName>(&json).unwrap(), name);
+        }
         for invalid in ["", "prompt.common", "has space", "café", "slash/name"] {
-            assert!(PackageName::new(invalid).is_err(), "{invalid:?}");
+            assert!(NewPackageName::new(invalid).is_err(), "{invalid:?}");
             assert!(
-                serde_json::from_value::<PackageName>(serde_json::json!(invalid)).is_err(),
+                serde_json::from_value::<NewPackageName>(serde_json::json!(invalid)).is_err(),
                 "{invalid:?}"
             );
         }
@@ -2546,6 +2562,9 @@ mod tests {
             "./file",
             "src\\file",
             "src/",
+            "C:/absolute",
+            "C:drive-relative",
+            "z:",
         ] {
             assert!(ProjectFilePath::new(invalid).is_err(), "{invalid:?}");
         }
@@ -2555,7 +2574,7 @@ mod tests {
     fn new_request_and_result_round_trip_with_truthful_identity_matching() {
         let request = OperationRequest::New(NewRequest {
             destination: ProjectDestination::new("relative/support"),
-            name: Some(PackageName::new("support").unwrap()),
+            name: Some(NewPackageName::new("support").unwrap()),
             vcs: Some(VcsChoice::Git),
         });
         assert_eq!(request.kind(), OperationKind::New);
@@ -2571,7 +2590,7 @@ mod tests {
         );
 
         let result = OperationResult::New(NewResult {
-            package: PackageName::new("support").unwrap(),
+            package: NewPackageName::new("support").unwrap(),
             path: ProjectDestination::new("/absolute/support"),
             manifest: ProjectDestination::new("/absolute/support/xmlsquish.toml"),
             target: TargetName::new("prompt").unwrap(),
@@ -2597,7 +2616,7 @@ mod tests {
 
         let wrong_vcs = OperationRequest::New(NewRequest {
             destination: ProjectDestination::new("relative/support"),
-            name: Some(PackageName::new("support").unwrap()),
+            name: Some(NewPackageName::new("support").unwrap()),
             vcs: Some(VcsChoice::None),
         });
         assert!(!result.matches_request(&wrong_vcs));
