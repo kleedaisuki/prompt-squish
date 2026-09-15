@@ -1524,6 +1524,14 @@ pub enum SupersedeReason {
     AuthoritativeRevisionChanged,
 }
 
+/// 取消必须延迟到权威动作提交完成的封闭原因。 / Closed reason why cancellation must be deferred until an authoritative action commit completes.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancellationDeferralReason {
+    /// 动作已越过不可逆的持久提交决定。 / The action crossed an irreversible durable commit decision.
+    IrreversibleCommit,
+}
+
 /// 不可变计划关闭的封闭原因。 / Closed reason for closing an immutable plan.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1695,6 +1703,22 @@ pub enum EventPayload {
         #[serde(default)]
         outputs: Vec<Artifact>,
     },
+    /// 动作越过提交决定后，将已请求的取消延迟到动作成功终态。 / Defers requested cancellation to the successful action terminal state after crossing its commit decision.
+    ///
+    /// 该事件仅在动作处于运行态时有效，并且必须紧邻相同动作的
+    /// [`EventPayload::ActionSucceeded`] 或 [`EventPayload::ActionFailed`] 之前发出。 / This
+    /// event is valid only while the action is running and must be emitted immediately before
+    /// [`EventPayload::ActionSucceeded`] or [`EventPayload::ActionFailed`] for the same action.
+    CancellationDeferred {
+        /// 作业。 / Job.
+        job: JobId,
+        /// 不可变计划。 / Immutable plan.
+        plan: PlanId,
+        /// 已越过持久提交决定的动作。 / Action that crossed its durable commit decision.
+        action: ActionId,
+        /// 延迟取消的封闭原因。 / Closed reason for deferring cancellation.
+        reason: CancellationDeferralReason,
+    },
     /// 动作成功。 / Action succeeded.
     ActionSucceeded {
         /// 作业。 / Job.
@@ -1841,6 +1865,14 @@ impl Event {
 
     /// 验证单事件的局部规范不变式。 / Validates local canonical invariants of one event.
     pub fn validate(&self) -> Result<(), EventValidationError> {
+        if matches!(self.payload, EventPayload::CancellationDeferred { .. })
+            && (self.version.major != 2 || self.version.minor < 1)
+        {
+            return Err(EventValidationError::EventRequiresProtocolMinor {
+                required: 1,
+                received: self.version.minor,
+            });
+        }
         validate_payload(&self.payload)
     }
 
@@ -1908,6 +1940,13 @@ impl std::error::Error for EncodeError {}
 /// 单事件层面的规范验证错误。 / Canonical validation error visible within one event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EventValidationError {
+    /// 事件类型晚于信封声明的协议次版本。 / Event kind was introduced after the envelope's declared protocol minor.
+    EventRequiresProtocolMinor {
+        /// 该事件所需的最小次版本。 / Minimum minor required by the event.
+        required: u16,
+        /// 信封声明的次版本。 / Minor declared by the envelope.
+        received: u16,
+    },
     /// 列表不是严格递增的唯一集合。 / A list is not a strictly increasing unique set.
     NonCanonicalSet,
     /// 动作将自身声明为依赖或阻塞者。 / An action names itself as a dependency or blocker.
@@ -1922,6 +1961,10 @@ pub enum EventValidationError {
 impl fmt::Display for EventValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::EventRequiresProtocolMinor { required, received } => write!(
+                f,
+                "event requires protocol minor {required}, but envelope declares {received}"
+            ),
             Self::NonCanonicalSet => f.write_str("event set must be unique and in canonical order"),
             Self::SelfReference => f.write_str("action must not refer to itself"),
             Self::LegacyProjection => {
@@ -2029,6 +2072,7 @@ fn known_event(value: &str, major: u16) -> bool {
             | "action_declared"
             | "action_started"
             | "cache_hit"
+            | "cancellation_deferred"
             | "action_succeeded"
             | "action_failed"
             | "action_blocked"
@@ -2190,6 +2234,46 @@ mod tests {
             Event::decode_json(&event.encode_json().unwrap()).unwrap(),
             DecodedEvent::Known(Box::new(event))
         );
+    }
+    #[test]
+    fn cancellation_deferred_is_a_native_v2_1_typed_event() {
+        let event = Event::new(
+            InvocationId::new("i").unwrap(),
+            3,
+            EventPayload::CancellationDeferred {
+                job: JobId::new("j").unwrap(),
+                plan: PlanId::new("p").unwrap(),
+                action: ActionId::new("create-project").unwrap(),
+                reason: CancellationDeferralReason::IrreversibleCommit,
+            },
+        );
+        let encoded = event.encode_json().unwrap();
+        let json = std::str::from_utf8(&encoded).unwrap();
+        assert!(json.contains(r#""type":"cancellation_deferred""#));
+        assert!(json.contains(r#""reason":"irreversible_commit""#));
+        assert_eq!(
+            Event::decode_json(&encoded).unwrap(),
+            DecodedEvent::Known(Box::new(event.clone()))
+        );
+
+        let mut mislabeled = event;
+        mislabeled.version = ProtocolVersion::new(2, 0);
+        assert_eq!(
+            mislabeled.validate(),
+            Err(EventValidationError::EventRequiresProtocolMinor {
+                required: 1,
+                received: 0,
+            })
+        );
+        assert!(matches!(
+            Event::decode_json(&serde_json::to_vec(&mislabeled).unwrap()),
+            Err(DecodeError::InvalidEvent(
+                EventValidationError::EventRequiresProtocolMinor {
+                    required: 1,
+                    received: 0
+                }
+            ))
+        ));
     }
     #[test]
     fn legacy_v1_plan_and_queue_project_to_one_marked_inspection_plan() {
