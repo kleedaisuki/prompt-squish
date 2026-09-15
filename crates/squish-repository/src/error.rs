@@ -14,6 +14,15 @@ pub enum RepositoryError {
     /// 项目创建在不可逆发布前被取消。 / Project creation was cancelled before irreversible publication.
     #[error("project creation cancelled before publication: {0}")]
     CreationCancelled(PathBuf),
+    /// 平台未能证明排他发布失败发生在移动之前。 / The platform could not prove that an exclusive-publication error preceded the move.
+    #[error("project publication outcome is unknown at {destination}: {source}")]
+    PublicationOutcomeUnknown {
+        /// 请求的项目目标。 / Requested project destination.
+        destination: PathBuf,
+        /// 平台发布错误。 / Platform publication error.
+        #[source]
+        source: io::Error,
+    },
     /// 项目目录已不可逆发布，但提交后收尾尚需恢复。 / The project directory was irreversibly published but post-commit completion still needs recovery.
     #[error("project creation committed at {destination}, but completion failed: {source}")]
     CreationCommitted {

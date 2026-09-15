@@ -51,6 +51,7 @@ pub enum ProjectVcs {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceMembership {
     /// 包含 `xmlsquish.toml` 的规范工作区根。 / Canonical workspace root containing `xmlsquish.toml`.
+    #[serde(with = "native_path_serde")]
     pub root: PathBuf,
     /// 使用 `/` 语义的工作区相对成员路径。 / Workspace-relative member path with `/` semantics.
     pub member: String,
@@ -169,10 +170,29 @@ impl StagePreparer for NoStagePreparation {
     }
 }
 
+/// 目录发布的原子、不覆盖平台原语。 / Atomic, no-overwrite platform primitive for directory publication.
+pub trait DirectoryPublisher {
+    /// 把 `source` 原子移动到尚不存在的 `destination`。 / Atomically moves `source` to a non-existing `destination`.
+    ///
+    /// An error may be outcome-unknown on remote filesystems. The repository reconciles its
+    /// durable marker and both paths rather than assuming the move did not happen.
+    fn publish_exclusive(&self, source: &Path, destination: &Path) -> io::Result<()>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PlatformDirectoryPublisher;
+
+impl DirectoryPublisher for PlatformDirectoryPublisher {
+    fn publish_exclusive(&self, source: &Path, destination: &Path) -> io::Result<()> {
+        fs::rename(source, destination)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum Phase {
     Prepared,
+    Publishing,
     Published,
     WorkspaceReplaced,
     Completed,
@@ -183,9 +203,13 @@ enum Phase {
 struct Journal {
     version: u32,
     phase: Phase,
+    #[serde(with = "native_path_serde")]
     destination: PathBuf,
+    #[serde(with = "native_path_serde")]
     publish_path: PathBuf,
+    #[serde(with = "native_path_serde")]
     stage_root: PathBuf,
+    #[serde(with = "native_path_serde")]
     missing_tail: PathBuf,
     marker_name: String,
     workspace: Option<WorkspaceMembership>,
@@ -208,6 +232,17 @@ pub fn create_project(
     request: &CreateProjectRequest,
     preparer: &dyn StagePreparer,
     faults: &dyn FaultInjector,
+) -> Result<CreatedProject, RepositoryError> {
+    create_project_with_publisher(request, preparer, faults, &PlatformDirectoryPublisher)
+}
+
+/// 使用可注入发布原语创建项目，供平台竞争测试使用。 / Creates a project with an injectable publication primitive for platform-race tests.
+#[doc(hidden)]
+pub fn create_project_with_publisher(
+    request: &CreateProjectRequest,
+    preparer: &dyn StagePreparer,
+    faults: &dyn FaultInjector,
+    publisher: &dyn DirectoryPublisher,
 ) -> Result<CreatedProject, RepositoryError> {
     validate_request(request)?;
     if !request.destination.is_absolute() {
@@ -337,13 +372,27 @@ pub fn create_project(
         cleanup_predecision(&tx)?;
         return Err(RepositoryError::CreationCancelled(receipt_destination));
     }
-    fs::rename(&staged_publish, &publish_path).map_err(|e| {
-        if fs::symlink_metadata(&publish_path).is_ok() {
-            RepositoryError::DestinationExists(destination.clone())
-        } else {
-            RepositoryError::io(&publish_path, e)
+    journal.phase = Phase::Publishing;
+    store_journal(&tx, &journal)?;
+    if let Err(error) = publisher.publish_exclusive(&staged_publish, &publish_path) {
+        let published_marker = publish_path.join(&journal.marker_name);
+        if !published_marker.is_file() {
+            if staged_publish.exists() {
+                let collision = fs::symlink_metadata(&publish_path).is_ok();
+                cleanup_predecision(&stage_root)?;
+                cleanup_predecision(&tx)?;
+                return if collision {
+                    Err(RepositoryError::DestinationExists(destination))
+                } else {
+                    Err(RepositoryError::io(&publish_path, error))
+                };
+            }
+            return Err(RepositoryError::PublicationOutcomeUnknown {
+                destination: receipt_destination,
+                source: error,
+            });
         }
-    })?;
+    }
     let completion = (|| {
         sync_directory(&stage_root)?;
         sync_directory(&publish_anchor)?;
@@ -442,6 +491,21 @@ fn recover_locked(
             cleanup_predecision(&journal.stage_root)?;
             cleanup_predecision(&tx)?;
             continue;
+        }
+        if journal.phase == Phase::Publishing && !marker.is_file() {
+            let staged_publish = journal
+                .stage_root
+                .join(first_component(&journal.missing_tail)?);
+            if staged_publish.exists() {
+                cleanup_predecision(&journal.stage_root)?;
+                cleanup_predecision(&tx)?;
+                continue;
+            }
+            return Err(RepositoryError::Journal {
+                path: tx.join(JOURNAL_NAME),
+                message: "exclusive publication outcome is unknown: source and marker are absent"
+                    .into(),
+            });
         }
         if !marker.is_file() {
             return Err(RepositoryError::Journal {
@@ -635,14 +699,50 @@ fn preflight_membership_after_publish(
             workspace.member
         )));
     }
-    // When already effective, the just-published member is expected; only other packages conflict.
-    let duplicates = package_occurrences(&workspace.root, &manifest, package, None)?;
-    if duplicates > 1 {
+    let destination = workspace.root.join(&workspace.member);
+    let duplicates = other_package_occurrences(&workspace.root, &manifest, package, &destination)?;
+    if duplicates != 0 {
         return Err(RepositoryError::WorkspaceConflict(format!(
             "duplicate workspace package name `{package}`"
         )));
     }
     Ok(())
+}
+
+fn other_package_occurrences(
+    root: &Path,
+    manifest: &Manifest,
+    package: &str,
+    created_destination: &Path,
+) -> Result<usize, RepositoryError> {
+    let mut count = usize::from(
+        manifest
+            .package
+            .as_ref()
+            .is_some_and(|candidate| candidate.name == package),
+    );
+    let policy = manifest.workspace.as_ref().ok_or_else(|| {
+        RepositoryError::WorkspaceConflict("workspace declaration disappeared".into())
+    })?;
+    let created = created_destination
+        .canonicalize()
+        .map_err(|error| RepositoryError::io(created_destination, error))?;
+    for directory in crate::repository::workspace_member_dirs(root, policy)? {
+        if directory == created {
+            continue;
+        }
+        let path = directory.join(MANIFEST_FILE_NAME);
+        let source =
+            fs::read_to_string(&path).map_err(|error| RepositoryError::io(&path, error))?;
+        let member = Manifest::parse(&source)?;
+        count += usize::from(
+            member
+                .package
+                .as_ref()
+                .is_some_and(|candidate| candidate.name == package),
+        );
+    }
+    Ok(count)
 }
 
 fn validate_member(workspace: &WorkspaceMembership) -> Result<(), RepositoryError> {
@@ -930,6 +1030,93 @@ fn generation() -> String {
     format!("{time:032x}-{sequence:016x}-{}", std::process::id())
 }
 
+/// 为持久日志编码无损原生路径。 / Losslessly encodes native paths in durable journals.
+///
+/// Legacy string values remain readable so transactions written by the initial v1 implementation
+/// can still recover. New writes always carry explicit native units and never call a lossy string
+/// conversion.
+mod native_path_serde {
+    use std::{
+        ffi::OsString,
+        path::{Path, PathBuf},
+    };
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    enum NativePath {
+        UnixBytes(Vec<u8>),
+        WindowsUtf16(Vec<u16>),
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum CompatiblePath {
+        Legacy(String),
+        Native(NativePath),
+    }
+
+    pub(super) fn serialize<S>(path: &Path, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            return NativePath::UnixBytes(path.as_os_str().as_bytes().to_vec())
+                .serialize(serializer);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            return NativePath::WindowsUtf16(path.as_os_str().encode_wide().collect())
+                .serialize(serializer);
+        }
+        #[allow(unreachable_code)]
+        Err(serde::ser::Error::custom(
+            "native path journal encoding is unsupported on this platform",
+        ))
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match CompatiblePath::deserialize(deserializer)? {
+            CompatiblePath::Legacy(value) => Ok(PathBuf::from(value)),
+            CompatiblePath::Native(NativePath::UnixBytes(bytes)) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::ffi::OsStringExt;
+                    Ok(PathBuf::from(OsString::from_vec(bytes)))
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = bytes;
+                    Err(de::Error::custom(
+                        "Unix-byte journal path cannot be decoded on this platform",
+                    ))
+                }
+            }
+            CompatiblePath::Native(NativePath::WindowsUtf16(units)) => {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::ffi::OsStringExt;
+                    Ok(PathBuf::from(OsString::from_wide(&units)))
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = units;
+                    Err(de::Error::custom(
+                        "Windows UTF-16 journal path cannot be decoded on this platform",
+                    ))
+                }
+            }
+        }
+    }
+}
+
 fn state_dir_for(missing_tail: &Path) -> Result<&'static str, RepositoryError> {
     if first_component(missing_tail)? == std::ffi::OsStr::new(STATE_DIR) {
         Ok(".xmlsquish-state")
@@ -971,6 +1158,23 @@ mod tests {
 
         fn cancellation_requested(&self) -> bool {
             true
+        }
+    }
+
+    struct ExternalRacer;
+    impl DirectoryPublisher for ExternalRacer {
+        fn publish_exclusive(&self, _source: &Path, destination: &Path) -> io::Result<()> {
+            fs::create_dir(destination)?;
+            fs::write(destination.join("racer-owned"), b"keep")?;
+            Err(io::Error::new(io::ErrorKind::AlreadyExists, "racer won"))
+        }
+    }
+
+    struct MoveThenReportError;
+    impl DirectoryPublisher for MoveThenReportError {
+        fn publish_exclusive(&self, source: &Path, destination: &Path) -> io::Result<()> {
+            fs::rename(source, destination)?;
+            Err(io::Error::other("remote filesystem lost the success reply"))
         }
     }
 
@@ -1141,6 +1345,37 @@ mod tests {
     }
 
     #[test]
+    fn exclusive_publication_never_overwrites_an_external_race_winner() {
+        let temp = tempdir().unwrap();
+        let destination = normalize_new_destination(&temp.path().join("new")).unwrap();
+        let error = create_project_with_publisher(
+            &request(destination.clone()),
+            &NoStagePreparation,
+            &NoFault,
+            &ExternalRacer,
+        )
+        .unwrap_err();
+        assert!(matches!(error, RepositoryError::DestinationExists(path) if path == destination));
+        assert_eq!(fs::read(destination.join("racer-owned")).unwrap(), b"keep");
+        recover_project_creations(temp.path(), &NoFault).unwrap();
+    }
+
+    #[test]
+    fn publication_error_after_move_is_reconciled_by_marker() {
+        let temp = tempdir().unwrap();
+        let destination = normalize_new_destination(&temp.path().join("new")).unwrap();
+        let created = create_project_with_publisher(
+            &request(destination.clone()),
+            &NoStagePreparation,
+            &NoFault,
+            &MoveThenReportError,
+        )
+        .unwrap();
+        assert_eq!(created.destination, destination);
+        assert!(created.destination.join(MANIFEST_FILE_NAME).is_file());
+    }
+
+    #[test]
     fn sibling_creators_replan_a_shared_missing_parent() {
         let temp = tempdir().unwrap();
         let left = normalize_new_destination(&temp.path().join("a/left")).unwrap();
@@ -1224,6 +1459,64 @@ mod tests {
                 .unwrap()
                 .contains("packages/new")
         );
+    }
+
+    #[test]
+    fn recovery_rejects_a_racing_duplicate_outside_created_destination() {
+        let temp = tempdir().unwrap();
+        fs::create_dir(temp.path().join("packages")).unwrap();
+        fs::write(
+            temp.path().join(MANIFEST_FILE_NAME),
+            "manifest-version = 1\n[workspace]\nmembers = [\"packages/*\"]\n",
+        )
+        .unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let destination = normalize_new_destination(&root.join("packages/new")).unwrap();
+        let mut req = request(destination.clone());
+        req.workspace = Some(WorkspaceMembership {
+            root: root.clone(),
+            member: "packages/new".into(),
+        });
+        assert!(
+            create_project(
+                &req,
+                &NoStagePreparation,
+                &Fail(FaultPoint::CreationPublished)
+            )
+            .is_err()
+        );
+
+        let racer = root.join("packages/racer");
+        fs::create_dir(&racer).unwrap();
+        fs::write(
+            racer.join(MANIFEST_FILE_NAME),
+            "manifest-version = 1\n[package]\nname='new'\nversion='0.1.0'\ndialect='xmlsquish/1'\nsource-root='src'\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            recover_project_creations(&root, &NoFault),
+            Err(RepositoryError::WorkspaceConflict(message)) if message.contains("duplicate")
+        ));
+        assert!(destination.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_destination_round_trips_through_recovery_journal() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let temp = tempdir().unwrap();
+        let leaf = OsString::from_vec(b"new-\xff".to_vec());
+        let destination = normalize_new_destination(&temp.path().join(leaf)).unwrap();
+        let error = create_project(
+            &request(destination.clone()),
+            &NoStagePreparation,
+            &Fail(FaultPoint::CreationPublished),
+        )
+        .unwrap_err();
+        assert_eq!(error.committed_creation(), Some(destination.as_path()));
+        recover_project_creations(temp.path(), &NoFault).unwrap();
+        assert!(destination.join(MANIFEST_FILE_NAME).is_file());
     }
 
     #[test]

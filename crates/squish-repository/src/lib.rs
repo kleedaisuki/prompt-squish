@@ -13,8 +13,9 @@ mod snapshot;
 mod transaction;
 
 pub use creation::{
-    CreateProjectRequest, CreatedProject, NewProjectLocation, NoStagePreparation, ProjectFile,
-    ProjectVcs, StagePreparer, WorkspaceMembership, create_project, inspect_new_destination,
+    CreateProjectRequest, CreatedProject, DirectoryPublisher, NewProjectLocation,
+    NoStagePreparation, ProjectFile, ProjectVcs, StagePreparer, WorkspaceMembership,
+    create_project, create_project_with_publisher, inspect_new_destination,
     normalize_new_destination, recover_project_creations,
 };
 pub use error::RepositoryError;
