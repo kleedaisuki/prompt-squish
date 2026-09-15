@@ -657,84 +657,73 @@ n\equiv 1^n
 
 ---
 
-## 11. 编译与展开管线
+## 11. 项目构建、链接与产物
 
-xmlsquish 的逻辑管线为：
+XML DSL 是项目管理器的前端语言；文件名和命令行模式不定义语言语义。逻辑管线为：
 
 ```text
-*.xml
-  ↓ source discovery / compile
-frozen SourceUnits + SymbolTable
-  ↓ expansion
-*.i.xml
-  ↓ lowering / cleanup
-attribute-free XML with local element names
-  ↓ final product whitespace compression
-*.o.xml
+xmlsquish.toml target
+  ↓ resolve dependencies + freeze source snapshot
+xs:entry link root + xs:module closure
+  ↓ XML frontend
+relocatable, reusable binary IR (.xsir when materialized)
+  ↓ static link + entry instantiation
+backend-neutral linked document + provenance traces
+  ↓ squish backend
+.prompt product (+ optional self-contained .psdbg)
 ```
 
-### 11.1 Source discovery / compile
+### 11.1 Source snapshot 与 frontend
 
-编译阶段：
+构建阶段：
 
-1. 解析 `xs:entry` 根源码；
-2. 静态解析入口与模块声明区中 `import` 的 `src`；
+1. 从目标声明取得唯一 `xs:entry`；入口是链接根（link root），不是宏或隐式 `main`；
+2. 在已解析的包图中静态解析入口与模块声明区中每个 `import`；
 3. 按 SourceId intern 并冻结完整源码闭包；
-4. 按 Expanded Name 注册所有 MacroDef；
-5. 校验重定义、QName、宏签名、静态展开引用与 regex 语法；
-6. 验证所有导入目标都是模块，并检查入口参数契约。
+4. 把每个源码单元独立降低为可重定位 IR，并按 Expanded Name 注册 MacroDef；
+5. 校验源码种类、QName、重定义、签名、静态展开引用与 regex；
+6. 链接入口及其模块闭包，再用目标参数和预算进行一次独立实例化。
 
-定义解析与文本顺序无关；不存在“调用发生后才偶然注册宏”的运行时副作用。完整冻结闭包和静态宏边为链接时优化（Link-time Optimization, LTO）提供分析基础，但不表示已经实现内联、常量折叠或死代码消除。优化不得改变错误、预算或来源信息契约。
+入口选择不改变模块编译结果。模块对象不包含入口；入口对象也不会获得合成宏身份。定义解析与文本顺序无关，不存在“调用后才注册宏”的运行时副作用。项目依赖地址由管理器解析为源码身份；同包相对 import 与宏定义位置语义仍遵守第 3–4 节。
 
-### 11.2 Expansion 与 `*.i.xml`
+### 11.2 `.xsir` 与可复用边界
 
-展开阶段创建入口构造上下文，求值其正文；遇到 `expand` 才创建命名宏展开帧，执行参数求值、slot 替换、正则匹配与递归。入口诊断上下文应与宏帧明确区分，不得伪造隐式 `main` 或宏定义标识。
+`.xsir` 是确定性、版本化的二进制中间表示（Intermediate Representation, IR）容器，而不是可编辑 XML 或最终提示词。它保留可重定位语义、源码表、符号、span、line map 与验证所需信息，使同一模块可在不同入口链接中复用。
 
-`*.i.xml` 是带完整 provenance 的中间表示（Intermediate Representation, IR）的可序列化视图。实现应为每个生成节点保留：
+静态链接结果以入口为根解析全部 import binding 和宏符号。链接器不得进行目录搜索、网络请求、清单修改或参数求值。一次入口实例化才创建参数环境、展开帧、正则捕获、slot 值和运行预算；这些动态状态不得被错误地缓存进模块 IR。
 
-- originating SourceId 与 source span；
-- 若节点由宏生成，记录 MacroDefId；入口直接生成节点不伪造此标识；
-- 当前 frame id；
-- parent/caller frame；
-- 触发调用的 `expand` 位置；
-- 子文件的 file frame 信息。
+### 11.3 `.prompt` 与 `.psdbg`
 
-### 11.3 Lowering 与 `*.o.xml`
+`squish` backend 从已链接文档生成 `.prompt` 产品。当前 backend 继续执行既有提示词产品变换：
 
-从 `*.i.xml` 降低（lowering）为最终提示词 XML 时必须：
+- 移除 xmlsquish 控制节点、全部属性、命名空间声明与元素前缀；
+- 元素仅保留局部名（local name），保持节点次序；
+- 在宏标量与结构求值完成后压缩产品空白；
+- 验证结果是格式良好的单一 XML 文档。
 
-- 移除所有 xmlsquish 控制节点；
-- 移除**所有属性**，包括普通用户属性、内部属性、`xml:*` 属性，以及默认和带前缀的命名空间声明（namespace declaration）；
-- 移除 debug/provenance/file-frame metadata；
-- 元素名仅保留局部名（local name），移除前缀，不得产生未绑定的前缀；不同命名空间下的同名元素在产品输出中不再区分；
-- 保留节点顺序，且在最终空白压缩前保留文本内容；
-- 验证最终结果是格式良好的 XML 文档。
+这些规则是 backend 产品语义，不改变 XML DSL 的求值规则，也不承诺通用 XML 数据等价。源码中的 `name`、`ref`、`src`、`get` 等属性仍参与编译；标量 body、capture 与 fill 在求值期间不得提前 trim 或折叠。
 
-属性不属于最终提示词的产品语义，没有启用或保留属性的输出选项。此规则不禁用源码中 DSL 指令的 `name`、`ref`、`src`、`get` 等属性；它们仍用于编译和展开。源码命名空间仍用于解析符号，中间表示仍保留来源与诊断信息；这些信息不得泄漏到 `*.o.xml`。
+`.psdbg` 是自包含调试包，交叉引用源码、静态链接、展开轨迹与产品字节来源。它不得改变 `.prompt` 字节。产品、IR 与调试伴随文件按一个目标 generation 发布；失败的 generation 不得把部分文件冒充成功结果。
 
-例如，`<p:task xmlns:p="urn:example" role="user" xml:space="preserve">Explain.</p:task>` 的最终输出为 `<task> Explain. </task>`。
-
-**产品阶段说明：** 最终产品阶段必须继续压缩空白，生成 `*.o.xml`；提示词中的空白按无意义的格式字符串处理，这是固定产品语义，不得关闭或因 `xml:space` 等属性而改变。空白压缩不属于标量求值或 XML 结构展开，不得提前应用到参数 body、capture 或 fill。最终输出有意丢弃属性、命名空间身份和格式空白，不承诺与输入 XML 的通用数据语义等价。
-
-`--debug` 与 `--explain` 表示同一诊断能力：它们可以保留或展示中间 provenance 和完整 frame chain，但不得改变正常 `.o.xml` 的语义输出。
-
-XML declaration 只作为输入/输出文档声明处理，不参与宏展开。普通用户 processing instruction 作为 XML 数据保留；实现专用诊断信息不得伪装成会泄漏到最终输出的用户节点。
+XML declaration 只作为输入文档声明处理，不参与宏展开。普通 processing instruction 是 XML 数据；实现诊断不得伪装成会泄漏到 `.prompt` 的用户节点。
 
 ---
-
 ## 12. 抽象语义与资源限制
 
 语言抽象语义中的递归深度、展开次数和输出长度不设固定上限。否则语言会因规范常数上界而失去计算完备性。
 
 实现必须提供可配置的资源 guard。`max-depth` 与 `max-expansions` 统计执行帧，包含一个入口构造帧；入口帧不具有宏身份。初始深度和展开计数均为 1，每次 `expand` 再创建一个宏帧。
 
-可配置项：
+可配置项属于清单目标或 profile 的 `limits`：
 
-```text
---max-depth
---max-expansions
---max-output-bytes
+```toml
+[target.chat.limits]
+max-depth = 128
+max-expansions = 10000
+max-output-bytes = 1048576
 ```
+
+构建时目标、profile 与显式 `--arg TARGET.NAME=VALUE` 共同形成一次实例化输入；预算不是松散文件编译选项。
 
 这些 guard：
 
@@ -742,7 +731,7 @@ XML declaration 只作为输入/输出文档声明处理，不参与宏展开。
 - 可以由用户提高；
 - 对任意最终停机的程序，都存在足够大的有限预算使其运行完成；
 - 触发时产生带完整 frame chain 的确定性错误；
-- 不得把部分 `.o.xml` 当作成功结果提交。
+- 不得把部分 `.prompt` 或不完整 generation 当作成功结果提交。
 
 于是可以同时保持：
 

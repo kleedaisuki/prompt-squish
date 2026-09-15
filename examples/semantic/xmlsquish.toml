@@ -1,0 +1,9 @@
+manifest-version = 1
+
+[package]
+name = "semantic-example"
+version = "1.0.0"
+source-root = "."
+
+[target.prompt]
+entry = "prompt.xml"

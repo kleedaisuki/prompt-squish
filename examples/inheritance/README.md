@@ -5,13 +5,14 @@
 The historical directory name is retained for migration discoverability. The language no longer supports `openat` or implicit metadata inheritance.
 
 ```bash
-cargo run -- examples/inheritance/prompt.xml
-cargo run -- --explain examples/inheritance/prompt.xml
+xmlsquish build --manifest-path examples/inheritance/xmlsquish.toml
+xmlsquish build --manifest-path examples/inheritance/xmlsquish.toml --emit prompt --emit debug
+xmlsquish inspect link prompt --manifest-path examples/inheritance/xmlsquish.toml --format json
 ```
 
-从仓库根目录运行。输出的两个 `Section` 分别包含 `researchers` 与 `everyone`。每次 `expand` 创建独立展开帧（Expansion Frame），但 `section.xml` 和 `leaf.xml` 每次编译只装载一次。
+从仓库根目录运行。逻辑产品定位符是 `target/xmlsquish/prompt.prompt`，管理器会报告不可变 generation 中的实际路径；其两个 `Section` 分别包含 `researchers` 与 `everyone`。每次 `expand` 创建独立展开帧（Expansion Frame），但 `section.xml` 和 `leaf.xml` 在同一快照内只装载一次。
 
-Run from the repository root. Two sections contain `researchers` and `everyone` respectively. Each expansion creates a fresh frame, while each source is loaded only once per compilation.
+Run from the repository root. The `.prompt` product contains sections for `researchers` and `everyone`. Each expansion creates a fresh frame, while each source is loaded once in the immutable snapshot.
 
 `xs:entry` 声明编译入口，导入之后的正文直接构造输出。模块只组织导入与宏定义；`import` 不产生内容。`section.xml` 显式把 `arg.audience` 传给 `leaf.xml`；删去该参数将报错，而不是自动继承。相对路径 `./leaf.xml` 始终相对 `section.xml` 解析。标题通过 `fill` 传递 XML 节点，不作为字符串；缺少必需标题也会报错。
 

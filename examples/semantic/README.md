@@ -3,13 +3,14 @@
 从仓库根目录运行 / Run from the repository root:
 
 ```bash
-cargo run -- examples/semantic/prompt.xml
-cargo run -- -I examples/semantic/prompt.xml
+xmlsquish build --manifest-path examples/semantic/xmlsquish.toml
+xmlsquish build --manifest-path examples/semantic/xmlsquish.toml --emit prompt --emit ir --emit debug
+xmlsquish inspect link prompt --manifest-path examples/semantic/xmlsquish.toml --format json
 ```
 
-`prompt.o.xml` 包含 `Hello, Klee &amp; friends!`，随后按顺序包含 `XML`、`macros`、`recursion` 三个 `Item`。最终产品阶段会压缩空白，编译与中间表示不做此压缩。`prompt.i.xml` 是来源可追踪的中间表示，而不是最终提示词。
+逻辑产物 `target/xmlsquish/prompt.prompt` 在项目的不可变 generation 中包含 `Hello, Klee &amp; friends!`，随后按顺序包含 `XML`、`macros`、`recursion` 三个 `Item`。`.xsir` 是可复用中间表示（Intermediate Representation, IR），`.psdbg` 是自包含调试包；它们都不是最终提示词。
 
-The final document contains the escaped greeting and three ordered `Item` elements. The final product pass compresses whitespace; compilation and the intermediate representation do not. The intermediate file includes provenance and is not the final prompt.
+The `.prompt` product contains the escaped greeting and three ordered `Item` elements. `.xsir` is reusable intermediate representation; `.psdbg` is a self-contained debug bundle. Neither companion is the prompt product.
 
 `xs:entry` 声明编译入口，`expand` 是唯一的递归展开操作。`import` 仅装载定义；调用方的 `s` 与定义方的 `str` 绑定同一 URI，因此引用同一符号。`items` 用命名捕获（named capture）拆分字符串，并以显式参数递归；捕获只在当前条件块内有效。`greet` 的紧凑宏体避免向标量结果意外加入排版空白。
 

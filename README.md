@@ -2,146 +2,177 @@
 
 **XML 是数据，宏是计算。 / XML is data. Macros are computation.**
 
-xmlsquish 是 Rust 编写的 XML 结构预处理器：冻结源码模块，以显式参数、XML 插槽和递归宏生成一个 XML 文档。语言规范以 [`docs/dsl.md`](docs/dsl.md) 为准；统一宏设计与迁移见 [ADR 0007](docs/adr/0007-unified-macro-expansion.md)。
+xmlsquish 是一个以项目为中心的提示词构建器：它从版本化 `xmlsquish.toml` 清单发现包、工作区、依赖和命名目标，把 XML DSL 编译成可复用中间表示（Intermediate Representation, IR），以入口作为链接根（link root），再发布 `.prompt` 产品。当前 XML 语言原语与语义保持不变；规范见 [`docs/dsl.md`](docs/dsl.md)，管理器架构见 [ADR 0009](docs/adr/0009-microkernel-manager-and-reusable-ir.md)。
 
-最近发布版本 / Latest published version: **0.3.0** · [发布说明 / Release notes](docs/releases/0.3.0.md) · [更新日志 / Changelog](CHANGELOG.md) · [命名空间 / Namespace](https://xmlsquish.moesegfault.dev/ns)
+xmlsquish is a project-oriented prompt builder. It discovers packages, workspaces, dependencies, and named targets from a versioned `xmlsquish.toml`, compiles the XML DSL to reusable IR, treats each entry as a link root, and publishes `.prompt` products. The XML language primitives and semantics are unchanged.
 
-0.3.0 将显式 `xs:entry` 构建入口与 `xs:module` 宏库分离，统一使用 `macro` / `expand`，不兼容 0.2.0 语法。以下示例使用 0.3.0；历史发布说明和版本快照保持不变。
+## 安装 / Installation
 
-0.3.0 separates explicit `xs:entry` build roots from `xs:module` libraries and uses unified `macro` / `expand` syntax, breaking compatibility with 0.2.0. The examples below target 0.3.0; historical release notes and snapshots remain unchanged.
+### 预编译二进制 / Prebuilt binary
 
-## 安装与运行 / Install and run
+从 [GitHub Releases](https://github.com/kleedaisuki/prompt-squish/releases) 下载与操作系统和处理器匹配的归档，按同次发布的校验和验证后解压，并把 `xmlsquish`（Windows 为 `xmlsquish.exe`）加入 `PATH`。Linux 发布包需要其发布说明所列的 glibc 版本；它不是 Alpine/musl 二进制。
 
-直接下载对应系统和处理器的预编译二进制，无需安装 Rust。Linux 包在 Ubuntu 22.04 上构建，需要 glibc 2.35 或更新版本（不适用于 Alpine/musl）。
-
-Download the prebuilt binary for your OS and CPU; Rust is not required. Linux packages are built on Ubuntu 22.04 and require glibc 2.35 or newer (not Alpine/musl).
-
-| 系统 / OS | 处理器 / CPU | 下载 / Download |
-| --- | --- | --- |
-| Windows 10 / 11 | x86-64 | [x86_64-pc-windows-msvc.zip](https://github.com/kleedaisuki/prompt-squish/releases/download/v0.3.0/xmlsquish-0.3.0-x86_64-pc-windows-msvc.zip) |
-| Windows 10 / 11 | ARM64 | [aarch64-pc-windows-msvc.zip](https://github.com/kleedaisuki/prompt-squish/releases/download/v0.3.0/xmlsquish-0.3.0-aarch64-pc-windows-msvc.zip) |
-| Linux · glibc ≥ 2.35 | x86-64 | [x86_64-unknown-linux-gnu.tar.gz](https://github.com/kleedaisuki/prompt-squish/releases/download/v0.3.0/xmlsquish-0.3.0-x86_64-unknown-linux-gnu.tar.gz) |
-| Linux · glibc ≥ 2.35 | ARM64 | [aarch64-unknown-linux-gnu.tar.gz](https://github.com/kleedaisuki/prompt-squish/releases/download/v0.3.0/xmlsquish-0.3.0-aarch64-unknown-linux-gnu.tar.gz) |
-| macOS ≥ 11 | Intel | [x86_64-apple-darwin.tar.gz](https://github.com/kleedaisuki/prompt-squish/releases/download/v0.3.0/xmlsquish-0.3.0-x86_64-apple-darwin.tar.gz) |
-| macOS ≥ 11 | Apple Silicon | [aarch64-apple-darwin.tar.gz](https://github.com/kleedaisuki/prompt-squish/releases/download/v0.3.0/xmlsquish-0.3.0-aarch64-apple-darwin.tar.gz) |
-
-校验后解压，将 `xmlsquish`（Windows 为 `xmlsquish.exe`）所在目录加入 `PATH`，再运行 `xmlsquish --version` 和 `xmlsquish --help`；版本应为 `xmlsquish 0.3.0`。Windows 可用 `Expand-Archive` 解压 ZIP；Linux/macOS 可用 `tar -xzf <archive.tar.gz>`。未加入 `PATH` 时，可在解压目录运行 `./xmlsquish --version`，Windows PowerShell 使用 `.\xmlsquish.exe --version`。
-
-Verify and extract the archive, add the directory containing `xmlsquish` (`xmlsquish.exe` on Windows) to `PATH`, then run `xmlsquish --version` and `xmlsquish --help`. Expect `xmlsquish 0.3.0`. Extract ZIPs with `Expand-Archive` on Windows or tarballs with `tar -xzf <archive.tar.gz>` on Linux/macOS. Before updating `PATH`, run `./xmlsquish --version` from the extracted directory, or `.\xmlsquish.exe --version` in Windows PowerShell.
-
-下载同次发布的 [SHA256SUMS](https://github.com/kleedaisuki/prompt-squish/releases/download/v0.3.0/SHA256SUMS)，在解压前比对所下载压缩包的 SHA-256：Linux 使用 `sha256sum <archive>`，macOS 使用 `shasum -a 256 <archive>`，PowerShell 使用 `Get-FileHash -Algorithm SHA256 <archive>`。仅与清单中完全相同文件名的一行比较。校验和证明文件完整性，不证明发布者身份；二进制未做代码签名（code signing）或 Apple 公证（notarization），系统可能显示安全提示，不要关闭全局安全保护。
-
-Download [SHA256SUMS](https://github.com/kleedaisuki/prompt-squish/releases/download/v0.3.0/SHA256SUMS) from the same release and compare the archive's SHA-256 before extraction: `sha256sum <archive>` on Linux, `shasum -a 256 <archive>` on macOS, or `Get-FileHash -Algorithm SHA256 <archive>` in PowerShell. Compare only the row with the exact downloaded filename. Checksums establish integrity, not publisher identity. Binaries are unsigned and not Apple-notarized; OS security prompts may appear. Do not disable system-wide security protections.
-
-六个平台由 GitHub Actions 在原生架构上构建并进行基本运行验证（smoke test）。0.3.0 的二进制从既有 `v0.3.0` 标签补充构建，标签和源码快照不变；未发布到 crates.io。
-
-GitHub Actions builds and smoke-tests all six targets on native architectures. The 0.3.0 binaries are backfilled from the existing `v0.3.0` tag without moving the tag or changing its source snapshot. There is no crates.io publication.
-
-### 可选：源码安装 / Optional: build from source
-
-仅源码安装需要 Rust 1.88 或更高版本。使用固定标签和锁文件：
-
-Only source installation requires Rust 1.88 or newer. Use the pinned tag and lockfile:
+Download the archive for your OS and CPU from GitHub Releases, verify it against the checksums from the same release, extract it, and put `xmlsquish` (`xmlsquish.exe` on Windows) on `PATH`. Check the release notes for the Linux glibc requirement.
 
 ```bash
-cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v0.3.0 --locked
+xmlsquish --version
+xmlsquish --help
 ```
 
-从当前检出源码安装并运行 / Install and run from the current checkout:
+### 从 Git 源码安装 / Install from Git source
+
+仅源码安装需要 Rust 1.88 或更高版本。仓库是完整 Cargo workspace，请使用锁文件；本项目**不发布到 crates.io**。
+
+Source installation requires Rust 1.88 or newer. Install the complete Cargo workspace with its lockfile. This project is **not published to crates.io**.
+
+```bash
+cargo install --git https://github.com/kleedaisuki/prompt-squish --locked
+```
+
+从当前检出安装 / Install from the current checkout:
 
 ```bash
 cargo install --path . --locked
-xmlsquish examples/semantic/prompt.xml
-xmlsquish examples/site-demo/agent.xml
-xmlsquish --debug --max-depth 128 --max-expansions 10000 --max-output-bytes 1048576 examples/semantic/prompt.xml
 ```
 
-`--arg NAME=VALUE` 可重复，为 `xs:entry` 的声明参数提供字符串值。`-I` 生成带来源信息（provenance）的 `.i.xml`；默认 `-O` 生成干净的 `.o.xml`。**最终 `.o.xml` 移除所有属性与命名空间声明（namespace declaration），元素仅保留局部名（local name），并继续压缩空白。** 属性不属于提示词产品语义；空白是无意义的格式字符串。这些行为不能通过输出选项或 `xml:space` 改变。`--debug` 与 `--explain` 等价，保留中间诊断信息但不改变最终产品行为。源码中的 DSL 指令属性仍用于编译和展开，标量求值仍保留字符串内容；最终提示词输出不承诺通用 XML 数据语义等价。输入文件不覆盖，失败不得提交部分成功输出。
+## 五分钟上手 / Five-minute start
 
-Repeat `--arg NAME=VALUE` for entry parameters. `-I` writes provenance-bearing `.i.xml`; default `-O` writes clean `.o.xml`. **Final `.o.xml` removes every attribute and namespace declaration, uses local element names, and squishes whitespace.** Attributes are not prompt product semantics; whitespace is formatting noise. Neither output options nor `xml:space` can override these rules. `--debug` and `--explain` are aliases that retain intermediate diagnostics without changing final product behavior. Source DSL directive attributes still drive compilation and expansion, and scalar evaluation still preserves string contents; final prompt output does not promise general XML data equivalence. Sources are never overwritten and failed expansion must not publish partial output.
-
-路径可为文件、目录或引号括起的 glob。目录和 glob 发现的合法 `xs:module` 库文件会跳过；显式指定模块文件仍报错。无路径时显示帮助；生成的 `.i.xml` / `.o.xml` 不再作为输入。`--color auto|always|never` 控制终端颜色。独立文件可继续处理，但任一失败使退出码非零。具体选项以 `xmlsquish --help` 为准。
-
-Paths accept files, directories, or quoted globs. Directory/glob discovery skips valid `xs:module` libraries; explicitly naming such a file remains an error. No paths prints help. Generated artifacts are excluded from discovery. Independent inputs may continue after an error, but any failure yields a nonzero exit status. Consult `xmlsquish --help` for options.
-
-## 最小程序 / Minimal program
-
-保存为 `hello.xml` / Save as `hello.xml`:
-
-```xml
-<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns">
-  <xs:param name="name"/>
-  <Greeting>Hello, <xs:insert get="arg.name"/>!</Greeting>
-</xs:entry>
-```
+每个示例目录都是可运行项目：
 
 ```bash
-xmlsquish --arg name=Klee hello.xml
+xmlsquish build --manifest-path examples/semantic/xmlsquish.toml
+xmlsquish fmt --manifest-path examples/semantic/xmlsquish.toml --check
+xmlsquish build --manifest-path examples/semantic/xmlsquish.toml --emit prompt --emit ir --emit debug
 ```
 
-`insert` 产生转义后的文本，绝不把字符串重新解释为 XML。普通文本和属性没有 `$` 插值；普通属性不会进入 `.o.xml`。
+该示例的逻辑产品定位符是 `target/xmlsquish/prompt.prompt`。管理器把完整目标原子发布到项目内 `examples/semantic/target/xmlsquish/.squish-publish/generations/…`，并在构建事件中报告当前 generation 的实际路径；不要绕过 current manifest 修改 generation 内文件。重复 `--emit` 可物化：
 
-`insert` emits escaped text, never reparsed markup. Ordinary text and attributes have no `$` interpolation; ordinary attributes never reach `.o.xml`.
-
-## 语言地图 / Language map
-
-| 结构 / Form | 契约 / Contract |
+| 后缀 / Suffix | 含义 / Meaning |
 | --- | --- |
-| `xs:module` | 只包含 import 与 macro 的库 / Library containing imports and macro definitions only |
-| `xs:entry` | 导入、入口参数与产品构造正文，不是宏 / Imports, root parameters, and document construction; not a macro |
-| `xs:import src="..."` | 仅装载定义，不执行 / Load definitions without execution |
-| `xs:macro name="app:name"` | 按扩展名（Expanded Name）注册，不可重定义 / Immutable namespace-qualified definition |
-| `xs:param name="x"` | 必需字符串参数，声明在主体之前 / Required string parameter before body |
-| `xs:expand ref="app:name"` | 递归展开命名宏，返回节点序列 / Recursively expand a named macro into a node sequence |
-| `xs:arg` | `value`、`get`、纯文本展开 body 三选一 / Exactly one scalar value form |
-| `xs:fill` / `xs:slot` | 显式传递 XML 节点序列 / Explicit XML node-sequence passing |
-| `xs:insert get="..."` | 读取 `file.*`、`arg.*`、词法 `match.*` / Read immutable scalar binding |
-| `xs:ifr` | Unicode 正则条件与命名捕获（named capture） / Regex condition with named captures |
+| `.prompt` | 可交付提示词产品 / Deliverable prompt product |
+| `.xsir` | 可复用、版本化二进制 IR / Reusable versioned binary IR |
+| `.psdbg` | 自包含来源、链接与展开调试包 / Self-contained provenance, link, and expansion debug bundle |
 
-内建操作按命名空间 URI 识别，不按 `xs` 拼写识别。宏 `name` / `ref` 必须有绑定的前缀；`import` 不继承被导入文件的前缀绑定，引用方自行声明相同 URI 的别名。相对 `src` 与 `file.*` 绑定定义位置；不继承调用者参数。静态装载完整源码闭包，即使某个分支不会执行，也会验证其中的引用和模式。纯导入环合法；执行递归由可调预算约束。
+`.xsir` 与 `.psdbg` 是伴随产物，不是 XML DSL 的新原语，也不是最终提示词。
 
-Builtin identity uses the namespace URI, not prefix spelling. Macro names/references require bound prefixes. Imports do not inherit prefix bindings: the referencing file declares its own alias for the same URI. Relative sources and `file.*` bind at the definition site. Arguments are not inherited. Discovery validates the complete static source closure, including unselected branches. Import cycles are legal; execution recursion is guarded by configurable budgets.
+## 项目清单 / Project manifest
 
-模块没有隐式正文或 `main`。`xs:entry` 是独立源码根，只构造文档、不定义宏；它不是符号或隐式宏。`import` 是唯一装载操作，只接受模块，不能导入入口。`expand` 是唯一展开操作；每次展开拥有独立作用域，参数与 fill 在展开者环境中求值一次后按值传递，不捕获外部变量。宏返回有序节点序列；纯文本返回值可在另一个 `xs:arg` body 中组合传递，结构返回值可在 `xs:fill` 中组合。`fragment` 不是独立语言构造。
+最小 `xmlsquish.toml`：
 
-Modules have no implicit body or `main`. `xs:entry` is a separate source root for document construction, not a macro definition or symbol. `import` is the sole loading operation and accepts modules only, never entries. `expand` is the sole expansion operation: each expansion has an isolated scope with eagerly evaluated, immutable arguments and fills, without caller capture. Macros return ordered node sequences; text-only results compose in `xs:arg` bodies and structural results in `xs:fill`. There is no separate `fragment` construct.
+```toml
+manifest-version = 1
 
-正则表达式不允许普通位置捕获、反向引用（backreference）和环视（look-around）。用 `(?:...)` 分组、`(?<name>...)` 捕获；XML 属性中 `<` 写成 `&lt;`。空白敏感的标量 body 应写为紧凑内联形式。
+[package]
+name = "agent-prompts"
+version = "1.0.0"
+source-root = "src"
 
-Regexes reject positional captures, backreferences, and look-around. Use noncapturing groups and named captures; escape `<` as `&lt;` in XML attributes. Keep whitespace-sensitive scalar bodies inline.
+[target.chat]
+entry = "src/chat.xml"
+output = "chat.prompt" # 可省略；默认 <target>.prompt / optional
 
-核心不读取环境、时间或执行子进程。默认本地加载器不是文件访问沙箱；只编译信任的源码，并给自动化任务设置合适预算。
+[target.chat.args]
+name = "Klee"
+```
 
-The core does not read environment variables or time or execute subprocesses. The local loader is not a filesystem sandbox: compile trusted sources and set suitable automation budgets.
+`target.entry` 是相对包清单的 `xs:entry` 源码，也是链接根；它不是宏、没有隐式 `main`。工作区可在根清单中声明 `[workspace]`、`members`、`exclude`、`target-dir` 和共享依赖；`-p/--package`、`--workspace` 与 `--exclude` 控制包选择。目标输出必须使用 `.prompt` 后缀且不得逃逸共享目标目录。
 
-## 示例与内部模块 / Examples and internal modules
+`target.entry` names an `xs:entry` source relative to its package manifest and is the link root. It is not a macro and has no implicit `main`. Root manifests may declare a workspace and shared dependencies. Outputs must use `.prompt` and remain within the shared target directory.
 
-- [组合与递归 / Composition and recursion](examples/semantic/README.md)
-- [显式参数而非继承 / Explicit arguments, not inheritance](examples/inheritance/README.md)
-- [网站演示源码 / Site demo sources](examples/site-demo/agent.xml)
+## 命令 / Commands
 
-编译器内部模块提供 `Compiler::default()`、`Compiler::with_options(CompileOptions)` 和可注入源码加载器；入口参数放在 `CompileOptions.args`。独立 `squish` 工具保留其词法空白转换用途；它**不是宏求值或 lowering**，而是在干净 XML 之后执行的最终产品压缩步骤，不保证 XML 文本语义。
+| 命令 | 作用 | 常用选项 |
+| --- | --- | --- |
+| `xmlsquish build` | 解析依赖、冻结源码、编译 IR、链接、实例化并发布 | `-t/--target`, `-p/--package`, `--profile`, `-j/--jobs`, `--emit`, `--arg TARGET.NAME=VALUE` |
+| `xmlsquish fmt` | 格式化项目自有 XML；保持 DSL 语义 | `--check`, `--diff`, `--path`, `--style-edition` |
+| `xmlsquish add SPEC` | 新增或更新有类型依赖，并协调清单与锁文件 | `--path`, `--git`, `--rev/--tag/--branch`, `--registry`, `--rename`, `--dry-run` |
+| `xmlsquish remove ALIAS` | 按别名移除直接依赖 | `-p/--package`, `--dev`, `--build`, `--dry-run` |
+| `xmlsquish inspect …` | 只读检查 IR、链接、源码来源、缓存键或产物 | `ir`, `link`, `source`, `cache`, `artifact`; `--format human|json` |
 
-The internal compiler module provides `Compiler::default()`, `Compiler::with_options(CompileOptions)`, and an injectable source loader; entry arguments belong in `CompileOptions.args`. `Compiler::prepare` freezes and links a reusable snapshot; `PreparedProgram::expand` executes it with fresh inputs and budgets, without reloading sources. Reprepare to observe edits. The standalone `squish` utility remains a lexical whitespace transformer, **not macro evaluation or lowering**; it runs after clean XML as the final product compression pass and does not preserve XML text semantics.
+所有项目命令从当前目录向上发现 `xmlsquish.toml`；`--manifest-path PATH` 显式选择清单。不存在松散文件编译语法：路径必须通过清单目标或 `fmt --path` 等有类型选项表达。
 
-内部编译器支持 `prepare` 一次、`expand` 多次：复用冻结源码与静态 IR 载荷，不复用参数、执行帧或预算状态。源码修改后需重新准备快照。实现与性能取舍见 [性能报告](docs/performance/README.md)，包含原始样本、差分验证和复现命令。
+All project commands discover `xmlsquish.toml` upward from the current directory; `--manifest-path PATH` selects it explicitly. Loose-file compilation is no longer a command grammar.
 
-See the [performance report](docs/performance/README.md) for implementation trade-offs, raw paired measurements, differential checks and reproduction commands. These are internal binary modules, not a new public library target.
+### 依赖来源与锁定模式 / Dependency sources and lock modes
 
-## 开发与站点 / Development and site
+```bash
+xmlsquish add common --path ../common
+xmlsquish add toolkit --git https://example.com/toolkit.git --tag v1.2.0
+xmlsquish add prompt-common@^2 --registry community --rename common
+xmlsquish remove common --dry-run
+xmlsquish build --locked
+xmlsquish build --offline
+xmlsquish build --frozen
+```
+
+依赖恰好选择一种来源：本地路径（path）、Git、registry 版本或工作区继承（`{ workspace = true }`）。`add` 支持前三者；工作区来源写在清单中。解析器把可变要求记录为精确锁状态：
+
+- `--locked`：禁止修改锁文件；
+- `--offline`：禁止网络访问，只使用本地可验证缓存；
+- `--frozen`：同时启用二者。
+
+These modes apply to `build`, `add`, and `remove`. A dependency edit is planned and validated before commit; `--dry-run` writes neither manifest nor lock state. Adding or removing a dependency never rewrites `xs:import` automatically.
+
+## 配置与输出 / Configuration and output
+
+配置按以下优先级分层合并（后者覆盖前者）：
+
+```text
+defaults
+  < user config
+  < workspace config
+  < environment
+  < CLI options / repeated --config KEY=VALUE
+```
+
+| 层 | 位置 / Location |
+| --- | --- |
+| 用户配置 | `$XMLSQUISH_HOME/config.toml`; Windows 默认 `%APPDATA%/xmlsquish/config.toml`; Unix 默认 `$XDG_CONFIG_HOME/xmlsquish/config.toml` 或 `~/.config/xmlsquish/config.toml` |
+| 工作区配置 | 项目根 `.xmlsquish/config.toml` |
+| CLI 覆盖 | `--config 'term.message-format="json"'`；值使用 TOML 语法，可重复 |
+
+相对路径按声明它的配置文件目录解析；CLI 覆盖中的相对路径按当前工作目录解析。支持的配置表是 `source`、`manager`、`build`、`term` 与 `registries.<alias>`。
+
+操作消息支持 `--message-format human|short|json`。`json` 是换行分隔 JSON（Newline-Delimited JSON, NDJSON），每行一个版本化事件，写入 stdout；human/short 状态与诊断写入 stderr，stdout 留给查询数据。`inspect` 使用 `--format human|json` 返回一个文档，而不是操作事件流。`--plain` 禁用颜色和动态进度；`--quiet` 抑制成功状态。
+
+## 退出与自动化 / Process exits and automation
+
+| 退出码 | 含义 |
+| ---: | --- |
+| `0` | 成功；裸 `xmlsquish`、帮助和版本也成功 |
+| `1` | 领域操作失败；包括 `fmt --check` 发现需格式化文件 |
+| `2` | 命令行用法或参数解析错误 |
+| `101` | 未映射的内部错误 |
+| `130` | 收到中断并完成取消/清理 |
+
+失败的构建不会把部分目标当作成功产品发布；默认继续运行独立工作，`--no-keep-going` 可停止接纳新工作。机器自动化应依赖退出码与 NDJSON 字段，不应抓取 human 文案。
+
+## XML DSL 快速地图 / XML DSL quick map
+
+| 结构 | 契约 |
+| --- | --- |
+| `xs:module` | 仅含 import 与 macro 的库 / Library of imports and macro definitions |
+| `xs:entry` | 导入、入口参数与产品构造；链接根 / Imports, root parameters, construction; link root |
+| `xs:import src="…"` | 静态装载定义，不执行 / Statically load definitions |
+| `xs:macro name="p:name"` | 按 XML 扩展名注册的不可变宏 / Immutable macro keyed by expanded name |
+| `xs:expand ref="p:name"` | 在独立帧中递归展开 / Recursive expansion in an isolated frame |
+| `xs:param` / `xs:arg` | 必需字符串参数与按值实参 / Required scalar parameters and value arguments |
+| `xs:fill` / `xs:slot` | 显式 XML 节点序列传递 / Explicit XML node-sequence passing |
+| `xs:insert get="…"` | 把标量绑定写成转义文本 / Emit a scalar binding as escaped text |
+| `xs:ifr` | Unicode 正则条件与命名捕获 / Regex condition with named captures |
+
+内建操作按命名空间 URI 识别，不按 `xs` 前缀拼写识别。完整语义、作用域、正则限制与资源预算见 [DSL 规范](docs/dsl.md)。
+
+## 示例与开发 / Examples and development
+
+- [组合与递归](examples/semantic/README.md)
+- [显式参数而非继承](examples/inheritance/README.md)
+- [网站演示](examples/site-demo/README.md)
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo test --all-features --locked
-cd site
-npm ci
-npm run test
-npm run demo:check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
 ```
 
-开发边界与验证要求见 [CONTRIBUTING.md](CONTRIBUTING.md)。网站由真实 Rust CLI 预生成示例，不在浏览器复制编译器。修改示例后运行 `npm run demo:generate`。GitHub Pages 使用 GitHub Actions；自定义域为 `xmlsquish.moesegfault.dev`，DNS 应指向仓库所有者实际的 GitHub Pages 域名。
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for boundaries and validation. Site examples are generated by the actual Rust CLI, not a browser-side imitation; refresh with `npm run demo:generate`. GitHub Pages uses GitHub Actions and the custom domain `xmlsquish.moesegfault.dev`.
-
-许可 / License: [`GPL-3.0-or-later`](LICENSE). 网站视觉来源 / Site visual foundation: [MoeSegfault Style](https://github.com/kleedaisuki/moesegfault-style).
+许可 / License: [`GPL-3.0-or-later`](LICENSE).
