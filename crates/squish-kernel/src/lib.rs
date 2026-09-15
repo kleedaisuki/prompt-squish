@@ -339,7 +339,7 @@ impl<'a> Kernel<'a> {
         }
         let status = if outcome.cancelled {
             ExitStatus::Cancelled
-        } else if reduction.root_failures > 0 {
+        } else if reduction.root_failures > 0 || !outcome.result.command_succeeded() {
             ExitStatus::Failed
         } else {
             ExitStatus::Success
@@ -1259,9 +1259,9 @@ mod tests {
     use super::*;
     use squish_protocol::{
         ActionKind, BuildRequest, BuildResult, Diagnostic, DiagnosticId, Digest, DigestAlgorithm,
-        EmitKind, FinalizationKind, FormatResult, InspectRequest, InspectResult, InspectView,
-        LockMode, OpaqueSourceId, Phase, PlanDigest, PlanningStepKind, ProfileName,
-        ProjectInspection, ProjectPath, Severity, WorkspaceScope,
+        EmitKind, FinalizationKind, FormatRequest, FormatResult, FormatSelection, InspectRequest,
+        InspectResult, InspectView, LockMode, OpaqueSourceId, Phase, PlanDigest, PlanningStepKind,
+        ProfileName, ProjectInspection, ProjectPath, Severity, WorkspaceScope,
     };
     use std::sync::Mutex;
 
@@ -2177,6 +2177,120 @@ mod tests {
             build_record: None,
         });
         assert!(result.matches_request(&request));
+    }
+
+    static FORMAT_DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
+        id: "format-check",
+        operations: &[OperationKind::Format],
+        summary: "format check",
+    };
+    struct FormatCheck {
+        dirty: bool,
+    }
+    impl Capability for FormatCheck {
+        fn descriptor(&self) -> &'static CapabilityDescriptor {
+            &FORMAT_DESCRIPTOR
+        }
+        fn execute(&self, _: &OperationRequest, context: &InvocationContext) -> OperationOutcome {
+            let attempt = attempt("format-attempt");
+            let plan = plan("format-plan");
+            context
+                .emit(EventPayload::PlanningStarted {
+                    job: job(),
+                    attempt: attempt.clone(),
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::PlanReady {
+                    job: job(),
+                    attempt,
+                    plan: plan.clone(),
+                    digest: plan_digest(),
+                    mode: PlanMode::Execute,
+                    actions: 0,
+                    issues: 0,
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::PlanClosed {
+                    job: job(),
+                    plan,
+                    reason: PlanCloseReason::Executed,
+                })
+                .unwrap();
+            let source = OpaqueSourceId::new("src/main.xml").unwrap();
+            OperationOutcome {
+                job: job(),
+                result: OperationResult::Format(FormatResult {
+                    selected: vec![source.clone()],
+                    changed: if self.dirty { vec![source] } else { vec![] },
+                    check: true,
+                    diffs: vec![],
+                }),
+                totals: ActionTotals::default(),
+                root_failures: 0,
+                cancelled: false,
+            }
+        }
+    }
+
+    #[test]
+    fn format_check_result_policy_sets_canonical_job_status() {
+        static CLEAN: FormatCheck = FormatCheck { dirty: false };
+        static DIRTY: FormatCheck = FormatCheck { dirty: true };
+        let request = OperationRequest::Format(FormatRequest {
+            project: ProjectPath::new(".").unwrap(),
+            scope: WorkspaceScope::Current,
+            selection: FormatSelection::All,
+            style: None,
+            check: true,
+            diff: false,
+        });
+        for (capability, expected) in [
+            (&CLEAN as &dyn Capability, ExitStatus::Success),
+            (&DIRTY as &dyn Capability, ExitStatus::Failed),
+        ] {
+            let sink = Arc::new(Sink::default());
+            let context = InvocationContext::new(
+                InvocationId::new(if expected == ExitStatus::Success {
+                    "clean-format"
+                } else {
+                    "dirty-format"
+                })
+                .unwrap(),
+                CancellationToken::default(),
+                sink.clone(),
+            );
+            let dispatched = Kernel::new(&[capability])
+                .unwrap()
+                .dispatch(&request, &context)
+                .unwrap();
+            assert_eq!(dispatched.summary.status, expected);
+            assert_eq!(dispatched.summary.root_failures, 0);
+            let events = lock(&sink.0);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event.payload,
+                        EventPayload::OperationCompleted { .. }
+                    ))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event.payload, EventPayload::JobFinished(_)))
+                    .count(),
+                1
+            );
+            assert!(matches!(
+                &events.last().unwrap().payload,
+                EventPayload::JobFinished(summary) if summary.status == expected
+                    && summary.root_failures == 0
+            ));
+        }
     }
 
     static BUILD_DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
