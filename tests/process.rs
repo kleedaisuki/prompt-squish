@@ -346,6 +346,122 @@ fn quiet_is_silent_and_non_tty_human_output_is_linear() {
     assert!(!verbose.stderr.windows(2).any(|bytes| bytes == b"\x1b["));
 }
 
+/// 运行一次成功的人类构建并返回标准错误文本。 / Runs one successful human build and
+/// returns its stderr text.
+fn human_build(project: &Path, extra: &[&str]) -> String {
+    let output = binary()
+        .current_dir(project)
+        .arg("build")
+        .args(["--emit=prompt", "--emit=ir", "--emit=debug"])
+        .args(extra)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    String::from_utf8(output.stderr).unwrap()
+}
+
+/// 返回带算法前缀的十六进制摘要长度。 / Returns the hexadecimal lengths of
+/// algorithm-prefixed digest tokens.
+fn digest_token_lengths(text: &str) -> Vec<usize> {
+    ["blake3:", "sha256:"]
+        .into_iter()
+        .flat_map(|prefix| {
+            text.match_indices(prefix).map(move |(offset, _)| {
+                text[offset + prefix.len()..]
+                    .bytes()
+                    .take_while(u8::is_ascii_hexdigit)
+                    .count()
+            })
+        })
+        .collect()
+}
+
+/// 断言产品级输出没有调度器身份或不可变发布实现路径。 / Asserts that product-level
+/// output contains neither scheduler identities nor immutable publication implementation paths.
+fn assert_no_internal_identity(text: &str) {
+    for private in [
+        "build-cli-",
+        "attempt-1",
+        "build:compile:",
+        "build:link:",
+        "build:instantiate:",
+        "build:backend:",
+        "build:publish:",
+        ".squish-publish/generations/",
+    ] {
+        assert!(!text.contains(private), "leaked {private} in:\n{text}");
+    }
+}
+
+#[test]
+fn human_detail_levels_hide_noise_without_erasing_machine_identity() {
+    let project = project("root-human-detail-");
+
+    // Prime the cache so every captured mode exercises the cache-hit presentation contract.
+    // 预热缓存，使每种捕获模式都覆盖缓存命中的呈现合同。
+    human_build(project.path(), &["--plain"]);
+
+    let normal = human_build(project.path(), &["--plain"]);
+    let verbose = human_build(project.path(), &["--plain", "-v"]);
+    let trace = human_build(project.path(), &["--plain", "-vv"]);
+    let short = human_build(project.path(), &["--message-format=short"]);
+
+    for product_output in [&normal, &short] {
+        assert!(digest_token_lengths(product_output).is_empty());
+        assert_no_internal_identity(product_output);
+        assert!(product_output.contains("cached") || product_output.contains("Cached"));
+    }
+    assert!(normal.contains("logical artifact target/xmlsquish/chat.prompt"));
+    assert!(!project.path().join("target/xmlsquish/chat.prompt").exists());
+
+    let verbose_lengths = digest_token_lengths(&verbose);
+    assert!(!verbose_lengths.is_empty());
+    assert!(verbose_lengths.iter().all(|length| *length == 12));
+    assert_no_internal_identity(&verbose);
+
+    assert!(digest_token_lengths(&trace).contains(&64));
+    assert!(trace.contains("build-cli-"));
+    assert!(trace.contains(".squish-publish/generations/"));
+
+    let json = binary()
+        .current_dir(project.path())
+        .args([
+            "build",
+            "--emit=prompt",
+            "--emit=ir",
+            "--emit=debug",
+            "--message-format=json",
+        ])
+        .output()
+        .unwrap();
+    assert!(json.status.success());
+    assert!(json.stderr.is_empty());
+    let documents = ndjson_documents(&json.stdout);
+    let cache_key = documents
+        .iter()
+        .find_map(|event| {
+            (event["payload"]["type"] == "cache_hit")
+                .then(|| event["payload"]["data"]["action_key"].as_str())
+                .flatten()
+        })
+        .expect("warm JSON build exposes a cache key");
+    assert_eq!(digest_token_lengths(cache_key), [64]);
+
+    let inspected = binary()
+        .current_dir(project.path())
+        .args(["inspect", "cache", cache_key, "--format=human"])
+        .output()
+        .unwrap();
+    assert!(inspected.status.success());
+    assert!(inspected.stderr.is_empty());
+    assert!(digest_token_lengths(&String::from_utf8(inspected.stdout).unwrap()).contains(&64));
+}
+
 #[test]
 fn layered_config_drives_registry_storage_and_presentation_with_cli_precedence() {
     let project = project("root-config-");
