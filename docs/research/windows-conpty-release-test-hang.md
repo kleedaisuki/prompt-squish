@@ -1,6 +1,6 @@
 # Windows x86_64 Release-Test Hang: ConPTY Shutdown Ownership
 
-Status: diagnosed and mitigated on 2026-09-15.
+Status: diagnosed, mitigated, and remotely verified on 2026-09-15.
 
 ## Decision context
 
@@ -105,6 +105,26 @@ source revisions and enables continued testing on older Windows implementations.
 
 The diagnosis should be revised if a Windows Server 2022 trace shows the test process
 blocked outside ConPTY close/read paths. A direct stack capture from the hosted runner
-was unavailable while the job was in progress. The strongest operational confirmation
-is an otherwise identical full release matrix completing on `windows-2025`; that result
-must be recorded before treating the release mitigation as verified.
+was unavailable while the job was in progress.
+
+## Remote verification
+
+[Release run `34987421053`](https://github.com/kleedaisuki/prompt-squish/actions/runs/34987421053)
+used automation commit `5c8bf1f3dc65ffff3255e78232d1d8cd638b5869` and completed successfully.
+All six build jobs, the complete native test commands, packaging, artifact upload, and
+the final publish job passed. In particular, Windows x86_64 job `104443061771` ran on
+the `windows-2025` label:
+
+| Step | Started (UTC) | Completed (UTC) | Duration | Result |
+|---|---|---|---:|---:|
+| locked release build | 15:17:59 | 15:22:09 | 4m10s | passed |
+| native release tests | 15:22:09 | 15:24:11 | 2m02s | passed |
+| smoke/package | 15:24:11 | 15:24:17 | 6s | passed |
+
+The same test step had previously made no progress for 31m45s on `windows-2022` before
+the 35-minute job timeout cancelled it. The controlled runner change therefore removed
+the release-blocking hang without removing or filtering a test binary.
+
+The publish job created the non-draft, non-prerelease
+[`xmlsquish 1.0.0` release](https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.0)
+with six platform archives and `SHA256SUMS`; GitHub reported all seven assets as uploaded.
