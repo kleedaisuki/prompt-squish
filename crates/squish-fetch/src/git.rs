@@ -1022,6 +1022,9 @@ mod tests {
         .to_owned()
     }
 
+    /// 删除 Windows Git 测试夹具，并对短暂的共享冲突做有界重试。
+    /// Remove a Windows Git fixture with bounded retries for transient sharing violations.
+    #[cfg(windows)]
     fn remove_git_fixture(root: &Path) {
         // 所有 Rust owner 和同步 Git 子进程均已结束后，Windows 仍可短暂返回 sharing violation；
         // 只对该精确 OS 状态做有界清理重试，其他错误立即暴露。
@@ -1037,6 +1040,17 @@ mod tests {
                 }
                 Err(error) => panic!("cannot remove Git fixture {}: {error}", root.display()),
             }
+        }
+    }
+
+    /// 删除非 Windows Git 测试夹具；除目录不存在外，所有错误都会立即暴露。
+    /// Remove a non-Windows Git fixture, immediately surfacing every error except absence.
+    #[cfg(not(windows))]
+    fn remove_git_fixture(root: &Path) {
+        match fs::remove_dir_all(root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("cannot remove Git fixture {}: {error}", root.display()),
         }
     }
 }
