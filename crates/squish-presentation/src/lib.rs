@@ -75,6 +75,8 @@ pub enum ProgressMode {
 pub enum Verbosity {
     /// 只显示警告、错误和最终失败。 / Show only warnings, errors, and final failures.
     Quiet,
+    /// 面向脚本与紧凑日志的稳定单行生命周期。 / Stable one-line lifecycle for scripts and compact logs.
+    Short,
     /// 面向日常交互的默认输出。 / Default output for ordinary interaction.
     #[default]
     Normal,
@@ -396,7 +398,7 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
             && capabilities.supports_ansi
             && capabilities.supports_dynamic
             && terminal.width().is_some();
-        let dynamic = options.verbosity != Verbosity::Quiet
+        let dynamic = matches!(options.verbosity, Verbosity::Normal | Verbosity::Verbose)
             && dynamic_capable
             && match options.progress {
                 ProgressMode::Auto => {
@@ -620,6 +622,202 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
         self.begin_progress(message, Some(completed), Some(total))
     }
 
+    fn render_short(&mut self, event: &Event) -> io::Result<()> {
+        match &event.payload {
+            EventPayload::PlanningStarted { job, .. } => {
+                self.write_persistent(&format!("plan {}", sanitize(job.as_str())))
+            }
+            EventPayload::PlanningStepStarted { job, kind, .. } => self.write_persistent(&format!(
+                "plan:{} {}",
+                planning_step_short_name(*kind),
+                sanitize(job.as_str())
+            )),
+            EventPayload::PlanningStepSucceeded { .. } => Ok(()),
+            EventPayload::PlanningStepFailed { diagnostic, .. }
+            | EventPayload::PlanningIssue { diagnostic, .. }
+            | EventPayload::PlanningFailed { diagnostic, .. } => self.render_diagnostic(diagnostic),
+            EventPayload::PlanningStepCancelled { job, .. }
+            | EventPayload::PlanningCancelled { job, .. } => {
+                self.write_persistent(&format!("cancel:plan {}", sanitize(job.as_str())))
+            }
+            EventPayload::PlanReady {
+                job,
+                plan,
+                mode,
+                actions,
+                issues,
+                ..
+            } => {
+                let view = self.plan_mut(job, plan);
+                view.declared_actions = *actions;
+                view.mode = Some(*mode);
+                self.write_persistent(&format!(
+                    "plan:ready {} {} mode={} actions={} issues={}",
+                    sanitize(job.as_str()),
+                    sanitize(plan.as_str()),
+                    plan_mode_name(*mode),
+                    actions,
+                    issues
+                ))
+            }
+            EventPayload::ActionDeclared {
+                job,
+                plan,
+                action,
+                kind,
+                ..
+            } => {
+                self.plan_mut(job, plan).actions.insert(
+                    action.clone(),
+                    ActionView {
+                        kind: *kind,
+                        state: ActionState::Declared,
+                    },
+                );
+                Ok(())
+            }
+            EventPayload::ActionStarted { job, plan, action } => {
+                self.set_action_state(job, plan, action, ActionState::Running);
+                self.write_persistent(&format!(
+                    "run:{} {}",
+                    action_kind_name(self.action_kind(job, plan, action)),
+                    sanitize(action.as_str())
+                ))
+            }
+            EventPayload::CacheHit { action, cache, .. } => self.write_persistent(&format!(
+                "cache:{} {}",
+                cache_name(*cache),
+                sanitize(action.as_str())
+            )),
+            EventPayload::ActionSucceeded {
+                job,
+                plan,
+                action,
+                timing,
+                ..
+            } => {
+                let kind = self.action_kind(job, plan, action);
+                self.set_action_state(job, plan, action, ActionState::Terminal);
+                self.write_persistent(&format!(
+                    "ok:{} {} {}ms",
+                    action_kind_name(kind),
+                    sanitize(action.as_str()),
+                    timing.elapsed_ms
+                ))
+            }
+            EventPayload::ActionFailed {
+                job,
+                plan,
+                action,
+                diagnostic,
+                ..
+            } => {
+                let kind = self.action_kind(job, plan, action);
+                self.set_action_state(job, plan, action, ActionState::Terminal);
+                self.write_persistent(&format!(
+                    "fail:{} {}",
+                    action_kind_name(kind),
+                    sanitize(action.as_str())
+                ))?;
+                self.render_diagnostic(diagnostic)
+            }
+            EventPayload::ActionBlocked {
+                job, plan, action, ..
+            } => {
+                self.set_action_state(job, plan, action, ActionState::Terminal);
+                self.write_persistent(&format!("blocked {}", sanitize(action.as_str())))
+            }
+            EventPayload::ActionCancelled {
+                job, plan, action, ..
+            } => {
+                self.set_action_state(job, plan, action, ActionState::Terminal);
+                self.write_persistent(&format!("cancel {}", sanitize(action.as_str())))
+            }
+            EventPayload::ActionSuperseded {
+                job, plan, action, ..
+            } => {
+                self.set_action_state(job, plan, action, ActionState::Terminal);
+                self.write_persistent(&format!("superseded {}", sanitize(action.as_str())))
+            }
+            EventPayload::PlanClosed { job, plan, reason } => {
+                self.plan_mut(job, plan).closed = true;
+                if *reason == PlanCloseReason::Executed {
+                    Ok(())
+                } else {
+                    self.write_persistent(&format!(
+                        "plan:{} {}",
+                        plan_close_name(*reason),
+                        sanitize(plan.as_str())
+                    ))
+                }
+            }
+            EventPayload::FinalizationStarted { job, id, kind } => {
+                self.jobs
+                    .entry(job.clone())
+                    .or_default()
+                    .finalizations
+                    .insert(id.clone(), *kind);
+                self.write_persistent(&format!(
+                    "finalize:{} {}",
+                    finalization_kind_short_name(*kind),
+                    sanitize(id.as_str())
+                ))
+            }
+            EventPayload::FinalizationSucceeded { job, id, timing } => {
+                let kind = self
+                    .jobs
+                    .get(job)
+                    .and_then(|view| view.finalizations.get(id))
+                    .copied();
+                self.write_persistent(&format!(
+                    "finalized:{} {} {}ms",
+                    finalization_short_name(kind),
+                    sanitize(id.as_str()),
+                    timing.elapsed_ms
+                ))
+            }
+            EventPayload::FinalizationFailed {
+                job,
+                id,
+                diagnostic,
+                ..
+            } => {
+                let kind = self
+                    .jobs
+                    .get(job)
+                    .and_then(|view| view.finalizations.get(id))
+                    .copied();
+                self.write_persistent(&format!(
+                    "fail:finalize:{} {}",
+                    finalization_short_name(kind),
+                    sanitize(id.as_str())
+                ))?;
+                self.render_diagnostic(diagnostic)
+            }
+            EventPayload::Diagnostic(diagnostic) => self.render_diagnostic(diagnostic),
+            EventPayload::OperationCompleted { job, result } => self.write_persistent(&format!(
+                "result {} {}",
+                sanitize(job.as_str()),
+                short_operation_result(result)
+            )),
+            EventPayload::JobFinished(summary) => {
+                self.jobs.remove(&summary.job);
+                self.write_persistent(&format!(
+                    "done {} status={} ok={} failed={} blocked={} cancelled={} cached={} {}ms",
+                    sanitize(summary.job.as_str()),
+                    exit_status_name(summary.status),
+                    summary.totals.succeeded,
+                    summary.totals.failed,
+                    summary.totals.blocked,
+                    summary.totals.cancelled,
+                    summary.cache_hits,
+                    summary.timing.elapsed_ms
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn render_diagnostic(&mut self, diagnostic: &squish_protocol::Diagnostic) -> io::Result<()> {
         if !self
             .rendered_diagnostics
@@ -629,7 +827,7 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
         }
         let visible = match self.options.verbosity {
             Verbosity::Quiet => matches!(diagnostic.severity, Severity::Warning | Severity::Error),
-            Verbosity::Normal => diagnostic.severity != Severity::Trace,
+            Verbosity::Short | Verbosity::Normal => diagnostic.severity != Severity::Trace,
             Verbosity::Verbose => true,
         };
         if !visible {
@@ -640,6 +838,23 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
             diagnostic.severity,
             severity_name(diagnostic.severity),
         );
+        if self.options.verbosity == Verbosity::Short {
+            let mut line = format!(
+                "{label}[{}] {}",
+                sanitize(&diagnostic.code),
+                sanitize(&diagnostic.message)
+            );
+            if let Some(span) = &diagnostic.primary {
+                let bytes = span.bytes();
+                line.push_str(&format!(
+                    " @ {}:{}..{}",
+                    sanitize(span.source().as_str()),
+                    bytes.start,
+                    bytes.end
+                ));
+            }
+            return self.write_persistent(&line);
+        }
         let mut line = format!(
             "{label}[{}] {} ({})",
             sanitize(&diagnostic.code),
@@ -730,6 +945,9 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
 
 impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
     fn render(&mut self, event: &Event) -> io::Result<()> {
+        if self.options.verbosity == Verbosity::Short {
+            return self.render_short(event);
+        }
         match &event.payload {
             EventPayload::PlanningStarted { job, attempt } => {
                 if self.options.verbosity != Verbosity::Quiet {
@@ -1113,6 +1331,219 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
     }
 }
 
+/// 类型化查询结果的人类可读投影。 / Human-readable projector for typed inspection results.
+///
+/// 该呈现器用于纯查询命令的 `stdout`，从不发出 ANSI 或原地重绘控制符。字段和值来自
+/// [`squish_protocol::InspectResult`]，因此调用方不需要退回到 pretty-JSON。 /
+/// This renderer is intended for pure-query `stdout`. It never emits ANSI or in-place repaint
+/// controls. Its fields and values come directly from [`squish_protocol::InspectResult`], so a
+/// caller never needs a pretty-JSON fallback.
+///
+/// # 示例 / Example
+///
+/// ```
+/// use squish_presentation::InspectHumanRenderer;
+/// use squish_protocol::{InspectResult, PackageName, ProjectInspection, TargetName};
+///
+/// let result = InspectResult::Project(ProjectInspection {
+///     packages: vec![PackageName::new("workspace").unwrap()],
+///     targets: vec![TargetName::new("chat").unwrap()],
+/// });
+/// let mut renderer = InspectHumanRenderer::new(Vec::new());
+/// renderer.render(&result).unwrap();
+/// renderer.finish().unwrap();
+/// let output = String::from_utf8(renderer.into_inner()).unwrap();
+/// assert!(output.contains("Packages (1)"));
+/// ```
+pub struct InspectHumanRenderer<W, T = FixedTerminal>
+where
+    T: TerminalProbe,
+{
+    writer: W,
+    terminal: T,
+}
+
+impl<W: Write> InspectHumanRenderer<W, FixedTerminal> {
+    /// 创建适合管道、文件和普通 `stdout` 捕获的追加式呈现器。 /
+    /// Creates an append-only renderer suitable for pipes, files, and ordinary `stdout` capture.
+    pub const fn new(writer: W) -> Self {
+        Self {
+            writer,
+            terminal: FixedTerminal::new(TerminalCapabilities::plain()),
+        }
+    }
+}
+
+impl<W: Write, T: TerminalProbe> InspectHumanRenderer<W, T> {
+    /// 使用可刷新终端宽度探测器创建呈现器；色彩能力会被有意忽略。 /
+    /// Creates a renderer with a refreshable width probe; color capabilities are intentionally ignored.
+    pub const fn with_terminal(writer: W, terminal: T) -> Self {
+        Self { writer, terminal }
+    }
+
+    /// 呈现一个完整的类型化查询结果。 / Renders one complete typed inspection result.
+    pub fn render(&mut self, result: &squish_protocol::InspectResult) -> io::Result<()> {
+        match result {
+            squish_protocol::InspectResult::Project(value) => {
+                self.line("Project")?;
+                self.collection("Packages", value.packages.iter().map(|item| item.as_str()))?;
+                self.collection("Targets", value.targets.iter().map(|item| item.as_str()))
+            }
+            squish_protocol::InspectResult::Plan(value) => {
+                self.line("Plan")?;
+                self.key("Job", value.job.as_str())?;
+                self.key("Identity", value.plan.as_str())?;
+                self.key("Digest", &format_digest(value.digest.digest()))?;
+                self.key("Mode", plan_mode_name(value.mode))?;
+                self.line(&format!("  Actions ({})", value.actions.len()))?;
+                if value.actions.is_empty() {
+                    return self.line("    (none)");
+                }
+                for action in &value.actions {
+                    self.line(&format!(
+                        "    {} {}",
+                        action_kind_name(action.kind),
+                        sanitize(action.action.as_str())
+                    ))?;
+                    self.key_at(
+                        6,
+                        "Action key",
+                        &action
+                            .action_key
+                            .as_ref()
+                            .map_or_else(|| "(not materialized)".to_owned(), ToString::to_string),
+                    )?;
+                    self.collection_at(
+                        6,
+                        "Depends on",
+                        action.dependencies.iter().map(|item| item.as_str()),
+                    )?;
+                }
+                Ok(())
+            }
+            squish_protocol::InspectResult::Cache(value) => {
+                self.line("Cache")?;
+                self.line(&format!("  Actions ({})", value.actions.len()))?;
+                if value.actions.is_empty() {
+                    return self.line("    (none)");
+                }
+                for action in &value.actions {
+                    self.line(&format!("    {}", action.action_key))?;
+                    self.key_at(6, "Result", &format_digest(&action.result_digest))?;
+                    self.artifacts(6, "Outputs", &action.outputs)?;
+                }
+                Ok(())
+            }
+            squish_protocol::InspectResult::Ir(value) => {
+                self.line("IR")?;
+                self.artifact(2, &value.artifact)
+            }
+            squish_protocol::InspectResult::Link(value) => {
+                self.line("Link")?;
+                self.key("Target", value.target.as_str())?;
+                self.line("  Static link map")?;
+                self.artifact(4, &value.link_map)
+            }
+            squish_protocol::InspectResult::Source(value) => {
+                self.line("Source")?;
+                self.key("Identity", value.source.as_str())?;
+                self.key("Digest", &format_digest(&value.digest))?;
+                self.key("Size", &format!("{} bytes", value.size))
+            }
+            squish_protocol::InspectResult::Provenance(value) => {
+                self.line("Provenance")?;
+                self.line("  Artifact")?;
+                self.artifact(4, &value.artifact)?;
+                self.artifacts(2, "Evidence", &value.evidence)
+            }
+        }
+    }
+
+    /// 刷新查询输出。 / Flushes query output.
+    pub fn finish(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+
+    /// 取回底层写入器。 / Returns the underlying writer.
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+
+    fn line(&mut self, value: &str) -> io::Result<()> {
+        let value = sanitize(value);
+        let value = self
+            .terminal
+            .width()
+            .map_or(value.clone(), |width| truncate_middle(&value, width));
+        writeln!(self.writer, "{value}")
+    }
+
+    fn key(&mut self, key: &str, value: &str) -> io::Result<()> {
+        self.key_at(2, key, value)
+    }
+
+    fn key_at(&mut self, indent: usize, key: &str, value: &str) -> io::Result<()> {
+        self.line(&format!("{}{key}: {}", " ".repeat(indent), sanitize(value)))
+    }
+
+    fn collection<'a>(
+        &mut self,
+        label: &str,
+        values: impl Iterator<Item = &'a str>,
+    ) -> io::Result<()> {
+        self.collection_at(2, label, values)
+    }
+
+    fn collection_at<'a>(
+        &mut self,
+        indent: usize,
+        label: &str,
+        values: impl Iterator<Item = &'a str>,
+    ) -> io::Result<()> {
+        let values: Vec<_> = values.collect();
+        self.line(&format!("{}{label} ({})", " ".repeat(indent), values.len()))?;
+        if values.is_empty() {
+            return self.line(&format!("{}(none)", " ".repeat(indent + 2)));
+        }
+        for value in values {
+            self.line(&format!("{}- {}", " ".repeat(indent + 2), sanitize(value)))?;
+        }
+        Ok(())
+    }
+
+    fn artifacts(
+        &mut self,
+        indent: usize,
+        label: &str,
+        artifacts: &[squish_protocol::Artifact],
+    ) -> io::Result<()> {
+        self.line(&format!(
+            "{}{label} ({})",
+            " ".repeat(indent),
+            artifacts.len()
+        ))?;
+        if artifacts.is_empty() {
+            return self.line(&format!("{}(none)", " ".repeat(indent + 2)));
+        }
+        for artifact in artifacts {
+            self.artifact(indent + 2, artifact)?;
+        }
+        Ok(())
+    }
+
+    fn artifact(&mut self, indent: usize, artifact: &squish_protocol::Artifact) -> io::Result<()> {
+        self.line(&format!(
+            "{}{} ({})",
+            " ".repeat(indent),
+            sanitize(artifact.id.as_str()),
+            artifact_kind(&artifact.kind)
+        ))?;
+        self.key_at(indent + 2, "URI", &artifact.uri)?;
+        self.key_at(indent + 2, "Size", &format!("{} bytes", artifact.size))?;
+        self.key_at(indent + 2, "Digest", &format_digest(&artifact.digest))
+    }
+}
+
 fn color_enabled(
     mode: ColorMode,
     capabilities: TerminalCapabilities,
@@ -1247,6 +1678,34 @@ fn planning_step_name(kind: PlanningStepKind) -> &'static str {
         _ => "Planning",
     }
 }
+fn planning_step_short_name(kind: PlanningStepKind) -> &'static str {
+    match kind {
+        PlanningStepKind::Recover => "recover",
+        PlanningStepKind::Locate => "locate",
+        PlanningStepKind::Resolve => "resolve",
+        PlanningStepKind::Fetch => "fetch",
+        PlanningStepKind::ReconcileLock => "lock",
+        PlanningStepKind::Snapshot => "snapshot",
+        PlanningStepKind::Scan => "scan",
+        PlanningStepKind::ValidatePlan => "validate",
+        PlanningStepKind::PrepareCandidate => "candidate",
+        _ => "work",
+    }
+}
+fn plan_mode_name(mode: PlanMode) -> &'static str {
+    match mode {
+        PlanMode::Execute => "execute",
+        PlanMode::ReportOnly => "report",
+        PlanMode::Legacy => "legacy",
+    }
+}
+fn plan_close_name(reason: PlanCloseReason) -> &'static str {
+    match reason {
+        PlanCloseReason::Executed => "executed",
+        PlanCloseReason::Reported => "reported",
+        PlanCloseReason::Superseded => "superseded",
+    }
+}
 fn finalization_kind_name(kind: FinalizationKind) -> &'static str {
     match kind {
         FinalizationKind::PersistBuildCatalog => "build catalog",
@@ -1255,6 +1714,15 @@ fn finalization_kind_name(kind: FinalizationKind) -> &'static str {
 }
 fn finalization_name(kind: Option<FinalizationKind>) -> &'static str {
     kind.map_or("operation record", finalization_kind_name)
+}
+fn finalization_kind_short_name(kind: FinalizationKind) -> &'static str {
+    match kind {
+        FinalizationKind::PersistBuildCatalog => "build-catalog",
+        _ => "operation-record",
+    }
+}
+fn finalization_short_name(kind: Option<FinalizationKind>) -> &'static str {
+    kind.map_or("operation-record", finalization_kind_short_name)
 }
 fn action_kind_name(kind: ActionKind) -> &'static str {
     match kind {
@@ -1285,6 +1753,38 @@ fn operation_kind_name(kind: squish_protocol::OperationKind) -> &'static str {
         squish_protocol::OperationKind::Add => "add",
         squish_protocol::OperationKind::Remove => "remove",
         squish_protocol::OperationKind::Inspect => "inspect",
+    }
+}
+fn exit_status_name(status: ExitStatus) -> &'static str {
+    match status {
+        ExitStatus::Success => "success",
+        ExitStatus::Failed => "failed",
+        ExitStatus::Cancelled => "cancelled",
+    }
+}
+fn short_operation_result(result: &OperationResult) -> String {
+    match result {
+        OperationResult::Unavailable { kind } => {
+            format!("{} unavailable", operation_kind_name(*kind))
+        }
+        OperationResult::Build(result) => format!("build published={}", result.published.len()),
+        OperationResult::Format(result) => format!(
+            "format selected={} changed={} check={}",
+            result.selected.len(),
+            result.changed.len(),
+            result.check
+        ),
+        OperationResult::Add(result) => format!(
+            "add dependency={} dry-run={}",
+            sanitize(result.dependency.as_str()),
+            result.dry_run
+        ),
+        OperationResult::Remove(result) => format!(
+            "remove dependency={} dry-run={}",
+            sanitize(result.dependency.as_str()),
+            result.dry_run
+        ),
+        OperationResult::Inspect(result) => format!("inspect view={}", inspect_result_name(result)),
     }
 }
 fn inspect_result_name(result: &squish_protocol::InspectResult) -> &'static str {
@@ -1321,9 +1821,12 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use squish_protocol::{
-        ActionKeyId, ActionTotals, Diagnostic, DiagnosticId, Digest, DigestAlgorithm, Event,
-        EventPayload, ExitStatus, InvocationId, JobId, JobSummary, OperationKind, OperationResult,
-        PlanDigest, PlanId, PlanMode, PlanningAttemptId, PlanningStepId, PlanningStepKind, Timing,
+        ActionKeyId, ActionTotals, Artifact, ArtifactId, CacheInspection, CachedAction, Diagnostic,
+        DiagnosticId, Digest, DigestAlgorithm, Event, EventPayload, ExitStatus, InspectResult,
+        InvocationId, IrInspection, JobId, JobSummary, LinkInspection, OpaqueSourceId,
+        OperationKind, OperationResult, PackageName, PlanDigest, PlanId, PlanInspection, PlanMode,
+        PlannedAction, PlanningAttemptId, PlanningStepId, PlanningStepKind, ProjectInspection,
+        ProvenanceInspection, SourceInspection, TargetName, Timing,
     };
 
     use super::*;
@@ -1392,6 +1895,41 @@ mod tests {
         String::from_utf8(renderer.into_inner()).unwrap()
     }
 
+    fn render_with_verbosity(events: &[Event], verbosity: Verbosity) -> String {
+        let mut renderer = HumanRenderer::new(
+            Vec::new(),
+            TerminalCapabilities::plain(),
+            Environment::default(),
+            PresentationOptions {
+                verbosity,
+                ..PresentationOptions::default()
+            },
+        );
+        for event in events {
+            renderer.render(event).unwrap();
+        }
+        renderer.finish().unwrap();
+        String::from_utf8(renderer.into_inner()).unwrap()
+    }
+
+    fn artifact(id_value: &str, uri: &str) -> Artifact {
+        Artifact {
+            id: id::<ArtifactId>(id_value),
+            kind: ArtifactKind::BinaryIr,
+            uri: uri.to_owned(),
+            size: 42,
+            digest: Digest::new(DigestAlgorithm::Sha256, vec![7; 32]).unwrap(),
+        }
+    }
+
+    fn render_inspect(result: &InspectResult, width: Option<usize>) -> String {
+        let terminal = FixedTerminal::new(TerminalCapabilities::plain()).with_width(width);
+        let mut renderer = InspectHumanRenderer::with_terminal(Vec::new(), terminal);
+        renderer.render(result).unwrap();
+        renderer.finish().unwrap();
+        String::from_utf8(renderer.into_inner()).unwrap()
+    }
+
     #[test]
     fn planning_failure_with_zero_actions_has_truthful_snapshot() {
         let job = id::<JobId>("build");
@@ -1436,6 +1974,168 @@ mod tests {
         assert_eq!(
             render_plain(&events),
             "Planning build (attempt-1)\nerror[PLAN001] cannot select a target (orchestrate); help: fix the manifest\nResult build: build result unavailable\nFailed build: 0 succeeded, 0 failed, 0 blocked, 0 cancelled, 0 cached (12 ms)\n"
+        );
+    }
+
+    #[test]
+    fn short_lifecycle_is_distinct_compact_and_preserves_failures() {
+        let job = id::<JobId>("build");
+        let attempt = id::<PlanningAttemptId>("attempt-1");
+        let events = vec![
+            event(
+                0,
+                EventPayload::PlanningStarted {
+                    job: job.clone(),
+                    attempt: attempt.clone(),
+                },
+            ),
+            event(
+                1,
+                EventPayload::PlanningFailed {
+                    job: job.clone(),
+                    attempt,
+                    diagnostic: diagnostic("cannot select a target"),
+                },
+            ),
+            event(
+                2,
+                EventPayload::OperationCompleted {
+                    job: job.clone(),
+                    result: OperationResult::Unavailable {
+                        kind: OperationKind::Build,
+                    },
+                },
+            ),
+            event(
+                3,
+                EventPayload::JobFinished(JobSummary {
+                    job,
+                    totals: ActionTotals::default(),
+                    root_failures: 1,
+                    cache_hits: 0,
+                    timing: Timing { elapsed_ms: 12 },
+                    status: ExitStatus::Failed,
+                }),
+            ),
+        ];
+        let short = render_with_verbosity(&events, Verbosity::Short);
+        assert_eq!(
+            short,
+            "plan build\nerror[PLAN001] cannot select a target\nresult build build unavailable\ndone build status=failed ok=0 failed=0 blocked=0 cancelled=0 cached=0 12ms\n"
+        );
+        assert_ne!(short, render_with_verbosity(&events, Verbosity::Normal));
+        assert!(!short.contains('\x1b'));
+        assert!(!short.contains('\r'));
+    }
+
+    #[test]
+    fn typed_inspect_project_plan_and_cache_snapshots_cover_empty_collections() {
+        let empty_project = InspectResult::Project(ProjectInspection {
+            packages: vec![],
+            targets: vec![],
+        });
+        assert_eq!(
+            render_inspect(&empty_project, None),
+            "Project\n  Packages (0)\n    (none)\n  Targets (0)\n    (none)\n"
+        );
+
+        let plan = InspectResult::Plan(PlanInspection {
+            job: id::<JobId>("build"),
+            plan: id::<PlanId>("plan-1"),
+            digest: plan_digest(8),
+            mode: PlanMode::ReportOnly,
+            actions: vec![PlannedAction {
+                action: id::<ActionId>("compile-chat"),
+                kind: ActionKind::Compile,
+                action_key: None,
+                dependencies: vec![],
+            }],
+        });
+        let plan_output = render_inspect(&plan, None);
+        assert_eq!(
+            plan_output,
+            "Plan\n  Job: build\n  Identity: plan-1\n  Digest: sha256:0808080808080808080808080808080808080808080808080808080808080808\n  Mode: report\n  Actions (1)\n    compile compile-chat\n      Action key: (not materialized)\n      Depends on (0)\n        (none)\n"
+        );
+
+        let empty_cache = InspectResult::Cache(CacheInspection { actions: vec![] });
+        assert_eq!(
+            render_inspect(&empty_cache, None),
+            "Cache\n  Actions (0)\n    (none)\n"
+        );
+        let cache = InspectResult::Cache(CacheInspection {
+            actions: vec![CachedAction {
+                action_key: id::<ActionKeyId>("compile-key"),
+                result_digest: Digest::new(DigestAlgorithm::Blake3, vec![9; 32]).unwrap(),
+                outputs: vec![],
+            }],
+        });
+        let cache_output = render_inspect(&cache, None);
+        assert!(cache_output.contains("compile-key"));
+        assert!(cache_output.contains("Outputs (0)\n        (none)"));
+    }
+
+    #[test]
+    fn typed_inspect_artifact_views_are_readable_unicode_safe_and_ansi_free() {
+        let ir_artifact = artifact("ir", "cas://模块/\u{1b}[31m非常长的规范身份");
+        let cases = [
+            (
+                "IR",
+                InspectResult::Ir(IrInspection {
+                    artifact: ir_artifact.clone(),
+                }),
+            ),
+            (
+                "Link",
+                InspectResult::Link(LinkInspection {
+                    target: id::<TargetName>("聊天-target"),
+                    link_map: artifact("link-map", "cas://link"),
+                }),
+            ),
+            (
+                "Source",
+                InspectResult::Source(SourceInspection {
+                    source: id::<OpaqueSourceId>("src/聊天.xml"),
+                    digest: Digest::new(DigestAlgorithm::Sha256, vec![1; 32]).unwrap(),
+                    size: 88,
+                }),
+            ),
+            (
+                "Provenance",
+                InspectResult::Provenance(ProvenanceInspection {
+                    artifact: artifact("prompt", "target/chat.prompt"),
+                    evidence: vec![],
+                }),
+            ),
+        ];
+        for (heading, result) in cases {
+            let output = render_inspect(&result, Some(24));
+            assert!(output.starts_with(heading));
+            assert!(!output.contains('\x1b'));
+            assert!(!output.contains('\r'));
+            for line in output.lines() {
+                assert!(UnicodeWidthStr::width(line) <= 24, "{line:?}");
+                assert!(!line.contains('�'));
+            }
+        }
+        let provenance = render_inspect(
+            &InspectResult::Provenance(ProvenanceInspection {
+                artifact: artifact("prompt", "target/chat.prompt"),
+                evidence: vec![],
+            }),
+            None,
+        );
+        assert!(provenance.contains("Evidence (0)\n    (none)"));
+    }
+
+    #[test]
+    fn typed_inspect_nonempty_project_preserves_stable_input_order() {
+        let result = InspectResult::Project(ProjectInspection {
+            packages: vec![id::<PackageName>("core"), id::<PackageName>("app")],
+            targets: vec![id::<TargetName>("alpha"), id::<TargetName>("beta")],
+        });
+        assert_eq!(
+            render_inspect(&result, None),
+            "Project\n  Packages (2)\n    - core\n    - app\n  Targets (2)\n    - alpha\n    - beta\n"
         );
     }
 
