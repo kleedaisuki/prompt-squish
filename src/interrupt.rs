@@ -147,21 +147,31 @@ impl InterruptCoordinator {
 
 /// 对继承的标准错误设备执行固定恢复序列。 / Writes a fixed restoration sequence to inherited stderr.
 pub(crate) struct StderrEmergencyRestore {
-    enabled: bool,
+    capable: bool,
+    enabled: std::sync::atomic::AtomicBool,
 }
 
 impl StderrEmergencyRestore {
     /// 从标准错误终端能力快照建立恢复租约。 / Captures the restoration lease from stderr capabilities.
     pub(crate) const fn capture(ansi_dynamic_terminal: bool) -> Self {
         Self {
-            enabled: ansi_dynamic_terminal,
+            capable: ansi_dynamic_terminal,
+            // Nothing has rendered a transient frame during bootstrap yet.
+            // 启动阶段尚未呈现瞬态帧，因此先保持解除状态。
+            enabled: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// 按实际呈现策略启用或解除恢复。 / Arms or disarms restoration from the resolved presentation policy.
+    pub(crate) fn set_dynamic_presentation(&self, dynamic: bool) {
+        self.enabled
+            .store(self.capable && dynamic, Ordering::Release);
     }
 }
 
 impl EmergencyRestore for StderrEmergencyRestore {
     fn restore(&self) {
-        if self.enabled {
+        if self.enabled.load(Ordering::Acquire) {
             platform::write_stderr_once(EMERGENCY_RESET);
         }
     }
@@ -322,9 +332,10 @@ mod tests {
     #[test]
     fn non_terminal_restore_is_a_no_op() {
         let restore = StderrEmergencyRestore::capture(false);
-        assert!(!restore.enabled);
+        restore.set_dynamic_presentation(true);
+        assert!(!restore.enabled.load(Ordering::Acquire));
         restore.restore();
-        assert!(!restore.enabled);
+        assert!(!restore.enabled.load(Ordering::Acquire));
     }
 
     #[test]

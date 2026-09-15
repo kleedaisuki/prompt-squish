@@ -151,13 +151,14 @@ fn execute(
     let terminal = SystemTerminal::stderr();
     let terminal_capabilities = terminal.capabilities();
     let cancellation = CancellationToken::default();
+    let emergency_terminal = Arc::new(StderrEmergencyRestore::capture(
+        terminal_capabilities.is_terminal
+            && terminal_capabilities.supports_ansi
+            && terminal_capabilities.supports_dynamic,
+    ));
     let coordinator = Arc::new(InterruptCoordinator::new(
         cancellation,
-        Arc::new(StderrEmergencyRestore::capture(
-            terminal_capabilities.is_terminal
-                && terminal_capabilities.supports_ansi
-                && terminal_capabilities.supports_dynamic,
-        )),
+        emergency_terminal.clone(),
         Arc::new(StdProcessTerminator),
     ));
     if let Err(error) = coordinator.install_with(ctrlc::set_handler) {
@@ -242,7 +243,13 @@ fn execute(
     };
 
     let query = matches!(invocation.request, OperationRequest::Inspect(_));
-    let sink = Arc::new(rendering_sink(&invocation, &config, query, terminal));
+    let sink = Arc::new(rendering_sink(
+        &invocation,
+        &config,
+        query,
+        terminal,
+        &emergency_terminal,
+    ));
     let settings = InvocationSettings {
         excluded_packages: invocation.execution.excluded_packages,
         jobs: invocation
@@ -407,6 +414,7 @@ fn rendering_sink(
     config: &Config,
     query: bool,
     terminal: SystemTerminal,
+    emergency_terminal: &StderrEmergencyRestore,
 ) -> RenderingSink {
     let message_format = if query {
         MessageFormat::Human
@@ -451,13 +459,15 @@ fn rendering_sink(
             },
             ..PresentationOptions::default()
         };
-        Box::new(HumanRenderer::with_clock_and_terminal(
+        let renderer = HumanRenderer::with_clock_and_terminal(
             stderr,
             terminal,
             Environment::capture(),
             options,
             SystemClock,
-        ))
+        );
+        emergency_terminal.set_dynamic_presentation(renderer.uses_dynamic_progress());
+        Box::new(renderer)
     };
     RenderingSink {
         renderer: Mutex::new(renderer),
