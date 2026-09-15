@@ -122,6 +122,49 @@ impl Inspect for ArtifactByteMap {
         ))
     }
 }
+impl Inspect for DebugBundle {
+    fn inspect_json(&self) -> JsonProjection {
+        let mut s =
+            String::from("{\"format\":\"xsir-inspect-v1\",\"kind\":\"debug-bundle\",\"schema\":{");
+        let _ = write!(
+            s,
+            "\"major\":{},\"minor\":{}}},\"features\":{},\"artifact\":{{\"digest\":",
+            self.schema.major, self.schema.minor, self.feature_bits.0
+        );
+        string(&mut s, &self.artifact.digest.0.hex());
+        let _ = write!(
+            s,
+            ",\"byteLength\":{}}},\"documentDigest\":",
+            self.artifact.byte_len
+        );
+        string(&mut s, &self.document_digest.0.hex());
+        s.push_str(",\"linkedImageDigest\":");
+        string(&mut s, &self.linked_image.0.hex());
+        s.push_str(",\"expansionTraceDigest\":");
+        string(&mut s, &self.expansion_trace_digest.0.hex());
+        s.push_str(",\"linkTraceDigest\":");
+        string(&mut s, &self.link_trace_digest.0.hex());
+        let _ = write!(
+            s,
+            ",\"document\":{{\"regions\":{},\"items\":{}}},\"trace\":{{\"frames\":{},\"origins\":{}}},\"linkTrace\":{{\"imports\":{},\"symbols\":{},\"diagnostics\":{}}},\"artifactMapRanges\":{},\"sourceArchives\":{},\"staticOrigins\":{},\"sourceBlobs\":{}}}",
+            self.document.regions.len(),
+            self.document.items.len(),
+            self.expansion_trace.frames.len(),
+            self.expansion_trace.origins.len(),
+            self.link_trace.imports.len(),
+            self.link_trace.symbols.len(),
+            self.link_trace.diagnostics.len(),
+            self.artifact_map.entries.len(),
+            self.source_archives.len(),
+            self.source_archives
+                .iter()
+                .map(|archive| archive.origins.entries.len())
+                .sum::<usize>(),
+            self.source_blobs.len()
+        );
+        JsonProjection(s)
+    }
+}
 fn source(out: &mut String, k: &SourceKey) {
     match k {
         SourceKey::AdHoc { uri } => {

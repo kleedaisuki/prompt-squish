@@ -12,6 +12,20 @@ pub enum PersistError {
     KindMismatch,
     SemanticMismatch,
     InvalidSections,
+    /// `.psdbg` typed payload schema 不受支持。 / Unsupported `.psdbg` typed-payload schema.
+    UnsupportedBundleVersion(Version),
+    /// Bundle 声明了此 reader 不理解的 feature。 / Bundle declares features unknown to this reader.
+    UnsupportedFeatures(u64),
+    /// 一个可重算的内容身份与 payload 不符。 / A recomputable content identity disagrees with its payload.
+    IdentityMismatch(&'static str),
+    /// Bundle 集合并非唯一且严格排序。 / A bundle collection is not unique and strictly sorted.
+    NonCanonicalBundle(&'static str),
+    /// Source record 所引用的 exact blob 缺失。 / An exact blob referenced by a source record is absent.
+    MissingSourceBlob,
+    /// Qualified object/local ID 或 link edge 悬空。 / A qualified object/local ID or link edge dangles.
+    DanglingBundleReference(&'static str),
+    /// 产品映射 origin 无法到达静态 source span。 / A mapped artifact origin cannot reach a static source span.
+    UntraceableArtifactOrigin,
 }
 impl fmt::Display for PersistError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

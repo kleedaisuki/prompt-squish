@@ -1,8 +1,8 @@
 //! 前端、链接器、求值器和后端之间的强类型协议。 / Typed contracts between stages.
 
 use crate::{
-    DebugDigest, Digest, DocumentDigest, LinkedImageDigest, ObjectDigest, SemanticUnitDigest,
-    SourceDigest,
+    ArtifactDigest, DebugDigest, Digest, DocumentDigest, LinkedImageDigest, ObjectDigest,
+    SemanticUnitDigest, SourceDigest,
 };
 
 macro_rules! id { ($($n:ident),+$(,)?)=>{$(
@@ -696,4 +696,72 @@ pub struct ArtifactMapEntry {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ArtifactByteMap {
     pub entries: Vec<ArtifactMapEntry>,
+}
+
+/// 最终产品的稳定身份；产品字节本身不进入 debug bundle。 / Stable final-artifact identity; product bytes are not embedded in the debug bundle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactIdentity {
+    /// 领域分离的产品内容摘要。 / Domain-separated artifact-content digest.
+    pub digest: ArtifactDigest,
+    /// 产品的精确字节长度。 / Exact artifact byte length.
+    pub byte_len: u64,
+}
+
+/// 一个完整 unit 的 source/debug archive 引用。 / Reference to one complete unit's source/debug archive.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceArchiveReference {
+    /// 产生该 archive 的完整 unit 对象身份。 / Complete unit-object identity that produced this archive.
+    pub object: ObjectDigest,
+    /// 原 unit 对象的 debug projection 身份。 / Debug-projection identity of the original unit object.
+    pub debug_digest: DebugDigest,
+    /// 自包含的规范源记录。 / Self-contained canonical source records.
+    pub archive: SourceArchive,
+    /// Qualified trace 引用所需的 unit-local 静态 provenance 表。 / Unit-local static
+    /// provenance table required to resolve qualified trace references.
+    pub origins: OriginTable,
+}
+
+/// 可移植 bundle 中按内容寻址的精确源 blob。 / Content-addressed exact-source blob carried by a portable bundle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BundledSourceBlob {
+    /// 精确源字节的内容地址。 / Content address of the exact source bytes.
+    pub reference: BlobRef,
+    /// 可移植调试所需的精确源字节。 / Exact source bytes required for portable debugging.
+    pub bytes: Vec<u8>,
+}
+
+/// `.psdbg` 的强类型、跨进程持久值。 / Strongly typed, cross-process persistent `.psdbg` value.
+///
+/// `document`、`expansion_trace` 与 `artifact_map` 在解码时联合校验。Archive 只通过
+/// `BlobRef` 指向 `source_blobs`，从而保持 unit object 的原始编码不变。
+/// `document`, `expansion_trace`, and `artifact_map` are jointly validated on decode. Archives
+/// address `source_blobs` through `BlobRef`, preserving the original unit-object encoding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DebugBundle {
+    /// `.psdbg` typed payload schema。 / `.psdbg` typed-payload schema.
+    pub schema: Version,
+    /// 此 schema 已启用的 feature 位。 / Feature bits enabled for this schema.
+    pub feature_bits: FeatureBits,
+    /// bundle 所描述的最终产品身份。 / Final-artifact identity described by this bundle.
+    pub artifact: ArtifactIdentity,
+    /// `document` 的规范 wire 身份。 / Canonical wire identity of `document`.
+    pub document_digest: DocumentDigest,
+    /// 产生文档的链接镜像身份。 / Identity of the linked image that produced the document.
+    pub linked_image: LinkedImageDigest,
+    /// `expansion_trace` 的规范 wire 身份。 / Canonical wire identity of `expansion_trace`.
+    pub expansion_trace_digest: DebugDigest,
+    /// `link_trace` 的规范 wire 身份。 / Canonical wire identity of `link_trace`.
+    pub link_trace_digest: DebugDigest,
+    /// 后端消费的完全展开文档。 / Fully expanded document consumed by the backend.
+    pub document: LinkedDocumentIr,
+    /// 文档 occurrence 到源 frame 的动态 provenance。 / Dynamic provenance from document occurrences to source frames.
+    pub expansion_trace: ExpansionTrace,
+    /// Import/symbol resolution 的可查询链接证据。 / Queryable import/symbol resolution evidence.
+    pub link_trace: LinkTrace,
+    /// 最终产品字节到 trace origin 的覆盖映射。 / Coverage map from final-artifact bytes to trace origins.
+    pub artifact_map: ArtifactByteMap,
+    /// 按 unit 对象身份排序的源 archives。 / Source archives sorted by unit-object identity.
+    pub source_archives: Vec<SourceArchiveReference>,
+    /// 按 `(digest, byte_len)` 排序的精确源 blobs。 / Exact source blobs sorted by `(digest, byte_len)`.
+    pub source_blobs: Vec<BundledSourceBlob>,
 }

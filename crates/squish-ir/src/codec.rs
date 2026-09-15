@@ -16,6 +16,16 @@ pub const SECTION_LINKED_IMAGE: u32 = 3;
 pub const SECTION_DOCUMENT: u32 = 4;
 /// 静态 source/origin 调试 section。 / Static source/origin debug section.
 pub const SECTION_DEBUG: u32 = 0x8000_0001;
+/// Debug bundle 元数据 section。 / Debug-bundle metadata section.
+pub const SECTION_BUNDLE_METADATA: u32 = 0x8000_0010;
+/// Debug bundle expansion trace section。 / Debug-bundle expansion-trace section.
+pub const SECTION_BUNDLE_TRACE: u32 = 0x8000_0011;
+/// Debug bundle artifact byte-map section。 / Debug-bundle artifact byte-map section.
+pub const SECTION_BUNDLE_ARTIFACT_MAP: u32 = 0x8000_0012;
+/// Debug bundle source archives section。 / Debug-bundle source-archive section.
+pub const SECTION_BUNDLE_SOURCES: u32 = 0x8000_0013;
+/// Debug bundle link-trace section。 / Debug-bundle link-trace section.
+pub const SECTION_BUNDLE_LINK_TRACE: u32 = 0x8000_0014;
 
 /// 容器对象种类。 / Container object kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,6 +37,7 @@ pub enum ContainerKind {
     LinkedDocument = 4,
     ExpansionTrace = 5,
     ArtifactMap = 6,
+    DebugBundle = 7,
 }
 impl ContainerKind {
     fn from_raw(v: u16) -> Result<Self, DecodeError> {
@@ -37,6 +48,7 @@ impl ContainerKind {
             4 => Self::LinkedDocument,
             5 => Self::ExpansionTrace,
             6 => Self::ArtifactMap,
+            7 => Self::DebugBundle,
             _ => return Err(DecodeError::UnknownKind(v)),
         })
     }
@@ -292,7 +304,16 @@ pub fn decode_container(bytes: &[u8]) -> Result<Container, DecodeError> {
 fn known_tag(t: u32) -> bool {
     matches!(
         t,
-        SECTION_DESCRIPTOR | SECTION_UNIT | SECTION_LINKED_IMAGE | SECTION_DOCUMENT | SECTION_DEBUG
+        SECTION_DESCRIPTOR
+            | SECTION_UNIT
+            | SECTION_LINKED_IMAGE
+            | SECTION_DOCUMENT
+            | SECTION_DEBUG
+            | SECTION_BUNDLE_METADATA
+            | SECTION_BUNDLE_TRACE
+            | SECTION_BUNDLE_ARTIFACT_MAP
+            | SECTION_BUNDLE_SOURCES
+            | SECTION_BUNDLE_LINK_TRACE
     )
 }
 fn validate_sections(s: &[Section]) -> Result<(), DecodeError> {

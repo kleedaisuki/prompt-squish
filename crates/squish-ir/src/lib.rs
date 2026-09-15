@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod codec;
+mod debug_bundle;
 mod digest;
 mod document_wire;
 mod inspect;
@@ -18,10 +19,12 @@ mod validate;
 mod wire;
 
 pub use codec::{
-    Container, ContainerKind, DecodeError, SECTION_DEBUG, SECTION_DESCRIPTOR, SECTION_DOCUMENT,
-    SECTION_LINKED_IMAGE, SECTION_UNIT, Section, SectionFlags, SemanticDescriptor,
-    decode_container, encode_container,
+    Container, ContainerKind, DecodeError, SECTION_BUNDLE_ARTIFACT_MAP, SECTION_BUNDLE_LINK_TRACE,
+    SECTION_BUNDLE_METADATA, SECTION_BUNDLE_SOURCES, SECTION_BUNDLE_TRACE, SECTION_DEBUG,
+    SECTION_DESCRIPTOR, SECTION_DOCUMENT, SECTION_LINKED_IMAGE, SECTION_UNIT, Section,
+    SectionFlags, SemanticDescriptor, decode_container, encode_container,
 };
+pub use debug_bundle::{decode_debug_bundle, encode_debug_bundle};
 pub use digest::{
     ArtifactDigest, DebugDigest, Digest, DigestAlgorithm, DocumentDigest, LinkedImageDigest,
     ObjectDigest, SemanticUnitDigest, SourceDigest,
