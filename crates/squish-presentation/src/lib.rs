@@ -158,6 +158,69 @@ impl TerminalProbe for FixedTerminal {
     }
 }
 
+/// 生产环境的标准错误终端探测器。 / Production terminal probe for standard error.
+///
+/// 交互能力在构造时从标准错误流捕获一次，避免重定向策略在一次调用中漂移；显示宽度
+/// 则在每次 [`TerminalProbe::width`] 调用时重新读取，因此窗口缩放会被后续 `tick`
+/// 观察到。无法可靠读取宽度时返回 `None`，呈现器将保守地禁用或停止动态重绘。
+/// / Interactive capabilities are snapshotted from standard error at construction so redirection
+/// policy cannot drift during an invocation. Display width is queried again on every
+/// [`TerminalProbe::width`] call, allowing subsequent ticks to observe terminal resizes. When the
+/// width cannot be read reliably, `None` conservatively disables or stops dynamic repainting.
+#[derive(Clone, Copy, Debug)]
+pub struct SystemTerminal {
+    capabilities: TerminalCapabilities,
+    width: fn() -> Option<usize>,
+}
+
+impl SystemTerminal {
+    /// 探测当前进程的标准错误流。 / Probes the current process standard-error stream.
+    ///
+    /// # 示例 / Example
+    ///
+    /// ```
+    /// use squish_presentation::{SystemTerminal, TerminalProbe};
+    ///
+    /// let terminal = SystemTerminal::stderr();
+    /// // Width is deliberately queried at use time rather than cached.
+    /// let _current_columns = terminal.width();
+    /// ```
+    pub fn stderr() -> Self {
+        let stderr = io::stderr();
+        Self {
+            capabilities: TerminalCapabilities::detect(&stderr),
+            width: stderr_width,
+        }
+    }
+
+    #[cfg(test)]
+    const fn with_width_probe(
+        capabilities: TerminalCapabilities,
+        width: fn() -> Option<usize>,
+    ) -> Self {
+        Self {
+            capabilities,
+            width,
+        }
+    }
+}
+
+impl TerminalProbe for SystemTerminal {
+    fn capabilities(&self) -> TerminalCapabilities {
+        self.capabilities
+    }
+
+    fn width(&self) -> Option<usize> {
+        (self.width)()
+    }
+}
+
+fn stderr_width() -> Option<usize> {
+    let stderr = io::stderr();
+    terminal_size::terminal_size_of(&stderr)
+        .map(|(terminal_size::Width(width), _)| usize::from(width))
+}
+
 /// 与呈现有关的环境变量快照。 / Snapshot of presentation-related environment variables.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Environment {
@@ -1831,6 +1894,29 @@ mod tests {
 
     use super::*;
 
+    thread_local! {
+        static TEST_TERMINAL_WIDTH: Cell<Option<usize>> = const { Cell::new(None) };
+        static TEST_WIDTH_READS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn injected_terminal_width() -> Option<usize> {
+        TEST_WIDTH_READS.set(TEST_WIDTH_READS.get() + 1);
+        TEST_TERMINAL_WIDTH.get()
+    }
+
+    fn set_injected_terminal_width(width: Option<usize>) {
+        TEST_TERMINAL_WIDTH.set(width);
+        TEST_WIDTH_READS.set(0);
+    }
+
+    fn interactive_capabilities() -> TerminalCapabilities {
+        TerminalCapabilities {
+            is_terminal: true,
+            supports_ansi: true,
+            supports_dynamic: true,
+        }
+    }
+
     #[derive(Clone, Default)]
     struct TestClock(Rc<Cell<u64>>);
 
@@ -2514,6 +2600,119 @@ mod tests {
             after_terminal
         );
         assert!(after_terminal.contains("\r\x1b[2K"));
+    }
+
+    #[test]
+    fn system_terminal_refreshes_injected_width_without_changing_capability_snapshot() {
+        set_injected_terminal_width(Some(96));
+        let terminal =
+            SystemTerminal::with_width_probe(interactive_capabilities(), injected_terminal_width);
+
+        assert_eq!(terminal.width(), Some(96));
+        TEST_TERMINAL_WIDTH.set(Some(41));
+        assert_eq!(terminal.width(), Some(41));
+        assert_eq!(terminal.capabilities(), interactive_capabilities());
+        assert_eq!(TEST_WIDTH_READS.get(), 2);
+    }
+
+    #[test]
+    fn unknown_initial_width_disables_dynamic_progress_even_if_width_later_appears() {
+        set_injected_terminal_width(None);
+        let terminal =
+            SystemTerminal::with_width_probe(interactive_capabilities(), injected_terminal_width);
+        let mut renderer = HumanRenderer::with_clock_and_terminal(
+            Vec::new(),
+            terminal,
+            Environment::default(),
+            PresentationOptions {
+                progress: ProgressMode::Always,
+                ..PresentationOptions::default()
+            },
+            TestClock::default(),
+        );
+        assert!(!renderer.uses_dynamic_progress());
+
+        TEST_TERMINAL_WIDTH.set(Some(80));
+        renderer.tick().unwrap();
+        assert!(renderer.writer.is_empty());
+    }
+
+    #[test]
+    fn resize_is_observed_on_tick_and_clear_uses_the_new_width() {
+        set_injected_terminal_width(Some(40));
+        let clock = TestClock::default();
+        let terminal =
+            SystemTerminal::with_width_probe(interactive_capabilities(), injected_terminal_width);
+        let mut renderer = HumanRenderer::with_clock_and_terminal(
+            Vec::new(),
+            terminal,
+            Environment::default(),
+            PresentationOptions {
+                color: ColorMode::Never,
+                progress: ProgressMode::Always,
+                ..PresentationOptions::default()
+            },
+            clock.clone(),
+        );
+        let job = id::<JobId>("resize-job");
+        let attempt = id::<PlanningAttemptId>("attempt");
+        let step = id::<PlanningStepId>("resolve");
+        renderer
+            .render(&event(
+                0,
+                EventPayload::PlanningStarted {
+                    job: job.clone(),
+                    attempt: attempt.clone(),
+                },
+            ))
+            .unwrap();
+        renderer
+            .render(&event(
+                1,
+                EventPayload::PlanningStepStarted {
+                    job: job.clone(),
+                    attempt: attempt.clone(),
+                    step: step.clone(),
+                    kind: PlanningStepKind::Resolve,
+                },
+            ))
+            .unwrap();
+        assert!(renderer.uses_dynamic_progress());
+        assert!(
+            renderer
+                .progress
+                .as_ref()
+                .is_some_and(|state| state.visible)
+        );
+
+        let before_resize = renderer.writer.len();
+        TEST_TERMINAL_WIDTH.set(Some(8));
+        clock.advance(100);
+        renderer.tick().unwrap();
+        assert!(
+            TEST_WIDTH_READS.get() >= 2,
+            "construction and tick must both probe width"
+        );
+        let repaint = String::from_utf8_lossy(&renderer.writer[before_resize..]);
+        assert!(
+            repaint.matches(CLEAR_LINE).count() >= 2,
+            "a narrower terminal must clear every previously wrapped row: {repaint:?}"
+        );
+
+        let before_terminal = renderer.writer.len();
+        renderer
+            .render(&event(
+                2,
+                EventPayload::PlanningStepSucceeded {
+                    job,
+                    attempt,
+                    step,
+                    timing: Timing { elapsed_ms: 100 },
+                },
+            ))
+            .unwrap();
+        let cleared = String::from_utf8_lossy(&renderer.writer[before_terminal..]);
+        assert!(cleared.starts_with(CLEAR_LINE));
     }
 
     #[test]

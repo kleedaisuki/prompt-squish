@@ -10,5 +10,6 @@ description = "Terminal and machine-readable presentation domain for prompt-squi
 [dependencies]
 serde_json = "1.0"
 squish-protocol = { path = "../squish-protocol" }
+terminal_size = "0.4"
 unicode-segmentation = "1.12"
 unicode-width = "0.2"
