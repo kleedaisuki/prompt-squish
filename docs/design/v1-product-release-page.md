@@ -1,17 +1,19 @@
-# xmlsquish 1.0 Product Release Surface: Implementation and Evidence Record
+# xmlsquish 1.0 Product Release Surface: Publication and Evidence Record
 
-- **Status:** release preparation complete; publication gate pending
-- **Evidence date:** 2026-09-15
+- **Status:** published; release and live-site gates complete
+- **Release date:** 2026-09-15
 - **Audience:** product, site, release, and validation owners
 - **Product routes:** `/releases/` (Simplified Chinese) and `/en/releases/` (English)
 - **Machine route:** `/releases/1.0.0.json`
-- **Prepared version/tag:** `1.0.0` / `v1.0.0`
-- **Exact validated site commit:** `8a2be527beb4091beba6477d3b7a870436ffc691`
+- **Version/tag:** `1.0.0` / `v1.0.0`
+- **Release source commit:** `8eeb856a38fac255e51337e7c0e2f27c6255ccde`
+- **Public release:** [xmlsquish 1.0.0 on GitHub](https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.0)
 
-This file records the implemented release surface and the evidence supporting it. It is not the
-release page itself. The public routes are deliberately **product launch pages**, not documentation
-pages: they lead with the user outcome, present one six-command lifecycle, route users to an
-installation choice, and keep migration detail subordinate to the product story.
+This file records the implemented release surface, publication history, and supporting evidence. It
+is not the release page itself. The public routes are deliberately **product launch pages**, not
+documentation pages: they lead with the user outcome, present one six-command lifecycle, route
+users to native downloads or a source installation, and keep migration detail subordinate to the
+product story.
 
 Product and technical authority remain in the
 [project-manager scope](../product/project-manager-scope.md),
@@ -20,7 +22,7 @@ Product and technical authority remain in the
 [ADR 0010](../adr/0010-transactional-new-project-creation.md), and the
 [execution ledger](project-manager-execution-status.md).
 
-## 1. Product decision and implemented journey
+## 1. Product decision and published journey
 
 The launch claim is:
 
@@ -46,51 +48,56 @@ xmlsquish build --offline
 xmlsquish inspect artifact target/xmlsquish/prompt.prompt --format=json
 ```
 
-This avoids the false implication that a newly added remote dependency is available to an offline
-build. The page also shows the canonical scaffold (`xmlsquish.toml`, `src/prompt.xml`), the
-published `.prompt`, and the inspectable artifact model. Migration copy preserves the 0.3 XML DSL
-while making the intentional command-first/project-first boundary explicit. `new` requires a
-nonexistent destination; adopting an existing populated directory (`init`) is not promised for
-1.0.
+This avoids implying that a newly added remote dependency is already available to an offline build.
+The page also shows the canonical scaffold (`xmlsquish.toml`, `src/prompt.xml`), the published
+`.prompt`, and the inspectable artifact model. Migration copy preserves the 0.3 XML DSL while making
+the intentional command-first/project-first boundary explicit. `new` requires a nonexistent
+destination; adopting an existing populated directory (`init`) is not promised for 1.0.
 
-## 2. Release state model
+## 2. Published state and source identity
 
-Two states must not be collapsed:
+The preparation/publication distinction is now closed with observed evidence:
 
-| State | Meaning | Current status |
+| State | Meaning | Result |
 | --- | --- | --- |
-| **Release preparation complete** | Versioned product UI, localization, machine discovery, candidate install, tests, release automation, and intended asset metadata are ready. | **Complete** |
-| **Publication gate** | Immutable `v1.0.0` tag exists and the GitHub Release contains all six native archives plus a verified `SHA256SUMS`. | **Pending** |
+| **Release preparation** | Versioned product UI, localization, machine discovery, tests, candidate install, and release automation were ready. | **Complete** |
+| **Publication gate** | Immutable tag, six native archives, `SHA256SUMS`, public Release, and live site agree. | **Complete** |
+| **Operational boundaries** | Signing/notarization and universal power-loss durability are not claimed. | **Explicitly retained** |
 
-The machine metadata therefore says `releaseStatus: "prepared"` and describes archive locations as
-`intendedUrl`. A prepared URL is not proof that an asset exists. The product page renders six
-disabled, non-link controls and explicitly labels them pending. It does not expose a working
-download affordance before publication.
+`v1.0.0` is an annotated Git tag. Tag object
+`51004bb88a784f0944317454a578863b8e346e72` peels to immutable source commit
+`8eeb856a38fac255e51337e7c0e2f27c6255ccde`. The annotated tag is unsigned; GitHub Release API's
+mutable `targetCommitish: main` is therefore not used as source-identity evidence. The peeled tag
+commit is authoritative.
 
-The current `SoftwareApplication` JSON-LD is also deliberately candidate-safe:
+The GitHub Release is public, non-draft, and non-prerelease. It was published at
+`2026-09-15T15:24:48Z` and exposes seven uploaded assets: six native archives and
+`SHA256SUMS`.
+
+The published `SoftwareApplication` JSON-LD is truthful and release-aware:
 
 - exactly one release-page entity;
 - `softwareVersion: "1.0.0"`;
 - repository identity through `sameAs`;
-- `creativeWorkStatus: "release candidate"`;
-- no `downloadUrl`, `Offer`/`offers`, rating, review, usage-count, or fabricated social proof;
-- facts match visible localized content.
+- `creativeWorkStatus: "Published"`;
+- six verified `downloadUrl` values derived from the same platform matrix as the visible buttons;
+- no `Offer`/`offers`, rating, review, usage-count, or fabricated social proof;
+- facts match the visible localized content.
 
 Google documents `offers.price` as required for eligibility for its software-app rich result. We do
 not invent an offer merely to chase eligibility: truthful entity description is more important than
-a rich-result badge. After the tag and assets exist, publication must update availability only from
-verified release facts.
+a rich-result badge.
 
 ## 3. Product-page information architecture
 
-The implemented page order is designed for product evaluation rather than reference lookup:
+The published page order is designed for product evaluation rather than reference lookup:
 
 1. **Hero:** “Your prompts are projects now.” / “从现在起，把提示词当作项目。”
 2. **Product map:** project → dependency graph → build → inspectable artifact.
 3. **Six-command journey:** the complete manager command surface in one ordered flow.
 4. **Runnable quick start:** the zero-network command sequence above.
 5. **Manager outcomes:** lifecycle, reproducibility, and human/tool-facing output.
-6. **Installation:** six platform candidates, honest availability, checksums, and source install.
+6. **Installation:** six direct platform downloads, checksums, and tagged source install.
 7. **Migration boundary:** preserved XML language and intentional project-model changes.
 8. **Closing action:** create, build offline, and inspect what is shipped.
 
@@ -126,30 +133,30 @@ Implemented interaction properties include:
 ## 5. Search and robot-agent discovery
 
 The human-visible product page remains the primary truth. Important identity, version, commands,
-installation state, compatibility, and source links are emitted as static semantic HTML rather than
+installation, compatibility, and source links are emitted as static semantic HTML rather than
 hidden behind hydration. Localized titles/descriptions, Open Graph/Twitter cards, canonical links,
 and the single truthful JSON-LD entity agree with that visible content.
 
-Four machine-discovery surfaces are implemented:
+Four machine-discovery surfaces are live:
 
 | Surface | Authority and purpose |
 | --- | --- |
 | `/robots.txt` | Crawler access policy under the Robots Exclusion Protocol; permits crawling and points to the sitemap. |
 | `/sitemap.xml` | Indexable URL discovery, including both localized release routes and reciprocal alternates. |
-| `/releases/1.0.0.json` | Product-owned, structured release state: prepared version, locale routes, intended tag/assets, commands, platform matrix, and integrity limitations. |
+| `/releases/1.0.0.json` | Product-owned structured release state: published version, locale routes, release/assets, commands, platform matrix, and integrity limitations. |
 | `/llms.txt` | Additive navigation for robot agents under a community proposal; it links to authoritative pages/metadata but is not crawler control, authorization, an SEO requirement, or the sole source of any claim. |
 
-The `llms.txt` surface is implemented, but its status is intentionally narrow. The Answer.AI-origin
-proposal describes a convention for helping agents locate concise material; it is not an IETF or
-search-engine standard. RFC 9309 governs `robots.txt`. Google explicitly says that ordinary SEO
-fundamentals remain applicable to its AI search features and that no special AI text file or schema
-is required. Consequently the durable optimization is truthful static content, crawlability,
-internal discovery, locale correctness, structured data matching visible text, and good page
-experience—not a parallel agent-only narrative.
+The `llms.txt` surface is useful but intentionally narrow. The Answer.AI-origin proposal describes
+a convention for helping agents locate concise material; it is not an IETF or search-engine
+standard. RFC 9309 governs `robots.txt`. Google explicitly says that ordinary SEO fundamentals
+remain applicable to its AI search features and that no special AI text file or schema is required.
+The durable optimization is truthful static content, crawlability, internal discovery, locale
+correctness, structured data matching visible text, and good page experience—not a parallel
+agent-only narrative.
 
-## 6. Installation and publication contract
+## 6. Published installation and integrity contract
 
-The prepared native matrix has stable intended names:
+The public Release contains these six native archives:
 
 ```text
 xmlsquish-1.0.0-x86_64-pc-windows-msvc.zip
@@ -161,80 +168,109 @@ xmlsquish-1.0.0-aarch64-apple-darwin.tar.gz
 SHA256SUMS
 ```
 
-Runtime boundaries are Linux glibc 2.35+, macOS 11+, and Windows MSVC desktop targets. Binaries
-are unsigned and macOS archives are not notarized; SHA-256 checksums establish byte integrity, not
-publisher identity. The source build requires Rust 1.88+ and xmlsquish is not published on
-crates.io.
+All seven public links returned HTTP 200 after following GitHub's asset redirects. The downloaded
+`SHA256SUMS`, live site release JSON, and GitHub Release API contain the same six archive names.
+Every manifest digest equals GitHub's independently reported per-asset SHA-256 digest:
 
-Until the tag exists, the page separates the proven immutable candidate command from the future
-tag command:
+| Native archive | SHA-256 |
+| --- | --- |
+| `xmlsquish-1.0.0-aarch64-apple-darwin.tar.gz` | `f5cb515b9d094860cc93bbc769ff860204b78098997b189c00d6535456e02b59` |
+| `xmlsquish-1.0.0-aarch64-pc-windows-msvc.zip` | `02033ff3d7cfb640b1d1bba2422d276369bfc8a1543cb8db8b8ec510b0d39209` |
+| `xmlsquish-1.0.0-aarch64-unknown-linux-gnu.tar.gz` | `bd5160983dbab25def457d88053101efccd40b9c32803eb3de066488aa8155f2` |
+| `xmlsquish-1.0.0-x86_64-apple-darwin.tar.gz` | `e4d140ecf52a6da694ba74e9e8eda7ff4aca7be7f1a7bcdbdaaaa20d71572448` |
+| `xmlsquish-1.0.0-x86_64-pc-windows-msvc.zip` | `09969760de7d4f56b767e72c0534d49a40bc51e16ca546652388ece33c3a1acd` |
+| `xmlsquish-1.0.0-x86_64-unknown-linux-gnu.tar.gz` | `c09e07f086c9096e859885198b0bccffce34d7a80bc18290c18a5cbf3817694d` |
+
+The 667-byte `SHA256SUMS` asset itself has SHA-256
+`214099529e16dc7c9cb3d73220f83e50b996a4ac7e9180e5e8b605e9ffca5251`, matching the GitHub API.
+
+Runtime boundaries are Linux glibc 2.35+, macOS 11+, and Windows MSVC desktop targets. Binaries
+are unsigned and macOS archives are not notarized; SHA-256 establishes byte integrity, not
+publisher identity. The source build requires Rust 1.88+ and xmlsquish is not published on
+crates.io. The published source-install command is:
 
 ```bash
-cargo install --git https://github.com/kleedaisuki/prompt-squish \
-  --rev 2eb5834b15d47717a7b45092a3b72bfa475f4c79 --locked
-
-# Valid only after publication:
 cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v1.0.0 --locked
 ```
 
-The exact remote `--rev` installation was executed against GitHub with Rust 1.88, installed
-`xmlsquish 1.0.0`, and successfully completed `new → fmt --check → build --offline → inspect`.
-This is candidate evidence, not evidence that the tag or release assets exist.
+Before the tag was cut, exact remote candidate revision
+`2eb5834b15d47717a7b45092a3b72bfa475f4c79` installed with Rust 1.88, reported
+`xmlsquish 1.0.0`, and completed `new → fmt --check → build --offline → inspect`. This remains useful
+pre-publication integration evidence; release identity now comes from the annotated tag.
 
-## 7. Verification evidence
+## 7. Verification and publication history
 
-### 7.1 Exact remote CI
+### 7.1 Source, main, and Pages gates
 
-[GitHub Actions run 34975527521](https://github.com/kleedaisuki/prompt-squish/actions/runs/34975527521)
-completed successfully for exact commit `8a2be527beb4091beba6477d3b7a870436ffc691`. All five jobs
-were terminal and green:
+All three gates used exact release source commit
+`8eeb856a38fac255e51337e7c0e2f27c6255ccde`:
+
+| Gate | Workflow run | Result and scope |
+| --- | --- | --- |
+| Pre-tag candidate CI | [34980263497](https://github.com/kleedaisuki/prompt-squish/actions/runs/34980263497) | Five jobs passed: Site, Ubuntu quality, and Linux/macOS/Windows tests. |
+| `main` CI | [34980902926](https://github.com/kleedaisuki/prompt-squish/actions/runs/34980902926) | Five jobs passed after the release source reached `main`; Linux also passed source-install smoke. |
+| GitHub Pages | [34980902735](https://github.com/kleedaisuki/prompt-squish/actions/runs/34980902735) | Build and deploy succeeded; live routes were subsequently fetched and parsed. |
+
+Cache-bypassed live verification returned HTTP 200 for `/releases/`, `/en/releases/`,
+`/releases/1.0.0.json`, `/llms.txt`, `/robots.txt`, and `/sitemap.xml`. The localized HTML, canonical
+and alternate metadata, six direct downloads, published release JSON, and machine-discovery files
+were parsed from live responses rather than inferred from repository build output.
+
+### 7.2 Adverse evidence and repairs
+
+Failed attempts are retained because they explain why the final automation is trustworthy:
+
+| Run/change | Observation | Resolution |
+| --- | --- | --- |
+| Release run [34980935644](https://github.com/kleedaisuki/prompt-squish/actions/runs/34980935644) | Both Apple jobs failed packaging because dependency legal notices were missing; the first concrete failure named `block2-0.6.2`. Publish did not run. | `d70c25b874688f8f4e7b39c31b1e7ca7787b9833` added reviewed license/source records for `block2`, `dispatch2`, `objc2`, and `objc2-encode`. |
+| Rerun [34982186340](https://github.com/kleedaisuki/prompt-squish/actions/runs/34982186340) | Both Apple jobs passed, but Windows x64 release tests hung in the two PTY tests until the 35-minute timeout; publish was skipped. | The old Windows Server 2022 ConPTY shutdown behavior was reproduced and analyzed instead of deleting tests. |
+| `5c8bf1f3dc65ffff3255e78232d1d8cd638b5869` | PTY reader ownership changed from strong to weak during cursor replies, and the immutable tag's release job moved to the Windows 2025 runner. | Mechanism, controlled experiments, uncertainty, and sources are preserved in [`docs/research/windows-conpty-release-test-hang.md`](../research/windows-conpty-release-test-hang.md). |
+
+The ConPTY mitigation retained the complete native test suite. It did not turn an infrastructure
+failure into a skipped test or silently weaken the publication gate.
+
+### 7.3 Final release workflow
+
+[Release run 34987421053](https://github.com/kleedaisuki/prompt-squish/actions/runs/34987421053)
+used automation commit `5c8bf1f3dc65ffff3255e78232d1d8cd638b5869`, resolved the annotated tag to
+the immutable `8eeb856a...` source, and completed **8/8 jobs successfully**:
 
 | Job | Result |
 | --- | --- |
-| Site | success |
-| Rust quality, Ubuntu, MSRV 1.88 | success |
-| Rust tests, Linux, MSRV 1.88 | success |
-| Rust tests, macOS, MSRV 1.88 | success |
-| Rust tests, Windows, MSRV 1.88 | success |
+| Resolve immutable tag source | success |
+| Build/test/package `x86_64-unknown-linux-gnu` | success |
+| Build/test/package `aarch64-unknown-linux-gnu` | success |
+| Build/test/package `x86_64-pc-windows-msvc` | success |
+| Build/test/package `aarch64-pc-windows-msvc` | success |
+| Build/test/package `x86_64-apple-darwin` | success |
+| Build/test/package `aarch64-apple-darwin` | success |
+| Verify complete matrix and publish | success |
 
-This is exact candidate-CI evidence. It is not described as the tagged-release workflow because
-`v1.0.0` has not yet passed the publication gate.
+The publisher created the non-draft, non-prerelease
+[public GitHub Release](https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.0) only after
+the complete native matrix succeeded.
 
-### 7.2 Site and visual validation
+### 7.4 Pre-publication site, visual, and Rust evidence
 
-- Astro/TypeScript build and the browser/static product contract: **38/38 passed**.
+- Browser/static product contract: **38/38 passed**.
 - Initial visual matrix: Chinese/English × mobile/desktop × light/dark = **8 full-page + 8 hero
-  screenshots**, all inspected; horizontal overflow was exactly zero in all eight cases.
-- Incremental recheck after the runnable quick start and split install commands: **4 additional
-  full-page screenshots** plus focused quick-start/source captures; all four documents again had
-  zero horizontal overflow.
-- Six pending platform controls were non-links in every visual case; no fabricated
-  `/releases/download/v1.0.0/` anchor was present.
+  screenshots**; horizontal overflow was zero in every case.
+- Incremental recheck: **4 additional full-page screenshots** plus focused quick-start/source
+  captures, again with zero horizontal overflow.
+- Isolated Rust 1.88 all-feature workspace suite: **518/518 passed** (505 unit/integration tests plus
+  13 doctests).
+- Rust 1.88 formatting, locked workspace check, strict Clippy, release build, CLI version, and root
+  smoke passed.
 
-The visual evidence used Chromium/Playwright on Windows. Safari/WebKit and Firefox were not part of
-this check; representative contrast was measured rather than exhaustively proving every token
-combination.
-
-### 7.3 Rust and packaging validation
-
-- Rust 1.88 format, locked workspace check, strict Clippy, release build, version, and root CLI
-  smoke: passed.
-- Isolated all-feature workspace suite: **518/518 passed** (505 unit/integration tests plus 13
-  doctests).
-- A repeated native Windows candidate package was byte-identical on the validation host.
-- Release automation defines six native build/package jobs and a final publish step that verifies
-  the complete matrix before creating assets.
-
-The repeated-package evidence covers one Windows host. It does not independently prove
-cross-architecture execution, future GitHub asset upload, signing/notarization, or sudden-power-loss
-durability on every filesystem.
+These candidate checks complement but do not replace the final six-target Release workflow and live
+HTTP verification.
 
 ## 8. Acceptance ledger
 
-### Release preparation complete
+### Product and release preparation
 
-- [x] Cargo package, lockfile, CLI `--version`, visible copy, machine metadata, and intended paths
-      consistently use `1.0.0` / `v1.0.0`.
+- [x] Cargo package, lockfile, CLI `--version`, visible copy, machine metadata, tag, and download
+      paths consistently use `1.0.0` / `v1.0.0`.
 - [x] The public release routes are product pages and lead with the project-manager model.
 - [x] All six commands appear in one lifecycle; the zero-network quick start is executable.
 - [x] Simplified Chinese and English pages have materially equal product facts and stable locale
@@ -242,33 +278,42 @@ durability on every filesystem.
 - [x] Light/dark/auto behavior, responsive presentation, no-script content, focus, reduced motion,
       and bounded long commands are implemented and covered by the stated visual/browser evidence.
 - [x] MoeSegfault Style 0.1.2 is version-pinned with SRI and used through shared tokens.
-- [x] `robots.txt`, localized `sitemap.xml`, candidate-safe release JSON, and additive `llms.txt`
-      are published by the static site.
-- [x] Exactly one candidate-safe `SoftwareApplication` JSON-LD entity is emitted, with `sameAs`
-      and `creativeWorkStatus`, and without downloads, offers, ratings, or reviews.
-- [x] Exact remote candidate revision `2eb5834b15d47717a7b45092a3b72bfa475f4c79` installs and runs
-      the documented journey.
+- [x] `robots.txt`, localized `sitemap.xml`, published release JSON, and additive `llms.txt` are live.
+- [x] Exactly one published `SoftwareApplication` JSON-LD entity is emitted, with `sameAs`,
+      `creativeWorkStatus`, and six verified download URLs, but without offers, ratings, or reviews.
 - [x] Browser/static tests pass 38/38, visual checks pass the stated matrices, Rust tests pass
-      518/518, and exact remote CI run 34975527521 is green for all five jobs.
+      518/518, and the exact pre-tag/main/Pages gates are green.
 
-### Publication gate pending
+### Publication gate
 
-- [ ] Create immutable Git tag `v1.0.0` at the approved release commit.
-- [ ] Run the release workflow against that exact tag and require all six native build/package jobs
-      plus the final publisher to succeed.
-- [ ] Publish all six archives and `SHA256SUMS` on the GitHub Release.
-- [ ] Verify every release asset URL resolves to the intended file.
-- [ ] Verify `SHA256SUMS` against the bytes downloaded from GitHub.
-- [ ] Run native archive smoke tests and the tag-based source-install command; confirm exact output
-      `xmlsquish 1.0.0` and the required command surface.
-- [ ] Replace pending controls/metadata only after those assets are observed; then verify the
-      production pages and JSON-LD remain truthful.
+- [x] Annotated Git tag `v1.0.0` exists and peels to exact source commit `8eeb856a...`.
+- [x] The corrected release workflow resolved the tag and completed all six native build/package
+      jobs plus resolve and publish: 8/8 successful.
+- [x] The GitHub Release is public, non-draft, and non-prerelease.
+- [x] All six archives and `SHA256SUMS` are uploaded; no asset is zero bytes.
+- [x] Every site/API release asset URL resolves with HTTP 200 to the intended GitHub asset.
+- [x] The downloaded `SHA256SUMS` filename set equals the site JSON and Release API asset set.
+- [x] All six downloaded manifest digests equal GitHub's per-asset digests.
+- [x] The six-target release automation ran native tests and CLI smoke before packaging and
+      published only after the complete matrix passed.
+- [x] Live Chinese/English pages and release JSON expose `published` state and direct downloads;
+      no stale prepared/candidate wording remains in the verified responses.
 
-Absent tag/assets are pending publication work, **not failures of the prepared candidate page**.
-Conversely, preparation evidence must never be promoted into a claim that the release has already
-been published.
+## 9. Explicitly retained boundaries
 
-## 9. External rationale and sources
+- Binaries are unsigned and macOS archives are not Apple-notarized. Operating-system warnings may
+  appear; users should not disable system-wide protections.
+- The annotated Git tag itself is unsigned. Its peel target proves source identity within Git, not
+  cryptographic publisher identity.
+- Checksums prove byte integrity relative to the release manifest/API, not publisher identity.
+- Controlled process-kill recovery is tested. The release does not claim proof against sudden
+  Windows power loss, storage-controller cache loss, or arbitrary remote filesystems.
+- Exclusive atomic rename depends on host/filesystem support; unsupported environments are rejected
+  rather than given a race-prone emulation.
+- xmlsquish is not published on crates.io; the supported source-install path is the immutable Git
+  tag.
+
+## 10. External rationale and sources
 
 - Google Search Central,
   [Software app structured data](https://developers.google.com/search/docs/appearance/structured-data/software-app):
