@@ -73,6 +73,7 @@ impl ProjectRepository {
 
     /// 恢复所有已作出持久提交决定但未完成的事务。 / Recovers every transaction with a durable commit decision but incomplete replacements.
     pub fn recover(&self) -> Result<(), RepositoryError> {
+        crate::creation::recover_creation_ancestors(&self.root, self.faults.as_ref())?;
         recover_transactions(&self.root, self.faults.as_ref())
     }
 
@@ -345,7 +346,7 @@ pub(crate) fn workspace_members_digest(root: &Path) -> Result<String, Repository
     Ok(digest(b"workspace-members", &bytes))
 }
 
-fn workspace_member_dirs(
+pub(crate) fn workspace_member_dirs(
     root: &Path,
     workspace: &Workspace,
 ) -> Result<Vec<PathBuf>, RepositoryError> {

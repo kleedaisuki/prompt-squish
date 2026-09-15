@@ -27,6 +27,14 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 /// 可注入的持久化边界。 / Injectable durability boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FaultPoint {
+    /// 新项目候选树与恢复日志均已同步。 / A new-project candidate tree and recovery journal are durable.
+    CreationPrepared,
+    /// 新项目树已原子发布。 / A new-project tree has been atomically published.
+    CreationPublished,
+    /// 包含工作区清单已持久替换。 / The enclosing workspace manifest has been durably replaced.
+    CreationWorkspaceReplaced,
+    /// 新项目事务已完成。 / A new-project transaction has completed.
+    CreationCompleted,
     /// 快照已持锁完成恢复，即将读取权威状态。 / A snapshot recovered under lock and is about to read authoritative state.
     SnapshotRead,
     /// 候选文件已同步。 / Candidate files have been synchronized.

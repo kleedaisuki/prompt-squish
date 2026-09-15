@@ -17,6 +17,7 @@ squish-ir = { path = "../squish-ir" }
 squish-project = { path = "../squish-project" }
 squish-source = { path = "../squish-source" }
 thiserror = "2.0"
+toml_edit = "0.23"
 
 [dev-dependencies]
 tempfile = "3.23"

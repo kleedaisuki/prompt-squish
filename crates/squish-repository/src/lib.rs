@@ -6,11 +6,17 @@
 
 #![forbid(unsafe_code)]
 
+mod creation;
 mod error;
 mod repository;
 mod snapshot;
 mod transaction;
 
+pub use creation::{
+    CreateProjectRequest, CreatedProject, NewProjectLocation, NoStagePreparation, ProjectFile,
+    ProjectVcs, StagePreparer, WorkspaceMembership, create_project, inspect_new_destination,
+    normalize_new_destination, recover_project_creations,
+};
 pub use error::RepositoryError;
 pub use repository::{Discovery, ProjectRepository};
 pub use snapshot::{

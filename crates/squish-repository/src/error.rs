@@ -5,6 +5,12 @@ use thiserror::Error;
 /// 文件系统项目适配器错误。 / Filesystem project-adapter error.
 #[derive(Debug, Error)]
 pub enum RepositoryError {
+    /// 新项目目标已被其它文件系统对象占用。 / A new-project destination is already occupied.
+    #[error("project destination already exists: {0}")]
+    DestinationExists(PathBuf),
+    /// 工作区不能无歧义地接纳新成员。 / A workspace cannot accept the new member unambiguously.
+    #[error("workspace membership conflict: {0}")]
+    WorkspaceConflict(String),
     /// 文件系统操作失败。 / A filesystem operation failed.
     #[error("filesystem operation failed for {path}: {source}")]
     Io {
