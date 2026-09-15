@@ -293,6 +293,10 @@ parent and follows the same nearest-manifest/upward rules as other commands:
 - If the normalized package directory is already an effective member, no root edit is needed.
 - Otherwise the manager appends the normalized workspace-relative directory to `workspace.members`
   while preserving unrelated TOML formatting and comments.
+- The normalized top-level member path `.xmlsquish` is reserved for workspace manager state and is
+  rejected before staging or editing the root manifest. This is a workspace namespace invariant,
+  not a global filename ban: a standalone destination named `.xmlsquish` remains allowed, although
+  its dot-containing leaf requires an explicit valid `--name` under the package-name rules above.
 - A matching `workspace.exclude`, a destination outside the workspace root, a duplicate package
   name, or an ambiguous/nested workspace relation fails before commit. The tool does not override
   an explicit exclusion.
@@ -365,6 +369,7 @@ required workspace membership, or a workspace member pointing at a missing desti
 | New package beneath an enclosing workspace | Child and missing `workspace.members` entry commit together; package is immediately selectable by `-p` |
 | Already-effective workspace member | No duplicate member entry and no unrelated root-manifest diff |
 | Excluded or duplicate-name workspace package | Diagnostic names the conflicting workspace rule/package; no destination or root-manifest change; exit `1` |
+| Top-level workspace destination `.xmlsquish` | Reject reserved manager-state member before writes; the same directory name outside a workspace remains usable with an explicit valid `--name` |
 | Destination is an existing empty directory, file, symlink, or junction | No merge or overwrite; diagnostic names the object; exit `1` |
 | Deep destination with missing parents | Parents and project are created; injected failure removes only still-empty manager-created ancestors |
 | Invalid explicit vs inferred package name | Explicit malformed `--name` exits `2`; invalid inferred leaf exits `1` and suggests `--name` |
@@ -379,6 +384,15 @@ required workspace membership, or a workspace member pointing at a missing desti
 Release evidence requires parser/protocol round trips, filesystem fault injection, process-level
 stream and exit tests, real process-death recovery points, and the same composed-binary workflow on
 Ubuntu, macOS, and Windows. A unit test that only compares template strings is insufficient.
+
+The process-death requirement means abrupt termination of the tool while the operating system and
+filesystem remain running; it is not a claim that Windows sudden power loss has been verified.
+Directory flush/sync may be unavailable for a Windows filesystem or handle configuration, so
+process-kill tests cannot prove that directory-entry updates have reached stable media before power
+is removed. This evidence boundary does not weaken ordinary cancellation or killed-process
+recovery: returned writes, renames, journals, and commit decisions must still reconcile exactly as
+specified above. A controlled power-cut or equivalent storage fault harness, on supported Windows
+filesystems, is required before claiming sudden-power-loss durability.
 
 #### 3.3.7 Production precedent and deliberate differences
 

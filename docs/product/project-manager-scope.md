@@ -37,7 +37,9 @@ lifecycle. It atomically creates a canonical package manifest, `src/prompt.xml`,
 a destination that does not exist. The generated source uses only the current DSL, is already in
 canonical format, and builds offline into a `.prompt` product. When the destination belongs to an
 enclosing workspace, package creation and any missing `workspace.members` edit are one recoverable
-transaction.
+transaction. The top-level member path `.xmlsquish` is reserved for that workspace's manager state
+and is rejected before writes; the same directory name is not reserved for a standalone project
+(an explicit valid `--name` is still required because the inferred leaf contains a dot).
 
 The previous decision that dismissed `init/new` together is explicitly reversed for `new`.
 Adopting a populated existing directory (`init`) remains a distinct, unresolved product operation;
@@ -161,6 +163,9 @@ There is no compatibility shim that guesses whether a command word is a file. Hi
 - An existing destination, workspace conflict, pre-commit failure, or pre-commit cancellation
   overwrites nothing and publishes no partial project. A post-decision process death is recovered
   by the next ordinary invocation.
+- Process-kill recovery is required on every supported platform. It does not, by itself, prove
+  Windows sudden-power-loss durability where directory flush/sync is unavailable; that narrower
+  claim requires a storage-level power-cut or equivalent fault harness.
 - All selected targets observe one authoritative frozen snapshot and exact resolved package graph.
 - Entry linking validates the complete static source closure, including import cycles and unreachable definitions according to DSL rules.
 - Equivalent declared inputs produce byte-identical canonical IR and prompt products under the same tool/schema/backend identities.
