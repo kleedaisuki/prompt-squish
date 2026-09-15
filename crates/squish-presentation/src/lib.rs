@@ -1021,7 +1021,7 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                         sanitize(attempt.as_str())
                     ))?;
                 }
-                self.begin_progress(format!("Planning {}", job), None, None)?;
+                self.begin_progress(format!("Planning {job}"), None, None)?;
             }
             EventPayload::PlanningStepStarted {
                 job, step, kind, ..

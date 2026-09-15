@@ -607,7 +607,7 @@ impl<R: RegistryPort, G: GitPort, F: FilesystemPort> Resolver<R, G, F> {
             && matches!(&locked.source, LockedSource::Git { repository: actual, revision, .. }
                 if actual == repository && reference.rev.as_ref().is_none_or(|wanted| wanted == revision))
         {
-            self.import_prior_closure(state, &locked.id)?;
+            Self::import_prior_closure(state, &locked.id)?;
             return Ok(locked.id);
         }
         let candidate = self
@@ -646,7 +646,7 @@ impl<R: RegistryPort, G: GitPort, F: FilesystemPort> Resolver<R, G, F> {
 
     /// 复制既有精确 Git 子图，避免不相关 manifest 变化刷新可移动选择器。 /
     /// Copies an existing exact Git subgraph so unrelated manifest changes do not refresh a moving selector.
-    fn import_prior_closure(&self, state: &mut State<'_>, id: &str) -> Result<(), ResolveError> {
+    fn import_prior_closure(state: &mut State<'_>, id: &str) -> Result<(), ResolveError> {
         if state.nodes.contains_key(id) {
             return Ok(());
         }
@@ -681,7 +681,7 @@ impl<R: RegistryPort, G: GitPort, F: FilesystemPort> Resolver<R, G, F> {
             },
         );
         for dependency in dependencies {
-            self.import_prior_closure(state, &dependency)?;
+            Self::import_prior_closure(state, &dependency)?;
         }
         Ok(())
     }

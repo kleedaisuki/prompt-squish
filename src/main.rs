@@ -596,13 +596,13 @@ fn load_config(
             .map(squish_cli::ConfigOverride::into_assignment),
     );
     if let Some(value) = invocation.presentation.color {
-        overrides.push(format!("term.color = \"{:?}\"", value).to_ascii_lowercase());
+        overrides.push(format!("term.color = \"{value:?}\"").to_ascii_lowercase());
     }
     if let Some(value) = invocation.presentation.progress {
-        overrides.push(format!("term.progress = \"{:?}\"", value).to_ascii_lowercase());
+        overrides.push(format!("term.progress = \"{value:?}\"").to_ascii_lowercase());
     }
     if let Some(value) = invocation.presentation.message_format {
-        overrides.push(format!("term.message-format = \"{:?}\"", value).to_ascii_lowercase());
+        overrides.push(format!("term.message-format = \"{value:?}\"").to_ascii_lowercase());
     }
     if invocation.presentation.plain {
         overrides.extend([

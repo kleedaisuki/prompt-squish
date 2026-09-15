@@ -60,7 +60,7 @@ digest_newtype! {SourceDigest=>"source",SemanticUnitDigest=>"unit",DebugDigest=>
 
 // 固定分块写法兼容项目 MSRV；新编译器建议的 `as_chunks` 稳定得更晚。
 // Fixed chunk iteration preserves the project MSRV; `as_chunks` stabilized later.
-#[allow(clippy::chunks_exact_to_as_chunks)]
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 fn sha256(input: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
