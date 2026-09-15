@@ -1,138 +1,155 @@
-# xmlsquish 1.0 Product Release Page
+# xmlsquish 1.0 Product Release Surface: Implementation and Evidence Record
 
-- **Status:** implementation contract
-- **Date:** 2026-09-15
+- **Status:** release preparation complete; publication gate pending
+- **Evidence date:** 2026-09-15
 - **Audience:** product, site, release, and validation owners
-- **Applies to:** `/releases/` and `/en/releases/`
-- **Product authority:** [project-manager scope](../product/project-manager-scope.md),
-  [CLI experience](../product/cli-experience.md), [ADR 0009](../adr/0009-microkernel-manager-and-reusable-ir.md),
-  [ADR 0010](../adr/0010-transactional-new-project-creation.md), and the
-  [execution ledger](project-manager-execution-status.md)
+- **Product routes:** `/releases/` (Simplified Chinese) and `/en/releases/` (English)
+- **Machine route:** `/releases/1.0.0.json`
+- **Prepared version/tag:** `1.0.0` / `v1.0.0`
+- **Exact validated site commit:** `8a2be527beb4091beba6477d3b7a870436ffc691`
 
-## 1. Decision
+This file records the implemented release surface and the evidence supporting it. It is not the
+release page itself. The public routes are deliberately **product launch pages**, not documentation
+pages: they lead with the user outcome, present one six-command lifecycle, route users to an
+installation choice, and keep migration detail subordinate to the product story.
 
-The 1.0 page is a **product launch page**, not a reformatted manual and not a long release-note
-document. It must let a new visitor answer five questions, in this order:
+Product and technical authority remain in the
+[project-manager scope](../product/project-manager-scope.md),
+[CLI experience](../product/cli-experience.md),
+[ADR 0009](../adr/0009-microkernel-manager-and-reusable-ir.md),
+[ADR 0010](../adr/0010-transactional-new-project-creation.md), and the
+[execution ledger](project-manager-execution-status.md).
 
-1. What is xmlsquish now?
-2. What can I accomplish with it?
-3. Why should I trust the 1.0 claim?
-4. How do I install and start?
-5. What changes if I used an older release?
+## 1. Product decision and implemented journey
 
-The one-sentence product model is:
+The launch claim is:
 
 > **xmlsquish is the project manager for XML prompts: create, format, resolve, build, and inspect
 > reproducible prompt artifacts with one command-line tool.**
 
-The narrative pivot is **compiler to project manager**. Compilation remains an important engine,
-but it is no longer the product boundary. The visual proof is the six-command lifecycle:
+The narrative pivot is from compiler to project manager. Both localized pages identify xmlsquish
+as an XML prompt project manager and expose the same lifecycle:
 
 ```text
 new → fmt → add/remove → build → inspect
 ```
 
-The page must name all six direct commands—`new`, `fmt`, `build`, `add`, `remove`, and `inspect`—and
-show how they belong to one workflow. It must not present six unrelated feature tiles or lead with
-the XML macro language.
-
-## 2. Audience and desired actions
-
-| Audience | Question | Page answer | Primary action |
-| --- | --- | --- | --- |
-| New prompt engineer | “Can this replace my scripts and loose XML files?” | One manifest, one manager, named targets, dependencies, deterministic artifacts | Install, then run `xmlsquish new` |
-| Existing 0.x user | “Will my prompt sources still work?” | The 0.3 XML vocabulary remains; the invocation and artifact model moves to projects | Read the compact migration boundary |
-| CI/tool author | “Can automation consume this without terminal scraping?” | Stable exits plus Human, Short, and versioned NDJSON presentation | Open the CLI contract or GitHub source |
-| Evaluator | “Is 1.0 merely a new label?” | Exact platform matrix, checksums, tagged source, release workflow, and stated limitations | Inspect release evidence |
-| Search crawler or robot agent | “What entity, version, capabilities, and downloads does this page describe?” | Static semantic HTML and matching structured facts | Follow canonical release/download/source links |
-
-The primary conversion is a successful local `new → fmt --check → build --offline` run. Download
-count is not the product outcome.
-
-## 3. Information architecture
-
-Replace the current 0.3 compiler-oriented body with the following sequence. The first screen must
-communicate value before history or internals.
-
-### 3.1 Global header
-
-Retain the xmlsquish brand, explicit language switch, and three-state theme control. Rename
-navigation wording if needed so the page reads as a product surface rather than a reference manual.
-Do not auto-redirect based on language or theme.
-
-### 3.2 Hero: the product change
-
-Required content:
-
-- eyebrow: `xmlsquish 1.0.0` plus the release date sourced from release metadata;
-- headline: “Your prompts are projects now.” / “从现在起，把提示词当作项目。”;
-- supporting line that explicitly identifies xmlsquish as an XML prompt project manager;
-- primary CTA to platform downloads;
-- secondary CTA to the six-command quick start;
-- compact facts: free/open source, GPL-3.0-or-later, Windows/Linux/macOS, x64/ARM64;
-- a visual command orbit or pipeline that makes the manager model legible without JavaScript.
-
-The hero must not say only “new language”, “macros”, “minification”, or `XML → XML`. Those describe
-the internal compiler-era product and are no longer an adequate 1.0 promise.
-
-### 3.3 Six-command workflow: show one successful journey
-
-Use one numbered, copyable terminal sequence rather than six isolated examples:
+The page presents all six direct commands—`new`, `fmt`, `build`, `add`, `remove`, and `inspect`—as
+one journey rather than unrelated feature tiles. The copyable, zero-network path is intentionally
+separate from the dependency-management demonstration:
 
 ```bash
-xmlsquish new support-agent --vcs=git
-cd support-agent
+xmlsquish new support --vcs=none
+cd support
 xmlsquish fmt --check
-xmlsquish add company-policy
-xmlsquish remove company-policy
 xmlsquish build --offline
-xmlsquish inspect artifact prompt
+xmlsquish inspect artifact target/xmlsquish/prompt.prompt --format=json
 ```
 
-Explain each command in one short phrase. `add` and `remove` belong to one dependency-management
-stage so the lifecycle stays visually simple. A visible output card shows the canonical scaffold
-(`xmlsquish.toml`, `src/prompt.xml`) and the published `.prompt`, with `.xsir` and `.psdbg` identified
-as optional inspectable companions.
+This avoids the false implication that a newly added remote dependency is available to an offline
+build. The page also shows the canonical scaffold (`xmlsquish.toml`, `src/prompt.xml`), the
+published `.prompt`, and the inspectable artifact model. Migration copy preserves the 0.3 XML DSL
+while making the intentional command-first/project-first boundary explicit. `new` requires a
+nonexistent destination; adopting an existing populated directory (`init`) is not promised for
+1.0.
 
-The example demonstrates the interface; it must not imply that a newly added remote dependency is
-available to an offline build unless the example establishes that cache state. For an executable
-zero-network quick start, make `new → fmt --check → build --offline` the copyable command and
-demonstrate `add`/`remove` separately in the same workflow section.
+## 2. Release state model
 
-### 3.4 Product pillars: why a manager matters
+Two states must not be collapsed:
 
-Use three high-signal cards:
+| State | Meaning | Current status |
+| --- | --- | --- |
+| **Release preparation complete** | Versioned product UI, localization, machine discovery, candidate install, tests, release automation, and intended asset metadata are ready. | **Complete** |
+| **Publication gate** | Immutable `v1.0.0` tag exists and the GitHub Release contains all six native archives plus a verified `SHA256SUMS`. | **Pending** |
 
-1. **Project lifecycle** — canonical `new`, upward project discovery, workspaces, and formatting.
-2. **Reproducible builds** — exact dependency state, immutable source observation, binary XSIR,
-   linking, and atomic artifact publication.
-3. **Built for humans and tools** — Human/Short/NDJSON outputs, stable exit meanings, typed
-   inspection, cancellation, and recovery.
+The machine metadata therefore says `releaseStatus: "prepared"` and describes archive locations as
+`intendedUrl`. A prepared URL is not proof that an asset exists. The product page renders six
+disabled, non-link controls and explicitly labels them pending. It does not expose a working
+download affordance before publication.
 
-Each card connects a feature to a user outcome. Internal crate names, scheduler phase names, and
-detailed budget tables belong in linked technical material, not the launch narrative.
+The current `SoftwareApplication` JSON-LD is also deliberately candidate-safe:
 
-### 3.5 Trust strip: make 1.0 falsifiable
+- exactly one release-page entity;
+- `softwareVersion: "1.0.0"`;
+- repository identity through `sameAs`;
+- `creativeWorkStatus: "release candidate"`;
+- no `downloadUrl`, `Offer`/`offers`, rating, review, usage-count, or fabricated social proof;
+- facts match visible localized content.
 
-Present a compact, visible evidence block—not vague badges—with these facts:
+Google documents `offers.price` as required for eligibility for its software-app rich result. We do
+not invent an offer merely to chase eligibility: truthful entity description is more important than
+a rich-result badge. After the tag and assets exist, publication must update availability only from
+verified release facts.
 
-- the tagged commit and GitHub release page;
-- release binaries are built and natively smoke-tested for six targets: Windows, Linux, and macOS,
-  each on x64 and ARM64;
-- release automation verifies the six-command help surface and a real
-  `new → fmt → build → inspect` journey before packaging;
-- archives have a release-local `SHA256SUMS` file;
-- minimum source-build toolchain is Rust 1.88;
-- binaries are unsigned and macOS artifacts are not notarized; checksums establish byte integrity,
-  not publisher identity.
+## 3. Product-page information architecture
 
-Only display a CI run as “passed” when it is the exact tagged 1.0.0 source and the run is terminal
-and successful. Pre-release milestone run 34968311247 is useful engineering evidence but must not be
-misrepresented as the tagged 1.0 release run.
+The implemented page order is designed for product evaluation rather than reference lookup:
 
-### 3.6 Installation: route by operating system
+1. **Hero:** “Your prompts are projects now.” / “从现在起，把提示词当作项目。”
+2. **Product map:** project → dependency graph → build → inspectable artifact.
+3. **Six-command journey:** the complete manager command surface in one ordered flow.
+4. **Runnable quick start:** the zero-network command sequence above.
+5. **Manager outcomes:** lifecycle, reproducibility, and human/tool-facing output.
+6. **Installation:** six platform candidates, honest availability, checksums, and source install.
+7. **Migration boundary:** preserved XML language and intentional project-model changes.
+8. **Closing action:** create, build offline, and inspect what is shipped.
 
-Retain six direct asset links using release automation's stable names:
+The page does not reproduce the CLI manual, internal crate graph, scheduler phases, or complete test
+ledger. Those remain linked technical material. This separation is a product requirement, not just
+a visual choice.
+
+## 4. Internationalization and visual system
+
+Chinese and English are complete monolingual pages at stable URLs. They share one typed content
+shape and the same command, platform, evidence, migration, limitation, and CTA structures.
+Locale-specific self-canonicals, reciprocal absolute `hreflang="zh-CN"`/`hreflang="en"`, and
+Chinese `x-default` are emitted. The language switch is an ordinary link; neither crawlers nor
+users are redirected from `Accept-Language`.
+
+The page uses **MoeSegfault Style 0.1.2** from its immutable versioned URL. `BaseLayout.astro` pins
+`https://style.moesegfault.dev/v0.1.2/css/all.css` with the exact Subresource Integrity (SRI) value
+`sha384-Tsj7ndpNmGrJTPrbAcVgLnpddldDQeHjlbEZRTpJmfvqM6xgXNrrqmsYK61doSFn`. The upstream
+[0.1.2 manifest](https://style.moesegfault.dev/v0.1.2/manifest.json) identifies the package/version
+and provides file hashes. Release-specific CSS composes the public `--moe-*` tokens and local
+`--xs-*` aliases instead of forking a light-only palette.
+
+Implemented interaction properties include:
+
+- explicit `auto`, `light`, and `dark` modes with a pre-paint theme bootstrap;
+- readable responsive layouts with no document-level horizontal overflow in tested viewports;
+- bounded wrapping for long immutable install commands and asset names;
+- visible keyboard focus, skip navigation, labelled locale/theme controls, and non-color status
+  cues;
+- a complete no-JavaScript content path; JavaScript only enhances controls;
+- `prefers-reduced-motion` handling for nonessential movement.
+
+## 5. Search and robot-agent discovery
+
+The human-visible product page remains the primary truth. Important identity, version, commands,
+installation state, compatibility, and source links are emitted as static semantic HTML rather than
+hidden behind hydration. Localized titles/descriptions, Open Graph/Twitter cards, canonical links,
+and the single truthful JSON-LD entity agree with that visible content.
+
+Four machine-discovery surfaces are implemented:
+
+| Surface | Authority and purpose |
+| --- | --- |
+| `/robots.txt` | Crawler access policy under the Robots Exclusion Protocol; permits crawling and points to the sitemap. |
+| `/sitemap.xml` | Indexable URL discovery, including both localized release routes and reciprocal alternates. |
+| `/releases/1.0.0.json` | Product-owned, structured release state: prepared version, locale routes, intended tag/assets, commands, platform matrix, and integrity limitations. |
+| `/llms.txt` | Additive navigation for robot agents under a community proposal; it links to authoritative pages/metadata but is not crawler control, authorization, an SEO requirement, or the sole source of any claim. |
+
+The `llms.txt` surface is implemented, but its status is intentionally narrow. The Answer.AI-origin
+proposal describes a convention for helping agents locate concise material; it is not an IETF or
+search-engine standard. RFC 9309 governs `robots.txt`. Google explicitly says that ordinary SEO
+fundamentals remain applicable to its AI search features and that no special AI text file or schema
+is required. Consequently the durable optimization is truthful static content, crawlability,
+internal discovery, locale correctness, structured data matching visible text, and good page
+experience—not a parallel agent-only narrative.
+
+## 6. Installation and publication contract
+
+The prepared native matrix has stable intended names:
 
 ```text
 xmlsquish-1.0.0-x86_64-pc-windows-msvc.zip
@@ -144,218 +161,132 @@ xmlsquish-1.0.0-aarch64-apple-darwin.tar.gz
 SHA256SUMS
 ```
 
-State the existing runtime boundaries beside the choices: Linux glibc 2.35+, macOS 11+, and
-Windows MSVC desktop targets. Also offer the pinned source install:
+Runtime boundaries are Linux glibc 2.35+, macOS 11+, and Windows MSVC desktop targets. Binaries
+are unsigned and macOS archives are not notarized; SHA-256 checksums establish byte integrity, not
+publisher identity. The source build requires Rust 1.88+ and xmlsquish is not published on
+crates.io.
+
+Until the tag exists, the page separates the proven immutable candidate command from the future
+tag command:
 
 ```bash
+cargo install --git https://github.com/kleedaisuki/prompt-squish \
+  --rev 2eb5834b15d47717a7b45092a3b72bfa475f4c79 --locked
+
+# Valid only after publication:
 cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v1.0.0 --locked
 ```
 
-The verification result shown below it is `xmlsquish 1.0.0`. State that source install requires
-Rust 1.88+ and that xmlsquish is not currently published on crates.io.
+The exact remote `--rev` installation was executed against GitHub with Rust 1.88, installed
+`xmlsquish 1.0.0`, and successfully completed `new → fmt --check → build --offline → inspect`.
+This is candidate evidence, not evidence that the tag or release assets exist.
 
-Download buttons must not be represented as working until the tag and corresponding release assets
-exist. Publishing the page and release is therefore one coordinated release gate; a candidate
-deployment may label itself “1.0.0 candidate” and route to GitHub Releases, but cannot fabricate
-successful asset URLs.
+## 7. Verification evidence
 
-### 3.7 Migration and compatibility boundary
+### 7.1 Exact remote CI
 
-This section is short and visible; do not hide the core answer in a collapsed manual.
+[GitHub Actions run 34975527521](https://github.com/kleedaisuki/prompt-squish/actions/runs/34975527521)
+completed successfully for exact commit `8a2be527beb4091beba6477d3b7a870436ffc691`. All five jobs
+were terminal and green:
 
-| From 0.3 compiler workflow | 1.0 project-manager workflow |
+| Job | Result |
 | --- | --- |
-| loose input operand | manifest target in `xmlsquish.toml` |
-| sibling `.o.xml` output | target-directory `.prompt` product |
-| printable intermediate XML | reusable binary `.xsir` |
-| optional provenance output | self-contained `.psdbg` |
-| direct compiler invocation | `xmlsquish build -t NAME` |
+| Site | success |
+| Rust quality, Ubuntu, MSRV 1.88 | success |
+| Rust tests, Linux, MSRV 1.88 | success |
+| Rust tests, macOS, MSRV 1.88 | success |
+| Rust tests, Windows, MSRV 1.88 | success |
 
-The page says both sides of the compatibility decision:
+This is exact candidate-CI evidence. It is not described as the tagged-release workflow because
+`v1.0.0` has not yet passed the publication gate.
 
-- **Preserved:** the 0.3 XML DSL—entries, modules, imports, macros, arguments, slots, and expansion
-  semantics—remains the source-language contract.
-- **Changed intentionally:** 1.0 is command-first and project-first. It does not guess that an
-  unknown command is a source path. Existing loose-source users create a manifest and target.
+### 7.2 Site and visual validation
 
-Also state that `new` requires a destination that does not exist; adopting an existing populated
-directory (`init`) is not part of 1.0. Do not promise universal power-loss durability: tested
-process-death recovery on supported desktops does not prove sudden-power-loss behavior on every
-filesystem or storage controller.
+- Astro/TypeScript build and the browser/static product contract: **38/38 passed**.
+- Initial visual matrix: Chinese/English × mobile/desktop × light/dark = **8 full-page + 8 hero
+  screenshots**, all inspected; horizontal overflow was exactly zero in all eight cases.
+- Incremental recheck after the runnable quick start and split install commands: **4 additional
+  full-page screenshots** plus focused quick-start/source captures; all four documents again had
+  zero horizontal overflow.
+- Six pending platform controls were non-links in every visual case; no fabricated
+  `/releases/download/v1.0.0/` anchor was present.
 
-### 3.8 Closing CTA
+The visual evidence used Chromium/Playwright on Windows. Safari/WebKit and Firefox were not part of
+this check; representative contrast was measured rather than exhaustively proving every token
+combination.
 
-End with one outcome, not another feature inventory:
+### 7.3 Rust and packaging validation
 
-> Create a real prompt project, build it offline, and inspect what you ship.
+- Rust 1.88 format, locked workspace check, strict Clippy, release build, version, and root CLI
+  smoke: passed.
+- Isolated all-feature workspace suite: **518/518 passed** (505 unit/integration tests plus 13
+  doctests).
+- A repeated native Windows candidate package was byte-identical on the validation host.
+- Release automation defines six native build/package jobs and a final publish step that verifies
+  the complete matrix before creating assets.
 
-Buttons: **Download 1.0.0** and **View source on GitHub**. Technical details link to the tagged
-changelog/release notes, product CLI contract, namespace page, and license; they do not occupy the
-main narrative.
+The repeated-package evidence covers one Windows host. It does not independently prove
+cross-architecture execution, future GitHub asset upload, signing/notarization, or sudden-power-loss
+durability on every filesystem.
 
-## 4. Bilingual content contract
+## 8. Acceptance ledger
 
-Chinese and English are two complete, monolingual product pages at stable URLs. They expose the
-same sections, facts, commands, asset choices, limitations, and CTA destinations. Translation does
-not require identical sentence length, but neither locale may contain a material claim absent from
-the other.
+### Release preparation complete
 
-| Message intent | English direction | Simplified Chinese direction |
-| --- | --- | --- |
-| SEO title | `xmlsquish 1.0 — Project manager for XML prompts` | `xmlsquish 1.0 — XML 提示词项目管理器` |
-| Meta description | `Create, format, resolve, build, and inspect reproducible XML prompt projects with xmlsquish 1.0.` | `使用 xmlsquish 1.0 创建、格式化、解析、构建并检查可复现的 XML 提示词项目。` |
-| Hero | `Your prompts are projects now.` | `从现在起，把提示词当作项目。` |
-| Value statement | `One manager from a new project to an inspectable artifact.` | `从新建项目到可检查产物，只用一个管理器。` |
-| Workflow heading | `Six commands. One project lifecycle.` | `六个命令，一条项目生命周期。` |
-| Evidence heading | `A 1.0 claim you can verify.` | `可以验证的 1.0。` |
-| Migration heading | `Coming from 0.3? Keep the language; adopt the project.` | `从 0.3 升级？保留语言，迁移到项目。` |
-| Closing | `Create a real prompt project, build it offline, and inspect what you ship.` | `创建真正的提示词项目，离线构建，并检查你交付的内容。` |
+- [x] Cargo package, lockfile, CLI `--version`, visible copy, machine metadata, and intended paths
+      consistently use `1.0.0` / `v1.0.0`.
+- [x] The public release routes are product pages and lead with the project-manager model.
+- [x] All six commands appear in one lifecycle; the zero-network quick start is executable.
+- [x] Simplified Chinese and English pages have materially equal product facts and stable locale
+      metadata.
+- [x] Light/dark/auto behavior, responsive presentation, no-script content, focus, reduced motion,
+      and bounded long commands are implemented and covered by the stated visual/browser evidence.
+- [x] MoeSegfault Style 0.1.2 is version-pinned with SRI and used through shared tokens.
+- [x] `robots.txt`, localized `sitemap.xml`, candidate-safe release JSON, and additive `llms.txt`
+      are published by the static site.
+- [x] Exactly one candidate-safe `SoftwareApplication` JSON-LD entity is emitted, with `sameAs`
+      and `creativeWorkStatus`, and without downloads, offers, ratings, or reviews.
+- [x] Exact remote candidate revision `2eb5834b15d47717a7b45092a3b72bfa475f4c79` installs and runs
+      the documented journey.
+- [x] Browser/static tests pass 38/38, visual checks pass the stated matrices, Rust tests pass
+      518/518, and exact remote CI run 34975527521 is green for all five jobs.
 
-`reference.ts` keeps one structural type for both locale objects so missing or shape-mismatched
-translations fail TypeScript checking. Tests additionally compare material arrays (commands,
-platforms, migration rows, and evidence facts) by key or length; TypeScript alone cannot detect a
-semantically omitted translation represented by an empty string.
+### Publication gate pending
 
-## 5. Visual system and interaction
+- [ ] Create immutable Git tag `v1.0.0` at the approved release commit.
+- [ ] Run the release workflow against that exact tag and require all six native build/package jobs
+      plus the final publisher to succeed.
+- [ ] Publish all six archives and `SHA256SUMS` on the GitHub Release.
+- [ ] Verify every release asset URL resolves to the intended file.
+- [ ] Verify `SHA256SUMS` against the bytes downloaded from GitHub.
+- [ ] Run native archive smoke tests and the tag-based source-install command; confirm exact output
+      `xmlsquish 1.0.0` and the required command surface.
+- [ ] Replace pending controls/metadata only after those assets are observed; then verify the
+      production pages and JSON-LD remain truthful.
 
-Use the pinned **MoeSegfault Style** stylesheet already loaded by `BaseLayout.astro`;
-release-specific CSS composes its public tokens (`--moe-*`) and existing xmlsquish aliases
-(`--xs-*`). It must not fork a second palette or hard-code a light-only surface.
+Absent tag/assets are pending publication work, **not failures of the prepared candidate page**.
+Conversely, preparation evidence must never be promoted into a claim that the release has already
+been published.
 
-Visual direction:
+## 9. External rationale and sources
 
-- warm cream/orange/brown MoeSegfault palette, editorial typography, rounded but restrained cards;
-- a large typographic hero with a dark terminal/product panel as the visual counterweight;
-- monospace version numbers, commands, artifact names, and evidence identifiers;
-- one warm accent for focus and action, not rainbow feature coloring;
-- roomy product storytelling above dense details;
-- real text and CSS for the command lifecycle, not a text-bearing raster image;
-- decorative anime/moe energy may appear in small accents but must not compete with command or
-  installation tasks.
-
-Theme behavior:
-
-- `auto`, `light`, and `dark` remain explicit choices and persist through the existing control;
-- render the initial theme before paint using the existing inline bootstrap;
-- every release surface derives foreground/background/border/focus colors from theme tokens;
-- `prefers-reduced-motion` removes nonessential movement;
-- the page remains complete without JavaScript; JavaScript only enhances copy buttons and controls.
-
-At 390, 768, and 1280 CSS pixels, both locales and both themes have no document-level horizontal
-overflow. Download targets remain at least as clear on touch as on desktop, and long commands or
-asset names wrap or scroll within their own bounded container.
-
-## 6. Search and robot-agent contract
-
-Optimize the same page for humans, crawlers, and agents rather than maintaining an agent-only
-parallel story:
-
-1. Generate static HTML with one descriptive `h1`, ordered `h2` sections, actual lists/tables, and
-   visible text for every material fact. Never require hydration to discover product meaning,
-   compatibility, commands, or download links.
-2. Keep locale-specific canonical URLs, reciprocal absolute `hreflang="zh-CN"` and `hreflang="en"`,
-   and `x-default` pointing to the Chinese release page. Each localized page canonicals to itself.
-3. Give 1.0 its own localized title and description. Add a release-appropriate Open Graph image and
-   `summary_large_image`; do not reuse an image whose visible text claims the old compiler model.
-4. Embed truthful JSON-LD with a `WebPage` whose `mainEntity` is a `SoftwareApplication`. Include
-   `name`, `softwareVersion: "1.0.0"`, localized `description`, `applicationCategory:
-   "DeveloperApplication"`, operating systems, license URL, code repository, release-notes URL,
-   download URL, and a zero-price `Offer`. Do not invent ratings, reviews, usage counts, awards, or
-   compatibility. Structured facts also appear visibly on the page.
-5. Publish crawlable `robots.txt` and `sitemap.xml` containing both release URLs. Do not block
-   ordinary search or agent crawlers. A future `llms.txt` may summarize stable navigation, but it is
-   optional and must not become the only source for a fact.
-6. Link directly to the immutable `v1.0.0` tag, release, checksums, changelog, license, namespace,
-   and repository with descriptive anchor text. Avoid “click here”.
-7. Keep the language switch as an ordinary anchor. Do not locale-redirect crawlers or users based
-   on `Accept-Language`.
-
-This follows Google's guidance to use separate language URLs with reciprocal `hreflang` annotations
-and visible monolingual content. `SoftwareApplication` markup is an entity description, not a
-promise of a rich result; without genuine reviews or ratings the page must not manufacture them to
-satisfy a rich-result eligibility rule.
-
-## 7. Non-goals
-
-- Reproducing the full CLI reference, XML DSL specification, internal architecture, or test ledger
-  inline.
-- Retelling the 0.2-to-0.3 `mount`/`call` migration as the headline of the 1.0 page.
-- Claiming that xmlsquish is a hosted service, registry, template marketplace, IDE, prompt test
-  framework, deployment platform, or general task runner.
-- Adding telemetry, sign-up gates, account creation, newsletter forms, pricing tiers, or fabricated
-  social proof.
-- Claiming code signing, notarization, crates.io availability, hermetic editable path dependencies,
-  universal filesystem support, or universal sudden-power-loss safety.
-- Maintaining materially different Chinese and English claims.
-- Building an agent-only shadow page that can drift from the human-visible facts.
-
-## 8. Verifiable acceptance checklist
-
-### Product truth
-
-- [ ] Cargo package, lockfile, binary `--version`, install command, tag links, download paths, visible
-      copy, and JSON-LD all say exactly `1.0.0` / `v1.0.0`.
-- [ ] The hero calls xmlsquish an XML prompt **project manager**, not only a compiler.
-- [ ] All six commands are visible and participate in one project lifecycle.
-- [ ] The zero-network quick start successfully executes with the tagged release binary.
-- [ ] The canonical scaffold and `.prompt` product are accurate; `.xsir` and `.psdbg` are optional
-      artifacts rather than XML text files.
-- [ ] Compatibility and limitations match the tagged product contract.
-
-### Release evidence
-
-- [ ] All six expected archives and `SHA256SUMS` exist at the linked GitHub release.
-- [ ] Every download link returns the intended asset rather than a GitHub error page.
-- [ ] `SHA256SUMS` matches the published bytes.
-- [ ] The displayed successful workflow is for the exact immutable `v1.0.0` commit.
-- [ ] Source-install and native archive smoke produce `xmlsquish 1.0.0` and exercise the six-command
-      surface required by release automation.
-
-### Internationalization and discovery
-
-- [ ] `/releases/` renders complete Simplified Chinese and `/en/releases/` complete English, with no
-      mixed-locale fallback text.
-- [ ] Commands, platforms, facts, migration rows, limitations, and CTA links are materially equal in
-      both locales.
-- [ ] Each page has correct `html[lang]`, self-canonical, reciprocal absolute `hreflang`, and
-      `x-default` metadata.
-- [ ] Localized title, description, Open Graph fields, and JSON-LD validate and agree with visible
-      content.
-- [ ] `robots.txt` permits crawling and the sitemap contains both localized release URLs.
-- [ ] Production HTML contains product identity, version, commands, install path, compatibility, and
-      source/release links without executing JavaScript.
-
-### Experience and accessibility
-
-- [ ] Product narrative appears before migration/reference detail; the page does not read like a
-      technical document.
-- [ ] Light, dark, and system modes work without a wrong-theme flash that obscures content.
-- [ ] Both locales pass browser checks at 390, 768, and 1280 pixels in light and dark modes with no
-      page overflow.
-- [ ] Keyboard focus, skip link, language switch, theme control, `<details>` if retained, and copy
-      feedback are operable and labelled; color is not the sole information channel.
-- [ ] Without JavaScript, all claims, commands, downloads, migration facts, and links remain usable.
-- [ ] Reduced-motion preference removes nonessential animation.
-
-## 9. Evidence and references
-
-Repository evidence inspected for this decision:
-
-- `site/src/components/ReleasePage.astro` — current 0.3 product-like layout but compiler-era story;
-- `site/src/i18n/reference.ts` — current paired translation shape and 0.3 migration content;
-- `site/src/layouts/BaseLayout.astro` and `ReferenceLayout.astro` — canonical/hreflang, theme
-  bootstrap, MoeSegfault stylesheet, and product-width shell;
-- `.github/workflows/release.yml` and `.github/scripts/release.py` — exact native matrix, asset
-  naming, package smoke, checksum, and publication contract;
-- `docs/design/project-manager-execution-status.md` — accepted six-command milestone evidence and
-  its explicit durability boundary.
-
-External implementation guidance:
-
-- Google Search Central, [localized versions](https://developers.google.com/search/docs/specialty/international/localized-versions)
-  and [multilingual sites](https://developers.google.com/search/docs/specialty/international/managing-multi-regional-sites):
-  separate language URLs, reciprocal alternates, visible monolingual content, and no forced locale redirect.
-- Google Search Central, [`SoftwareApplication` structured data](https://developers.google.com/search/docs/appearance/structured-data/software-app):
-  visible, truthful application facts and validation; search presentation is not guaranteed.
-- Schema.org, [`SoftwareApplication`](https://schema.org/SoftwareApplication): the vocabulary for the
-  software entity described by the release page.
+- Google Search Central,
+  [Software app structured data](https://developers.google.com/search/docs/appearance/structured-data/software-app):
+  supported `SoftwareApplication` fields, visible-data consistency, and rich-result eligibility.
+- Google Search Central,
+  [Localized versions of pages](https://developers.google.com/search/docs/specialty/international/localized-versions):
+  separate locale URLs and reciprocal `hreflang` relationships.
+- Google Search Central,
+  [Build and submit a sitemap](https://developers.google.com/search/docs/crawling-indexing/sitemaps/build-sitemap):
+  XML sitemap and localized-page discovery guidance.
+- Google Search Central,
+  [AI features and your website](https://developers.google.com/search/docs/appearance/ai-features):
+  foundational SEO remains applicable; no special AI file or schema is required.
+- IETF, [RFC 9309: Robots Exclusion Protocol](https://www.rfc-editor.org/rfc/rfc9309): the
+  normative crawler-access protocol implemented by `/robots.txt`.
+- Answer.AI-origin community proposal,
+  [`llms.txt`](https://llmstxt.org/): an additive agent-navigation convention, not crawler control
+  or a standards-track SEO requirement.
+- MoeSegfault Style,
+  [version 0.1.2 manifest](https://style.moesegfault.dev/v0.1.2/manifest.json): exact package,
+  version, file inventory, and integrity metadata used to audit the pinned stylesheet.
