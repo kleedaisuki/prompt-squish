@@ -56,7 +56,12 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-          - runner: windows-2022
+          # Server 2022's pre-24H2 ConPTY can block ClosePseudoConsole indefinitely even
+          # while a PTY reader drains output. Server 2025 keeps the full native PTY suite
+          # while using the corrected build-26100 close semantics.
+          # Server 2022 的旧版 ConPTY 可能无限阻塞 ClosePseudoConsole；Server 2025
+          # 在保留完整原生 PTY 测试的同时使用 build 26100 修正后的关闭语义。
+          - runner: windows-2025
             target: x86_64-pc-windows-msvc
           - runner: windows-11-arm
             target: aarch64-pc-windows-msvc

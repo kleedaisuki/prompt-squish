@@ -158,7 +158,14 @@ impl PtySession {
         ));
         let output = Arc::new(CapturedOutput::default());
         let captured = Arc::clone(&output);
-        let terminal_input = Arc::clone(&writer);
+        // The reader must not own the input pipe. On pre-24H2 ConPTY,
+        // ClosePseudoConsole may wait for that pipe to close while the reader waits for output
+        // EOF, forming an unbounded shutdown cycle. A weak reference still answers live cursor
+        // queries but lets `finish_output` close stdin before closing the pseudoconsole.
+        // 读取线程不能拥有输入管道。在 24H2 之前的 ConPTY 上，ClosePseudoConsole 可能
+        // 等待输入管道关闭，而读取线程又等待输出 EOF，从而形成无界关闭环。弱引用仍能
+        // 在会话存活时回答光标查询，同时允许 `finish_output` 先关闭 stdin。
+        let terminal_input = Arc::downgrade(&writer);
         let columns = Arc::new(AtomicU16::new(INITIAL_SIZE.cols));
         let reported_columns = Arc::clone(&columns);
         let reader = thread::spawn(move || {
@@ -183,14 +190,13 @@ impl PtySession {
                             // ConPTY 会把控制台信息同步转换成设备状态查询；PTY 只是传输层，
                             // 因此这里必须像真实终端一样回答，不能把产品进程误判为卡死。
                             let column = reported_columns.load(Ordering::Acquire).max(1);
-                            write!(
-                                terminal_input.lock().expect("PTY input lock"),
-                                "\x1b[1;{column}R"
-                            )
-                            .expect("answer terminal status query");
+                            let Some(terminal_input) = terminal_input.upgrade() else {
+                                return;
+                            };
+                            let mut terminal_input = terminal_input.lock().expect("PTY input lock");
+                            write!(terminal_input, "\x1b[1;{column}R")
+                                .expect("answer terminal status query");
                             terminal_input
-                                .lock()
-                                .expect("PTY input lock")
                                 .flush()
                                 .expect("flush terminal status response");
                             pending.drain(..position + 4);
