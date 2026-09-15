@@ -1,7 +1,7 @@
 """Package native binaries and publish a complete matrix. / 原生二进制打包及完整矩阵发布。
 
 Run from the checkout parent: / 从检出目录的父目录运行：
-    RELEASE_TAG=v0.3.0 RELEASE_TARGET=x86_64-unknown-linux-gnu \
+    RELEASE_TAG=v1.0.0 RELEASE_TARGET=x86_64-unknown-linux-gnu \
       python automation/.github/scripts/release.py package source dist
 """
 

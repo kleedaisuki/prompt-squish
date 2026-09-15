@@ -6,6 +6,12 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 
 ## [Unreleased]
 
+尚无已记录的面向用户变化。 / No user-facing changes recorded yet.
+
+## [1.0.0] — 2026-09-15 · prepared for release
+
+完整发布说明与安装方法 / Full release notes and installation: [1.0.0](docs/releases/1.0.0.md).
+
 ### 项目管理器切换 / Project-manager cutover
 
 - 公共命令改为直接的 `xmlsquish new|fmt|build|add|remove|inspect`；移除松散文件编译和过渡期命令命名空间。
@@ -53,6 +59,7 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 - 引入命名空间感知模块、不可变命名宏、显式字符串参数与 XML slot。
   Introduced namespace-aware modules, immutable named macros, explicit scalar parameters, and XML slots.
 
-[Unreleased]: https://github.com/kleedaisuki/prompt-squish/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/kleedaisuki/prompt-squish/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.0
 [0.3.0]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v0.3.0
 [0.2.0]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v0.2.0
