@@ -88,6 +88,9 @@ pub enum Verbosity {
     Normal,
     /// 包括 trace 诊断和生命周期细节。 / Include trace diagnostics and lifecycle detail.
     Verbose,
+    /// 包括完整协议身份和内容摘要，供深度诊断。 / Include full protocol identities and content
+    /// digests for deep diagnostics.
+    Trace,
 }
 
 /// 输出流的终端能力快照。 / Snapshot of terminal capabilities for an output stream.
@@ -342,6 +345,84 @@ struct JobView {
     finalizations: BTreeMap<FinalizationId, FinalizationKind>,
 }
 
+/// 统一选择产品概念、短显示指纹或完整诊断细节。 / Uniformly selects product concepts,
+/// short display fingerprints, or complete diagnostic detail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HumanDetail {
+    Product,
+    Fingerprint,
+    Trace,
+}
+
+impl HumanDetail {
+    /// 从用户选择的详细程度建立统一投影策略。 / Builds one projection policy from the
+    /// user-selected verbosity.
+    const fn from_verbosity(verbosity: Verbosity) -> Self {
+        match verbosity {
+            Verbosity::Verbose => Self::Fingerprint,
+            Verbosity::Trace => Self::Trace,
+            _ => Self::Product,
+        }
+    }
+
+    /// 仅在 trace 投影中返回内部标识。 / Returns an internal identity only in the trace
+    /// projection.
+    fn identity(self, value: &str) -> String {
+        match self {
+            Self::Product | Self::Fingerprint => String::new(),
+            Self::Trace => format!(" {}", sanitize(value)),
+        }
+    }
+
+    /// 仅在 trace 投影中追加作业上下文。 / Appends job context only in the trace projection.
+    fn context(self, job: &JobId) -> String {
+        match self {
+            Self::Product | Self::Fingerprint => String::new(),
+            Self::Trace => format!(" ({})", sanitize(job.as_str())),
+        }
+    }
+
+    /// 按投影策略描述缓存命中，默认保留来源和产物数但隐藏内容摘要。 / Describes a cache
+    /// hit according to the projection policy, retaining source and output count while hiding the
+    /// content digest by default.
+    fn cache(self, cache: CacheKind, digest: &Digest, outputs: usize) -> String {
+        match self {
+            Self::Product => format!("{}, {outputs} outputs", cache_name(cache)),
+            Self::Fingerprint => format!(
+                "{}, {}, {outputs} outputs",
+                cache_name(cache),
+                format_fingerprint(digest)
+            ),
+            Self::Trace => format!(
+                "{}, {}, {outputs} outputs",
+                cache_name(cache),
+                format_digest(digest)
+            ),
+        }
+    }
+
+    /// 按投影策略描述产物；默认 URI 不暴露内容寻址缓存内部键。 / Describes an artifact
+    /// according to the projection policy; the default URI does not expose content-addressed cache
+    /// keys.
+    fn artifact(self, artifact: &squish_protocol::Artifact) -> String {
+        let uri = product_artifact_uri(&artifact.uri);
+        match self {
+            Self::Product => format!("{uri} ({} bytes)", artifact.size),
+            Self::Fingerprint => format!(
+                "{uri} ({} bytes, {})",
+                artifact.size,
+                format_fingerprint(&artifact.digest)
+            ),
+            Self::Trace => format!(
+                "{} ({} bytes, {})",
+                sanitize(&artifact.uri),
+                artifact.size,
+                format_digest(&artifact.digest)
+            ),
+        }
+    }
+}
+
 /// 将协议事件按规范编码成逐行 NDJSON。 / Encodes protocol events as canonical line-delimited NDJSON.
 ///
 /// 每个事件立即写入并刷新，且使用 [`Event::encode_json`] 验证 v2 局部不变式；人类
@@ -454,6 +535,12 @@ impl<W: Write, C: Clock> HumanRenderer<W, C, FixedTerminal> {
 }
 
 impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
+    /// 返回本次人类输出唯一采用的细节策略。 / Returns the single detail policy used by this
+    /// human projection.
+    const fn detail(&self) -> HumanDetail {
+        HumanDetail::from_verbosity(self.options.verbosity)
+    }
+
     /// 用可刷新终端端口和时钟创建呈现器。 / Creates a renderer with refreshable terminal and clock ports.
     pub fn with_clock_and_terminal(
         writer: W,
@@ -468,8 +555,10 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
             && capabilities.supports_ansi
             && capabilities.supports_dynamic
             && terminal.width().is_some();
-        let dynamic = matches!(options.verbosity, Verbosity::Normal | Verbosity::Verbose)
-            && dynamic_capable
+        let dynamic = matches!(
+            options.verbosity,
+            Verbosity::Normal | Verbosity::Verbose | Verbosity::Trace
+        ) && dynamic_capable
             && match options.progress {
                 ProgressMode::Auto => {
                     !environment.ci && environment.term.as_deref() != Some("dumb")
@@ -688,31 +777,24 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
         }
         let message = match running.as_slice() {
             [] => "Waiting for runnable actions".to_owned(),
-            [(action, view)] => format!("{} {}", action_kind_name(view.kind), action),
-            [(action, _), ..] => {
-                format!("Running {} actions (including {})", running.len(), action)
-            }
+            [(_, view)] => action_kind_name(view.kind).to_owned(),
+            [(_, _), ..] => format!("Running {} actions", running.len()),
         };
         self.begin_progress(message, Some(completed), Some(total))
     }
 
     fn render_short(&mut self, event: &Event) -> io::Result<()> {
         match &event.payload {
-            EventPayload::PlanningStarted { job, .. } => {
-                self.write_persistent(&format!("plan {}", sanitize(job.as_str())))
+            EventPayload::PlanningStarted { .. } => self.write_persistent("plan"),
+            EventPayload::PlanningStepStarted { kind, .. } => {
+                self.write_persistent(&format!("plan:{}", planning_step_short_name(*kind)))
             }
-            EventPayload::PlanningStepStarted { job, kind, .. } => self.write_persistent(&format!(
-                "plan:{} {}",
-                planning_step_short_name(*kind),
-                sanitize(job.as_str())
-            )),
             EventPayload::PlanningStepSucceeded { .. } => Ok(()),
             EventPayload::PlanningStepFailed { diagnostic, .. }
             | EventPayload::PlanningIssue { diagnostic, .. }
             | EventPayload::PlanningFailed { diagnostic, .. } => self.render_diagnostic(diagnostic),
-            EventPayload::PlanningStepCancelled { job, .. }
-            | EventPayload::PlanningCancelled { job, .. } => {
-                self.write_persistent(&format!("cancel:plan {}", sanitize(job.as_str())))
+            EventPayload::PlanningStepCancelled { .. } | EventPayload::PlanningCancelled { .. } => {
+                self.write_persistent("cancel:plan")
             }
             EventPayload::PlanReady {
                 job,
@@ -726,9 +808,7 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
                 view.declared_actions = *actions;
                 view.mode = Some(*mode);
                 self.write_persistent(&format!(
-                    "plan:ready {} {} mode={} actions={} issues={}",
-                    sanitize(job.as_str()),
-                    sanitize(plan.as_str()),
+                    "plan:ready mode={} actions={} issues={}",
                     plan_mode_name(*mode),
                     actions,
                     issues
@@ -753,15 +833,22 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
             EventPayload::ActionStarted { job, plan, action } => {
                 self.set_action_state(job, plan, action, ActionState::Running);
                 self.write_persistent(&format!(
-                    "run:{} {}",
-                    action_kind_name(self.action_kind(job, plan, action)),
-                    sanitize(action.as_str())
+                    "run:{}",
+                    action_kind_name(self.action_kind(job, plan, action))
                 ))
             }
-            EventPayload::CacheHit { action, cache, .. } => self.write_persistent(&format!(
-                "cache:{} {}",
+            EventPayload::CacheHit {
+                job,
+                plan,
+                action,
+                cache,
+                outputs,
+                ..
+            } => self.write_persistent(&format!(
+                "cache:{} {} outputs={}",
                 cache_name(*cache),
-                sanitize(action.as_str())
+                action_kind_name(self.action_kind(job, plan, action)),
+                outputs.len()
             )),
             EventPayload::ActionSucceeded {
                 job,
@@ -773,9 +860,8 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
                 let kind = self.action_kind(job, plan, action);
                 self.set_action_state(job, plan, action, ActionState::Terminal);
                 self.write_persistent(&format!(
-                    "ok:{} {} {}ms",
+                    "ok:{} {}ms",
                     action_kind_name(kind),
-                    sanitize(action.as_str()),
                     timing.elapsed_ms
                 ))
             }
@@ -788,41 +874,42 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
             } => {
                 let kind = self.action_kind(job, plan, action);
                 self.set_action_state(job, plan, action, ActionState::Terminal);
-                self.write_persistent(&format!(
-                    "fail:{} {}",
-                    action_kind_name(kind),
-                    sanitize(action.as_str())
-                ))?;
+                self.write_persistent(&format!("fail:{}", action_kind_name(kind)))?;
                 self.render_diagnostic(diagnostic)
             }
             EventPayload::ActionBlocked {
                 job, plan, action, ..
             } => {
                 self.set_action_state(job, plan, action, ActionState::Terminal);
-                self.write_persistent(&format!("blocked {}", sanitize(action.as_str())))
+                self.write_persistent(&format!(
+                    "blocked:{}",
+                    action_kind_name(self.action_kind(job, plan, action))
+                ))
             }
             EventPayload::ActionCancelled {
                 job, plan, action, ..
             } => {
                 self.set_action_state(job, plan, action, ActionState::Terminal);
-                self.write_persistent(&format!("cancel {}", sanitize(action.as_str())))
+                self.write_persistent(&format!(
+                    "cancel:{}",
+                    action_kind_name(self.action_kind(job, plan, action))
+                ))
             }
             EventPayload::ActionSuperseded {
                 job, plan, action, ..
             } => {
                 self.set_action_state(job, plan, action, ActionState::Terminal);
-                self.write_persistent(&format!("superseded {}", sanitize(action.as_str())))
+                self.write_persistent(&format!(
+                    "superseded:{}",
+                    action_kind_name(self.action_kind(job, plan, action))
+                ))
             }
             EventPayload::PlanClosed { job, plan, reason } => {
                 self.plan_mut(job, plan).closed = true;
                 if *reason == PlanCloseReason::Executed {
                     Ok(())
                 } else {
-                    self.write_persistent(&format!(
-                        "plan:{} {}",
-                        plan_close_name(*reason),
-                        sanitize(plan.as_str())
-                    ))
+                    self.write_persistent(&format!("plan:{}", plan_close_name(*reason)))
                 }
             }
             EventPayload::FinalizationStarted { job, id, kind } => {
@@ -831,11 +918,7 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
                     .or_default()
                     .finalizations
                     .insert(id.clone(), *kind);
-                self.write_persistent(&format!(
-                    "finalize:{} {}",
-                    finalization_kind_short_name(*kind),
-                    sanitize(id.as_str())
-                ))
+                self.write_persistent(&format!("finalize:{}", finalization_kind_short_name(*kind)))
             }
             EventPayload::FinalizationSucceeded { job, id, timing } => {
                 let kind = self
@@ -844,9 +927,8 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
                     .and_then(|view| view.finalizations.get(id))
                     .copied();
                 self.write_persistent(&format!(
-                    "finalized:{} {} {}ms",
+                    "finalized:{} {}ms",
                     finalization_short_name(kind),
-                    sanitize(id.as_str()),
                     timing.elapsed_ms
                 ))
             }
@@ -861,24 +943,17 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
                     .get(job)
                     .and_then(|view| view.finalizations.get(id))
                     .copied();
-                self.write_persistent(&format!(
-                    "fail:finalize:{} {}",
-                    finalization_short_name(kind),
-                    sanitize(id.as_str())
-                ))?;
+                self.write_persistent(&format!("fail:finalize:{}", finalization_short_name(kind)))?;
                 self.render_diagnostic(diagnostic)
             }
             EventPayload::Diagnostic(diagnostic) => self.render_diagnostic(diagnostic),
-            EventPayload::OperationCompleted { job, result } => self.write_persistent(&format!(
-                "result {} {}",
-                sanitize(job.as_str()),
-                short_operation_result(result)
-            )),
+            EventPayload::OperationCompleted { result, .. } => {
+                self.write_persistent(&format!("result {}", short_operation_result(result)))
+            }
             EventPayload::JobFinished(summary) => {
                 self.jobs.remove(&summary.job);
                 self.write_persistent(&format!(
-                    "done {} status={} ok={} failed={} blocked={} cancelled={} cached={} {}ms",
-                    sanitize(summary.job.as_str()),
+                    "done status={} ok={} failed={} blocked={} cancelled={} cached={} {}ms",
                     exit_status_name(summary.status),
                     summary.totals.succeeded,
                     summary.totals.failed,
@@ -902,7 +977,7 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
         let visible = match self.options.verbosity {
             Verbosity::Quiet => matches!(diagnostic.severity, Severity::Warning | Severity::Error),
             Verbosity::Short | Verbosity::Normal => diagnostic.severity != Severity::Trace,
-            Verbosity::Verbose => true,
+            Verbosity::Verbose | Verbosity::Trace => true,
         };
         if !visible {
             return Ok(());
@@ -1010,10 +1085,11 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
                 format!("inspection: {}", inspect_result_name(result))
             }
         };
+        let detail_policy = self.detail();
         self.write_persistent(&format!(
-            "{} {}: {detail}",
+            "{}{}: {detail}",
             styled_info(self.color, "Result"),
-            sanitize(job.as_str())
+            detail_policy.identity(job.as_str())
         ))
     }
 }
@@ -1026,11 +1102,12 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
         match &event.payload {
             EventPayload::PlanningStarted { job, attempt } => {
                 if self.options.verbosity != Verbosity::Quiet {
+                    let detail = self.detail();
                     self.write_persistent(&format!(
-                        "{} {} ({})",
+                        "{}{}{}",
                         styled_info(self.color, "Planning"),
-                        sanitize(job.as_str()),
-                        sanitize(attempt.as_str())
+                        detail.identity(attempt.as_str()),
+                        detail.context(job)
                     ))?;
                 }
                 self.begin_progress(format!("Planning {job}"), None, None)?;
@@ -1039,12 +1116,13 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                 job, step, kind, ..
             } => {
                 if !self.dynamic && self.options.verbosity != Verbosity::Quiet {
+                    let detail = self.detail();
                     self.write_persistent(&format!(
-                        "{} {} {} ({})",
+                        "{} {}{}{}",
                         styled_info(self.color, "Planning"),
                         planning_step_name(*kind),
-                        sanitize(step.as_str()),
-                        sanitize(job.as_str())
+                        detail.identity(step.as_str()),
+                        detail.context(job)
                     ))?;
                 }
                 self.begin_progress(format!("{} {}", planning_step_name(*kind), job), None, None)?;
@@ -1053,12 +1131,16 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                 job, step, timing, ..
             } => {
                 self.stop_progress()?;
-                if self.options.verbosity == Verbosity::Verbose {
+                if matches!(
+                    self.options.verbosity,
+                    Verbosity::Verbose | Verbosity::Trace
+                ) {
+                    let detail = self.detail();
                     self.write_persistent(&format!(
-                        "Planned step {} ({}, {} ms)",
-                        sanitize(step.as_str()),
-                        sanitize(job.as_str()),
-                        timing.elapsed_ms
+                        "Planned step{} ({} ms){}",
+                        detail.identity(step.as_str()),
+                        timing.elapsed_ms,
+                        detail.context(job)
                     ))?;
                 }
             }
@@ -1069,10 +1151,11 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
             EventPayload::PlanningStepCancelled { job, step, .. } => {
                 self.stop_progress()?;
                 if self.options.verbosity != Verbosity::Quiet {
+                    let detail = self.detail();
                     self.write_persistent(&format!(
-                        "Cancelled planning step {} ({})",
-                        sanitize(step.as_str()),
-                        sanitize(job.as_str())
+                        "Cancelled planning step{}{}",
+                        detail.identity(step.as_str()),
+                        detail.context(job)
                     ))?;
                 }
             }
@@ -1085,8 +1168,8 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                 self.stop_progress()?;
                 if self.options.verbosity != Verbosity::Quiet {
                     self.write_persistent(&format!(
-                        "Cancelled planning {}",
-                        sanitize(job.as_str())
+                        "Cancelled planning{}",
+                        self.detail().context(job)
                     ))?;
                 }
             }
@@ -1108,13 +1191,14 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                         PlanMode::ReportOnly => "report only",
                         PlanMode::Legacy => "legacy projection",
                     };
+                    let detail = self.detail();
                     self.write_persistent(&format!(
-                        "{} {} for {}: {} actions, {} issues ({mode_text})",
+                        "{}{}: {} actions, {} issues ({mode_text}){}",
                         styled_info(self.color, "Planned"),
-                        sanitize(plan.as_str()),
-                        sanitize(job.as_str()),
+                        detail.identity(plan.as_str()),
                         actions,
-                        issues
+                        issues,
+                        detail.context(job)
                     ))?;
                 }
             }
@@ -1132,7 +1216,7 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                         state: ActionState::Declared,
                     },
                 );
-                if self.options.verbosity == Verbosity::Verbose {
+                if self.options.verbosity == Verbosity::Trace {
                     let after = dependencies
                         .iter()
                         .map(|id| sanitize(id.as_str()))
@@ -1150,12 +1234,13 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
             EventPayload::ActionStarted { job, plan, action } => {
                 self.set_action_state(job, plan, action, ActionState::Running);
                 if !self.dynamic && self.options.verbosity != Verbosity::Quiet {
+                    let detail = self.detail();
                     self.write_persistent(&format!(
-                        "{} {} {} ({})",
+                        "{} {}{}{}",
                         styled_info(self.color, "Running"),
                         action_kind_name(self.action_kind(job, plan, action)),
-                        sanitize(action.as_str()),
-                        sanitize(job.as_str())
+                        detail.identity(action.as_str()),
+                        detail.context(job)
                     ))?;
                 }
                 self.update_action_progress(job, plan)?;
@@ -1170,14 +1255,14 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                 ..
             } => {
                 if self.options.verbosity != Verbosity::Quiet {
+                    let detail = self.detail();
                     self.write_persistent(&format!(
-                        "{} {} ({}, {}, {}, {} outputs)",
+                        "{} {}{} ({}){}",
                         styled_success(self.color, "Cached"),
-                        sanitize(action.as_str()),
-                        sanitize(job.as_str()),
-                        cache_name(*cache),
-                        format_digest(digest),
-                        outputs.len()
+                        action_kind_name(self.action_kind(job, plan, action)),
+                        detail.identity(action.as_str()),
+                        detail.cache(*cache, digest, outputs.len()),
+                        detail.context(job)
                     ))?;
                 }
                 // 缓存命中是执行器观察到的事实，不是动作终态；内核稍后仍会发送
@@ -1196,22 +1281,21 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                 let kind = self.action_kind(job, plan, action);
                 self.set_action_state(job, plan, action, ActionState::Terminal);
                 if self.options.verbosity != Verbosity::Quiet {
+                    let detail = self.detail();
                     self.write_persistent(&format!(
-                        "{} {} {} ({}, {} ms)",
+                        "{} {}{} ({} ms){}",
                         styled_success(self.color, "Finished"),
                         action_kind_name(kind),
-                        sanitize(action.as_str()),
-                        sanitize(job.as_str()),
-                        timing.elapsed_ms
+                        detail.identity(action.as_str()),
+                        timing.elapsed_ms,
+                        detail.context(job)
                     ))?;
                     for artifact in artifacts {
                         self.write_persistent(&format!(
-                            "{} {} {} ({} bytes, {})",
+                            "{} {} {}",
                             styled_info(self.color, "Produced"),
                             artifact_kind(&artifact.kind),
-                            sanitize(&artifact.uri),
-                            artifact.size,
-                            format_digest(&artifact.digest)
+                            detail.artifact(artifact)
                         ))?;
                     }
                 }
@@ -1227,13 +1311,14 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                 let kind = self.action_kind(job, plan, action);
                 self.set_action_state(job, plan, action, ActionState::Terminal);
                 if self.options.verbosity != Verbosity::Quiet {
+                    let detail = self.detail();
                     self.write_persistent(&format!(
-                        "{} {} {} ({}, {} ms)",
+                        "{} {}{} ({} ms){}",
                         styled_error(self.color, "Failed"),
                         action_kind_name(kind),
-                        sanitize(action.as_str()),
-                        sanitize(job.as_str()),
-                        timing.elapsed_ms
+                        detail.identity(action.as_str()),
+                        timing.elapsed_ms,
+                        detail.context(job)
                     ))?;
                 }
                 self.render_diagnostic(diagnostic)?;
@@ -1247,17 +1332,26 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
             } => {
                 self.set_action_state(job, plan, action, ActionState::Terminal);
                 if self.options.verbosity != Verbosity::Quiet {
-                    let causes = blocked_by
-                        .iter()
-                        .map(|id| sanitize(id.as_str()))
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                    let detail = self.detail();
+                    let causes = if detail == HumanDetail::Trace {
+                        format!(
+                            " by {}",
+                            blocked_by
+                                .iter()
+                                .map(|id| sanitize(id.as_str()))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    } else {
+                        String::new()
+                    };
                     self.write_persistent(&format!(
-                        "{} {} ({}) blocked by {}",
+                        "{} {}{}{}{}",
                         styled(self.color, Severity::Warning, "Blocked"),
-                        sanitize(action.as_str()),
-                        sanitize(job.as_str()),
-                        causes
+                        action_kind_name(self.action_kind(job, plan, action)),
+                        detail.identity(action.as_str()),
+                        causes,
+                        detail.context(job)
                     ))?;
                 }
                 self.update_action_progress(job, plan)?;
@@ -1267,10 +1361,12 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
             } => {
                 self.set_action_state(job, plan, action, ActionState::Terminal);
                 if self.options.verbosity != Verbosity::Quiet {
+                    let detail = self.detail();
                     self.write_persistent(&format!(
-                        "Cancelled {} ({})",
-                        sanitize(action.as_str()),
-                        sanitize(job.as_str())
+                        "Cancelled {}{}{}",
+                        action_kind_name(self.action_kind(job, plan, action)),
+                        detail.identity(action.as_str()),
+                        detail.context(job)
                     ))?;
                 }
                 self.update_action_progress(job, plan)?;
@@ -1281,11 +1377,13 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                 self.set_action_state(job, plan, action, ActionState::Terminal);
                 self.stop_progress()?;
                 if self.options.verbosity != Verbosity::Quiet {
+                    let detail = self.detail();
                     self.write_persistent(&format!(
-                        "{} {} ({}) because project state changed",
+                        "{} {}{}{} because project state changed",
                         styled(self.color, Severity::Warning, "Superseded"),
-                        sanitize(action.as_str()),
-                        sanitize(job.as_str())
+                        action_kind_name(self.action_kind(job, plan, action)),
+                        detail.identity(action.as_str()),
+                        detail.context(job)
                     ))?;
                 }
             }
@@ -1296,16 +1394,16 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                     match reason {
                         PlanCloseReason::Executed => {}
                         PlanCloseReason::Reported => self.write_persistent(&format!(
-                            "{} {} ({}) without execution",
+                            "{} plan{}{} without execution",
                             styled_success(self.color, "Reported"),
-                            sanitize(plan.as_str()),
-                            sanitize(job.as_str())
+                            self.detail().identity(plan.as_str()),
+                            self.detail().context(job)
                         ))?,
                         PlanCloseReason::Superseded => self.write_persistent(&format!(
-                            "{} plan {} ({}); replanning",
+                            "{} plan{}{}; replanning",
                             styled(self.color, Severity::Warning, "Superseded"),
-                            sanitize(plan.as_str()),
-                            sanitize(job.as_str())
+                            self.detail().identity(plan.as_str()),
+                            self.detail().context(job)
                         ))?,
                     }
                 }
@@ -1318,12 +1416,13 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                     .finalizations
                     .insert(id.clone(), *kind);
                 if self.options.verbosity != Verbosity::Quiet {
+                    let detail = self.detail();
                     self.write_persistent(&format!(
-                        "{} {} {} ({})",
+                        "{} {}{}{}",
                         styled_info(self.color, "Finalizing"),
                         finalization_kind_name(*kind),
-                        sanitize(id.as_str()),
-                        sanitize(job.as_str())
+                        detail.identity(id.as_str()),
+                        detail.context(job)
                     ))?;
                 }
             }
@@ -1335,13 +1434,14 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                     .and_then(|view| view.finalizations.get(id))
                     .copied();
                 if self.options.verbosity != Verbosity::Quiet {
+                    let detail = self.detail();
                     self.write_persistent(&format!(
-                        "{} {} {} ({}, {} ms)",
+                        "{} {}{} ({} ms){}",
                         styled_success(self.color, "Finalized"),
                         finalization_name(kind),
-                        sanitize(id.as_str()),
-                        sanitize(job.as_str()),
-                        timing.elapsed_ms
+                        detail.identity(id.as_str()),
+                        timing.elapsed_ms,
+                        detail.context(job)
                     ))?;
                 }
             }
@@ -1358,13 +1458,14 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                     .and_then(|view| view.finalizations.get(id))
                     .copied();
                 if self.options.verbosity != Verbosity::Quiet {
+                    let detail = self.detail();
                     self.write_persistent(&format!(
-                        "{} {} {} ({}, {} ms)",
+                        "{} {}{} ({} ms){}",
                         styled_error(self.color, "Failed"),
                         finalization_name(kind),
-                        sanitize(id.as_str()),
-                        sanitize(job.as_str()),
-                        timing.elapsed_ms
+                        detail.identity(id.as_str()),
+                        timing.elapsed_ms,
+                        detail.context(job)
                     ))?;
                 }
                 self.render_diagnostic(diagnostic)?;
@@ -1385,7 +1486,7 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                         ExitStatus::Failed => styled_error(self.color, "Failed"),
                         ExitStatus::Cancelled => styled(self.color, Severity::Warning, "Cancelled"),
                     };
-                    self.write_persistent(&format!("{} {}: {} succeeded, {} failed, {} blocked, {} cancelled, {} cached ({} ms)", label, sanitize(summary.job.as_str()), summary.totals.succeeded, summary.totals.failed, summary.totals.blocked, summary.totals.cancelled, summary.cache_hits, summary.timing.elapsed_ms))?;
+                    self.write_persistent(&format!("{}{}: {} succeeded, {} failed, {} blocked, {} cancelled, {} cached ({} ms)", label, self.detail().identity(summary.job.as_str()), summary.totals.succeeded, summary.totals.failed, summary.totals.blocked, summary.totals.cancelled, summary.cache_hits, summary.timing.elapsed_ms))?;
                 }
             }
             _ => {}
@@ -1832,6 +1933,16 @@ fn cache_name(cache: CacheKind) -> &'static str {
         CacheKind::Remote => "remote",
     }
 }
+
+/// 将内部内容寻址 URI 投影为用户概念，其余位置保持原样。 / Projects internal
+/// content-addressed URIs to a user concept while preserving ordinary locations verbatim.
+fn product_artifact_uri(uri: &str) -> String {
+    if uri.starts_with("cas://") {
+        "content-addressed cache".to_owned()
+    } else {
+        sanitize(uri)
+    }
+}
 fn operation_kind_name(kind: squish_protocol::OperationKind) -> &'static str {
     match kind {
         squish_protocol::OperationKind::New => "new",
@@ -1966,6 +2077,16 @@ fn format_digest(digest: &Digest) -> String {
         DigestAlgorithm::Other(name) => sanitize(name),
     };
     format!("{algorithm}:{}", digest.hex())
+}
+
+/// 生成适合终端关联问题的短显示指纹，不改变任何缓存身份。 / Produces a short display
+/// fingerprint suitable for correlating terminal output without changing any cache identity.
+fn format_fingerprint(digest: &Digest) -> String {
+    let full = format_digest(digest);
+    let Some((algorithm, hex)) = full.split_once(':') else {
+        return full;
+    };
+    format!("{algorithm}:{}", &hex[..hex.len().min(12)])
 }
 fn artifact_kind(kind: &ArtifactKind) -> String {
     match kind {
@@ -2145,7 +2266,7 @@ mod tests {
 
         assert_eq!(
             output,
-            "Result new: created package demo at /workspace/demo (target prompt; files: .gitignore, src/prompt.xml, xmlsquish.toml; workspace member tools/demo; enclosing Git repository reused)\n"
+            "Result: created package demo at /workspace/demo (target prompt; files: .gitignore, src/prompt.xml, xmlsquish.toml; workspace member tools/demo; enclosing Git repository reused)\n"
         );
     }
 
@@ -2164,7 +2285,7 @@ mod tests {
 
         assert_eq!(
             output,
-            "result new new package=demo path=/workspace/demo target=prompt files=.gitignore,src/prompt.xml,xmlsquish.toml workspace=tools/demo vcs=git-reused\n"
+            "result new package=demo path=/workspace/demo target=prompt files=.gitignore,src/prompt.xml,xmlsquish.toml workspace=tools/demo vcs=git-reused\n"
         );
         assert_eq!(operation_kind_name(OperationKind::New), "new");
         assert_eq!(
@@ -2246,7 +2367,7 @@ mod tests {
         ];
         assert_eq!(
             render_plain(&events),
-            "Planning build (attempt-1)\nerror[PLAN001] cannot select a target (orchestrate); help: fix the manifest\nResult build: build result unavailable\nFailed build: 0 succeeded, 0 failed, 0 blocked, 0 cancelled, 0 cached (12 ms)\n"
+            "Planning\nerror[PLAN001] cannot select a target (orchestrate); help: fix the manifest\nResult: build result unavailable\nFailed: 0 succeeded, 0 failed, 0 blocked, 0 cancelled, 0 cached (12 ms)\n"
         );
     }
 
@@ -2294,11 +2415,131 @@ mod tests {
         let short = render_with_verbosity(&events, Verbosity::Short);
         assert_eq!(
             short,
-            "plan build\nerror[PLAN001] cannot select a target\nresult build build unavailable\ndone build status=failed ok=0 failed=0 blocked=0 cancelled=0 cached=0 12ms\n"
+            "plan\nerror[PLAN001] cannot select a target\nresult build unavailable\ndone status=failed ok=0 failed=0 blocked=0 cancelled=0 cached=0 12ms\n"
         );
         assert_ne!(short, render_with_verbosity(&events, Verbosity::Normal));
         assert!(!short.contains('\x1b'));
         assert!(!short.contains('\r'));
+    }
+
+    #[test]
+    fn human_detail_tiers_hide_internals_but_keep_cache_and_artifact_value() {
+        let job = id::<JobId>("job-0123456789abcdef0123456789abcdef");
+        let attempt = id::<PlanningAttemptId>("attempt-0123456789abcdef");
+        let plan = id::<PlanId>("plan-0123456789abcdef");
+        let action = id::<ActionId>("action-0123456789abcdef");
+        let events = vec![
+            event(
+                0,
+                EventPayload::PlanningStarted {
+                    job: job.clone(),
+                    attempt: attempt.clone(),
+                },
+            ),
+            event(
+                1,
+                EventPayload::PlanReady {
+                    job: job.clone(),
+                    attempt,
+                    plan: plan.clone(),
+                    digest: plan_digest(5),
+                    mode: PlanMode::Execute,
+                    actions: 1,
+                    issues: 0,
+                },
+            ),
+            event(
+                2,
+                EventPayload::ActionDeclared {
+                    job: job.clone(),
+                    plan: plan.clone(),
+                    action: action.clone(),
+                    kind: ActionKind::Compile,
+                    dependencies: vec![],
+                },
+            ),
+            event(
+                3,
+                EventPayload::ActionStarted {
+                    job: job.clone(),
+                    plan: plan.clone(),
+                    action: action.clone(),
+                },
+            ),
+            event(
+                4,
+                EventPayload::CacheHit {
+                    job: job.clone(),
+                    plan: plan.clone(),
+                    action: action.clone(),
+                    cache: CacheKind::Local,
+                    digest: Digest::new(DigestAlgorithm::Blake3, vec![6; 32]).unwrap(),
+                    action_key: Some(id::<ActionKeyId>("key-0123456789abcdef")),
+                    outputs: vec![artifact("cached-output", "target/prompt.xsir")],
+                },
+            ),
+            event(
+                5,
+                EventPayload::ActionSucceeded {
+                    job: job.clone(),
+                    plan,
+                    action,
+                    timing: Timing { elapsed_ms: 9 },
+                    artifacts: vec![artifact("output-0123456789abcdef", "target/prompt.xsir")],
+                },
+            ),
+            event(
+                6,
+                EventPayload::JobFinished(JobSummary {
+                    job,
+                    totals: ActionTotals {
+                        succeeded: 1,
+                        ..ActionTotals::default()
+                    },
+                    root_failures: 0,
+                    cache_hits: 1,
+                    timing: Timing { elapsed_ms: 11 },
+                    status: ExitStatus::Success,
+                }),
+            ),
+        ];
+
+        let normal = render_with_verbosity(&events, Verbosity::Normal);
+        assert_eq!(
+            normal,
+            "Planning\nPlanned: 1 actions, 0 issues (execute)\nRunning compile\nCached compile (local, 1 outputs)\nFinished compile (9 ms)\nProduced binary-ir target/prompt.xsir (42 bytes)\nCompleted: 1 succeeded, 0 failed, 0 blocked, 0 cancelled, 1 cached (11 ms)\n"
+        );
+        assert!(!normal.contains("sha256"));
+        assert!(!normal.contains("blake3"));
+        assert!(!normal.contains("0123456789abcdef"));
+
+        let verbose = render_with_verbosity(&events, Verbosity::Verbose);
+        assert_eq!(
+            verbose,
+            "Planning\nPlanned: 1 actions, 0 issues (execute)\nRunning compile\nCached compile (local, blake3:060606060606, 1 outputs)\nFinished compile (9 ms)\nProduced binary-ir target/prompt.xsir (42 bytes, sha256:070707070707)\nCompleted: 1 succeeded, 0 failed, 0 blocked, 0 cancelled, 1 cached (11 ms)\n"
+        );
+        assert!(!verbose.contains("0123456789abcdef"));
+        assert!(!verbose.contains("0606060606060606"));
+
+        let short = render_with_verbosity(&events, Verbosity::Short);
+        assert!(short.contains("cache:local compile outputs=1"));
+        assert!(!short.contains("sha256"));
+        assert!(!short.contains("blake3"));
+        assert!(!short.contains("0123456789abcdef"));
+
+        let trace = render_with_verbosity(&events, Verbosity::Trace);
+        assert!(trace.contains("job-0123456789abcdef0123456789abcdef"));
+        assert!(trace.contains("action-0123456789abcdef"));
+        assert!(
+            trace.contains(
+                "blake3:0606060606060606060606060606060606060606060606060606060606060606"
+            )
+        );
+        assert!(
+            trace.contains(
+                "sha256:0707070707070707070707070707070707070707070707070707070707070707"
+            )
+        );
     }
 
     #[test]
@@ -2530,7 +2771,7 @@ mod tests {
         ];
         assert_eq!(
             render_plain(&events),
-            "Planning add (attempt-1)\nPlanned plan-1 for add: 1 actions, 0 issues (execute)\nRunning commit-transaction commit (add)\nSuperseded commit (add) because project state changed\nSuperseded plan plan-1 (add); replanning\nPlanning add (attempt-2)\nPlanned plan-2 for add: 1 actions, 0 issues (execute)\nCached compile (add, local, blake3:0909090909090909090909090909090909090909090909090909090909090909, 0 outputs)\n"
+            "Planning\nPlanned: 1 actions, 0 issues (execute)\nRunning commit-transaction\nSuperseded commit-transaction because project state changed\nSuperseded plan; replanning\nPlanning\nPlanned: 1 actions, 0 issues (execute)\nCached compile (local, 0 outputs)\n"
         );
     }
 
@@ -2580,7 +2821,7 @@ mod tests {
         ];
         assert_eq!(
             render_plain(&events),
-            "Planning inspect-plan (attempt)\nPlanned plan for inspect-plan: 1 actions, 0 issues (report only)\nReported plan (inspect-plan) without execution\n"
+            "Planning\nPlanned: 1 actions, 0 issues (report only)\nReported plan without execution\n"
         );
     }
 
@@ -2609,7 +2850,7 @@ mod tests {
         let output = render_plain(&events);
         assert_eq!(
             output,
-            "Finalizing build catalog persist-build-catalog (build)\nFinalized build catalog persist-build-catalog (build, 4 ms)\n"
+            "Finalizing build catalog\nFinalized build catalog (4 ms)\n"
         );
         assert!(!output.contains('\x1b'));
         assert!(!output.contains('\r'));
@@ -2658,7 +2899,7 @@ mod tests {
         let plain = render(ColorMode::Never);
         assert_eq!(
             plain,
-            "Finalizing build catalog catalog (build)\nFailed build catalog catalog (build, 7 ms)\nerror[PLAN001] could not persist terminal build facts (orchestrate); help: fix the manifest\n"
+            "Finalizing build catalog\nFailed build catalog (7 ms)\nerror[PLAN001] could not persist terminal build facts (orchestrate); help: fix the manifest\n"
         );
         let colored = render(ColorMode::Always);
         assert!(colored.contains("\x1b[36mFinalizing\x1b[0m build catalog"));
@@ -3030,7 +3271,7 @@ mod tests {
         renderer.clock.advance(100);
         renderer.tick().unwrap();
         let output = String::from_utf8_lossy(renderer.writer.as_slice());
-        assert!(output.contains("Running 2 actions (including alpha)"));
+        assert!(output.contains("Running 2 actions"));
         assert!(!output.contains("|") && !output.contains("/ build"));
     }
 
@@ -3118,7 +3359,7 @@ mod tests {
         assert_eq!(plan_view.actions[&alpha].state, ActionState::Running);
         assert_eq!(plan_view.actions[&beta].state, ActionState::Running);
         let before_terminal = String::from_utf8_lossy(renderer.writer.as_slice()).into_owned();
-        assert!(before_terminal.contains("Running 2 actions (including alpha)   0% (0/2)"));
+        assert!(before_terminal.contains("Running 2 actions   0% (0/2)"));
         assert!(!before_terminal.contains(" 50% (1/2)"));
 
         renderer
@@ -3140,7 +3381,7 @@ mod tests {
         assert_eq!(plan_view.actions[&alpha].state, ActionState::Terminal);
         assert_eq!(plan_view.actions[&beta].state, ActionState::Running);
         let after_terminal = String::from_utf8_lossy(renderer.writer.as_slice());
-        assert!(after_terminal.contains("link beta  50% (1/2)"));
+        assert!(after_terminal.contains("link  50% (1/2)"));
     }
 
     #[test]

@@ -765,14 +765,17 @@ fn rendering_sink(
                 } else if message_format == MessageFormat::Short {
                     Verbosity::Short
                 } else if invocation.presentation.verbosity > 0 {
-                    Verbosity::Verbose
+                    if invocation.presentation.verbosity == 1 {
+                        Verbosity::Verbose
+                    } else {
+                        Verbosity::Trace
+                    }
                 } else {
                     match config.term.verbosity {
                         squish_config::Verbosity::Quiet => Verbosity::Quiet,
                         squish_config::Verbosity::Normal => Verbosity::Normal,
-                        squish_config::Verbosity::Verbose | squish_config::Verbosity::Trace => {
-                            Verbosity::Verbose
-                        }
+                        squish_config::Verbosity::Verbose => Verbosity::Verbose,
+                        squish_config::Verbosity::Trace => Verbosity::Trace,
                     }
                 },
                 ..PresentationOptions::default()
