@@ -1259,7 +1259,12 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
             }
             EventPayload::ActionStarted { job, plan, action } => {
                 self.set_action_state(job, plan, action, ActionState::Running);
-                if !self.dynamic && self.options.verbosity != Verbosity::Quiet {
+                if !self.dynamic
+                    && matches!(
+                        self.options.verbosity,
+                        Verbosity::Verbose | Verbosity::Trace
+                    )
+                {
                     let detail = self.detail();
                     self.write_persistent(&format!(
                         "{} {}{}{}",
@@ -1280,7 +1285,10 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                 outputs,
                 ..
             } => {
-                if self.options.verbosity != Verbosity::Quiet {
+                if matches!(
+                    self.options.verbosity,
+                    Verbosity::Verbose | Verbosity::Trace
+                ) {
                     let detail = self.detail();
                     self.write_persistent(&format!(
                         "{} {}{} ({}){}",
@@ -1308,14 +1316,16 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                 self.set_action_state(job, plan, action, ActionState::Terminal);
                 if self.options.verbosity != Verbosity::Quiet {
                     let detail = self.detail();
-                    self.write_persistent(&format!(
-                        "{} {}{} ({} ms){}",
-                        styled_success(self.color, "Finished"),
-                        action_kind_name(kind),
-                        detail.identity(action.as_str()),
-                        timing.elapsed_ms,
-                        detail.context(job)
-                    ))?;
+                    if detail != HumanDetail::Product {
+                        self.write_persistent(&format!(
+                            "{} {}{} ({} ms){}",
+                            styled_success(self.color, "Finished"),
+                            action_kind_name(kind),
+                            detail.identity(action.as_str()),
+                            timing.elapsed_ms,
+                            detail.context(job)
+                        ))?;
+                    }
                     for artifact in artifacts {
                         self.write_persistent(&format!(
                             "{} {} {}",
@@ -2556,7 +2566,7 @@ mod tests {
         let normal = render_with_verbosity(&events, Verbosity::Normal);
         assert_eq!(
             normal,
-            "Planning\nPlanned: 1 actions, 0 issues (execute)\nRunning compile\nCached compile (local, 1 outputs)\nFinished compile (9 ms)\nProduced binary-ir target/prompt.xsir (42 bytes)\nCompleted: 1 succeeded, 0 failed, 0 blocked, 0 cancelled, 1 cached (11 ms)\n"
+            "Planning\nPlanned: 1 actions, 0 issues (execute)\nProduced binary-ir target/prompt.xsir (42 bytes)\nCompleted: 1 succeeded, 0 failed, 0 blocked, 0 cancelled, 1 cached (11 ms)\n"
         );
         assert!(!normal.contains("sha256"));
         assert!(!normal.contains("blake3"));
@@ -2869,7 +2879,7 @@ mod tests {
         ];
         assert_eq!(
             render_plain(&events),
-            "Planning\nPlanned: 1 actions, 0 issues (execute)\nRunning commit-transaction\nSuperseded commit-transaction because project state changed\nSuperseded plan; replanning\nPlanning\nPlanned: 1 actions, 0 issues (execute)\nCached compile (local, 0 outputs)\n"
+            "Planning\nPlanned: 1 actions, 0 issues (execute)\nSuperseded commit-transaction because project state changed\nSuperseded plan; replanning\nPlanning\nPlanned: 1 actions, 0 issues (execute)\n"
         );
     }
 
