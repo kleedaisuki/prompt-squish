@@ -4,7 +4,7 @@
 
 use squish_protocol::{
     ActionId, ActionTotals, CapabilityId, Event, EventPayload, ExitStatus, InvocationId, JobId,
-    JobSummary, OperationKind, OperationRequest, Timing,
+    JobSummary, OperationKind, OperationRequest, OperationResult, Timing,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -36,6 +36,8 @@ pub struct CapabilityDescriptor {
 pub struct OperationOutcome {
     /// 作业 ID。 / Job ID.
     pub job: JobId,
+    /// 与请求类别匹配且不含退出码的领域结果。 / Domain result matching the request kind and containing no exit code.
+    pub result: OperationResult,
     /// 所有动作的终态计数。 / Terminal counts for every action.
     pub totals: ActionTotals,
     /// 自身执行失败（非阻塞）的根失败数。 / Root execution failures, excluding blocked actions.
@@ -180,10 +182,21 @@ impl InvocationContext {
         };
         self.deliver(sequence, payload)
     }
-    fn publish(&self, payload: EventPayload) -> Result<(), EmitError> {
+    fn complete(&self, job: JobId, result: OperationResult) -> Result<(), EmitError> {
         let _delivery = lock(&self.delivery);
+        lock(&self.lifecycle)
+            .complete(&job)
+            .map_err(EmitError::Lifecycle)?;
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
-        self.deliver(sequence, payload)
+        self.deliver(sequence, EventPayload::OperationCompleted { job, result })
+    }
+    fn finish_job(&self, summary: JobSummary) -> Result<(), EmitError> {
+        let _delivery = lock(&self.delivery);
+        lock(&self.lifecycle)
+            .finish_job(&summary.job)
+            .map_err(EmitError::Lifecycle)?;
+        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
+        self.deliver(sequence, EventPayload::JobFinished(summary))
     }
     fn deliver(&self, sequence: u64, payload: EventPayload) -> Result<(), EmitError> {
         let result = self
@@ -214,6 +227,17 @@ pub enum KernelError {
     InvalidDescriptor,
     /// 没有处理器。 / No handler exists.
     UnsupportedOperation(OperationKind),
+    /// 能力返回的结果类别与请求不匹配。 / Capability result kind did not match the request.
+    ResultKindMismatch {
+        /// 请求类别。 / Requested kind.
+        requested: OperationKind,
+        /// 返回类别。 / Returned kind.
+        returned: OperationKind,
+    },
+    /// 结果的查询视图或对象身份与请求不匹配。 / Result inspection view or object identity did not match the request.
+    ResultRequestMismatch,
+    /// 成功操作错误地声明领域结果不可用。 / Successful operation incorrectly declared its domain result unavailable.
+    UnavailableResultOnSuccess,
     /// 能力产生无效/未闭合生命周期。 / Capability produced invalid or unclosed lifecycle.
     Lifecycle(LifecycleError),
     /// 事件发布失败。 / Event publication failed.
@@ -228,6 +252,19 @@ impl fmt::Display for KernelError {
                 f.write_str("capability id and operations must not be empty")
             }
             Self::UnsupportedOperation(kind) => write!(f, "unsupported operation `{kind:?}`"),
+            Self::ResultKindMismatch {
+                requested,
+                returned,
+            } => write!(
+                f,
+                "operation result kind `{returned:?}` differs from request `{requested:?}`"
+            ),
+            Self::ResultRequestMismatch => {
+                f.write_str("operation result view or identity differs from request")
+            }
+            Self::UnavailableResultOnSuccess => {
+                f.write_str("successful operation must provide domain result data")
+            }
             Self::Lifecycle(error) => write!(f, "invalid lifecycle: {error}"),
             Self::Emit(error) => error.fmt(f),
         }
@@ -240,6 +277,8 @@ impl std::error::Error for KernelError {}
 pub struct DispatchOutcome {
     /// 处理能力。 / Handling capability.
     pub capability: CapabilityId,
+    /// 已验证且已发布的领域结果。 / Validated and published domain result.
+    pub result: OperationResult,
     /// 内核归约的作业摘要。 / Kernel-reduced job summary.
     pub summary: JobSummary,
 }
@@ -272,9 +311,21 @@ impl<'a> Kernel<'a> {
         if let Some(error) = lock(&context.emission_failure).clone() {
             return Err(KernelError::Emit(error));
         }
+        if outcome.result.kind() != operation.kind() {
+            return Err(KernelError::ResultKindMismatch {
+                requested: operation.kind(),
+                returned: outcome.result.kind(),
+            });
+        }
+        if !outcome.result.matches_request(operation) {
+            return Err(KernelError::ResultRequestMismatch);
+        }
         let reduction = lock(&context.lifecycle)
             .finish(&outcome, context.is_cancelled())
             .map_err(KernelError::Lifecycle)?;
+        if outcome.result.is_unavailable() && reduction.totals.failed == 0 && !outcome.cancelled {
+            return Err(KernelError::UnavailableResultOnSuccess);
+        }
         let status = if outcome.cancelled {
             ExitStatus::Cancelled
         } else if reduction.totals.failed > 0 {
@@ -283,7 +334,7 @@ impl<'a> Kernel<'a> {
             ExitStatus::Success
         };
         let summary = JobSummary {
-            job: outcome.job,
+            job: outcome.job.clone(),
             totals: reduction.totals,
             root_failures: reduction.root_failures,
             cache_hits: reduction.cache_hits,
@@ -293,10 +344,14 @@ impl<'a> Kernel<'a> {
             status,
         };
         context
-            .publish(EventPayload::JobFinished(summary.clone()))
+            .complete(outcome.job, outcome.result.clone())
+            .map_err(KernelError::Emit)?;
+        context
+            .finish_job(summary.clone())
             .map_err(KernelError::Emit)?;
         Ok(DispatchOutcome {
             capability: CapabilityId::new(capability.descriptor().id).expect("validated ID"),
+            result: outcome.result,
             summary,
         })
     }
@@ -364,6 +419,8 @@ struct Lifecycle {
     planned: Option<u64>,
     actions: HashMap<ActionId, ActionRecord>,
     cache_hits: u64,
+    operation_completed: bool,
+    job_finished: bool,
 }
 struct Reduction {
     totals: ActionTotals,
@@ -372,6 +429,11 @@ struct Reduction {
 }
 impl Lifecycle {
     fn observe(&mut self, event: &EventPayload) -> Result<(), LifecycleError> {
+        if self.operation_completed {
+            return Err(LifecycleError(
+                "capability event followed operation completion".into(),
+            ));
+        }
         match event {
             EventPayload::PlanReady { job, actions } => self.plan(job, *actions),
             EventPayload::ActionQueued {
@@ -383,7 +445,17 @@ impl Lifecycle {
             EventPayload::ActionStarted { job, action } => {
                 self.transition(job, action, &[ActionState::Queued], ActionState::Started)
             }
-            EventPayload::CacheHit { job, action, .. } => {
+            EventPayload::CacheHit {
+                job,
+                action,
+                action_key,
+                ..
+            } => {
+                if action_key.is_none() {
+                    return Err(LifecycleError(
+                        "new cache-hit emissions require a complete action key".into(),
+                    ));
+                }
                 self.cache(job, action)?;
                 self.cache_hits += 1;
                 Ok(())
@@ -406,13 +478,41 @@ impl Lifecycle {
                 ActionState::Cancelled,
             ),
             EventPayload::Diagnostic(_) => Ok(()),
-            EventPayload::JobFinished(_) => {
-                Err(LifecycleError("only the kernel may finish a job".into()))
-            }
+            EventPayload::OperationCompleted { .. } | EventPayload::JobFinished(_) => Err(
+                LifecycleError("only the kernel may complete or finish a job".into()),
+            ),
             _ => Err(LifecycleError(
                 "kernel does not understand this additive lifecycle event".into(),
             )),
         }
+    }
+    fn complete(&mut self, job: &JobId) -> Result<(), LifecycleError> {
+        self.same_job(job)?;
+        if self.operation_completed {
+            return Err(LifecycleError(
+                "operation-completed emitted more than once".into(),
+            ));
+        }
+        if self.actions.values().any(|record| !record.state.terminal()) {
+            return Err(LifecycleError(
+                "operation completed with non-terminal actions".into(),
+            ));
+        }
+        self.operation_completed = true;
+        Ok(())
+    }
+    fn finish_job(&mut self, job: &JobId) -> Result<(), LifecycleError> {
+        self.same_job(job)?;
+        if !self.operation_completed {
+            return Err(LifecycleError(
+                "job-finished preceded operation-completed".into(),
+            ));
+        }
+        if self.job_finished {
+            return Err(LifecycleError("job-finished emitted more than once".into()));
+        }
+        self.job_finished = true;
+        Ok(())
     }
     fn plan(&mut self, job: &JobId, actions: u64) -> Result<(), LifecycleError> {
         if self.job.is_some() {
@@ -590,14 +690,20 @@ impl Lifecycle {
 mod tests {
     use super::*;
     use squish_protocol::{
-        ActionKind, BuildRequest, Diagnostic, DiagnosticId, EmitKind, LockMode, Phase, ProfileName,
-        ProjectPath, Severity, WorkspaceScope,
+        ActionKind, BuildRequest, BuildResult, Diagnostic, DiagnosticId, EmitKind, InspectRequest,
+        InspectResult, InspectView, LockMode, OpaqueSourceId, Phase, ProfileName,
+        ProjectInspection, ProjectPath, Severity, WorkspaceScope,
     };
     use std::sync::Mutex;
     static DESC: CapabilityDescriptor = CapabilityDescriptor {
         id: "build",
         operations: &[OperationKind::Build],
         summary: "build",
+    };
+    static INSPECT_DESC: CapabilityDescriptor = CapabilityDescriptor {
+        id: "inspect",
+        operations: &[OperationKind::Inspect],
+        summary: "inspect",
     };
     struct Build;
     impl Capability for Build {
@@ -637,6 +743,10 @@ mod tests {
                 .unwrap();
             OperationOutcome {
                 job,
+                result: OperationResult::Build(BuildResult {
+                    published: vec![],
+                    build_record: None,
+                }),
                 totals: ActionTotals {
                     succeeded: 1,
                     ..ActionTotals::default()
@@ -680,10 +790,252 @@ mod tests {
             .dispatch(&operation(), &context)
             .unwrap();
         assert_eq!(outcome.summary.status, ExitStatus::Success);
+        assert_eq!(outcome.result.kind(), OperationKind::Build);
+        let events = lock(&sink.0);
         assert!(matches!(
-            lock(&sink.0).last().unwrap().payload,
+            events[events.len() - 2].payload,
+            EventPayload::OperationCompleted { .. }
+        ));
+        assert!(matches!(
+            events.last().unwrap().payload,
             EventPayload::JobFinished(_)
         ));
+        assert_eq!(
+            events[events.len() - 2].sequence + 1,
+            events.last().unwrap().sequence
+        );
+    }
+    struct WrongResult;
+    impl Capability for WrongResult {
+        fn descriptor(&self) -> &'static CapabilityDescriptor {
+            &DESC
+        }
+        fn execute(
+            &self,
+            operation: &OperationRequest,
+            context: &InvocationContext,
+        ) -> OperationOutcome {
+            let mut outcome = Build.execute(operation, context);
+            outcome.result = OperationResult::Format(squish_protocol::FormatResult {
+                selected: vec![],
+                changed: vec![],
+                check: true,
+                diffs: vec![],
+            });
+            outcome
+        }
+    }
+    #[test]
+    fn result_kind_mismatch_emits_neither_completion_nor_summary() {
+        static WRONG: WrongResult = WrongResult;
+        let capabilities: &[&dyn Capability] = &[&WRONG];
+        let sink = Arc::new(Sink::default());
+        let context = InvocationContext::new(
+            InvocationId::new("i").unwrap(),
+            CancellationToken::default(),
+            sink.clone(),
+        );
+        assert!(matches!(
+            Kernel::new(capabilities)
+                .unwrap()
+                .dispatch(&operation(), &context),
+            Err(KernelError::ResultKindMismatch { .. })
+        ));
+        assert!(!lock(&sink.0).iter().any(|event| matches!(
+            event.payload,
+            EventPayload::OperationCompleted { .. } | EventPayload::JobFinished(_)
+        )));
+    }
+    fn early_failure(context: &InvocationContext, kind: ActionKind) -> JobId {
+        let job = JobId::new("early-failure").unwrap();
+        let action = ActionId::new("resolve").unwrap();
+        context
+            .emit(EventPayload::PlanReady {
+                job: job.clone(),
+                actions: 1,
+            })
+            .unwrap();
+        context
+            .emit(EventPayload::ActionQueued {
+                job: job.clone(),
+                action: action.clone(),
+                kind,
+                dependencies: vec![],
+            })
+            .unwrap();
+        context
+            .emit(EventPayload::ActionStarted {
+                job: job.clone(),
+                action: action.clone(),
+            })
+            .unwrap();
+        context
+            .emit(EventPayload::ActionFailed {
+                job: job.clone(),
+                action,
+                timing: Timing::default(),
+                diagnostic: Diagnostic {
+                    id: DiagnosticId::new("resolution-failed").unwrap(),
+                    code: "resolution_failed".into(),
+                    severity: Severity::Error,
+                    phase: Phase::Resolve,
+                    message: "resolution failed before domain data existed".into(),
+                    primary: None,
+                    related: vec![],
+                    help: None,
+                },
+            })
+            .unwrap();
+        job
+    }
+    struct ResolveFails;
+    impl Capability for ResolveFails {
+        fn descriptor(&self) -> &'static CapabilityDescriptor {
+            &DESC
+        }
+        fn execute(&self, _: &OperationRequest, context: &InvocationContext) -> OperationOutcome {
+            OperationOutcome {
+                job: early_failure(context, ActionKind::Resolve),
+                result: OperationResult::Unavailable {
+                    kind: OperationKind::Build,
+                },
+                totals: ActionTotals {
+                    failed: 1,
+                    ..ActionTotals::default()
+                },
+                root_failures: 1,
+                cancelled: false,
+            }
+        }
+    }
+    #[test]
+    fn resolve_failure_publishes_typed_unavailable_before_failed_summary() {
+        static CAPABILITY: ResolveFails = ResolveFails;
+        let sink = Arc::new(Sink::default());
+        let context = InvocationContext::new(
+            InvocationId::new("i").unwrap(),
+            CancellationToken::default(),
+            sink.clone(),
+        );
+        let outcome = Kernel::new(&[&CAPABILITY])
+            .unwrap()
+            .dispatch(&operation(), &context)
+            .unwrap();
+        assert_eq!(outcome.summary.status, ExitStatus::Failed);
+        assert_eq!(
+            outcome.result,
+            OperationResult::Unavailable {
+                kind: OperationKind::Build
+            }
+        );
+        let events = lock(&sink.0);
+        assert!(matches!(
+            events[events.len() - 2].payload,
+            EventPayload::OperationCompleted {
+                result: OperationResult::Unavailable {
+                    kind: OperationKind::Build
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            events.last().unwrap().payload,
+            EventPayload::JobFinished(_)
+        ));
+    }
+    struct InspectFails;
+    impl Capability for InspectFails {
+        fn descriptor(&self) -> &'static CapabilityDescriptor {
+            &INSPECT_DESC
+        }
+        fn execute(&self, _: &OperationRequest, context: &InvocationContext) -> OperationOutcome {
+            OperationOutcome {
+                job: early_failure(context, ActionKind::ResolveCandidate),
+                result: OperationResult::Unavailable {
+                    kind: OperationKind::Inspect,
+                },
+                totals: ActionTotals {
+                    failed: 1,
+                    ..ActionTotals::default()
+                },
+                root_failures: 1,
+                cancelled: false,
+            }
+        }
+    }
+    fn inspect_operation() -> OperationRequest {
+        OperationRequest::Inspect(InspectRequest {
+            project: ProjectPath::new(".").unwrap(),
+            view: InspectView::Source(OpaqueSourceId::new("src/main.squish").unwrap()),
+        })
+    }
+    #[test]
+    fn inspect_early_failure_can_report_unavailable_without_fabricated_data() {
+        static CAPABILITY: InspectFails = InspectFails;
+        let sink = Arc::new(Sink::default());
+        let context = InvocationContext::new(
+            InvocationId::new("i").unwrap(),
+            CancellationToken::default(),
+            sink.clone(),
+        );
+        Kernel::new(&[&CAPABILITY])
+            .unwrap()
+            .dispatch(&inspect_operation(), &context)
+            .unwrap();
+        assert!(matches!(
+            lock(&sink.0)[4].payload,
+            EventPayload::OperationCompleted {
+                result: OperationResult::Unavailable {
+                    kind: OperationKind::Inspect
+                },
+                ..
+            }
+        ));
+    }
+    struct WrongInspectIdentity;
+    impl Capability for WrongInspectIdentity {
+        fn descriptor(&self) -> &'static CapabilityDescriptor {
+            &INSPECT_DESC
+        }
+        fn execute(&self, _: &OperationRequest, context: &InvocationContext) -> OperationOutcome {
+            let job = JobId::new("inspect").unwrap();
+            context
+                .emit(EventPayload::PlanReady {
+                    job: job.clone(),
+                    actions: 0,
+                })
+                .unwrap();
+            OperationOutcome {
+                job,
+                result: OperationResult::Inspect(InspectResult::Project(ProjectInspection {
+                    packages: vec![],
+                    targets: vec![],
+                })),
+                totals: ActionTotals::default(),
+                root_failures: 0,
+                cancelled: false,
+            }
+        }
+    }
+    #[test]
+    fn inspect_view_mismatch_is_rejected_before_completion() {
+        static CAPABILITY: WrongInspectIdentity = WrongInspectIdentity;
+        let sink = Arc::new(Sink::default());
+        let context = InvocationContext::new(
+            InvocationId::new("i").unwrap(),
+            CancellationToken::default(),
+            sink.clone(),
+        );
+        assert_eq!(
+            Kernel::new(&[&CAPABILITY])
+                .unwrap()
+                .dispatch(&inspect_operation(), &context),
+            Err(KernelError::ResultRequestMismatch)
+        );
+        assert!(!lock(&sink.0).iter().any(|event| matches!(
+            event.payload,
+            EventPayload::OperationCompleted { .. } | EventPayload::JobFinished(_)
+        )));
     }
     struct Liar;
     impl Capability for Liar {
@@ -700,6 +1052,10 @@ mod tests {
                 .unwrap();
             OperationOutcome {
                 job,
+                result: OperationResult::Build(BuildResult {
+                    published: vec![],
+                    build_record: None,
+                }),
                 totals: ActionTotals {
                     failed: 1,
                     ..ActionTotals::default()
@@ -801,6 +1157,10 @@ mod tests {
                 .unwrap();
             OperationOutcome {
                 job,
+                result: OperationResult::Build(BuildResult {
+                    published: vec![],
+                    build_record: None,
+                }),
                 totals: ActionTotals {
                     succeeded: 1,
                     failed: 1,

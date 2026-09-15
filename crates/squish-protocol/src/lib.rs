@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt, ops::Range};
 
 /// 当前协议版本。 / Current protocol version.
-pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
+pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion::new(1, 1);
 
 /// 遵循主/次兼容规则的协议版本。 / Major/minor compatible protocol version.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -78,6 +78,10 @@ string_id!(InvocationId, "一次管理器调用。 / One manager invocation.");
 string_id!(CapabilityId, "静态内核能力。 / Static kernel capability.");
 string_id!(JobId, "计划执行作业。 / Planned execution job.");
 string_id!(ActionId, "作业动作节点。 / Job action node.");
+string_id!(
+    ActionKeyId,
+    "动作全部语义输入的稳定缓存键。 / Stable cache key for every semantic action input."
+);
 string_id!(ArtifactId, "构建产物。 / Build artifact.");
 string_id!(DiagnosticId, "诊断实例。 / Diagnostic instance.");
 string_id!(
@@ -771,6 +775,256 @@ pub enum ActionKind {
     CommitTransaction,
 }
 
+/// 一个目标已成功提交的完整产物集合。 / Complete artifact set committed for one target.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PublishedTarget {
+    /// 目标名。 / Target name.
+    pub target: TargetName,
+    /// 同一提交世代中的全部产物。 / Every artifact in the same committed generation.
+    pub artifacts: Vec<Artifact>,
+}
+
+/// 构建操作结果；动作失败仍由统一作业摘要计数。 / Build-operation result; action failures remain counted by the common job summary.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BuildResult {
+    /// 成功提交的目标及其完整产物集合。 / Successfully committed targets and their complete artifact sets.
+    pub published: Vec<PublishedTarget>,
+    /// 记录输入、动作键与最终结果的构建记录；早期失败时可不存在。 / Build record naming inputs, action keys, and final results; absent after an early failure.
+    pub build_record: Option<Artifact>,
+}
+
+/// 格式化操作结果。 / Format-operation result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FormatResult {
+    /// 实际检查的稳定源码集合。 / Stable source set actually inspected.
+    pub selected: Vec<OpaqueSourceId>,
+    /// 会变化或已写回的源码集合。 / Sources that would change or were rewritten.
+    pub changed: Vec<OpaqueSourceId>,
+    /// 是否为只读检查。 / Whether this was a read-only check.
+    pub check: bool,
+    /// 请求差异时产生的完整机器差异产物。 / Complete machine diff artifacts produced when requested.
+    pub diffs: Vec<Artifact>,
+}
+
+/// 一份项目权威状态的内容身份。 / Content identity of authoritative project state.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectStateDigests {
+    /// 清单内容摘要。 / Manifest content digest.
+    pub manifest: Digest,
+    /// 锁文件摘要；尚无锁文件时为空。 / Lockfile digest, absent when no lockfile exists yet.
+    pub lock: Option<Digest>,
+}
+
+/// 添加依赖操作结果。 / Add-dependency operation result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AddResult {
+    /// 被添加或更新的依赖别名。 / Dependency alias added or updated.
+    pub dependency: DependencyName,
+    /// 操作前的权威状态。 / Authoritative state before the operation.
+    pub before: ProjectStateDigests,
+    /// 候选或已提交的权威状态。 / Candidate or committed authoritative state.
+    pub after: ProjectStateDigests,
+    /// 是否只计算而未提交。 / Whether the change was computed but not committed.
+    pub dry_run: bool,
+}
+
+/// 删除依赖操作结果。 / Remove-dependency operation result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RemoveResult {
+    /// 被删除的依赖别名。 / Dependency alias removed.
+    pub dependency: DependencyName,
+    /// 操作前的权威状态。 / Authoritative state before the operation.
+    pub before: ProjectStateDigests,
+    /// 候选或已提交的权威状态。 / Candidate or committed authoritative state.
+    pub after: ProjectStateDigests,
+    /// 是否只计算而未提交。 / Whether the change was computed but not committed.
+    pub dry_run: bool,
+    /// 仍静态引用该别名的源码。 / Sources still statically importing the alias.
+    pub affected_sources: Vec<OpaqueSourceId>,
+}
+
+/// 项目查询结果。 / Project inspection result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectInspection {
+    /// 查询到的工作区包。 / Workspace packages found.
+    pub packages: Vec<PackageName>,
+    /// 查询到的构建目标。 / Build targets found.
+    pub targets: Vec<TargetName>,
+}
+
+/// 冻结计划中的一个动作。 / One action in an inspected frozen plan.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PlannedAction {
+    /// 动作 ID。 / Action ID.
+    pub action: ActionId,
+    /// 核心动作类别。 / Core action kind.
+    pub kind: ActionKind,
+    /// 已物化时的动作键。 / Materialized action key when available.
+    pub action_key: Option<ActionKeyId>,
+    /// 稳定顺序的完整前置动作。 / Complete prerequisites in stable order.
+    pub dependencies: Vec<ActionId>,
+}
+
+/// 计划查询结果。 / Plan inspection result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PlanInspection {
+    /// 计划作业。 / Planned job.
+    pub job: JobId,
+    /// 稳定拓扑顺序的动作。 / Actions in stable topological order.
+    pub actions: Vec<PlannedAction>,
+}
+
+/// 一项可复用的缓存动作结果。 / One reusable cached action result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CachedAction {
+    /// 完整动作键。 / Complete action key.
+    pub action_key: ActionKeyId,
+    /// 动作结果记录摘要。 / Action-result record digest.
+    pub result_digest: Digest,
+    /// 结果记录引用的完整输出集合。 / Complete output set referenced by the result record.
+    pub outputs: Vec<Artifact>,
+}
+
+/// 缓存查询结果。 / Cache inspection result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CacheInspection {
+    /// 稳定键顺序的缓存结果。 / Cached results in stable key order.
+    pub actions: Vec<CachedAction>,
+}
+
+/// IR 查询结果。 / IR inspection result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct IrInspection {
+    /// 被查询的完整 IR 产物。 / Complete inspected IR artifact.
+    pub artifact: Artifact,
+}
+
+/// 链接图查询结果。 / Link-graph inspection result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LinkInspection {
+    /// 查询目标。 / Inspected target.
+    pub target: TargetName,
+    /// 持久静态链接证据产物。 / Persistent static-link evidence artifact.
+    pub link_map: Artifact,
+}
+
+/// 源码查询结果。 / Source inspection result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SourceInspection {
+    /// 源码身份。 / Source identity.
+    pub source: OpaqueSourceId,
+    /// 精确源码字节摘要。 / Exact source-byte digest.
+    pub digest: Digest,
+    /// 精确源码字节数。 / Exact source byte size.
+    pub size: u64,
+}
+
+/// 产物来源证明查询结果。 / Artifact-provenance inspection result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProvenanceInspection {
+    /// 被解释的产物。 / Artifact being explained.
+    pub artifact: Artifact,
+    /// 完整、可移植的调试或来源证明伴随产物。 / Complete portable debug or provenance companions.
+    pub evidence: Vec<Artifact>,
+}
+
+/// 与 [`InspectView`] 一一对应的类型化查询负载。 / Typed inspection payload corresponding one-to-one with [`InspectView`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "view", content = "value")]
+pub enum InspectResult {
+    /// 项目元数据。 / Project metadata.
+    Project(ProjectInspection),
+    /// 冻结计划。 / Frozen plan.
+    Plan(PlanInspection),
+    /// 缓存状态。 / Cache state.
+    Cache(CacheInspection),
+    /// IR 产物。 / IR artifact.
+    Ir(IrInspection),
+    /// 链接图。 / Link graph.
+    Link(LinkInspection),
+    /// 源码摘要。 / Source summary.
+    Source(SourceInspection),
+    /// 产物来源证明。 / Artifact provenance.
+    Provenance(ProvenanceInspection),
+}
+
+/// 一次操作的领域结果；退出状态不属于能力结果。 / Domain result of one operation; process exit status is not a capability result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "type", content = "result")]
+pub enum OperationResult {
+    /// 操作在产生领域数据前失败或取消。 / Operation failed or was cancelled before producing domain data.
+    Unavailable {
+        /// 未能产生结果的操作类别。 / Operation kind whose result could not be produced.
+        kind: OperationKind,
+    },
+    /// 构建结果。 / Build result.
+    Build(BuildResult),
+    /// 格式化结果。 / Format result.
+    Format(FormatResult),
+    /// 添加依赖结果。 / Add-dependency result.
+    Add(AddResult),
+    /// 删除依赖结果。 / Remove-dependency result.
+    Remove(RemoveResult),
+    /// 查询结果。 / Inspection result.
+    Inspect(InspectResult),
+}
+impl OperationResult {
+    /// 返回与请求路由一致的操作类别。 / Returns the operation kind matching request routing.
+    pub const fn kind(&self) -> OperationKind {
+        match self {
+            Self::Unavailable { kind } => *kind,
+            Self::Build(_) => OperationKind::Build,
+            Self::Format(_) => OperationKind::Format,
+            Self::Add(_) => OperationKind::Add,
+            Self::Remove(_) => OperationKind::Remove,
+            Self::Inspect(_) => OperationKind::Inspect,
+        }
+    }
+
+    /// 验证结果类别、查询视图及请求携带的对象身份。 / Validates the result kind, inspection view, and request-carried object identity.
+    pub fn matches_request(&self, request: &OperationRequest) -> bool {
+        match (self, request) {
+            (Self::Unavailable { kind }, request) => *kind == request.kind(),
+            (Self::Build(_), OperationRequest::Build(_)) => true,
+            (Self::Format(result), OperationRequest::Format(request)) => {
+                result.check == request.check
+            }
+            (Self::Add(result), OperationRequest::Add(request)) => {
+                result.dependency == request.dependency && result.dry_run == request.dry_run
+            }
+            (Self::Remove(result), OperationRequest::Remove(request)) => {
+                result.dependency == request.dependency && result.dry_run == request.dry_run
+            }
+            (Self::Inspect(result), OperationRequest::Inspect(request)) => {
+                result.matches_view(&request.view)
+            }
+            _ => false,
+        }
+    }
+
+    /// 返回结果是否因领域数据尚不可用而为空。 / Returns whether domain data is unavailable.
+    pub const fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Unavailable { .. })
+    }
+}
+
+impl InspectResult {
+    fn matches_view(&self, view: &InspectView) -> bool {
+        match (self, view) {
+            (Self::Project(_), InspectView::Project)
+            | (Self::Plan(_), InspectView::Plan)
+            | (Self::Cache(_), InspectView::Cache) => true,
+            (Self::Ir(result), InspectView::Ir(requested)) => &result.artifact.id == requested,
+            (Self::Link(result), InspectView::Link(requested)) => &result.target == requested,
+            (Self::Source(result), InspectView::Source(requested)) => &result.source == requested,
+            (Self::Provenance(result), InspectView::Provenance(requested)) => {
+                &result.artifact.id == requested
+            }
+            _ => false,
+        }
+    }
+}
+
 /// 完整调度事件代数。 / Complete scheduling event algebra.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "type", content = "data")]
@@ -811,6 +1065,12 @@ pub enum EventPayload {
         cache: CacheKind,
         /// 命中内容摘要。 / Hit content digest.
         digest: Digest,
+        /// 完整动作键；旧的 v1.0 发送方可能省略。 / Complete action key; legacy v1.0 senders may omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action_key: Option<ActionKeyId>,
+        /// 命中结果记录引用的全部输出/产物。 / Every output/artifact referenced by the hit result record.
+        #[serde(default)]
+        outputs: Vec<Artifact>,
     },
     /// 动作成功。 / Action succeeded.
     ActionSucceeded {
@@ -854,6 +1114,13 @@ pub enum EventPayload {
     },
     /// 非动作诊断。 / Non-action diagnostic.
     Diagnostic(Diagnostic),
+    /// 内核确认并发布的类型化操作结果。 / Typed operation result validated and published by the kernel.
+    OperationCompleted {
+        /// 作业。 / Job.
+        job: JobId,
+        /// 与请求类别匹配且不含退出码的领域结果。 / Domain result matching the request kind and containing no exit code.
+        result: OperationResult,
+    },
     /// 内核生成的作业摘要。 / Kernel-produced job summary.
     JobFinished(JobSummary),
 }
@@ -977,6 +1244,7 @@ fn known_event(value: &str) -> bool {
             | "action_blocked"
             | "action_cancelled"
             | "diagnostic"
+            | "operation_completed"
             | "job_finished"
     )
 }
@@ -1013,6 +1281,54 @@ mod tests {
         assert_eq!(
             Event::decode_json(&serde_json::to_vec(&event).unwrap()).unwrap(),
             DecodedEvent::Known(Box::new(event))
+        );
+    }
+    #[test]
+    fn legacy_v1_cache_hit_decodes_missing_additive_fields() {
+        let json = br#"{"version":{"major":1,"minor":0},"invocation":"i","sequence":3,"payload":{"type":"cache_hit","data":{"job":"j","action":"a","cache":"local","digest":{"algorithm":{"type":"sha256"},"hex":"0000000000000000000000000000000000000000000000000000000000000000"}}}}"#;
+        let DecodedEvent::Known(event) = Event::decode_json(json).unwrap() else {
+            panic!("known v1.0 cache event was skipped");
+        };
+        let EventPayload::CacheHit {
+            action_key,
+            outputs,
+            ..
+        } = event.payload
+        else {
+            panic!("decoded the wrong event payload");
+        };
+        assert_eq!(action_key, None);
+        assert!(outputs.is_empty());
+    }
+    #[test]
+    fn inspect_result_matching_checks_view_and_identity() {
+        let source = OpaqueSourceId::new("src/main.squish").unwrap();
+        let request = OperationRequest::Inspect(InspectRequest {
+            project: ProjectPath::new(".").unwrap(),
+            view: InspectView::Source(source.clone()),
+        });
+        let matching = OperationResult::Inspect(InspectResult::Source(SourceInspection {
+            source: source.clone(),
+            digest: Digest::new(DigestAlgorithm::Sha256, vec![0; 32]).unwrap(),
+            size: 10,
+        }));
+        let wrong_identity = OperationResult::Inspect(InspectResult::Source(SourceInspection {
+            source: OpaqueSourceId::new("src/other.squish").unwrap(),
+            digest: Digest::new(DigestAlgorithm::Sha256, vec![0; 32]).unwrap(),
+            size: 10,
+        }));
+        let wrong_view = OperationResult::Inspect(InspectResult::Project(ProjectInspection {
+            packages: vec![],
+            targets: vec![],
+        }));
+        assert!(matching.matches_request(&request));
+        assert!(!wrong_identity.matches_request(&request));
+        assert!(!wrong_view.matches_request(&request));
+        assert!(
+            OperationResult::Unavailable {
+                kind: OperationKind::Inspect
+            }
+            .matches_request(&request)
         );
     }
     #[test]

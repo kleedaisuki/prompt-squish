@@ -674,14 +674,21 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                 action,
                 cache,
                 digest,
+                action_key,
+                outputs,
             } => {
                 if self.options.verbosity == Verbosity::Verbose {
+                    let key = action_key
+                        .as_ref()
+                        .map_or("legacy-v1.0".to_owned(), |key| key.to_string());
                     self.write_persistent(&format!(
-                        "Cached {} ({}, {}, {})",
+                        "Cached {} ({}, {}, {}, key {}, {} outputs)",
                         sanitize(action.as_str()),
                         sanitize(job.as_str()),
                         cache_name(*cache),
-                        format_digest(digest)
+                        format_digest(digest),
+                        sanitize(&key),
+                        outputs.len()
                     ))?;
                 }
             }
@@ -763,6 +770,16 @@ impl<W: Write, C: Clock, T: TerminalProbe> Renderer for HumanRenderer<W, C, T> {
                 self.update_progress()?;
             }
             EventPayload::Diagnostic(diagnostic) => self.render_diagnostic(diagnostic)?,
+            EventPayload::OperationCompleted { job, result } => {
+                if self.options.verbosity != Verbosity::Quiet {
+                    let value = serde_json::to_string(result).map_err(io::Error::other)?;
+                    self.write_persistent(&format!(
+                        "Result {}: {}",
+                        sanitize(job.as_str()),
+                        sanitize(&value)
+                    ))?;
+                }
+            }
             EventPayload::JobFinished(summary) => {
                 self.clear_progress()?;
                 self.jobs.remove(&summary.job);
@@ -982,8 +999,9 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use squish_protocol::{
-        ActionId, ActionTotals, Artifact, ArtifactId, Diagnostic, DiagnosticId, Digest,
-        DigestAlgorithm, Event, ExitStatus, InvocationId, JobId, JobSummary, Timing,
+        ActionId, ActionTotals, Artifact, ArtifactId, BuildResult, Diagnostic, DiagnosticId,
+        Digest, DigestAlgorithm, Event, ExitStatus, InvocationId, JobId, JobSummary,
+        OperationResult, Timing,
     };
 
     use super::*;
@@ -1116,15 +1134,27 @@ mod tests {
     fn ndjson_emits_exactly_one_unmodified_event_per_line() {
         let first = plan(0, 1);
         let second = queued(1);
+        let third = event(
+            2,
+            EventPayload::OperationCompleted {
+                job: id("build:main"),
+                result: OperationResult::Build(BuildResult {
+                    published: vec![],
+                    build_record: None,
+                }),
+            },
+        );
         let mut renderer = NdjsonRenderer::new(Vec::new());
         renderer.render(&first).unwrap();
         renderer.render(&second).unwrap();
+        renderer.render(&third).unwrap();
         renderer.finish().unwrap();
         let output = String::from_utf8(renderer.into_inner()).unwrap();
         let lines: Vec<_> = output.lines().collect();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3);
         assert_eq!(serde_json::from_str::<Event>(lines[0]).unwrap(), first);
         assert_eq!(serde_json::from_str::<Event>(lines[1]).unwrap(), second);
+        assert_eq!(serde_json::from_str::<Event>(lines[2]).unwrap(), third);
         assert!(!output.contains('\r'));
         assert!(!output.contains('\u{1b}'));
     }
@@ -1540,13 +1570,13 @@ mod tests {
                     action: action("link:main"),
                     cache: CacheKind::Local,
                     digest: Digest::new(DigestAlgorithm::Blake3, vec![1; 32]).unwrap(),
+                    action_key: Some(squish_protocol::ActionKeyId::new("key:link").unwrap()),
+                    outputs: vec![],
                 },
             ))
             .unwrap();
         let output = String::from_utf8(renderer.into_inner()).unwrap();
         assert!(output.contains("Queued link link:main (build:main) after [compile:main]"));
-        assert!(output.contains(
-            "Cached link:main (build:main, local, blake3:0101010101010101010101010101010101010101010101010101010101010101)"
-        ));
+        assert!(output.contains("Cached link:main (build:main, local, blake3:0101010101010101010101010101010101010101010101010101010101010101, key key:link, 0 outputs)"));
     }
 }
