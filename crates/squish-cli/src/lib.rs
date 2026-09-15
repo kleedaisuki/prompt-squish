@@ -32,7 +32,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use std::{collections::BTreeMap, ffi::OsString, fmt};
+use std::{collections::BTreeMap, ffi::OsString, fmt, path::PathBuf};
 
 use clap::{
     ArgAction, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
@@ -41,9 +41,10 @@ use clap::{
 use squish_protocol::{
     AddRequest, ArgumentName, ArtifactId, BuildRequest, DependencyKind, DependencyName,
     DependencySource, EmitKind, FeatureName, FormatRequest, FormatSelection, GitBranch,
-    GitReference, GitRevision, GitTag, InspectRequest, InspectView, LockMode, OpaqueSourceId,
-    OperationRequest, PackageName, ProfileName, ProjectPath, RegistryName, RemoveRequest,
-    RepositoryUrl, StyleEdition, TargetName, VersionRequirement, WorkspaceScope,
+    GitReference, GitRevision, GitTag, InspectRequest, InspectView, LockMode, NewRequest,
+    OpaqueSourceId, OperationRequest, PackageName, ProfileName, ProjectDestination, ProjectPath,
+    RegistryName, RemoveRequest, RepositoryUrl, StyleEdition, TargetName, VcsChoice,
+    VersionRequirement, WorkspaceScope,
 };
 
 /// 操作消息的外形。 / Shape of operational messages.
@@ -333,7 +334,7 @@ where
     version,
     about = "Build prompts and manage xmlsquish projects",
     subcommand_required = true,
-    after_help = "Examples:\n  xmlsquish build -t chat\n  xmlsquish fmt --check --plain"
+    after_help = "Examples:\n  xmlsquish new my-prompt\n  xmlsquish build -t chat\n  xmlsquish fmt --check --plain"
 )]
 struct Cli {
     #[command(flatten)]
@@ -375,6 +376,11 @@ struct PresentationArgs {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Create a new, immediately buildable project.
+    #[command(
+        after_help = "Examples:\n  xmlsquish new my-prompt\n  xmlsquish new prompts/support --name support --vcs=none"
+    )]
+    New(NewArgs),
     /// Build selected prompts.
     #[command(
         after_help = "Examples:\n  xmlsquish build -t chat\n  xmlsquish build --workspace --frozen --message-format=json"
@@ -400,6 +406,25 @@ enum Command {
         after_help = "Examples:\n  xmlsquish inspect ir ir:sha256:abcd\n  xmlsquish inspect artifact target/prompts/chat.prompt --format=json"
     )]
     Inspect(InspectArgs),
+}
+
+#[derive(Debug, Args)]
+struct NewArgs {
+    /// Destination that must not already exist.
+    #[arg(value_name = "PATH")]
+    destination: PathBuf,
+    /// Explicit package identity; otherwise infer it from PATH.
+    #[arg(long, value_name = "NAME")]
+    name: Option<String>,
+    /// Select Git management or no VCS files.
+    #[arg(long, value_name = "git|none")]
+    vcs: Option<VcsArg>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum VcsArg {
+    Git,
+    None,
 }
 
 #[derive(Debug, Args)]
@@ -615,6 +640,7 @@ impl Cli {
         };
 
         let mut invocation = match self.command {
+            Command::New(args) => new_invocation(args, presentation),
             Command::Build(args) => build_invocation(args, presentation),
             Command::Fmt(args) => format_invocation(args, presentation),
             Command::Add(args) => add_invocation(args, presentation),
@@ -624,6 +650,28 @@ impl Cli {
         invocation.config_overrides = self.config_overrides;
         Ok(invocation)
     }
+}
+
+fn new_invocation(
+    args: NewArgs,
+    presentation: PresentationSettings,
+) -> Result<ParsedInvocation, clap::Error> {
+    let name = args
+        .name
+        .map(|value| package_name(value, "package name"))
+        .transpose()?;
+    let vcs = args.vcs.map(|vcs| match vcs {
+        VcsArg::Git => VcsChoice::Git,
+        VcsArg::None => VcsChoice::None,
+    });
+    Ok(simple_invocation(
+        OperationRequest::New(NewRequest {
+            destination: ProjectDestination::new(args.destination),
+            name,
+            vcs,
+        }),
+        presentation,
+    ))
 }
 
 fn build_invocation(
@@ -1073,6 +1121,10 @@ where
     F: FnOnce(String) -> Result<T, E>,
 {
     constructor(value).map_err(|_| usage(format!("{label} must not be empty")))
+}
+
+fn package_name(value: String, label: &str) -> Result<PackageName, clap::Error> {
+    PackageName::new(value).map_err(|error| usage(format!("invalid {label}: {error}")))
 }
 
 fn require_nonempty(value: &str, label: &str) -> Result<(), clap::Error> {

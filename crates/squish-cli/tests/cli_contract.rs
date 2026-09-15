@@ -5,7 +5,10 @@ use squish_cli::{
     BootstrapOutcome, InspectSubject, MessageFormat, ParsedInvocation, QueryFormat, parse_from,
     parse_from_with_version,
 };
-use squish_protocol::{DependencySource, EmitKind, InspectView, LockMode, OperationRequest};
+use squish_protocol::{
+    DependencySource, EmitKind, InspectView, LockMode, OperationLocation, OperationRequest,
+    VcsChoice,
+};
 
 fn invocation<const N: usize>(arguments: [&str; N]) -> ParsedInvocation {
     parse_from(arguments)
@@ -25,6 +28,97 @@ fn operation_and_presentation_are_separate_contracts() {
         parsed.presentation.message_format,
         Some(MessageFormat::Short)
     );
+}
+
+#[test]
+fn new_maps_only_creation_inputs_without_touching_the_filesystem() {
+    let parsed = invocation([
+        "xmlsquish",
+        "new",
+        "does/not/exist",
+        "--name",
+        "support_v2",
+        "--vcs=none",
+        "--message-format=json",
+        "--config",
+        "new.vcs=\"git\"",
+    ]);
+    let OperationRequest::New(request) = &parsed.request else {
+        panic!("new must produce NewRequest")
+    };
+    assert_eq!(
+        request.destination.as_path(),
+        std::path::Path::new("does/not/exist")
+    );
+    assert_eq!(request.name.as_ref().unwrap().as_str(), "support_v2");
+    assert_eq!(request.vcs, Some(VcsChoice::None));
+    assert!(matches!(
+        parsed.request.location(),
+        OperationLocation::Prospective(destination)
+            if destination.as_path() == std::path::Path::new("does/not/exist")
+    ));
+    assert_eq!(
+        parsed.presentation.message_format,
+        Some(MessageFormat::Json)
+    );
+    assert_eq!(parsed.config_overrides[0].key(), "new.vcs");
+}
+
+#[test]
+fn new_defers_inferred_name_and_default_vcs_to_the_domain() {
+    for path in ["hello", ".", ".."] {
+        let parsed = invocation(["xmlsquish", "new", path]);
+        let OperationRequest::New(request) = parsed.request else {
+            panic!("new must produce NewRequest")
+        };
+        assert_eq!(request.destination.as_path(), std::path::Path::new(path));
+        assert!(request.name.is_none());
+        assert!(request.vcs.is_none());
+    }
+}
+
+#[test]
+fn new_rejects_malformed_explicit_name_and_non_contract_options_as_usage() {
+    for name in ["", "bad.name", "café", "has space"] {
+        let failure = parse_from(["xmlsquish", "new", "destination", "--name", name]).unwrap_err();
+        assert_eq!(failure.exit_code(), 2, "{name:?}");
+    }
+    for option in ["--force", "--template", "--workspace", "--dry-run", "--yes"] {
+        let failure = parse_from(["xmlsquish", "new", "destination", option]).unwrap_err();
+        assert_eq!(failure.exit_code(), 2, "{option}");
+    }
+}
+
+#[test]
+fn help_exposes_exact_six_manager_commands() {
+    let help = parse_from(["xmlsquish"])
+        .unwrap()
+        .into_invocation()
+        .unwrap_err();
+    for command in ["new", "build", "fmt", "add", "remove", "inspect"] {
+        assert!(help.as_str().contains(command), "missing {command}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn new_preserves_non_utf8_destination_for_domain_validation() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let destination = std::ffi::OsString::from_vec(vec![b'b', b'a', b'd', 0xff]);
+    let parsed = parse_from([
+        std::ffi::OsString::from("xmlsquish"),
+        std::ffi::OsString::from("new"),
+        destination.clone(),
+        std::ffi::OsString::from("--name=valid"),
+    ])
+    .unwrap()
+    .into_invocation()
+    .unwrap();
+    let OperationRequest::New(request) = parsed.request else {
+        panic!("new must produce NewRequest")
+    };
+    assert_eq!(request.destination.as_path().as_os_str(), destination);
 }
 
 #[test]

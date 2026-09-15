@@ -3,10 +3,15 @@
 #![deny(missing_docs)]
 
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fmt, ops::Range};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    ops::Range,
+    path::{Path, PathBuf},
+};
 
 /// 当前协议版本。 / Current protocol version.
-pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion::new(2, 0);
+pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion::new(2, 1);
 
 /// 在过渡期内仍可解码的旧事件协议主版本。 / Legacy event-protocol major decoded during the compatibility window.
 pub const LEGACY_EVENT_MAJOR: u16 = 1;
@@ -117,7 +122,6 @@ string_id!(
 );
 string_id!(TargetName, "项目目标名。 / Project target name.");
 string_id!(DependencyName, "依赖别名。 / Dependency alias.");
-string_id!(PackageName, "工作区包名。 / Workspace package name.");
 string_id!(ProfileName, "构建配置名。 / Build profile name.");
 string_id!(ArgumentName, "入口参数名。 / Entry argument name.");
 string_id!(FeatureName, "依赖特性名。 / Dependency feature name.");
@@ -131,6 +135,242 @@ string_id!(GitRevision, "Git 修订。 / Git revision.");
 string_id!(GitBranch, "Git 分支名。 / Git branch name.");
 string_id!(GitTag, "Git 标签名。 / Git tag name.");
 string_id!(StyleEdition, "格式样式版本。 / Formatting style edition.");
+
+/// 非法包名。 / Invalid package name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidPackageName;
+
+impl fmt::Display for InvalidPackageName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "package name must be a non-empty sequence of ASCII letters, digits, '-' or '_'",
+        )
+    }
+}
+
+impl std::error::Error for InvalidPackageName {}
+
+/// 清单与创建操作共享的已验证包名。 / Validated package name shared by manifests and project creation.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct PackageName(String);
+
+impl PackageName {
+    /// 按唯一的清单包名语法验证文本。 / Validates text using the single manifest package-name grammar.
+    pub fn new(value: impl Into<String>) -> Result<Self, InvalidPackageName> {
+        let value = value.into();
+        validate_package_name(&value)?;
+        Ok(Self(value))
+    }
+
+    /// 判断文本是否符合共享文法。 / Tests text against the shared grammar.
+    pub fn is_valid(value: &str) -> bool {
+        validate_package_name(value).is_ok()
+    }
+
+    /// 返回已验证的包名。 / Returns the validated package name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// 取得已验证的文本。 / Consumes the value and returns the validated text.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+/// 按清单与协议共享的唯一文法验证包名。 / Validates a package name using the single grammar shared by manifests and protocol requests.
+pub fn validate_package_name(value: &str) -> Result<(), InvalidPackageName> {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        Ok(())
+    } else {
+        Err(InvalidPackageName)
+    }
+}
+
+impl fmt::Display for PackageName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl TryFrom<String> for PackageName {
+    type Error = InvalidPackageName;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<&str> for PackageName {
+    type Error = InvalidPackageName;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<PackageName> for String {
+    fn from(value: PackageName) -> Self {
+        value.0
+    }
+}
+
+/// 尚未存在的项目目标路径。 / Filesystem destination at which a project does not yet exist.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ProjectDestination(PathBuf);
+
+impl ProjectDestination {
+    /// 创建不访问文件系统的目标路径。 / Creates a destination path without accessing the filesystem.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self(path.into())
+    }
+
+    /// 返回用户提供的路径。 / Returns the user-provided path.
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+
+    /// 取得用户提供的路径。 / Consumes the value and returns the user-provided path.
+    pub fn into_path_buf(self) -> PathBuf {
+        self.0
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", tag = "encoding", content = "units")]
+enum ProjectDestinationWire {
+    UnixBytes(Vec<u8>),
+    WindowsUtf16(Vec<u16>),
+    Utf8(String),
+}
+
+impl Serialize for ProjectDestination {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            ProjectDestinationWire::UnixBytes(self.0.as_os_str().as_bytes().to_vec())
+                .serialize(serializer)
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            ProjectDestinationWire::WindowsUtf16(self.0.as_os_str().encode_wide().collect())
+                .serialize(serializer)
+        }
+        #[cfg(not(any(unix, windows)))]
+        ProjectDestinationWire::Utf8(self.0.to_string_lossy().into_owned()).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProjectDestination {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ProjectDestinationWire::deserialize(deserializer)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            match wire {
+                ProjectDestinationWire::UnixBytes(units) => {
+                    Ok(Self(std::ffi::OsString::from_vec(units).into()))
+                }
+                ProjectDestinationWire::Utf8(value) => Ok(Self(value.into())),
+                ProjectDestinationWire::WindowsUtf16(_) => Err(serde::de::Error::custom(
+                    "a Windows UTF-16 path cannot be decoded on Unix",
+                )),
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            match wire {
+                ProjectDestinationWire::WindowsUtf16(units) => {
+                    Ok(Self(std::ffi::OsString::from_wide(&units).into()))
+                }
+                ProjectDestinationWire::Utf8(value) => Ok(Self(value.into())),
+                ProjectDestinationWire::UnixBytes(_) => Err(serde::de::Error::custom(
+                    "a Unix byte path cannot be decoded on Windows",
+                )),
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        match wire {
+            ProjectDestinationWire::Utf8(value) => Ok(Self(value.into())),
+            _ => Err(serde::de::Error::custom(
+                "a native path encoding cannot be decoded on this platform",
+            )),
+        }
+    }
+}
+
+/// 非规范项目内文件路径。 / Non-canonical project-relative file path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidProjectFilePath;
+
+impl fmt::Display for InvalidProjectFilePath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("project file path must be a normalized non-empty relative path")
+    }
+}
+
+impl std::error::Error for InvalidProjectFilePath {}
+
+/// 使用 `/` 分隔的规范项目内文件路径。 / Normalized `/`-separated project-relative file path.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ProjectFilePath(String);
+
+impl ProjectFilePath {
+    /// 验证规范的相对文件路径。 / Validates a normalized relative file path.
+    pub fn new(value: impl Into<String>) -> Result<Self, InvalidProjectFilePath> {
+        let value = value.into();
+        let normalized = !value.is_empty()
+            && !value.contains('\\')
+            && !value.contains('\0')
+            && value
+                .split('/')
+                .all(|component| !component.is_empty() && !matches!(component, "." | ".."));
+        if !normalized {
+            return Err(InvalidProjectFilePath);
+        }
+        Ok(Self(value))
+    }
+
+    /// 返回规范路径文本。 / Returns the normalized path text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ProjectFilePath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl TryFrom<String> for ProjectFilePath {
+    type Error = InvalidProjectFilePath;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<ProjectFilePath> for String {
+    fn from(value: ProjectFilePath) -> Self {
+        value.0
+    }
+}
 
 /// 未经领域验证的不透明源码身份。 / Opaque source identity not yet domain-validated.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -172,6 +412,8 @@ impl From<OpaqueSourceId> for String {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
+    /// 创建项目。 / Create project.
+    New,
     /// 构建。 / Build.
     Build,
     /// 格式化。 / Format.
@@ -188,6 +430,8 @@ pub enum OperationKind {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "type", content = "request")]
 pub enum OperationRequest {
+    /// 创建项目。 / Create project.
+    New(NewRequest),
     /// 构建。 / Build.
     Build(BuildRequest),
     /// 格式化。 / Format.
@@ -203,6 +447,7 @@ impl OperationRequest {
     /// 返回静态路由类别。 / Returns the static routing kind.
     pub const fn kind(&self) -> OperationKind {
         match self {
+            Self::New(_) => OperationKind::New,
             Self::Build(_) => OperationKind::Build,
             Self::Format(_) => OperationKind::Format,
             Self::Add(_) => OperationKind::Add,
@@ -210,6 +455,48 @@ impl OperationRequest {
             Self::Inspect(_) => OperationKind::Inspect,
         }
     }
+
+    /// 返回操作面向现有项目还是尚未存在的目标。 / Returns whether the operation addresses an existing project or a prospective destination.
+    pub const fn location(&self) -> OperationLocation<'_> {
+        match self {
+            Self::New(request) => OperationLocation::Prospective(&request.destination),
+            Self::Build(request) => OperationLocation::Existing(&request.project),
+            Self::Format(request) => OperationLocation::Existing(&request.project),
+            Self::Add(request) => OperationLocation::Existing(&request.project),
+            Self::Remove(request) => OperationLocation::Existing(&request.project),
+            Self::Inspect(request) => OperationLocation::Existing(&request.project),
+        }
+    }
+}
+
+/// 操作的中心位置代数。 / Central location algebra for manager operations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationLocation<'a> {
+    /// 必须通过项目发现解析的现有项目。 / Existing project resolved through project discovery.
+    Existing(&'a ProjectPath),
+    /// 尚未存在且不得通过项目发现解释的目标。 / Prospective destination that must not be interpreted through project discovery.
+    Prospective(&'a ProjectDestination),
+}
+
+/// 创建操作请求。 / Project-creation request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NewRequest {
+    /// 用户提供且尚未存在的目标。 / User-provided destination that does not yet exist.
+    pub destination: ProjectDestination,
+    /// 显式、已验证的包名；空值要求管理器从目标叶名推断。 / Explicit validated package name; absence asks the manager to infer from the destination leaf.
+    pub name: Option<PackageName>,
+    /// 显式 VCS 策略；空值让配置决定，并最终默认 Git。 / Explicit VCS policy; absence defers to configuration and ultimately defaults to Git.
+    pub vcs: Option<VcsChoice>,
+}
+
+/// 项目创建的版本控制策略。 / Version-control policy for project creation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VcsChoice {
+    /// 使用或创建 Git 仓库。 / Reuse or create a Git repository.
+    Git,
+    /// 不创建版本控制文件。 / Create no version-control files.
+    None,
 }
 
 /// 构建请求。 / Build request.
@@ -806,6 +1093,8 @@ pub struct JobSummary {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionKind {
+    /// 原子创建完整项目及可选工作区成员关系。 / Atomically create a complete project and optional workspace membership.
+    CreateProject,
     /// 仅解码 v1 的旧依赖解析占位动作；v2 计划必须使用 [`PlanningStepKind::Resolve`]。 / Legacy v1 dependency-resolution placeholder for decoding only; v2 plans must use [`PlanningStepKind::Resolve`].
     Resolve,
     /// 仅解码 v1 的旧快照占位动作；v2 计划必须使用 [`PlanningStepKind::Snapshot`]。 / Legacy v1 snapshot placeholder for decoding only; v2 plans must use [`PlanningStepKind::Snapshot`].
@@ -830,6 +1119,66 @@ pub enum ActionKind {
     ResolveCandidate,
     /// 项目事务提交。 / Project transaction commit.
     CommitTransaction,
+}
+
+/// 创建项目时产生的可验证公共文件。 / Verifiable public file created with a project.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CreatedProjectFile {
+    /// 项目内规范相对路径。 / Normalized project-relative path.
+    pub path: ProjectFilePath,
+    /// 精确文件字节摘要。 / Digest of the exact file bytes.
+    pub digest: Digest,
+    /// 精确文件字节数。 / Exact file byte size.
+    pub size: u64,
+}
+
+/// 新包在外围工作区中的落位。 / Placement of a new package in an enclosing workspace.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkspacePlacement {
+    /// 被复用或修改的绝对工作区清单路径。 / Absolute workspace manifest path reused or modified.
+    pub manifest: ProjectDestination,
+    /// 写入或确认的规范工作区相对成员路径。 / Normalized workspace-relative member path written or confirmed.
+    pub member: ProjectFilePath,
+}
+
+/// VCS 操作的实际结果。 / Actual disposition of the VCS operation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VcsDisposition {
+    /// 创建了新仓库。 / A new repository was created.
+    Created,
+    /// 复用了外围仓库。 / An enclosing repository was reused.
+    Reused,
+    /// VCS 已明确禁用。 / Version control was disabled.
+    Disabled,
+}
+
+/// 创建项目最终采用的 VCS 策略与处置。 / Effective VCS policy and disposition for project creation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct VcsResult {
+    /// 最终采用的 VCS 类别。 / Effective VCS kind.
+    pub kind: VcsChoice,
+    /// 仓库创建、复用或禁用结果。 / Repository creation, reuse, or disabled disposition.
+    pub disposition: VcsDisposition,
+}
+
+/// 创建项目的完整领域结果。 / Complete domain result of project creation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NewResult {
+    /// 最终包身份。 / Final package identity.
+    pub package: PackageName,
+    /// 创建后的绝对目标路径。 / Absolute destination path after creation.
+    pub path: ProjectDestination,
+    /// 创建后的绝对包清单路径。 / Absolute package manifest path after creation.
+    pub manifest: ProjectDestination,
+    /// 规范脚手架的默认目标。 / Default target in the canonical scaffold.
+    pub target: TargetName,
+    /// 按规范路径词法序排列的公共文件。 / Public files in lexical order by normalized path.
+    pub created: Vec<CreatedProjectFile>,
+    /// 外围工作区落位；独立项目为空。 / Enclosing workspace placement, absent for a standalone project.
+    pub workspace: Option<WorkspacePlacement>,
+    /// 实际采用的版本控制行为。 / Effective version-control behavior.
+    pub vcs: VcsResult,
 }
 
 /// 一个目标已成功提交的完整产物集合。 / Complete artifact set committed for one target.
@@ -1020,6 +1369,8 @@ pub enum OperationResult {
         /// 未能产生结果的操作类别。 / Operation kind whose result could not be produced.
         kind: OperationKind,
     },
+    /// 创建项目结果。 / Project-creation result.
+    New(NewResult),
     /// 构建结果。 / Build result.
     Build(BuildResult),
     /// 格式化结果。 / Format result.
@@ -1036,6 +1387,7 @@ impl OperationResult {
     pub const fn kind(&self) -> OperationKind {
         match self {
             Self::Unavailable { kind } => *kind,
+            Self::New(_) => OperationKind::New,
             Self::Build(_) => OperationKind::Build,
             Self::Format(_) => OperationKind::Format,
             Self::Add(_) => OperationKind::Add,
@@ -1048,6 +1400,13 @@ impl OperationResult {
     pub fn matches_request(&self, request: &OperationRequest) -> bool {
         match (self, request) {
             (Self::Unavailable { kind }, request) => *kind == request.kind(),
+            (Self::New(result), OperationRequest::New(request)) => {
+                request
+                    .name
+                    .as_ref()
+                    .is_none_or(|name| name == &result.package)
+                    && request.vcs.is_none_or(|vcs| vcs == result.vcs.kind)
+            }
             (Self::Build(_), OperationRequest::Build(_)) => true,
             (Self::Format(result), OperationRequest::Format(request)) => {
                 result.check == request.check
@@ -1083,7 +1442,8 @@ impl OperationResult {
         match self {
             Self::Unavailable { .. } => false,
             Self::Format(result) if result.check => result.changed.is_empty(),
-            Self::Build(_)
+            Self::New(_)
+            | Self::Build(_)
             | Self::Format(_)
             | Self::Add(_)
             | Self::Remove(_)
@@ -1707,7 +2067,8 @@ fn validate_payload(payload: &EventPayload) -> Result<(), EventValidationError> 
 fn is_v2_executable_action(kind: ActionKind) -> bool {
     matches!(
         kind,
-        ActionKind::Compile
+        ActionKind::CreateProject
+            | ActionKind::Compile
             | ActionKind::Link
             | ActionKind::Instantiate
             | ActionKind::Backend
@@ -2153,6 +2514,128 @@ mod tests {
         assert!(
             serde_json::from_str::<Digest>(r#"{"algorithm":{"type":"sha256"},"hex":"AF"}"#)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn package_name_has_one_strict_wire_and_constructor_grammar() {
+        for valid in ["a", "Prompt_2", "prompt-common"] {
+            let name = PackageName::new(valid).unwrap();
+            let json = serde_json::to_string(&name).unwrap();
+            assert_eq!(serde_json::from_str::<PackageName>(&json).unwrap(), name);
+        }
+        for invalid in ["", "prompt.common", "has space", "café", "slash/name"] {
+            assert!(PackageName::new(invalid).is_err(), "{invalid:?}");
+            assert!(
+                serde_json::from_value::<PackageName>(serde_json::json!(invalid)).is_err(),
+                "{invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn project_file_paths_reject_non_normalized_or_escaping_forms() {
+        for valid in ["xmlsquish.toml", ".gitignore", "src/prompt.xml"] {
+            assert_eq!(ProjectFilePath::new(valid).unwrap().as_str(), valid);
+        }
+        for invalid in [
+            "",
+            "/absolute",
+            "../escape",
+            "src/../escape",
+            "./file",
+            "src\\file",
+            "src/",
+        ] {
+            assert!(ProjectFilePath::new(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn new_request_and_result_round_trip_with_truthful_identity_matching() {
+        let request = OperationRequest::New(NewRequest {
+            destination: ProjectDestination::new("relative/support"),
+            name: Some(PackageName::new("support").unwrap()),
+            vcs: Some(VcsChoice::Git),
+        });
+        assert_eq!(request.kind(), OperationKind::New);
+        assert!(matches!(
+            request.location(),
+            OperationLocation::Prospective(destination)
+                if destination.as_path() == Path::new("relative/support")
+        ));
+        let request_json = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            serde_json::from_str::<OperationRequest>(&request_json).unwrap(),
+            request
+        );
+
+        let result = OperationResult::New(NewResult {
+            package: PackageName::new("support").unwrap(),
+            path: ProjectDestination::new("/absolute/support"),
+            manifest: ProjectDestination::new("/absolute/support/xmlsquish.toml"),
+            target: TargetName::new("prompt").unwrap(),
+            created: vec![CreatedProjectFile {
+                path: ProjectFilePath::new("xmlsquish.toml").unwrap(),
+                digest: Digest::new(DigestAlgorithm::Sha256, vec![3; 32]).unwrap(),
+                size: 42,
+            }],
+            workspace: None,
+            vcs: VcsResult {
+                kind: VcsChoice::Git,
+                disposition: VcsDisposition::Created,
+            },
+        });
+        assert_eq!(result.kind(), OperationKind::New);
+        assert!(result.command_succeeded());
+        assert!(result.matches_request(&request));
+        let result_json = serde_json::to_string(&result).unwrap();
+        assert_eq!(
+            serde_json::from_str::<OperationResult>(&result_json).unwrap(),
+            result
+        );
+
+        let wrong_vcs = OperationRequest::New(NewRequest {
+            destination: ProjectDestination::new("relative/support"),
+            name: Some(PackageName::new("support").unwrap()),
+            vcs: Some(VcsChoice::None),
+        });
+        assert!(!result.matches_request(&wrong_vcs));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_destination_wire_round_trips_non_utf8_unix_bytes_losslessly() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let destination = ProjectDestination::new(std::ffi::OsString::from_vec(vec![
+            b'p', b'r', b'o', b'j', 0xff,
+        ]));
+        let json = serde_json::to_string(&destination).unwrap();
+        assert!(json.contains(r#""encoding":"unix_bytes""#));
+        assert_eq!(
+            serde_json::from_str::<ProjectDestination>(&json).unwrap(),
+            destination
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn project_destination_wire_round_trips_unpaired_utf16_losslessly() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+        let original = std::ffi::OsString::from_wide(&[b'p' as u16, 0xd800, b'x' as u16]);
+        let destination = ProjectDestination::new(original.clone());
+        let json = serde_json::to_string(&destination).unwrap();
+        assert!(json.contains(r#""encoding":"windows_utf16""#));
+        let decoded = serde_json::from_str::<ProjectDestination>(&json).unwrap();
+        assert_eq!(
+            decoded
+                .as_path()
+                .as_os_str()
+                .encode_wide()
+                .collect::<Vec<_>>(),
+            original.encode_wide().collect::<Vec<_>>()
         );
     }
 }
