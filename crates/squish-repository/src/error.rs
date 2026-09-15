@@ -11,6 +11,15 @@ pub enum RepositoryError {
     /// 工作区不能无歧义地接纳新成员。 / A workspace cannot accept the new member unambiguously.
     #[error("workspace membership conflict: {0}")]
     WorkspaceConflict(String),
+    /// 项目目录已不可逆发布，但提交后收尾尚需恢复。 / The project directory was irreversibly published but post-commit completion still needs recovery.
+    #[error("project creation committed at {destination}, but completion failed: {source}")]
+    CreationCommitted {
+        /// 已发布的项目目标。 / Published project destination.
+        destination: PathBuf,
+        /// 提交后的底层故障。 / Underlying post-commit failure.
+        #[source]
+        source: Box<RepositoryError>,
+    },
     /// 文件系统操作失败。 / A filesystem operation failed.
     #[error("filesystem operation failed for {path}: {source}")]
     Io {
@@ -46,6 +55,15 @@ impl RepositoryError {
         Self::Io {
             path: path.into(),
             source,
+        }
+    }
+
+    /// 返回已经越过项目创建提交边界的目标（若有）。 / Returns the destination whose project-creation commit boundary was crossed, if any.
+    #[must_use]
+    pub fn committed_creation(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::CreationCommitted { destination, .. } => Some(destination),
+            _ => None,
         }
     }
 }

@@ -207,6 +207,7 @@ pub fn create_project(
             "new-project destination must be absolute and normalized".into(),
         ));
     }
+    let receipt_destination = request.destination.clone();
     let destination = normalize_new_destination(&request.destination)?;
     let workspace = request
         .workspace
@@ -326,18 +327,26 @@ pub fn create_project(
             RepositoryError::io(&publish_path, e)
         }
     })?;
-    sync_directory(&stage_root)?;
-    sync_directory(&publish_anchor)?;
-    // Deliberately inject before the phase write: the in-tree marker closes this exact
-    // rename→journal window and recovery must infer publication from it.
-    faults
-        .check(FaultPoint::CreationPublished)
-        .map_err(|e| RepositoryError::io(&publish_path, e))?;
-    journal.phase = Phase::Published;
-    store_journal(&tx, &journal)?;
-    finish_published(&tx, &mut journal, faults, _workspace_lock.is_some())?;
+    let completion = (|| {
+        sync_directory(&stage_root)?;
+        sync_directory(&publish_anchor)?;
+        // Deliberately inject before the phase write: the in-tree marker closes this exact
+        // rename→journal window and recovery must infer publication from it.
+        faults
+            .check(FaultPoint::CreationPublished)
+            .map_err(|e| RepositoryError::io(&publish_path, e))?;
+        journal.phase = Phase::Published;
+        store_journal(&tx, &journal)?;
+        finish_published(&tx, &mut journal, faults, _workspace_lock.is_some())
+    })();
+    if let Err(source) = completion {
+        return Err(RepositoryError::CreationCommitted {
+            destination: receipt_destination,
+            source: Box::new(source),
+        });
+    }
     Ok(CreatedProject {
-        destination,
+        destination: receipt_destination,
         workspace_updated,
     })
 }
@@ -1038,14 +1047,13 @@ mod tests {
         ] {
             let temp = tempdir().unwrap();
             let destination = normalize_new_destination(&temp.path().join("new")).unwrap();
-            assert!(
-                create_project(
-                    &request(destination.clone()),
-                    &NoStagePreparation,
-                    &Fail(point)
-                )
-                .is_err()
-            );
+            let error = create_project(
+                &request(destination.clone()),
+                &NoStagePreparation,
+                &Fail(point),
+            )
+            .unwrap_err();
+            assert_eq!(error.committed_creation(), Some(destination.as_path()));
             recover_project_creations(temp.path(), &NoFault).unwrap();
             assert!(destination.join("xmlsquish.toml").is_file(), "{point:?}");
             assert!(!destination.join(".xmlsquish-published").exists());
