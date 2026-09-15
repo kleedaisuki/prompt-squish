@@ -184,7 +184,7 @@ struct PlatformDirectoryPublisher;
 
 impl DirectoryPublisher for PlatformDirectoryPublisher {
     fn publish_exclusive(&self, source: &Path, destination: &Path) -> io::Result<()> {
-        fs::rename(source, destination)
+        squish_platform_fs::rename_exclusive(source, destination)
     }
 }
 

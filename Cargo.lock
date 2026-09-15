@@ -1669,6 +1669,7 @@ dependencies = [
  "serde",
  "serde_json",
  "squish-ir",
+ "squish-platform-fs",
  "squish-project",
  "squish-source",
  "tempfile",
