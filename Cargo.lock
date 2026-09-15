@@ -1600,6 +1600,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "squish-platform-fs"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "tempfile",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "squish-presentation"
 version = "0.1.0"
 dependencies = [

@@ -29,6 +29,7 @@ members = [
     "crates/squish-kernel",
     "crates/squish-link",
     "crates/squish-manager",
+    "crates/squish-platform-fs",
     "crates/squish-presentation",
     "crates/squish-project",
     "crates/squish-protocol",
