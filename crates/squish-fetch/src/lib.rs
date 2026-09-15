@@ -13,7 +13,9 @@ mod registry;
 mod types;
 
 pub use filesystem::FilesystemHost;
-pub use git::{GitHost, GitInvocation, GitRunOutput, GitRunner, GitSelector, SystemGitRunner};
+pub use git::{
+    GitHost, GitInvocation, GitRunOutput, GitRunner, GitSelector, LockedGitPackage, SystemGitRunner,
+};
 pub use materialize::{LogicalFile, LogicalTree, Materializer};
 pub use registry::{
     AuthorizationValue, CredentialError, CredentialLookup, CredentialPort, HttpRequest,

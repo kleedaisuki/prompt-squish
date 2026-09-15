@@ -619,19 +619,19 @@ impl ProductionHost {
                             squish_fetch::Access::Online,
                         );
                     }
-                    let candidate = candidate.map_err(|error| unavailable(&package.id, error))?;
-                    Some(
-                        self.git
-                            .materialize_locked(
-                                repository,
-                                &candidate.commit,
-                                &candidate.package_tree,
-                                ".",
-                                &candidate.content_digest,
-                                squish_fetch::Access::LocalOnly,
-                            )
-                            .map_err(|error| unavailable(&package.id, error))?,
-                    )
+                    let locked = candidate.map_err(|error| unavailable(&package.id, error))?;
+                    if locked.candidate.commit != commit
+                        || locked.candidate.content_digest != content
+                        || locked.materialized.content_digest != content
+                    {
+                        return Err(SourceUnavailable {
+                            identity: package.id.clone(),
+                            detail:
+                                "locked Git materialization returned a different exact identity"
+                                    .into(),
+                        });
+                    }
+                    Some(locked.materialized)
                 }
                 LockedSource::Path { .. } | LockedSource::Workspace { .. } => None,
             };

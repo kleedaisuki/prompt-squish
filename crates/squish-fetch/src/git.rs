@@ -40,6 +40,15 @@ pub struct ExactGitCandidate {
     pub manifest: squish_project::Manifest,
 }
 
+/// Exact Git 身份与其已验证物化目录。 / Exact Git identity together with its verified materialization.
+#[derive(Clone, Debug)]
+pub struct LockedGitPackage {
+    /// 从 commit 推导出的完整候选身份。 / Complete candidate identity derived from the commit.
+    pub candidate: ExactGitCandidate,
+    /// 可供 source host 使用的物理根与 manifest。 / Physical root and manifest for the source host.
+    pub materialized: crate::MaterializedPackage,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Observation {
     commit: String,
@@ -250,17 +259,12 @@ impl GitHost {
     ) -> Result<crate::MaterializedPackage, FetchError> {
         let candidate =
             self.materialize_locked_revision(repository, commit, subdir, expected_content, access)?;
-        if candidate.package_tree != *package_tree {
+        if candidate.candidate.package_tree != *package_tree {
             return Err(FetchError::Integrity(
                 "locked Git package-tree mismatch".into(),
             ));
         }
-        let db = self.db_path(repository, commit.format);
-        let tree = self.read_tree(&db, &candidate.package_tree.hex)?;
-        self.materializer.materialize(
-            &format!("git:{}#{}@{}", stable_repo(repository), subdir, commit.hex),
-            &tree,
-        )
+        Ok(candidate.materialized)
     }
 
     /// 直接从 exact commit 推导并验证 root/package tree；LocalOnly 不需要 selector observation。 / Derives and verifies root/package trees directly from an exact commit; LocalOnly needs no selector observation.
@@ -271,7 +275,7 @@ impl GitHost {
         subdir: &str,
         expected_content: &ContentDigest,
         access: Access,
-    ) -> Result<ExactGitCandidate, FetchError> {
+    ) -> Result<LockedGitPackage, FetchError> {
         validate_repository(repository)?;
         validate_subdir(subdir)?;
         let db = self.db_path(repository, commit.format);
@@ -317,14 +321,18 @@ impl GitHost {
             &format!("git:{}#{}@{}", stable_repo(repository), subdir, commit.hex),
             &tree,
         )?;
-        Ok(ExactGitCandidate {
+        let candidate = ExactGitCandidate {
             commit: commit.clone(),
             root_tree: GitOid::new(commit.format, root.trim().to_owned())?,
             package_tree: GitOid::new(commit.format, selected)?,
             subdir: subdir.into(),
             content_digest: expected_content.clone(),
-            manifest_digest: materialized.manifest_digest,
-            manifest: materialized.manifest,
+            manifest_digest: materialized.manifest_digest.clone(),
+            manifest: materialized.manifest.clone(),
+        };
+        Ok(LockedGitPackage {
+            candidate,
+            materialized,
         })
     }
 
@@ -555,9 +563,16 @@ impl GitHost {
         args: Vec<OsString>,
         trace_packet: bool,
     ) -> Result<GitRunOutput, FetchError> {
+        // 禁止 fetch 启动 detached auto-maintenance；Command::output 返回即表示全部 Git 文件句柄已收割。
+        // Prevent detached auto-maintenance so Command::output returning means all Git file handles are reaped.
         let mut env = BTreeMap::from([
             ("GIT_TERMINAL_PROMPT".into(), "0".into()),
             ("GCM_INTERACTIVE".into(), "Never".into()),
+            ("GIT_CONFIG_COUNT".into(), "2".into()),
+            ("GIT_CONFIG_KEY_0".into(), "gc.auto".into()),
+            ("GIT_CONFIG_VALUE_0".into(), "0".into()),
+            ("GIT_CONFIG_KEY_1".into(), "maintenance.autoDetach".into()),
+            ("GIT_CONFIG_VALUE_1".into(), "false".into()),
         ]);
         if trace_packet {
             env.insert("GIT_TRACE_PACKET".into(), "1".into());
@@ -823,7 +838,8 @@ mod tests {
                 Access::LocalOnly,
             )
             .unwrap();
-        assert_eq!(locked.package_tree, candidate.package_tree);
+        assert_eq!(locked.candidate.package_tree, candidate.package_tree);
+        assert!(locked.materialized.root.join("xmlsquish.toml").is_file());
         let missing = GitOid::new(GitObjectFormat::Sha1, "0".repeat(40)).unwrap();
         assert!(matches!(
             host.materialize_locked_revision(
@@ -835,7 +851,11 @@ mod tests {
             ),
             Err(FetchError::OfflineMiss(_))
         ));
-        fs::remove_dir_all(root).unwrap();
+        // 在 Windows 清理 cache 前显式结束所有拥有者生命周期。 / End every owner lifetime explicitly before removing the cache on Windows.
+        drop(locked);
+        drop(candidate);
+        drop(host);
+        remove_git_fixture(&root);
     }
 
     #[test]
@@ -856,7 +876,7 @@ mod tests {
             .unwrap()
             .success();
         if !supported {
-            let _ = fs::remove_dir_all(root);
+            remove_git_fixture(&root);
             return;
         }
         command(&repo, &["config", "user.email", "test@example.invalid"]);
@@ -889,7 +909,10 @@ mod tests {
             .unwrap();
         assert_eq!(candidate.commit.format, GitObjectFormat::Sha256);
         assert_eq!(candidate.commit.hex.len(), 64);
-        fs::remove_dir_all(root).unwrap();
+        // Runner 的同步 output 已收割子进程；随后释放 host/candidate。 / Synchronous runner output has reaped children; now release host/candidate.
+        drop(candidate);
+        drop(host);
+        remove_git_fixture(&root);
     }
 
     #[test]
@@ -950,7 +973,9 @@ mod tests {
         for handle in handles {
             handle.join().unwrap();
         }
-        fs::remove_dir_all(root).unwrap();
+        // 所有线程及共享 runner owner 都必须先结束。 / All threads and the shared runner owner must end first.
+        drop(host);
+        remove_git_fixture(&root);
     }
 
     #[test]
@@ -972,7 +997,7 @@ mod tests {
             Some(&OsString::from("0"))
         );
         drop(calls);
-        fs::remove_dir_all(root).unwrap();
+        remove_git_fixture(&root);
     }
 
     fn command(repo: &Path, args: &[&str]) {
@@ -995,5 +1020,23 @@ mod tests {
         .unwrap()
         .trim()
         .to_owned()
+    }
+
+    fn remove_git_fixture(root: &Path) {
+        // 所有 Rust owner 和同步 Git 子进程均已结束后，Windows 仍可短暂返回 sharing violation；
+        // 只对该精确 OS 状态做有界清理重试，其他错误立即暴露。
+        // After all Rust owners and synchronous Git children end, Windows can transiently return
+        // sharing violation; retry only that exact OS state and surface every other error immediately.
+        for attempt in 0..8u64 {
+            match fs::remove_dir_all(root) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                #[cfg(windows)]
+                Err(error) if error.raw_os_error() == Some(32) && attempt < 7 => {
+                    std::thread::sleep(std::time::Duration::from_millis(10 * (attempt + 1)));
+                }
+                Err(error) => panic!("cannot remove Git fixture {}: {error}", root.display()),
+            }
+        }
     }
 }

@@ -64,9 +64,10 @@ representations:
    only through `BuildCatalogSnapshot`; the host never derives publisher hashes or paths.
 7. Locked Git materialization first resolves the already-full revision (never a branch/tag),
    with `GitHost::materialize_locked_revision`, which derives the tree directly from the local
-   object DB without requiring a selector observation. The recovered typed package-tree identity
-   is passed to `GitHost::materialize_locked`. `Frozen` performs this sequence using local state
-   only; absence is an observable cache miss rather than a remote fallback.
+   object DB without requiring a selector observation. Its `LockedGitPackage` returns the verified
+   exact candidate and materialized root together; the host rechecks commit/content identity and
+   consumes that root directly. `Frozen` performs this sequence using local state only; absence
+   is an observable cache miss rather than a remote fallback.
 
 Registry aliases and stable registry identities share one explicitly validated routing namespace.
 This is essential because a root manifest may use a friendly alias while registry metadata uses
