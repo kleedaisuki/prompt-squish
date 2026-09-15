@@ -3,10 +3,10 @@
 #![deny(missing_docs)]
 
 use squish_protocol::{
-    ActionId, ActionKind, ActionTotals, CapabilityId, Event, EventPayload, ExitStatus,
-    FinalizationId, FinalizationKind, InvocationId, JobId, JobSummary, OperationKind,
-    OperationRequest, OperationResult, PlanCloseReason, PlanId, PlanMode, PlanningAttemptId,
-    PlanningIssueId, PlanningStepId, SupersedeReason, Timing,
+    ActionId, ActionKind, ActionTotals, CancellationDeferralReason, CapabilityId, Event,
+    EventPayload, ExitStatus, FinalizationId, FinalizationKind, InvocationId, JobId, JobSummary,
+    OperationKind, OperationRequest, OperationResult, PlanCloseReason, PlanId, PlanMode,
+    PlanningAttemptId, PlanningIssueId, PlanningStepId, SupersedeReason, Timing,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -425,6 +425,7 @@ struct ActionRecord {
     dependencies: Vec<ActionId>,
     state: ActionState,
     cache_hit: bool,
+    cancellation_deferred: bool,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StepState {
@@ -480,6 +481,7 @@ struct Lifecycle {
     retry_allowed: bool,
     fatal_planning_failure: bool,
     planning_cancelled: bool,
+    pending_deferred_cancellation: Option<(PlanId, ActionId)>,
     operation_completed: bool,
     job_finished: bool,
 }
@@ -493,6 +495,7 @@ impl Lifecycle {
         if self.operation_completed {
             return self.invalid("capability event followed operation completion");
         }
+        self.require_deferred_terminal(event)?;
         match event {
             EventPayload::PlanningStarted { job, attempt } => self.start_attempt(job, attempt),
             EventPayload::PlanningStepStarted {
@@ -552,22 +555,10 @@ impl Lifecycle {
             }
             EventPayload::ActionSucceeded {
                 job, plan, action, ..
-            } => self.action_transition(
-                job,
-                plan,
-                action,
-                &[ActionState::Started],
-                ActionState::Succeeded,
-            ),
+            } => self.finish_action(job, plan, action, ActionState::Succeeded),
             EventPayload::ActionFailed {
                 job, plan, action, ..
-            } => self.action_transition(
-                job,
-                plan,
-                action,
-                &[ActionState::Started],
-                ActionState::Failed,
-            ),
+            } => self.finish_action(job, plan, action, ActionState::Failed),
             EventPayload::ActionBlocked {
                 job,
                 plan,
@@ -583,6 +574,12 @@ impl Lifecycle {
                 &[ActionState::Declared, ActionState::Started],
                 ActionState::Cancelled,
             ),
+            EventPayload::CancellationDeferred {
+                job,
+                plan,
+                action,
+                reason,
+            } => self.defer_cancellation(job, plan, action, *reason),
             EventPayload::ActionSuperseded {
                 job,
                 plan,
@@ -616,6 +613,31 @@ impl Lifecycle {
                 self.invalid("only the kernel may complete or finish a job")
             }
             _ => self.invalid("kernel does not understand this lifecycle event"),
+        }
+    }
+
+    fn require_deferred_terminal(&self, event: &EventPayload) -> Result<(), LifecycleError> {
+        let Some((expected_plan, expected_action)) = &self.pending_deferred_cancellation else {
+            return Ok(());
+        };
+        match event {
+            EventPayload::ActionSucceeded {
+                job,
+                plan,
+                action,
+                ..
+            }
+            | EventPayload::ActionFailed {
+                job,
+                plan,
+                action,
+                ..
+            } if self.job.as_ref() == Some(job)
+                && plan == expected_plan
+                && action == expected_action => Ok(()),
+            _ => self.invalid(format!(
+                "deferred cancellation for action `{expected_action}` requires its immediate terminal event"
+            )),
         }
     }
 
@@ -856,6 +878,7 @@ impl Lifecycle {
                     dependencies: dependencies.to_vec(),
                     state: ActionState::Declared,
                     cache_hit: false,
+                    cancellation_deferred: false,
                 },
             )
             .is_some()
@@ -973,6 +996,66 @@ impl Lifecycle {
             .get_mut(action)
             .expect("declared action")
             .state = to;
+        Ok(())
+    }
+
+    fn defer_cancellation(
+        &mut self,
+        job: &JobId,
+        plan: &PlanId,
+        action: &ActionId,
+        reason: CancellationDeferralReason,
+    ) -> Result<(), LifecycleError> {
+        if reason != CancellationDeferralReason::IrreversibleCommit {
+            return self.invalid("unsupported cancellation deferral reason");
+        }
+        let record = self.active_plan(job, plan)?;
+        if !Self::declarations_complete(record) {
+            return self.invalid("cancellation deferral preceded complete declaration");
+        }
+        let item = record
+            .actions
+            .get(action)
+            .ok_or_else(|| LifecycleError(format!("action `{action}` was not declared")))?;
+        if item.state != ActionState::Started {
+            return self.invalid(format!(
+                "cancellation may be deferred only for a running action, not {:?}",
+                item.state
+            ));
+        }
+        if item.cancellation_deferred {
+            return self.invalid(format!(
+                "action `{action}` deferred cancellation more than once"
+            ));
+        }
+        self.plans
+            .get_mut(plan)
+            .expect("active plan exists")
+            .actions
+            .get_mut(action)
+            .expect("declared action")
+            .cancellation_deferred = true;
+        self.pending_deferred_cancellation = Some((plan.clone(), action.clone()));
+        Ok(())
+    }
+
+    fn finish_action(
+        &mut self,
+        job: &JobId,
+        plan: &PlanId,
+        action: &ActionId,
+        terminal: ActionState,
+    ) -> Result<(), LifecycleError> {
+        debug_assert!(matches!(
+            terminal,
+            ActionState::Succeeded | ActionState::Failed
+        ));
+        self.action_transition(job, plan, action, &[ActionState::Started], terminal)?;
+        if self.pending_deferred_cancellation.as_ref().is_some_and(
+            |(expected_plan, expected_action)| expected_plan == plan && expected_action == action,
+        ) {
+            self.pending_deferred_cancellation = None;
+        }
         Ok(())
     }
     fn cache(
@@ -1186,6 +1269,10 @@ impl Lifecycle {
     }
     fn finish(&self, outcome: &OperationOutcome) -> Result<Reduction, LifecycleError> {
         self.same_job(&outcome.job)?;
+        if self.pending_deferred_cancellation.is_some() {
+            return self
+                .invalid("job ended before deferred cancellation reached a terminal action");
+        }
         if self.active.is_some() || self.retry_allowed || self.active_finalization.is_some() {
             return self.invalid("job ended with open planning, plan, or finalization work");
         }
@@ -1216,6 +1303,7 @@ impl Lifecycle {
             root_failures += record.expected_issues;
             for action in record.actions.values() {
                 cache_hits += u64::from(action.cache_hit);
+                cancelled |= action.cancellation_deferred;
                 match action.state {
                     ActionState::Succeeded => totals.succeeded += 1,
                     ActionState::Failed => {
@@ -1373,6 +1461,208 @@ mod tests {
             root_failures,
             cancelled,
         }
+    }
+
+    fn running_action(lifecycle: &mut Lifecycle) -> (PlanId, ActionId) {
+        let attempt = attempt("deferred-attempt");
+        let plan = plan("deferred-plan");
+        let action = action("irreversible-write");
+        start(lifecycle, &attempt);
+        seal(lifecycle, &attempt, &plan, PlanMode::Execute, 1, 0);
+        declare(lifecycle, &plan, &action, vec![]);
+        lifecycle
+            .observe(&EventPayload::ActionStarted {
+                job: job(),
+                plan: plan.clone(),
+                action: action.clone(),
+            })
+            .unwrap();
+        (plan, action)
+    }
+
+    fn defer_cancellation(lifecycle: &mut Lifecycle, plan: &PlanId, action: &ActionId) {
+        lifecycle
+            .observe(&EventPayload::CancellationDeferred {
+                job: job(),
+                plan: plan.clone(),
+                action: action.clone(),
+                reason: CancellationDeferralReason::IrreversibleCommit,
+            })
+            .unwrap();
+    }
+
+    fn close_and_finalize(lifecycle: &mut Lifecycle, plan: PlanId) {
+        lifecycle
+            .observe(&EventPayload::PlanClosed {
+                job: job(),
+                plan,
+                reason: PlanCloseReason::Executed,
+            })
+            .unwrap();
+        finalize_catalog(lifecycle, "deferred-catalog");
+    }
+
+    #[test]
+    fn deferred_cancellation_preserves_success_and_cancels_job() {
+        let mut lifecycle = Lifecycle::default();
+        let (plan, action) = running_action(&mut lifecycle);
+        defer_cancellation(&mut lifecycle, &plan, &action);
+        lifecycle
+            .observe(&EventPayload::ActionSucceeded {
+                job: job(),
+                plan: plan.clone(),
+                action,
+                timing: Timing::default(),
+                artifacts: vec![],
+            })
+            .unwrap();
+        close_and_finalize(&mut lifecycle, plan);
+
+        let declared = outcome(
+            ActionTotals {
+                succeeded: 1,
+                ..ActionTotals::default()
+            },
+            0,
+            true,
+        );
+        let reduced = lifecycle.finish(&declared).unwrap();
+        assert_eq!(reduced.totals.succeeded, 1);
+        assert_eq!(reduced.root_failures, 0);
+    }
+
+    #[test]
+    fn deferred_cancellation_preserves_terminal_failure_facts() {
+        let mut lifecycle = Lifecycle::default();
+        let (plan, action) = running_action(&mut lifecycle);
+        defer_cancellation(&mut lifecycle, &plan, &action);
+        lifecycle
+            .observe(&EventPayload::ActionFailed {
+                job: job(),
+                plan: plan.clone(),
+                action,
+                timing: Timing::default(),
+                diagnostic: diagnostic(),
+            })
+            .unwrap();
+        close_and_finalize(&mut lifecycle, plan);
+
+        let declared = outcome(
+            ActionTotals {
+                failed: 1,
+                ..ActionTotals::default()
+            },
+            1,
+            true,
+        );
+        let reduced = lifecycle.finish(&declared).unwrap();
+        assert_eq!(reduced.totals.failed, 1);
+        assert_eq!(reduced.root_failures, 1);
+    }
+
+    #[test]
+    fn deferred_cancellation_requires_a_running_action() {
+        let mut lifecycle = Lifecycle::default();
+        let attempt = attempt("not-running-attempt");
+        let plan = plan("not-running-plan");
+        let action = action("not-running-action");
+        start(&mut lifecycle, &attempt);
+        seal(&mut lifecycle, &attempt, &plan, PlanMode::Execute, 1, 0);
+        declare(&mut lifecycle, &plan, &action, vec![]);
+
+        assert!(
+            lifecycle
+                .observe(&EventPayload::CancellationDeferred {
+                    job: job(),
+                    plan,
+                    action,
+                    reason: CancellationDeferralReason::IrreversibleCommit,
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn deferred_cancellation_requires_the_immediate_matching_terminal_event() {
+        let mut lifecycle = Lifecycle::default();
+        let (plan, action) = running_action(&mut lifecycle);
+        defer_cancellation(&mut lifecycle, &plan, &action);
+
+        assert!(
+            lifecycle
+                .observe(&EventPayload::Diagnostic(diagnostic()))
+                .is_err()
+        );
+        assert!(
+            lifecycle
+                .observe(&EventPayload::ActionCancelled {
+                    job: job(),
+                    plan: plan.clone(),
+                    action: action.clone(),
+                    timing: Timing::default(),
+                })
+                .is_err()
+        );
+        assert!(
+            lifecycle
+                .observe(&EventPayload::ActionFailed {
+                    job: job(),
+                    plan: plan.clone(),
+                    action: action("different-action"),
+                    timing: Timing::default(),
+                    diagnostic: diagnostic(),
+                })
+                .is_err()
+        );
+        assert!(
+            lifecycle
+                .observe(&EventPayload::ActionSucceeded {
+                    job: JobId::new("different-job").unwrap(),
+                    plan: plan.clone(),
+                    action: action.clone(),
+                    timing: Timing::default(),
+                    artifacts: vec![],
+                })
+                .is_err()
+        );
+        lifecycle
+            .observe(&EventPayload::ActionSucceeded {
+                job: job(),
+                plan,
+                action,
+                timing: Timing::default(),
+                artifacts: vec![],
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn cancelled_outcome_requires_lifecycle_cancellation_evidence() {
+        let mut lifecycle = Lifecycle::default();
+        let (plan, action) = running_action(&mut lifecycle);
+        lifecycle
+            .observe(&EventPayload::ActionSucceeded {
+                job: job(),
+                plan: plan.clone(),
+                action,
+                timing: Timing::default(),
+                artifacts: vec![],
+            })
+            .unwrap();
+        close_and_finalize(&mut lifecycle, plan);
+
+        assert!(
+            lifecycle
+                .finish(&outcome(
+                    ActionTotals {
+                        succeeded: 1,
+                        ..ActionTotals::default()
+                    },
+                    0,
+                    true,
+                ))
+                .is_err()
+        );
     }
 
     #[test]
@@ -2291,6 +2581,114 @@ mod tests {
                     && summary.root_failures == 0
             ));
         }
+    }
+
+    struct DeferredFormat;
+    impl Capability for DeferredFormat {
+        fn descriptor(&self) -> &'static CapabilityDescriptor {
+            &FORMAT_DESCRIPTOR
+        }
+
+        fn execute(&self, _: &OperationRequest, context: &InvocationContext) -> OperationOutcome {
+            let attempt = attempt("deferred-format-attempt");
+            let plan = plan("deferred-format-plan");
+            let action = action("deferred-format-write");
+            for payload in [
+                EventPayload::PlanningStarted {
+                    job: job(),
+                    attempt: attempt.clone(),
+                },
+                EventPayload::PlanReady {
+                    job: job(),
+                    attempt,
+                    plan: plan.clone(),
+                    digest: plan_digest(),
+                    mode: PlanMode::Execute,
+                    actions: 1,
+                    issues: 0,
+                },
+                EventPayload::ActionDeclared {
+                    job: job(),
+                    plan: plan.clone(),
+                    action: action.clone(),
+                    kind: ActionKind::Format,
+                    dependencies: vec![],
+                },
+                EventPayload::ActionStarted {
+                    job: job(),
+                    plan: plan.clone(),
+                    action: action.clone(),
+                },
+                EventPayload::CancellationDeferred {
+                    job: job(),
+                    plan: plan.clone(),
+                    action: action.clone(),
+                    reason: CancellationDeferralReason::IrreversibleCommit,
+                },
+                EventPayload::ActionSucceeded {
+                    job: job(),
+                    plan: plan.clone(),
+                    action,
+                    timing: Timing::default(),
+                    artifacts: vec![],
+                },
+                EventPayload::PlanClosed {
+                    job: job(),
+                    plan,
+                    reason: PlanCloseReason::Executed,
+                },
+            ] {
+                context.emit(payload).unwrap();
+            }
+            OperationOutcome {
+                job: job(),
+                result: OperationResult::Format(FormatResult {
+                    selected: vec![],
+                    changed: vec![],
+                    check: true,
+                    diffs: vec![],
+                }),
+                totals: ActionTotals {
+                    succeeded: 1,
+                    ..ActionTotals::default()
+                },
+                root_failures: 0,
+                cancelled: true,
+            }
+        }
+    }
+
+    #[test]
+    fn deferred_cancellation_returns_available_result_with_cancelled_job_status() {
+        static CAPABILITY: DeferredFormat = DeferredFormat;
+        let sink = Arc::new(Sink::default());
+        let context = InvocationContext::new(
+            InvocationId::new("deferred-format-invocation").unwrap(),
+            CancellationToken::default(),
+            sink.clone(),
+        );
+        let request = OperationRequest::Format(FormatRequest {
+            project: ProjectPath::new(".").unwrap(),
+            scope: WorkspaceScope::Current,
+            selection: FormatSelection::All,
+            style: None,
+            check: true,
+            diff: false,
+        });
+
+        let dispatched = Kernel::new(&[&CAPABILITY])
+            .unwrap()
+            .dispatch(&request, &context)
+            .unwrap();
+
+        assert!(!dispatched.result.is_unavailable());
+        assert_eq!(dispatched.summary.status, ExitStatus::Cancelled);
+        assert_eq!(dispatched.summary.totals.succeeded, 1);
+        assert!(matches!(
+            lock(&sink.0).last().map(|event| &event.payload),
+            Some(EventPayload::JobFinished(summary))
+                if summary.status == ExitStatus::Cancelled
+        ));
     }
 
     static BUILD_DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
