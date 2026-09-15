@@ -6,7 +6,10 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt, ops::Range};
 
 /// 当前协议版本。 / Current protocol version.
-pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion::new(1, 1);
+pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion::new(2, 0);
+
+/// 在过渡期内仍可解码的旧事件协议主版本。 / Legacy event-protocol major decoded during the compatibility window.
+pub const LEGACY_EVENT_MAJOR: u16 = 1;
 
 /// 遵循主/次兼容规则的协议版本。 / Major/minor compatible protocol version.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -77,6 +80,26 @@ macro_rules! string_id {
 string_id!(InvocationId, "一次管理器调用。 / One manager invocation.");
 string_id!(CapabilityId, "静态内核能力。 / Static kernel capability.");
 string_id!(JobId, "计划执行作业。 / Planned execution job.");
+string_id!(
+    PlanningAttemptId,
+    "作业内唯一的计划尝试。 / Job-scoped unique planning attempt."
+);
+string_id!(
+    PlanningStepId,
+    "计划尝试内唯一的真实工作步骤。 / Attempt-scoped unique real planning step."
+);
+string_id!(
+    PlanningIssueId,
+    "计划尝试内唯一的问题。 / Attempt-scoped unique planning issue."
+);
+string_id!(
+    PlanScopeId,
+    "计划问题影响的稳定目标或源范围。 / Stable target or source scope affected by a planning issue."
+);
+string_id!(
+    PlanId,
+    "作业内唯一的不可变计划。 / Job-scoped unique immutable plan."
+);
 string_id!(ActionId, "作业动作节点。 / Job action node.");
 string_id!(
     ActionKeyId,
@@ -870,6 +893,12 @@ pub struct PlannedAction {
 pub struct PlanInspection {
     /// 计划作业。 / Planned job.
     pub job: JobId,
+    /// 不可变计划实例。 / Immutable plan instance.
+    pub plan: PlanId,
+    /// 计划语义身份。 / Semantic plan identity.
+    pub digest: PlanDigest,
+    /// 执行或仅报告模式。 / Execute or report-only mode.
+    pub mode: PlanMode,
     /// 稳定拓扑顺序的动作。 / Actions in stable topological order.
     pub actions: Vec<PlannedAction>,
 }
@@ -1025,50 +1054,207 @@ impl InspectResult {
     }
 }
 
-/// 完整调度事件代数。 / Complete scheduling event algebra.
+/// 计划的执行策略。 / Execution policy of a sealed plan.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanMode {
+    /// 声明完整图后执行动作。 / Execute actions after declaring the complete graph.
+    Execute,
+    /// 声明完整图但不启动动作。 / Declare the complete graph without starting actions.
+    ReportOnly,
+    /// 仅供 v1 解码器丢失性查看的旧投影；不是可由 v2 内核执行的模式。 /
+    /// Lossy legacy projection for v1 decoder inspection only; not executable by a v2 kernel.
+    Legacy,
+}
+
+/// 对用户有意义的真实计划工作类别。 / User-meaningful kind of real planning work.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PlanningStepKind {
+    /// 恢复未完成的权威事务。 / Recover an incomplete authoritative transaction.
+    Recover,
+    /// 定位项目或工作区。 / Locate a project or workspace.
+    Locate,
+    /// 解析依赖图。 / Resolve the dependency graph.
+    Resolve,
+    /// 获取或物化依赖。 / Fetch or materialize dependencies.
+    Fetch,
+    /// 协调候选锁状态。 / Reconcile candidate lock state.
+    ReconcileLock,
+    /// 冻结权威输入快照。 / Freeze the authoritative input snapshot.
+    Snapshot,
+    /// 扫描源闭包和目标。 / Scan the source closure and targets.
+    Scan,
+    /// 验证并封闭动作图。 / Validate and close the action graph.
+    ValidatePlan,
+    /// 为项目变更准备精确候选。 / Prepare an exact project-mutation candidate.
+    PrepareCandidate,
+}
+
+/// 乐观提交动作被废弃的封闭原因。 / Closed reason for superseding optimistic commit work.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupersedeReason {
+    /// 提交决定前权威修订已变化。 / Authoritative revision changed before the commit decision.
+    AuthoritativeRevisionChanged,
+}
+
+/// 不可变计划关闭的封闭原因。 / Closed reason for closing an immutable plan.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanCloseReason {
+    /// 可执行计划已到终态。 / Executable plan reached terminal state.
+    Executed,
+    /// 仅报告计划已完整声明。 / Report-only plan was fully declared.
+    Reported,
+    /// 权威提交决定前计划已被替代。 / Plan was superseded before an authoritative commit decision.
+    Superseded,
+}
+
+/// 完整的计划与调度事件代数。 / Complete planning and scheduling event algebra.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "type", content = "data")]
 #[non_exhaustive]
 pub enum EventPayload {
-    /// 计划已冻结。 / Plan is ready.
+    /// 开始一次计划尝试。 / A planning attempt started.
+    PlanningStarted {
+        /// 作业。 / Job.
+        job: JobId,
+        /// 计划尝试。 / Planning attempt.
+        attempt: PlanningAttemptId,
+    },
+    /// 开始一项真实计划工作。 / A real planning step started.
+    PlanningStepStarted {
+        /// 作业。 / Job.
+        job: JobId,
+        /// 计划尝试。 / Planning attempt.
+        attempt: PlanningAttemptId,
+        /// 计划步骤。 / Planning step.
+        step: PlanningStepId,
+        /// 类型化类别。 / Typed kind.
+        kind: PlanningStepKind,
+    },
+    /// 计划步骤成功。 / A planning step succeeded.
+    PlanningStepSucceeded {
+        /// 作业。 / Job.
+        job: JobId,
+        /// 计划尝试。 / Planning attempt.
+        attempt: PlanningAttemptId,
+        /// 计划步骤。 / Planning step.
+        step: PlanningStepId,
+        /// 耗时。 / Timing.
+        timing: Timing,
+    },
+    /// 计划步骤失败。 / A planning step failed.
+    PlanningStepFailed {
+        /// 作业。 / Job.
+        job: JobId,
+        /// 计划尝试。 / Planning attempt.
+        attempt: PlanningAttemptId,
+        /// 计划步骤。 / Planning step.
+        step: PlanningStepId,
+        /// 耗时。 / Timing.
+        timing: Timing,
+        /// 结构化诊断。 / Structured diagnostic.
+        diagnostic: Diagnostic,
+    },
+    /// 计划步骤被取消。 / A planning step was cancelled.
+    PlanningStepCancelled {
+        /// 作业。 / Job.
+        job: JobId,
+        /// 计划尝试。 / Planning attempt.
+        attempt: PlanningAttemptId,
+        /// 计划步骤。 / Planning step.
+        step: PlanningStepId,
+        /// 耗时。 / Timing.
+        timing: Timing,
+    },
+    /// 记录不阻止独立子图封闭的范围化问题。 / Records a scoped issue that does not prevent sealing independent subgraphs.
+    PlanningIssue {
+        /// 作业。 / Job.
+        job: JobId,
+        /// 计划尝试。 / Planning attempt.
+        attempt: PlanningAttemptId,
+        /// 计划问题。 / Planning issue.
+        issue: PlanningIssueId,
+        /// 按规范顺序排列的受影响范围。 / Affected scopes in canonical order.
+        affected: Vec<PlanScopeId>,
+        /// 结构化诊断。 / Structured diagnostic.
+        diagnostic: Diagnostic,
+    },
+    /// 尝试在产生计划前失败。 / An attempt failed before producing a plan.
+    PlanningFailed {
+        /// 作业。 / Job.
+        job: JobId,
+        /// 计划尝试。 / Planning attempt.
+        attempt: PlanningAttemptId,
+        /// 结构化诊断。 / Structured diagnostic.
+        diagnostic: Diagnostic,
+    },
+    /// 尝试在产生计划前被取消。 / An attempt was cancelled before producing a plan.
+    PlanningCancelled {
+        /// 作业。 / Job.
+        job: JobId,
+        /// 计划尝试。 / Planning attempt.
+        attempt: PlanningAttemptId,
+    },
+    /// 完整不可变计划已原子封闭。 / A complete immutable plan was atomically sealed.
     PlanReady {
         /// 作业。 / Job.
         job: JobId,
-        /// 计划动作总数。 / Planned action count.
+        /// 计划尝试。 / Planning attempt.
+        attempt: PlanningAttemptId,
+        /// 不可变计划。 / Immutable plan.
+        plan: PlanId,
+        /// 语义摘要。 / Semantic digest.
+        digest: PlanDigest,
+        /// 计划模式。 / Plan mode.
+        mode: PlanMode,
+        /// 后续唯一动作声明数。 / Number of subsequent unique action declarations.
         actions: u64,
+        /// 此前属于此计划的唯一问题数。 / Number of preceding unique issues belonging to this plan.
+        issues: u64,
     },
-    /// 动作已排队。 / Action queued.
-    ActionQueued {
+    /// 声明封闭 DAG 的一个顶点。 / Declares one vertex of the sealed DAG.
+    ActionDeclared {
         /// 作业。 / Job.
         job: JobId,
-        /// 动作。 / Action.
+        /// 不可变计划。 / Immutable plan.
+        plan: PlanId,
+        /// 计划范围内的动作。 / Plan-scoped action.
         action: ActionId,
-        /// 核心动作类别。 / Core action kind.
+        /// 类型化类别。 / Typed kind.
         kind: ActionKind,
-        /// 稳定顺序的完整前置动作。 / Complete prerequisite actions in stable order.
+        /// 按规范顺序排列的完整前置动作。 / Complete prerequisites in canonical order.
         dependencies: Vec<ActionId>,
     },
     /// 动作开始。 / Action started.
     ActionStarted {
         /// 作业。 / Job.
         job: JobId,
-        /// 动作。 / Action.
+        /// 不可变计划。 / Immutable plan.
+        plan: PlanId,
+        /// 计划范围内的动作。 / Plan-scoped action.
         action: ActionId,
     },
     /// 缓存命中。 / Cache hit.
     CacheHit {
         /// 作业。 / Job.
         job: JobId,
-        /// 动作。 / Action.
+        /// 不可变计划。 / Immutable plan.
+        plan: PlanId,
+        /// 计划范围内的动作。 / Plan-scoped action.
         action: ActionId,
         /// 缓存来源。 / Cache source.
         cache: CacheKind,
-        /// 命中内容摘要。 / Hit content digest.
+        /// 语义摘要。 / Semantic digest.
         digest: Digest,
-        /// 完整动作键；旧的 v1.0 发送方可能省略。 / Complete action key; legacy v1.0 senders may omit it.
+        /// 完整动作键；仅 v1 兼容投影可能缺失。 / Complete action key; only a v1 compatibility projection may omit it.
+        /// 完整动作键。 / Complete action key.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         action_key: Option<ActionKeyId>,
-        /// 命中结果记录引用的全部输出/产物。 / Every output/artifact referenced by the hit result record.
+        /// 结果记录引用的全部输出。 / Every output referenced by the result record.
         #[serde(default)]
         outputs: Vec<Artifact>,
     },
@@ -1076,41 +1262,71 @@ pub enum EventPayload {
     ActionSucceeded {
         /// 作业。 / Job.
         job: JobId,
-        /// 动作。 / Action.
+        /// 不可变计划。 / Immutable plan.
+        plan: PlanId,
+        /// 计划范围内的动作。 / Plan-scoped action.
         action: ActionId,
         /// 耗时。 / Timing.
         timing: Timing,
-        /// 此动作发布的产物。 / Artifacts published by this action.
+        /// 此动作产生的产物。 / Artifacts produced by this action.
         artifacts: Vec<Artifact>,
     },
     /// 动作失败。 / Action failed.
     ActionFailed {
         /// 作业。 / Job.
         job: JobId,
-        /// 动作。 / Action.
+        /// 不可变计划。 / Immutable plan.
+        plan: PlanId,
+        /// 计划范围内的动作。 / Plan-scoped action.
         action: ActionId,
         /// 耗时。 / Timing.
         timing: Timing,
-        /// 根因诊断。 / Root-cause diagnostic.
+        /// 结构化诊断。 / Structured diagnostic.
         diagnostic: Diagnostic,
     },
     /// 动作被依赖阻塞。 / Action blocked by dependencies.
     ActionBlocked {
         /// 作业。 / Job.
         job: JobId,
-        /// 动作。 / Action.
+        /// 不可变计划。 / Immutable plan.
+        plan: PlanId,
+        /// 计划范围内的动作。 / Plan-scoped action.
         action: ActionId,
-        /// 已失败或阻塞的前置动作。 / Failed or blocked prerequisite actions.
+        /// 按规范顺序排列的失败或阻塞前置动作。 / Failed or blocked prerequisites in canonical order.
         blocked_by: Vec<ActionId>,
     },
     /// 动作取消。 / Action cancelled.
     ActionCancelled {
         /// 作业。 / Job.
         job: JobId,
-        /// 动作。 / Action.
+        /// 不可变计划。 / Immutable plan.
+        plan: PlanId,
+        /// 计划范围内的动作。 / Plan-scoped action.
         action: ActionId,
-        /// 取消前耗时。 / Timing before cancellation.
+        /// 耗时。 / Timing.
         timing: Timing,
+    },
+    /// 动作因权威修订竞争而被废弃。 / Action superseded after an authoritative-revision race.
+    ActionSuperseded {
+        /// 作业。 / Job.
+        job: JobId,
+        /// 不可变计划。 / Immutable plan.
+        plan: PlanId,
+        /// 计划范围内的动作。 / Plan-scoped action.
+        action: ActionId,
+        /// 耗时。 / Timing.
+        timing: Timing,
+        /// 封闭的状态转换原因。 / Closed state-transition reason.
+        reason: SupersedeReason,
+    },
+    /// 关闭不可变计划。 / Closes an immutable plan.
+    PlanClosed {
+        /// 作业。 / Job.
+        job: JobId,
+        /// 不可变计划。 / Immutable plan.
+        plan: PlanId,
+        /// 封闭的状态转换原因。 / Closed state-transition reason.
+        reason: PlanCloseReason,
     },
     /// 非动作诊断。 / Non-action diagnostic.
     Diagnostic(Diagnostic),
@@ -1118,7 +1334,7 @@ pub enum EventPayload {
     OperationCompleted {
         /// 作业。 / Job.
         job: JobId,
-        /// 与请求类别匹配且不含退出码的领域结果。 / Domain result matching the request kind and containing no exit code.
+        /// 与请求匹配的领域结果。 / Domain result matching the request.
         result: OperationResult,
     },
     /// 内核生成的作业摘要。 / Kernel-produced job summary.
@@ -1147,9 +1363,28 @@ impl Event {
             payload,
         }
     }
-    /// 解码已知事件，或跳过同主版本未知事件。 / Decodes a known event or skips an unknown same-major event.
+    /// 以稳定字段顺序生成规范 JSON。 / Encodes canonical JSON with stable field ordering.
+    ///
+    /// 该方法会先拒绝单事件层面的非规范集合；跨事件状态机由内核归约器验证。 /
+    /// This rejects non-canonical collections visible within one event first;
+    /// cross-event state-machine validation belongs to the kernel reducer.
+    pub fn encode_json(&self) -> Result<Vec<u8>, EncodeError> {
+        self.validate().map_err(EncodeError::Invalid)?;
+        serde_json::to_vec(self).map_err(EncodeError::Serialize)
+    }
+
+    /// 验证单事件的局部规范不变式。 / Validates local canonical invariants of one event.
+    pub fn validate(&self) -> Result<(), EventValidationError> {
+        validate_payload(&self.payload)
+    }
+
+    /// 解码 v2 事件，或将 v1 的唯一计划流投影为一个仅供查看的旧计划。 / Decodes v2 or projects v1's sole plan stream into one inspection-only legacy plan.
+    ///
+    /// 投影不伪造缺失的计划开始/关闭事件，且 [`PlanMode::Legacy`] 必须被严格 v2 归约器拒绝。 /
+    /// The projection does not invent missing planning start/close events, and
+    /// strict v2 reducers must reject [`PlanMode::Legacy`].
     pub fn decode_json(bytes: &[u8]) -> Result<DecodedEvent, DecodeError> {
-        let value: serde_json::Value =
+        let mut value: serde_json::Value =
             serde_json::from_slice(bytes).map_err(DecodeError::Malformed)?;
         let version: ProtocolVersion = serde_json::from_value(
             value
@@ -1158,23 +1393,77 @@ impl Event {
                 .ok_or(DecodeError::MissingVersion)?,
         )
         .map_err(DecodeError::Malformed)?;
-        validate_major(version)?;
+        if version.major != CURRENT_VERSION.major && version.major != LEGACY_EVENT_MAJOR {
+            return Err(DecodeError::UnsupportedMajor {
+                received: version.major,
+                supported: CURRENT_VERSION.major,
+            });
+        }
         let event_type = value
             .pointer("/payload/type")
             .and_then(serde_json::Value::as_str)
-            .ok_or(DecodeError::MissingEventType)?;
-        if !known_event(event_type) {
+            .ok_or(DecodeError::MissingEventType)?
+            .to_owned();
+        if !known_event(&event_type, version.major) {
             return Ok(DecodedEvent::SkippedUnknown {
                 version,
-                event_type: event_type.to_owned(),
+                event_type,
             });
         }
-        serde_json::from_value(value)
-            .map(Box::new)
-            .map(DecodedEvent::Known)
-            .map_err(DecodeError::Malformed)
+        if version.major == LEGACY_EVENT_MAJOR {
+            project_v1_event(&mut value, &event_type)?;
+        }
+        let event: Event = serde_json::from_value(value).map_err(DecodeError::Malformed)?;
+        if version.major == CURRENT_VERSION.major {
+            event.validate().map_err(DecodeError::InvalidEvent)?;
+        }
+        Ok(DecodedEvent::Known(Box::new(event)))
     }
 }
+
+/// 事件规范编码失败。 / Canonical event encoding failure.
+#[derive(Debug)]
+pub enum EncodeError {
+    /// 事件违反局部不变式。 / Event violates a local invariant.
+    Invalid(EventValidationError),
+    /// JSON 序列化失败。 / JSON serialization failed.
+    Serialize(serde_json::Error),
+}
+impl fmt::Display for EncodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid(error) => error.fmt(f),
+            Self::Serialize(error) => write!(f, "cannot serialize protocol event: {error}"),
+        }
+    }
+}
+impl std::error::Error for EncodeError {}
+
+/// 单事件层面的规范验证错误。 / Canonical validation error visible within one event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EventValidationError {
+    /// 列表不是严格递增的唯一集合。 / A list is not a strictly increasing unique set.
+    NonCanonicalSet,
+    /// 动作将自身声明为依赖或阻塞者。 / An action names itself as a dependency or blocker.
+    SelfReference,
+    /// 旧 v1 查看投影不能重新编码为原生 v2 事件。 / A legacy v1 inspection projection cannot be re-encoded as a native v2 event.
+    LegacyProjection,
+    /// 原生 v2 缓存命中缺少完整动作键。 / A native v2 cache hit lacks its complete action key.
+    MissingActionKey,
+}
+impl fmt::Display for EventValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonCanonicalSet => f.write_str("event set must be unique and in canonical order"),
+            Self::SelfReference => f.write_str("action must not refer to itself"),
+            Self::LegacyProjection => {
+                f.write_str("legacy v1 inspection projection is not a native v2 event")
+            }
+            Self::MissingActionKey => f.write_str("native v2 cache hit requires an action key"),
+        }
+    }
+}
+impl std::error::Error for EventValidationError {}
 /// 兼容解码结果。 / Compatible decode result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DecodedEvent {
@@ -1197,6 +1486,10 @@ pub enum DecodeError {
     MissingVersion,
     /// 缺少事件类型。 / Missing event type.
     MissingEventType,
+    /// JSON 值缺少投影所需的信封字段。 / JSON value lacks an envelope field required for projection.
+    MalformedJsonShape,
+    /// 事件违反局部规范不变式。 / Event violates a local canonical invariant.
+    InvalidEvent(EventValidationError),
     /// 不支持的主版本。 / Unsupported major version.
     UnsupportedMajor {
         /// 收到的主版本。 / Received major version.
@@ -1211,6 +1504,8 @@ impl fmt::Display for DecodeError {
             Self::Malformed(error) => write!(f, "malformed protocol envelope: {error}"),
             Self::MissingVersion => f.write_str("protocol envelope is missing version"),
             Self::MissingEventType => f.write_str("event envelope is missing payload type"),
+            Self::MalformedJsonShape => f.write_str("malformed protocol envelope shape"),
+            Self::InvalidEvent(error) => write!(f, "invalid protocol event: {error}"),
             Self::UnsupportedMajor {
                 received,
                 supported,
@@ -1232,21 +1527,130 @@ fn validate_major(version: ProtocolVersion) -> Result<(), DecodeError> {
         })
     }
 }
-fn known_event(value: &str) -> bool {
+fn known_event(value: &str, major: u16) -> bool {
+    if major == LEGACY_EVENT_MAJOR {
+        return matches!(
+            value,
+            "plan_ready"
+                | "action_queued"
+                | "action_started"
+                | "cache_hit"
+                | "action_succeeded"
+                | "action_failed"
+                | "action_blocked"
+                | "action_cancelled"
+                | "diagnostic"
+                | "operation_completed"
+                | "job_finished"
+        );
+    }
     matches!(
         value,
-        "plan_ready"
-            | "action_queued"
+        "planning_started"
+            | "planning_step_started"
+            | "planning_step_succeeded"
+            | "planning_step_failed"
+            | "planning_step_cancelled"
+            | "planning_issue"
+            | "planning_failed"
+            | "planning_cancelled"
+            | "plan_ready"
+            | "action_declared"
             | "action_started"
             | "cache_hit"
             | "action_succeeded"
             | "action_failed"
             | "action_blocked"
             | "action_cancelled"
+            | "action_superseded"
+            | "plan_closed"
             | "diagnostic"
             | "operation_completed"
             | "job_finished"
     )
+}
+
+fn validate_payload(payload: &EventPayload) -> Result<(), EventValidationError> {
+    match payload {
+        EventPayload::PlanReady {
+            mode: PlanMode::Legacy,
+            ..
+        } => Err(EventValidationError::LegacyProjection),
+        EventPayload::CacheHit {
+            action_key: None, ..
+        } => Err(EventValidationError::MissingActionKey),
+        EventPayload::ActionDeclared {
+            action,
+            dependencies,
+            ..
+        } => validate_action_set(action, dependencies),
+        EventPayload::ActionBlocked {
+            action, blocked_by, ..
+        } => validate_action_set(action, blocked_by),
+        EventPayload::PlanningIssue { affected, .. } => validate_ordered(affected),
+        _ => Ok(()),
+    }
+}
+
+fn validate_action_set(action: &ActionId, values: &[ActionId]) -> Result<(), EventValidationError> {
+    if values.iter().any(|value| value == action) {
+        return Err(EventValidationError::SelfReference);
+    }
+    validate_ordered(values)
+}
+
+fn validate_ordered<T: Ord>(values: &[T]) -> Result<(), EventValidationError> {
+    if values.windows(2).all(|pair| pair[0] < pair[1]) {
+        Ok(())
+    } else {
+        Err(EventValidationError::NonCanonicalSet)
+    }
+}
+
+fn project_v1_event(value: &mut serde_json::Value, event_type: &str) -> Result<(), DecodeError> {
+    let invocation = value
+        .get("invocation")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(DecodeError::MalformedJsonShape)?
+        .to_owned();
+    let data = value
+        .pointer_mut("/payload/data")
+        .and_then(serde_json::Value::as_object_mut);
+    if let Some(data) = data {
+        let job = data
+            .get("job")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("legacy-job")
+            .to_owned();
+        let plan = format!("legacy-v1-plan:{invocation}:{job}");
+        match event_type {
+            "plan_ready" => {
+                data.insert(
+                    "attempt".into(),
+                    serde_json::Value::String(format!("legacy-v1-attempt:{invocation}:{job}")),
+                );
+                data.insert("plan".into(), serde_json::Value::String(plan));
+                data.insert(
+                    "digest".into(),
+                    serde_json::Value::String(format!("legacy-v1:{invocation}:{job}")),
+                );
+                data.insert("mode".into(), serde_json::Value::String("legacy".into()));
+                data.insert("issues".into(), serde_json::Value::from(0));
+            }
+            "action_queued" => {
+                data.insert("plan".into(), serde_json::Value::String(plan));
+                value["payload"]["type"] = serde_json::Value::String("action_declared".into());
+            }
+            "action_started" | "cache_hit" | "action_succeeded" | "action_failed"
+            | "action_blocked" | "action_cancelled" => {
+                data.insert("plan".into(), serde_json::Value::String(plan));
+            }
+            _ => {}
+        }
+    }
+    value["version"] =
+        serde_json::json!({"major": CURRENT_VERSION.major, "minor": CURRENT_VERSION.minor});
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1254,7 +1658,7 @@ mod tests {
     use super::*;
     #[test]
     fn other_major_is_rejected() {
-        let json = br#"{"version":{"major":2,"minor":0},"operation":{"type":"inspect","request":{"project":".","view":"project"}}}"#;
+        let json = br#"{"version":{"major":3,"minor":0},"operation":{"type":"inspect","request":{"project":".","view":"project"}}}"#;
         assert!(matches!(
             OperationEnvelope::decode_json(json),
             Err(DecodeError::UnsupportedMajor { .. })
@@ -1262,7 +1666,7 @@ mod tests {
     }
     #[test]
     fn unknown_additive_event_is_skipped() {
-        let json = br#"{"version":{"major":1,"minor":9},"invocation":"i","sequence":7,"payload":{"type":"future_metric","data":{}}}"#;
+        let json = br#"{"version":{"major":2,"minor":9},"invocation":"i","sequence":7,"payload":{"type":"future_metric","data":{}}}"#;
         assert!(matches!(
             Event::decode_json(json),
             Ok(DecodedEvent::SkippedUnknown { .. })
@@ -1275,13 +1679,53 @@ mod tests {
             0,
             EventPayload::PlanReady {
                 job: JobId::new("j").unwrap(),
+                attempt: PlanningAttemptId::new("attempt-1").unwrap(),
+                plan: PlanId::new("plan-1").unwrap(),
+                digest: PlanDigest::new("sha256:plan").unwrap(),
+                mode: PlanMode::Execute,
                 actions: 2,
+                issues: 0,
             },
         );
         assert_eq!(
-            Event::decode_json(&serde_json::to_vec(&event).unwrap()).unwrap(),
+            Event::decode_json(&event.encode_json().unwrap()).unwrap(),
             DecodedEvent::Known(Box::new(event))
         );
+    }
+    #[test]
+    fn legacy_v1_plan_and_queue_project_to_one_marked_inspection_plan() {
+        let ready = br#"{"version":{"major":1,"minor":1},"invocation":"i","sequence":0,"payload":{"type":"plan_ready","data":{"job":"j","actions":1}}}"#;
+        let queued = br#"{"version":{"major":1,"minor":1},"invocation":"i","sequence":1,"payload":{"type":"action_queued","data":{"job":"j","action":"a","kind":"compile","dependencies":[]}}}"#;
+        let DecodedEvent::Known(ready) = Event::decode_json(ready).unwrap() else {
+            panic!("legacy plan was skipped");
+        };
+        let DecodedEvent::Known(queued) = Event::decode_json(queued).unwrap() else {
+            panic!("legacy declaration was skipped");
+        };
+        assert_eq!(
+            ready.validate(),
+            Err(EventValidationError::LegacyProjection)
+        );
+        let EventPayload::PlanReady {
+            plan: ready_plan,
+            mode,
+            issues,
+            ..
+        } = ready.payload
+        else {
+            panic!("legacy plan was not projected");
+        };
+        let EventPayload::ActionDeclared {
+            plan: queued_plan, ..
+        } = queued.payload
+        else {
+            panic!("legacy queue was not projected");
+        };
+        assert_eq!(ready.version, CURRENT_VERSION);
+        assert_eq!(queued.version, CURRENT_VERSION);
+        assert_eq!(ready_plan, queued_plan);
+        assert_eq!(mode, PlanMode::Legacy);
+        assert_eq!(issues, 0);
     }
     #[test]
     fn legacy_v1_cache_hit_decodes_missing_additive_fields() {
@@ -1299,6 +1743,82 @@ mod tests {
         };
         assert_eq!(action_key, None);
         assert!(outputs.is_empty());
+    }
+    #[test]
+    fn declarations_require_canonical_dependencies_without_self_edges() {
+        let base = |dependencies| {
+            Event::new(
+                InvocationId::new("i").unwrap(),
+                1,
+                EventPayload::ActionDeclared {
+                    job: JobId::new("j").unwrap(),
+                    plan: PlanId::new("p").unwrap(),
+                    action: ActionId::new("b").unwrap(),
+                    kind: ActionKind::Compile,
+                    dependencies,
+                },
+            )
+        };
+        assert!(base(vec![ActionId::new("a").unwrap()]).validate().is_ok());
+        assert_eq!(
+            base(vec![ActionId::new("b").unwrap()]).validate(),
+            Err(EventValidationError::SelfReference)
+        );
+        assert_eq!(
+            base(vec![
+                ActionId::new("a").unwrap(),
+                ActionId::new("a").unwrap()
+            ])
+            .validate(),
+            Err(EventValidationError::NonCanonicalSet)
+        );
+    }
+    #[test]
+    fn report_only_plan_has_explicit_seal_declarations_and_reported_close() {
+        let invocation = InvocationId::new("i").unwrap();
+        let job = JobId::new("j").unwrap();
+        let plan = PlanId::new("p").unwrap();
+        let ready = Event::new(
+            invocation.clone(),
+            2,
+            EventPayload::PlanReady {
+                job: job.clone(),
+                attempt: PlanningAttemptId::new("a").unwrap(),
+                plan: plan.clone(),
+                digest: PlanDigest::new("blake3:canonical-plan").unwrap(),
+                mode: PlanMode::ReportOnly,
+                actions: 1,
+                issues: 0,
+            },
+        );
+        let declared = Event::new(
+            invocation.clone(),
+            3,
+            EventPayload::ActionDeclared {
+                job: job.clone(),
+                plan: plan.clone(),
+                action: ActionId::new("compile.main").unwrap(),
+                kind: ActionKind::Compile,
+                dependencies: vec![],
+            },
+        );
+        let closed = Event::new(
+            invocation,
+            4,
+            EventPayload::PlanClosed {
+                job,
+                plan,
+                reason: PlanCloseReason::Reported,
+            },
+        );
+
+        for event in [ready, declared, closed] {
+            let bytes = event.encode_json().unwrap();
+            assert_eq!(
+                Event::decode_json(&bytes).unwrap(),
+                DecodedEvent::Known(Box::new(event))
+            );
+        }
     }
     #[test]
     fn inspect_result_matching_checks_view_and_identity() {
