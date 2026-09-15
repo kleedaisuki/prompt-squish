@@ -3,9 +3,10 @@
 #![deny(missing_docs)]
 
 use squish_protocol::{
-    ActionId, ActionTotals, CapabilityId, Event, EventPayload, ExitStatus, InvocationId, JobId,
-    JobSummary, OperationKind, OperationRequest, OperationResult, PlanCloseReason, PlanId,
-    PlanMode, PlanningAttemptId, PlanningIssueId, PlanningStepId, SupersedeReason, Timing,
+    ActionId, ActionKind, ActionTotals, CapabilityId, Event, EventPayload, ExitStatus,
+    InvocationId, JobId, JobSummary, OperationKind, OperationRequest, OperationResult,
+    PlanCloseReason, PlanId, PlanMode, PlanningAttemptId, PlanningIssueId, PlanningStepId,
+    SupersedeReason, Timing,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -330,7 +331,7 @@ impl<'a> Kernel<'a> {
             return Err(KernelError::ResultRequestMismatch);
         }
         let reduction = lock(&context.lifecycle)
-            .finish(&outcome, context.is_cancelled())
+            .finish(&outcome)
             .map_err(KernelError::Lifecycle)?;
         if outcome.result.is_unavailable() && reduction.root_failures == 0 && !outcome.cancelled {
             return Err(KernelError::UnavailableResultOnSuccess);
@@ -419,6 +420,7 @@ impl ActionState {
 }
 #[derive(Clone, Debug)]
 struct ActionRecord {
+    kind: ActionKind,
     dependencies: Vec<ActionId>,
     state: ActionState,
     cache_hit: bool,
@@ -516,9 +518,9 @@ impl Lifecycle {
                 job,
                 plan,
                 action,
+                kind,
                 dependencies,
-                ..
-            } => self.declare(job, plan, action, dependencies),
+            } => self.declare(job, plan, action, *kind, dependencies),
             EventPayload::ActionStarted { job, plan, action } => {
                 self.start_action(job, plan, action)
             }
@@ -807,6 +809,7 @@ impl Lifecycle {
         job: &JobId,
         plan: &PlanId,
         action: &ActionId,
+        kind: ActionKind,
         dependencies: &[ActionId],
     ) -> Result<(), LifecycleError> {
         let record = self.active_plan(job, plan)?;
@@ -826,6 +829,7 @@ impl Lifecycle {
             .insert(
                 action.clone(),
                 ActionRecord {
+                    kind,
                     dependencies: dependencies.to_vec(),
                     state: ActionState::Declared,
                     cache_hit: false,
@@ -1053,9 +1057,18 @@ impl Lifecycle {
                     || record
                         .actions
                         .values()
-                        .any(|x| x.state == ActionState::Started) =>
+                        .any(|x| x.state == ActionState::Started)
+                    || !record
+                        .actions
+                        .values()
+                        .any(|x| x.state == ActionState::Superseded)
+                    || record.actions.values().any(|x| {
+                        x.kind == ActionKind::CommitTransaction && x.state == ActionState::Succeeded
+                    }) =>
             {
-                return self.invalid("superseded plan has running actions");
+                return self.invalid(
+                    "superseded plan requires discarded work before any commit succeeded",
+                );
             }
             PlanCloseReason::Executed | PlanCloseReason::Reported | PlanCloseReason::Superseded => {
             }
@@ -1100,18 +1113,14 @@ impl Lifecycle {
         self.job_finished = true;
         Ok(())
     }
-    fn finish(
-        &self,
-        outcome: &OperationOutcome,
-        cancellation_requested: bool,
-    ) -> Result<Reduction, LifecycleError> {
+    fn finish(&self, outcome: &OperationOutcome) -> Result<Reduction, LifecycleError> {
         self.same_job(&outcome.job)?;
         if self.active.is_some() || self.retry_allowed {
             return self.invalid("job ended with an open planning attempt or plan");
         }
         let mut totals = ActionTotals::default();
         let mut root_failures = 0;
-        let mut cancelled = self.planning_cancelled || cancellation_requested;
+        let mut cancelled = self.planning_cancelled;
         let mut cache_hits = 0;
         if let Some(plan) = &self.final_plan {
             let record = &self.plans[plan];
@@ -1223,12 +1232,21 @@ mod tests {
         action: &ActionId,
         dependencies: Vec<ActionId>,
     ) {
+        declare_kind(lifecycle, plan, action, ActionKind::Compile, dependencies);
+    }
+    fn declare_kind(
+        lifecycle: &mut Lifecycle,
+        plan: &PlanId,
+        action: &ActionId,
+        kind: ActionKind,
+        dependencies: Vec<ActionId>,
+    ) {
         lifecycle
             .observe(&EventPayload::ActionDeclared {
                 job: job(),
                 plan: plan.clone(),
                 action: action.clone(),
-                kind: ActionKind::Compile,
+                kind,
                 dependencies,
             })
             .unwrap();
@@ -1306,17 +1324,14 @@ mod tests {
             })
             .unwrap();
         lifecycle
-            .finish(
-                &outcome(
-                    ActionTotals {
-                        succeeded: 2,
-                        ..Default::default()
-                    },
-                    0,
-                    false,
-                ),
+            .finish(&outcome(
+                ActionTotals {
+                    succeeded: 2,
+                    ..Default::default()
+                },
+                0,
                 false,
-            )
+            ))
             .unwrap();
     }
 
@@ -1406,7 +1421,7 @@ mod tests {
             })
             .unwrap();
         lifecycle
-            .finish(&outcome(Default::default(), 0, false), false)
+            .finish(&outcome(Default::default(), 0, false))
             .unwrap();
     }
 
@@ -1423,7 +1438,7 @@ mod tests {
             })
             .unwrap();
         failed
-            .finish(&outcome(Default::default(), 1, false), false)
+            .finish(&outcome(Default::default(), 1, false))
             .unwrap();
         let mut cancelled = Lifecycle::default();
         let a = attempt("cancel");
@@ -1435,7 +1450,7 @@ mod tests {
             })
             .unwrap();
         cancelled
-            .finish(&outcome(Default::default(), 0, true), false)
+            .finish(&outcome(Default::default(), 0, true))
             .unwrap();
     }
 
@@ -1501,18 +1516,116 @@ mod tests {
             })
             .unwrap();
         lifecycle
-            .finish(
-                &outcome(
-                    ActionTotals {
-                        succeeded: 1,
-                        ..Default::default()
-                    },
-                    0,
-                    false,
-                ),
+            .finish(&outcome(
+                ActionTotals {
+                    succeeded: 1,
+                    ..Default::default()
+                },
+                0,
                 false,
-            )
+            ))
             .unwrap();
+    }
+
+    #[test]
+    fn supersede_requires_discarded_work_and_rejects_a_succeeded_commit() {
+        let mut valid = Lifecycle::default();
+        let a = attempt("valid-attempt");
+        let p = plan("valid-plan");
+        let transform = action("transform");
+        let commit = action("commit");
+        start(&mut valid, &a);
+        seal(&mut valid, &a, &p, PlanMode::Execute, 2, 0);
+        declare(&mut valid, &p, &transform, vec![]);
+        declare_kind(
+            &mut valid,
+            &p,
+            &commit,
+            ActionKind::CommitTransaction,
+            vec![transform.clone()],
+        );
+        valid
+            .observe(&EventPayload::ActionStarted {
+                job: job(),
+                plan: p.clone(),
+                action: transform.clone(),
+            })
+            .unwrap();
+        valid
+            .observe(&EventPayload::ActionSucceeded {
+                job: job(),
+                plan: p.clone(),
+                action: transform,
+                timing: Timing::default(),
+                artifacts: vec![],
+            })
+            .unwrap();
+        valid
+            .observe(&EventPayload::ActionSuperseded {
+                job: job(),
+                plan: p.clone(),
+                action: commit,
+                timing: Timing::default(),
+                reason: SupersedeReason::AuthoritativeRevisionChanged,
+            })
+            .unwrap();
+        valid
+            .observe(&EventPayload::PlanClosed {
+                job: job(),
+                plan: p,
+                reason: PlanCloseReason::Superseded,
+            })
+            .unwrap();
+
+        let mut invalid = Lifecycle::default();
+        let a = attempt("invalid-attempt");
+        let p = plan("invalid-plan");
+        let commit = action("commit");
+        let discarded = action("discarded");
+        start(&mut invalid, &a);
+        seal(&mut invalid, &a, &p, PlanMode::Execute, 2, 0);
+        declare_kind(
+            &mut invalid,
+            &p,
+            &commit,
+            ActionKind::CommitTransaction,
+            vec![],
+        );
+        declare(&mut invalid, &p, &discarded, vec![]);
+        invalid
+            .observe(&EventPayload::ActionStarted {
+                job: job(),
+                plan: p.clone(),
+                action: commit.clone(),
+            })
+            .unwrap();
+        invalid
+            .observe(&EventPayload::ActionSucceeded {
+                job: job(),
+                plan: p.clone(),
+                action: commit,
+                timing: Timing::default(),
+                artifacts: vec![],
+            })
+            .unwrap();
+        invalid
+            .observe(&EventPayload::ActionSuperseded {
+                job: job(),
+                plan: p.clone(),
+                action: discarded,
+                timing: Timing::default(),
+                reason: SupersedeReason::AuthoritativeRevisionChanged,
+            })
+            .unwrap();
+        assert!(
+            invalid
+                .observe(&EventPayload::PlanClosed {
+                    job: job(),
+                    plan: p,
+                    reason: PlanCloseReason::Superseded,
+                })
+                .is_err()
+        );
     }
 
     #[test]
@@ -1628,17 +1741,14 @@ mod tests {
             })
             .unwrap();
         lifecycle
-            .finish(
-                &outcome(
-                    ActionTotals {
-                        failed: 1,
-                        ..Default::default()
-                    },
-                    2,
-                    false,
-                ),
+            .finish(&outcome(
+                ActionTotals {
+                    failed: 1,
+                    ..Default::default()
+                },
+                2,
                 false,
-            )
+            ))
             .unwrap();
     }
 
@@ -1743,5 +1853,120 @@ mod tests {
         assert_eq!(dispatched.summary.status, ExitStatus::Failed);
         assert_eq!(dispatched.summary.totals, ActionTotals::default());
         assert_eq!(dispatched.summary.root_failures, 1);
+    }
+
+    struct LateCancellation;
+    impl Capability for LateCancellation {
+        fn descriptor(&self) -> &'static CapabilityDescriptor {
+            &BUILD_DESCRIPTOR
+        }
+        fn execute(&self, _: &OperationRequest, context: &InvocationContext) -> OperationOutcome {
+            let attempt = attempt("late-cancel-attempt");
+            let plan = plan("late-cancel-plan");
+            let action = action("work");
+            context
+                .emit(EventPayload::PlanningStarted {
+                    job: job(),
+                    attempt: attempt.clone(),
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::PlanReady {
+                    job: job(),
+                    attempt,
+                    plan: plan.clone(),
+                    digest: plan_digest(),
+                    mode: PlanMode::Execute,
+                    actions: 1,
+                    issues: 0,
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::ActionDeclared {
+                    job: job(),
+                    plan: plan.clone(),
+                    action: action.clone(),
+                    kind: ActionKind::Compile,
+                    dependencies: vec![],
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::ActionStarted {
+                    job: job(),
+                    plan: plan.clone(),
+                    action: action.clone(),
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::ActionSucceeded {
+                    job: job(),
+                    plan: plan.clone(),
+                    action,
+                    timing: Timing::default(),
+                    artifacts: vec![],
+                })
+                .unwrap();
+            context
+                .emit(EventPayload::PlanClosed {
+                    job: job(),
+                    plan,
+                    reason: PlanCloseReason::Executed,
+                })
+                .unwrap();
+            context.cancellation().cancel();
+            OperationOutcome {
+                job: job(),
+                result: OperationResult::Build(BuildResult {
+                    published: vec![],
+                    build_record: None,
+                }),
+                totals: ActionTotals {
+                    succeeded: 1,
+                    ..ActionTotals::default()
+                },
+                root_failures: 0,
+                cancelled: false,
+            }
+        }
+    }
+
+    #[test]
+    fn advisory_cancellation_after_plan_close_does_not_rewrite_success() {
+        static CAPABILITY: LateCancellation = LateCancellation;
+        let sink = Arc::new(Sink::default());
+        let context = InvocationContext::new(
+            InvocationId::new("late-cancel-invocation").unwrap(),
+            CancellationToken::default(),
+            sink.clone(),
+        );
+        let request = OperationRequest::Build(BuildRequest {
+            project: ProjectPath::new(".").unwrap(),
+            scope: WorkspaceScope::Current,
+            targets: vec![],
+            profile: ProfileName::new("dev").unwrap(),
+            arguments: Default::default(),
+            emit: vec![EmitKind::Prompt],
+            lock: LockMode::Update,
+        });
+        let dispatched = Kernel::new(&[&CAPABILITY])
+            .unwrap()
+            .dispatch(&request, &context)
+            .unwrap();
+        assert_eq!(dispatched.summary.status, ExitStatus::Success);
+        let events = lock(&sink.0);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.payload, EventPayload::OperationCompleted { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.payload, EventPayload::JobFinished(_)))
+                .count(),
+            1
+        );
     }
 }
