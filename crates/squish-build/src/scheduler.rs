@@ -21,11 +21,13 @@ pub enum ActionState {
     Succeeded,
     /// worker 报告失败。 / Worker reported failure.
     Failed(WorkerFailure),
-    /// 因前驱失败或非 keep-going 停止。 / Prevented by a failed predecessor or non-keep-going stop.
+    /// 因一个直接依赖失败或受阻而无法执行。 / Prevented by a failed or blocked direct dependency.
     Blocked {
-        /// 首个阻止执行的根失败动作。 / First root failure preventing execution.
-        cause: ActionId,
+        /// 阻止此动作的直接依赖；追踪其状态可还原完整失败链。 / Direct dependency preventing this action; follow its state to reconstruct the failure chain.
+        dependency: ActionId,
     },
+    /// 在执行前或协作式停止后被取消。 / Cancelled before execution or after cooperative shutdown.
+    Cancelled,
 }
 
 /// 调度器产生、由宿主展示或记录的事件。 / Event produced by the scheduler for host rendering or recording.
@@ -174,6 +176,7 @@ pub struct Scheduler {
     completed_outputs: BTreeMap<ActionId, Vec<ProducedOutput>>,
     final_keys: BTreeMap<ActionId, ActionKey>,
     events: Vec<ScheduleEvent>,
+    cancellation_requested: bool,
 }
 
 impl Scheduler {
@@ -208,6 +211,7 @@ impl Scheduler {
             completed_outputs: BTreeMap::new(),
             final_keys: BTreeMap::new(),
             events: Vec::new(),
+            cancellation_requested: false,
         };
         let roots: Vec<_> = scheduler
             .plan
@@ -248,6 +252,9 @@ impl Scheduler {
 
     /// 取得下一项确定性工作；`None` 表示当前没有可派发项。 / Takes the next deterministic work item; `None` means none is dispatchable now.
     pub fn next_dispatch(&mut self) -> Option<Dispatch> {
+        if self.cancellation_requested {
+            return None;
+        }
         loop {
             let ids: Vec<_> = self.ready.iter().cloned().collect();
             let mut resolved = false;
@@ -293,6 +300,63 @@ impl Scheduler {
             },
             ResultSource::Cache,
         )
+    }
+
+    /// 请求协作式取消并返回仍需宿主停止的 worker leader。 / Requests cooperative cancellation and returns worker leaders the host must still stop.
+    ///
+    /// 尚未派发的动作立即进入 [`ActionState::Cancelled`]，此后不再产生新 dispatch。
+    /// 已运行的 single-flight 组保持 `Running`，直到宿主停止对应 worker 并调用
+    /// [`Scheduler::complete_cancelled`]；因此资源不会在 worker 真正停止前被错误复用。
+    /// Actions not yet dispatched become [`ActionState::Cancelled`] immediately and no new
+    /// dispatches are produced. Running single-flight groups remain `Running` until the host
+    /// stops each corresponding worker and calls [`Scheduler::complete_cancelled`], preventing
+    /// resources from being reused while work is still active.
+    pub fn request_cancellation(&mut self) -> Vec<ActionId> {
+        self.cancellation_requested = true;
+        let queued: Vec<_> = self
+            .states
+            .iter()
+            .filter(|(_, state)| matches!(state, ActionState::Pending | ActionState::Ready))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in queued {
+            self.ready.remove(&id);
+            self.change(id, ActionState::Cancelled);
+        }
+        self.leaders.keys().cloned().collect()
+    }
+
+    /// 确认一个 worker leader 已协作式停止，并取消整个 single-flight 组。 / Confirms a worker leader stopped cooperatively and cancels its whole single-flight group.
+    ///
+    /// 只有 [`Scheduler::request_cancellation`] 之后才能确认取消。资源在这里释放，而非在
+    /// 请求时释放。 / Cancellation can only be acknowledged after
+    /// [`Scheduler::request_cancellation`]. Resources are released here, not at request time.
+    pub fn complete_cancelled(&mut self, leader: &ActionId) -> Result<(), CompletionError> {
+        if !self.states.contains_key(leader) {
+            return Err(CompletionError::UnknownAction(leader.clone()));
+        }
+        if !self.cancellation_requested {
+            return Err(CompletionError::NotLeader(leader.clone()));
+        }
+        let key = self
+            .leaders
+            .remove(leader)
+            .ok_or_else(|| CompletionError::NotLeader(leader.clone()))?;
+        let flight = self.flights.remove(&key).expect("leader has a flight");
+        let demand = self.plan.action(leader).expect("leader exists").resources;
+        self.available = self
+            .available
+            .checked_add(demand)
+            .expect("released resources fit integer domains");
+        for member in flight.members {
+            self.change(member, ActionState::Cancelled);
+        }
+        Ok(())
+    }
+
+    /// 是否已经请求取消。 / Whether cancellation has been requested.
+    pub const fn cancellation_requested(&self) -> bool {
+        self.cancellation_requested
     }
 
     fn complete_with_source(
@@ -423,9 +487,9 @@ impl Scheduler {
             }
             CachedOutcome::Failed(error) => {
                 self.change(id.clone(), ActionState::Failed(error));
-                self.block_descendants(&id, &id);
+                self.block_dependents(&id);
                 if !self.keep_going {
-                    self.stop_independent(&id);
+                    self.cancel_queued();
                 }
             }
         }
@@ -446,23 +510,24 @@ impl Scheduler {
         }
     }
 
-    fn block_descendants(&mut self, id: &ActionId, cause: &ActionId) {
-        let mut stack = self.plan.dependents(id).to_vec();
-        while let Some(child) = stack.pop() {
-            if !is_terminal(&self.states[&child]) {
-                self.ready.remove(&child);
-                self.change(
-                    child.clone(),
-                    ActionState::Blocked {
-                        cause: cause.clone(),
-                    },
-                );
-                stack.extend_from_slice(self.plan.dependents(&child));
+    fn block_dependents(&mut self, dependency: &ActionId) {
+        let dependents = self.plan.dependents(dependency).to_vec();
+        for dependent in dependents {
+            if is_terminal(&self.states[&dependent]) {
+                continue;
             }
+            self.ready.remove(&dependent);
+            self.change(
+                dependent.clone(),
+                ActionState::Blocked {
+                    dependency: dependency.clone(),
+                },
+            );
+            self.block_dependents(&dependent);
         }
     }
 
-    fn stop_independent(&mut self, cause: &ActionId) {
+    fn cancel_queued(&mut self) {
         let ids: Vec<_> = self
             .states
             .iter()
@@ -471,12 +536,7 @@ impl Scheduler {
             .collect();
         for id in ids {
             self.ready.remove(&id);
-            self.change(
-                id,
-                ActionState::Blocked {
-                    cause: cause.clone(),
-                },
-            );
+            self.change(id, ActionState::Cancelled);
         }
     }
 
@@ -509,6 +569,9 @@ impl Scheduler {
 fn is_terminal(state: &ActionState) -> bool {
     matches!(
         state,
-        ActionState::Succeeded | ActionState::Failed(_) | ActionState::Blocked { .. }
+        ActionState::Succeeded
+            | ActionState::Failed(_)
+            | ActionState::Blocked { .. }
+            | ActionState::Cancelled
     )
 }

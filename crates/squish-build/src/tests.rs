@@ -139,7 +139,7 @@ fn keep_going_runs_independent_work_and_blocks_descendants() {
 }
 
 #[test]
-fn no_keep_going_blocks_independent_ready_work() {
+fn no_keep_going_cancels_independent_ready_work() {
     let plan = BuildPlan::new([
         action("a", &[], Resources::new(1, 0, 0)),
         action("z", &[], Resources::new(1, 0, 0)),
@@ -155,7 +155,7 @@ fn no_keep_going_blocks_independent_ready_work() {
         .unwrap();
     assert!(matches!(
         scheduler.state(&id("z")),
-        Some(ActionState::Blocked { .. })
+        Some(ActionState::Cancelled)
     ));
     assert!(scheduler.is_finished());
 }
@@ -322,8 +322,67 @@ fn no_keep_going_does_not_reclassify_already_running_work() {
     scheduler.complete(&z.action.id, success("z")).unwrap();
     assert!(matches!(
         scheduler.state(&id("zz-child")),
-        Some(ActionState::Blocked { .. })
+        Some(ActionState::Cancelled)
     ));
+}
+
+#[test]
+fn blocked_state_names_the_direct_dependency_at_each_link() {
+    let plan = BuildPlan::new([
+        action("root", &[], Resources::new(1, 0, 0)),
+        action("middle", &["root"], Resources::new(1, 0, 0)),
+        action("leaf", &["middle"], Resources::new(1, 0, 0)),
+    ])
+    .unwrap();
+    let mut scheduler = Scheduler::new(plan, Resources::new(1, 0, 0), true).unwrap();
+    let root = scheduler.next_dispatch().unwrap();
+    scheduler
+        .complete(&root.action.id, ActionResult::failure("compile", "bad"))
+        .unwrap();
+
+    assert_eq!(
+        scheduler.state(&id("middle")),
+        Some(&ActionState::Blocked {
+            dependency: id("root")
+        })
+    );
+    assert_eq!(
+        scheduler.state(&id("leaf")),
+        Some(&ActionState::Blocked {
+            dependency: id("middle")
+        })
+    );
+}
+
+#[test]
+fn cancellation_stops_dispatch_until_running_leaders_acknowledge() {
+    let a = action("a", &[], Resources::new(2, 0, 0));
+    let mut alias = action("alias", &[], Resources::new(2, 0, 0));
+    alias.key = a.key.clone();
+    alias.outputs = a.outputs.clone();
+    let queued = action("z", &[], Resources::new(1, 0, 0));
+    let capacity = Resources::new(2, 0, 0);
+    let plan = BuildPlan::new([a, alias, queued]).unwrap();
+    let mut scheduler = Scheduler::new(plan, capacity, true).unwrap();
+
+    let leader = scheduler.next_dispatch().unwrap();
+    assert!(scheduler.next_dispatch().is_none());
+    assert_eq!(scheduler.available(), Resources::default());
+
+    assert_eq!(scheduler.request_cancellation(), vec![id("a")]);
+    assert!(scheduler.cancellation_requested());
+    assert!(scheduler.next_dispatch().is_none());
+    assert_eq!(scheduler.state(&id("z")), Some(&ActionState::Cancelled));
+    assert_eq!(scheduler.state(&id("a")), Some(&ActionState::Running));
+    assert_eq!(scheduler.state(&id("alias")), Some(&ActionState::Running));
+    assert!(!scheduler.is_finished());
+    assert_eq!(scheduler.available(), Resources::default());
+
+    scheduler.complete_cancelled(&leader.action.id).unwrap();
+    assert_eq!(scheduler.state(&id("a")), Some(&ActionState::Cancelled));
+    assert_eq!(scheduler.state(&id("alias")), Some(&ActionState::Cancelled));
+    assert_eq!(scheduler.available(), capacity);
+    assert!(scheduler.is_finished());
 }
 
 #[test]

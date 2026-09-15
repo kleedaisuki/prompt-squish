@@ -19,9 +19,13 @@ not run processes, create threads, print, or depend on a concrete CAS/database.
   bytes are reserved together and never oversubscribed.
 - Equal materialized keys use single-flight. Every logical action still receives
   its own `ResultAvailable` event and output view.
-- A failure always blocks its descendants. With keep-going enabled, independent
-  actions remain runnable; without it, not-yet-running independent actions are
-  blocked while already-running work is allowed to report its real outcome.
+- A failure blocks descendants through explicit direct-dependency links. With
+  keep-going enabled, independent actions remain runnable; without it,
+  not-yet-running independent actions are cancelled while already-running work
+  is allowed to report its real outcome.
+- Cooperative cancellation stops dispatch immediately, terminalizes queued
+  actions, and lets the host acknowledge stopped leaders before their reserved
+  resources are released and their single-flight members become cancelled.
 
 ## Host/store boundary
 
