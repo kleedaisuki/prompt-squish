@@ -3,6 +3,7 @@
 use clap::error::ErrorKind;
 use squish_cli::{
     BootstrapOutcome, InspectSubject, MessageFormat, ParsedInvocation, QueryFormat, parse_from,
+    parse_from_with_version,
 };
 use squish_protocol::{DependencySource, InspectView, LockMode, OperationRequest};
 
@@ -132,4 +133,26 @@ fn config_does_not_change_existing_global_conflicts_or_help() {
     let help = parse_from(["xmlsquish", "--help"]).unwrap_err();
     assert_eq!(help.kind(), ErrorKind::DisplayHelp);
     assert_eq!(help.exit_code(), 0);
+}
+
+#[test]
+fn composing_binary_injects_the_displayed_version() {
+    let version = parse_from_with_version(["xmlsquish", "--version"], "9.8.7-root").unwrap_err();
+    assert_eq!(version.kind(), ErrorKind::DisplayVersion);
+    assert_eq!(version.exit_code(), 0);
+    assert!(version.to_string().contains("xmlsquish 9.8.7-root"));
+}
+
+#[test]
+fn convenience_and_versioned_entry_points_share_one_typed_parser() {
+    let convenience = parse_from(["xmlsquish", "build", "--config", "build.jobs=3"])
+        .unwrap()
+        .into_invocation()
+        .unwrap();
+    let versioned =
+        parse_from_with_version(["xmlsquish", "build", "--config", "build.jobs=3"], "9.8.7")
+            .unwrap()
+            .into_invocation()
+            .unwrap();
+    assert_eq!(convenience, versioned);
 }

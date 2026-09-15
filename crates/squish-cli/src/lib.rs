@@ -34,7 +34,10 @@
 
 use std::{collections::BTreeMap, ffi::OsString, fmt};
 
-use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
+use clap::{
+    ArgAction, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
+    error::ErrorKind,
+};
 use squish_protocol::{
     AddRequest, ArgumentName, ArtifactId, BuildRequest, DependencyKind, DependencyName,
     DependencySource, EmitKind, FeatureName, FormatRequest, FormatSelection, GitBranch,
@@ -267,14 +270,49 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    parse_from_with_version(arguments, env!("CARGO_PKG_VERSION"))
+}
+
+/// 使用组合二进制的版本解析参数，不访问文件系统、环境变量或终端。 / Parses arguments with the composing binary's version, without accessing the filesystem, environment, or terminal.
+///
+/// 库自身不知道最终可执行文件的发布版本；根二进制应传入自己的静态版本字符串，使
+/// `--version` 与实际发行包一致。 / The library cannot know the final executable's release
+/// version; the root binary should pass its own static version string so `--version` identifies
+/// the actual distribution.
+///
+/// # 示例 / Example
+///
+/// ```
+/// use clap::error::ErrorKind;
+/// use squish_cli::parse_from_with_version;
+///
+/// let version = parse_from_with_version(["xmlsquish", "--version"], "3.2.1").unwrap_err();
+/// assert_eq!(version.kind(), ErrorKind::DisplayVersion);
+/// assert!(version.to_string().contains("3.2.1"));
+/// ```
+pub fn parse_from_with_version<I, T>(
+    arguments: I,
+    version: &'static str,
+) -> Result<BootstrapOutcome, ParseFailure>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
     let arguments: Vec<OsString> = arguments.into_iter().map(Into::into).collect();
     if arguments.len() == 1 {
         return Ok(BootstrapOutcome::BareHelp(BareHelp {
-            text: Cli::command().render_help().to_string(),
+            text: Cli::command().version(version).render_help().to_string(),
         }));
     }
     let json_requested = exact_json_requested(&arguments);
-    let mut cli = Cli::try_parse_from(arguments.iter().cloned()).map_err(|error| ParseFailure {
+    let mut matches = Cli::command()
+        .version(version)
+        .try_get_matches_from(arguments.iter().cloned())
+        .map_err(|error| ParseFailure {
+            error,
+            json_requested,
+        })?;
+    let mut cli = Cli::from_arg_matches_mut(&mut matches).map_err(|error| ParseFailure {
         error,
         json_requested,
     })?;
