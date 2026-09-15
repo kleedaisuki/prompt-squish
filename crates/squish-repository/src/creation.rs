@@ -1534,6 +1534,24 @@ mod tests {
     }
 
     #[test]
+    fn durable_v1_reader_accepts_legacy_string_paths() {
+        let value = serde_json::json!({
+            "version": 1,
+            "phase": "prepared",
+            "destination": "legacy/new",
+            "publish_path": "legacy/new",
+            "stage_root": "legacy/stage",
+            "missing_tail": "new",
+            "marker_name": ".xmlsquish-published-legacy",
+            "workspace": null,
+            "package_name": "new"
+        });
+        let journal: Journal = serde_json::from_value(value).unwrap();
+        assert_eq!(journal.destination, PathBuf::from("legacy/new"));
+        assert_eq!(journal.stage_root, PathBuf::from("legacy/stage"));
+    }
+
+    #[test]
     fn recovery_removes_a_partially_staged_journaled_tree() {
         let temp = tempdir().unwrap();
         let anchor = temp.path().canonicalize().unwrap();
