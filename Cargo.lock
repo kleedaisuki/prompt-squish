@@ -2378,6 +2378,7 @@ dependencies = [
  "squish-manager",
  "squish-presentation",
  "squish-protocol",
+ "squish-publish",
  "squish-repository",
  "squish-store",
  "tempfile",

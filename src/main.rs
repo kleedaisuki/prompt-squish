@@ -3,6 +3,8 @@
 //! 只负责参数解析、项目定位、显式服务组合、事件呈现与退出码。 / Owns only argv parsing,
 //! project location, explicit service composition, event presentation, and exit status.
 
+#[cfg(feature = "fault-injection")]
+mod fault_injection;
 mod interrupt;
 
 use std::{
@@ -29,7 +31,9 @@ use squish_host::{
 use squish_kernel::{
     CancellationToken, EventSink, InvocationContext, Kernel, KernelError, SinkError,
 };
-use squish_manager::{InspectSubject, InvocationSettings, ManagerCapability, StorageLayout};
+use squish_manager::{
+    DurabilityPorts, InspectSubject, InvocationSettings, ManagerCapability, StorageLayout,
+};
 use squish_presentation::{
     ColorMode, Environment, HumanRenderer, InspectHumanRenderer, NdjsonRenderer,
     PresentationOptions, ProgressMode, Renderer, SystemClock, SystemTerminal, TerminalProbe,
@@ -192,6 +196,20 @@ fn execute(
     };
     let root = repository.root().to_path_buf();
     set_project(&mut invocation.request, &root)?;
+    let durability = match durability_ports(&environment) {
+        Ok(durability) => durability,
+        Err(error) => {
+            let message = format!("invalid process-recovery fault selector: {error}");
+            return Ok(bootstrap_failure(
+                bootstrap_json,
+                "fault-injection",
+                "TEST_FAULT001",
+                &message,
+                1,
+                true,
+            ));
+        }
+    };
     let config = match load_config(&root, &invocation) {
         Ok(config) => config,
         Err(error) => {
@@ -261,7 +279,7 @@ fn execute(
         },
         inspect_subject: manager_inspect_subject(invocation.execution.inspect_subject)?,
     };
-    let manager = ManagerCapability::new(host, settings);
+    let manager = ManagerCapability::with_durability(host, settings, durability);
     let capabilities: [&dyn squish_kernel::Capability; 1] = [&manager];
     let kernel = Kernel::new(&capabilities)?;
 
@@ -306,6 +324,23 @@ fn execute(
         ));
     }
     Ok(outcome.summary.status.code())
+}
+
+/// 从进程边界已捕获的环境构造持久化端口。 /
+/// Builds durability ports from the environment snapshot captured at the process boundary.
+#[cfg(feature = "fault-injection")]
+fn durability_ports(
+    environment: &[(OsString, OsString)],
+) -> Result<DurabilityPorts, fault_injection::FaultConfigurationError> {
+    fault_injection::from_environment(environment)
+}
+
+/// 默认二进制不包含故障配置入口。 / The default binary contains no fault-configuration entry point.
+#[cfg(not(feature = "fault-injection"))]
+fn durability_ports(
+    _environment: &[(OsString, OsString)],
+) -> Result<DurabilityPorts, std::convert::Infallible> {
+    Ok(DurabilityPorts::default())
 }
 
 /// 用互不重叠的持久责任组合生产服务。 / Composes production services with non-overlapping persistence responsibilities.

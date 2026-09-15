@@ -29,7 +29,8 @@ use squish_source::{
 use squish_xml_front::{FrontendSourceContext, compile};
 
 use crate::{
-    Effect, InvocationSettings, ManagerError, PlannedWork, PreparedPlan, Services, StorageLayout,
+    DurabilityPorts, Effect, InvocationSettings, ManagerError, PlannedWork, PreparedPlan, Services,
+    StorageLayout,
     orchestrator::{
         self, CachedResult, PlanningRecorder, ResolvedInputs, WorkDisposition, WorkExecutor,
     },
@@ -268,10 +269,11 @@ pub fn prepare(
     )
 }
 
-pub(crate) fn execute(
+pub(crate) fn execute_with_durability(
     request: &FormatRequest,
     services: &dyn Services,
     settings: &InvocationSettings,
+    durability: &DurabilityPorts,
     context: &InvocationContext,
 ) -> OperationOutcome {
     let job = JobId::new(format!("format-{}", context.id())).expect("invocation IDs are non-empty");
@@ -281,16 +283,18 @@ pub(crate) fn execute(
         Err(_) => return unavailable(job, context, true),
     };
     let repository = match planning.step(step("locate"), PlanningStepKind::Locate, || {
-        ProjectRepository::discover(Discovery::Explicit(request.project.as_str().into())).map_err(
-            |error| {
-                manager_error(
-                    "XS3000",
-                    Phase::Discover,
-                    "could not discover project",
-                    error,
-                )
-            },
+        ProjectRepository::discover_with_faults(
+            Discovery::Explicit(request.project.as_str().into()),
+            durability.repository(),
         )
+        .map_err(|error| {
+            manager_error(
+                "XS3000",
+                Phase::Discover,
+                "could not discover project",
+                error,
+            )
+        })
     }) {
         Ok(repository) => repository,
         Err(failure) => return planning.unavailable(OperationKind::Format, &failure),

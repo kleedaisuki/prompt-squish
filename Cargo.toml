@@ -12,6 +12,10 @@ publish = false
 # 根包从完整 workspace 源码安装，不发布到 crates.io。
 include = ["/src/**", "/examples/**", "/docs/dsl.md", "/docs/releases/**", "/CHANGELOG.md", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
 
+[features]
+default = []
+fault-injection = ["dep:squish-publish"]
+
 [workspace]
 members = [
     "crates/squish-backend",
@@ -56,6 +60,7 @@ squish-kernel = { path = "crates/squish-kernel" }
 squish-manager = { path = "crates/squish-manager" }
 squish-presentation = { path = "crates/squish-presentation" }
 squish-protocol = { path = "crates/squish-protocol" }
+squish-publish = { path = "crates/squish-publish", optional = true }
 squish-repository = { path = "crates/squish-repository" }
 squish-store = { path = "crates/squish-store" }
 url = "2.5"
@@ -63,3 +68,8 @@ url = "2.5"
 [dev-dependencies]
 portable-pty = "=0.9.0"
 tempfile = "3.23"
+
+[[test]]
+name = "recovery_process"
+path = "tests/recovery_process.rs"
+required-features = ["fault-injection"]

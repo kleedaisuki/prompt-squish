@@ -44,8 +44,8 @@ use squish_store::{BlobDigest, Cas, VerifiedActionIndex};
 use squish_xml_front::{FrontendSourceContext, compile};
 
 use crate::{
-    Effect, InvocationSettings, ManagerError, PlannedWork, PreparedPlan, ResolveRequest, Services,
-    StorageLayout,
+    DurabilityPorts, Effect, InvocationSettings, ManagerError, PlannedWork, PreparedPlan,
+    ResolveRequest, Services, StorageLayout,
     orchestrator::{
         self, ActionExecutionFact, CachedResult, ExecutionReport, ExecutionState, PlanningFailure,
         PlanningRecorder, ResolvedInputs, WorkDisposition, WorkExecutor,
@@ -486,11 +486,13 @@ fn classify_durable_read_error(error: std::io::Error, subject: &str) -> BuildCat
 
 fn read_base_build_catalog(
     layout: &StorageLayout,
+    durability: &DurabilityPorts,
 ) -> Result<Option<BuildCatalogSnapshot>, BuildCatalogError> {
-    let publisher = FileArtifactPublisher::open(
+    let publisher = FileArtifactPublisher::with_observer(
         layout.catalog_root(),
         Cas::open(layout.cas_root())
             .map_err(|error| BuildCatalogError::Storage(error.to_string()))?,
+        durability.build_catalog(),
     )
     .map_err(publisher_read_error)?;
     let Some(generation) = publisher
@@ -623,13 +625,21 @@ fn validate_target_artifact_schema(
 pub fn read_current_build_catalog(
     layout: &StorageLayout,
 ) -> Result<Option<BuildCatalogSnapshot>, BuildCatalogError> {
-    let Some(snapshot) = read_base_build_catalog(layout)? else {
+    read_current_build_catalog_with(layout, &DurabilityPorts::default())
+}
+
+fn read_current_build_catalog_with(
+    layout: &StorageLayout,
+    durability: &DurabilityPorts,
+) -> Result<Option<BuildCatalogSnapshot>, BuildCatalogError> {
+    let Some(snapshot) = read_base_build_catalog(layout, durability)? else {
         return Ok(None);
     };
-    let publication_publisher = FileArtifactPublisher::open(
+    let publication_publisher = FileArtifactPublisher::with_observer(
         layout.publication_root(),
         Cas::open(layout.cas_root())
             .map_err(|error| BuildCatalogError::Storage(error.to_string()))?,
+        durability.artifact_generation(),
     )
     .map_err(publisher_read_error)?;
     let cas = Cas::open(layout.cas_root())
@@ -692,14 +702,16 @@ pub fn read_current_build_record(
 
 fn recover_build_catalog(
     layout: &StorageLayout,
+    durability: &DurabilityPorts,
 ) -> Result<Option<BuildRecordV2>, BuildCatalogError> {
-    let Some(snapshot) = read_base_build_catalog(layout)? else {
+    let Some(snapshot) = read_base_build_catalog(layout, durability)? else {
         return Ok(None);
     };
-    let publisher = FileArtifactPublisher::open(
+    let publisher = FileArtifactPublisher::with_observer(
         layout.publication_root(),
         Cas::open(layout.cas_root())
             .map_err(|error| BuildCatalogError::Storage(error.to_string()))?,
+        durability.artifact_generation(),
     )
     .map_err(publisher_read_error)?;
     let cas = Cas::open(layout.cas_root())
@@ -1286,21 +1298,29 @@ pub fn prepare(
     request: &BuildRequest,
     services: &dyn Services,
 ) -> Result<PreparedBuild, ManagerError> {
-    prepare_excluding(request, services, &BTreeSet::new())
+    prepare_excluding(
+        request,
+        services,
+        &BTreeSet::new(),
+        &DurabilityPorts::default(),
+    )
 }
 
 fn prepare_excluding(
     request: &BuildRequest,
     services: &dyn Services,
     excluded: &BTreeSet<String>,
+    durability: &DurabilityPorts,
 ) -> Result<PreparedBuild, ManagerError> {
-    let repository =
-        ProjectRepository::discover(Discovery::Explicit(request.project.as_str().into()))
-            .map_err(|e| error("MGB001", Phase::Discover, e))?;
+    let repository = ProjectRepository::discover_with_faults(
+        Discovery::Explicit(request.project.as_str().into()),
+        durability.repository(),
+    )
+    .map_err(|e| error("MGB001", Phase::Discover, e))?;
     let storage = services
         .storage_layout(repository.root())
         .map_err(|e| ManagerError::new(e.code(), Phase::Cache, e.message()))?;
-    let prior_record = recover_build_catalog(&storage)
+    let prior_record = recover_build_catalog(&storage, durability)
         .map_err(|e| ManagerError::new("MGB124", Phase::Cache, e.to_string()))?;
     let mode = resolution_mode(request);
     let bare = repository.snapshot();
@@ -1360,13 +1380,17 @@ fn prepare_recorded(
     request: &BuildRequest,
     services: &dyn Services,
     excluded: &BTreeSet<String>,
+    durability: &DurabilityPorts,
     planning: &mut PlanningRecorder<'_>,
     context: &InvocationContext,
 ) -> Result<PreparedBuild, PlanningFailure> {
     let repository = planning.step(step("locate"), PlanningStepKind::Locate, || {
         planning_not_cancelled(context)?;
-        ProjectRepository::discover(Discovery::Explicit(request.project.as_str().into()))
-            .map_err(|e| error("MGB001", Phase::Discover, e))
+        ProjectRepository::discover_with_faults(
+            Discovery::Explicit(request.project.as_str().into()),
+            durability.repository(),
+        )
+        .map_err(|e| error("MGB001", Phase::Discover, e))
     })?;
     planning.step(step("recover"), PlanningStepKind::Recover, || {
         planning_not_cancelled(context)?;
@@ -1384,7 +1408,7 @@ fn prepare_recorded(
         PlanningStepKind::Recover,
         || {
             planning_not_cancelled(context)?;
-            recover_build_catalog(&storage)
+            recover_build_catalog(&storage, durability)
                 .map_err(|e| ManagerError::new("MGB124", Phase::Cache, e.to_string()))
         },
     )?;
@@ -1494,6 +1518,22 @@ pub fn execute(
     settings: &InvocationSettings,
     context: &InvocationContext,
 ) -> OperationOutcome {
+    execute_with_durability(
+        request,
+        services,
+        settings,
+        &DurabilityPorts::default(),
+        context,
+    )
+}
+
+pub(crate) fn execute_with_durability(
+    request: &BuildRequest,
+    services: &dyn Services,
+    settings: &InvocationSettings,
+    durability: &DurabilityPorts,
+    context: &InvocationContext,
+) -> OperationOutcome {
     let job = JobId::new(format!("build-{}", context.id())).expect("invocation IDs are non-empty");
     let excluded = settings
         .excluded_packages
@@ -1508,14 +1548,21 @@ pub fn execute(
         Ok(planning) => planning,
         Err(_) => return unavailable(job, context),
     };
-    let prepared = match prepare_recorded(request, services, &excluded, &mut planning, context) {
+    let prepared = match prepare_recorded(
+        request,
+        services,
+        &excluded,
+        durability,
+        &mut planning,
+        context,
+    ) {
         Ok(prepared) => prepared,
         Err(failure) => return planning.unavailable(OperationKind::Build, &failure),
     };
     let plan = prepared.plan.clone();
     let snapshot = planning_snapshot_digest(&prepared);
     let executor = match planning.step(step("open-build-state"), PlanningStepKind::Recover, || {
-        BuildExecutor::new(prepared)
+        BuildExecutor::new(prepared, durability)
     }) {
         Ok(executor) => executor,
         Err(failure) => return planning.unavailable(OperationKind::Build, &failure),
@@ -1636,17 +1683,19 @@ struct BuildExecutionState {
 }
 
 impl BuildExecutor {
-    fn new(prepared: PreparedBuild) -> Result<Self, ManagerError> {
+    fn new(prepared: PreparedBuild, durability: &DurabilityPorts) -> Result<Self, ManagerError> {
         let cas =
             Cas::open(prepared.storage.cas_root()).map_err(|e| error("MGB030", Phase::Cache, e))?;
-        let publisher = FileArtifactPublisher::open(
+        let publisher = FileArtifactPublisher::with_observer(
             prepared.storage.publication_root(),
             Cas::open(cas.root()).map_err(|e| error("MGB031", Phase::Publish, e))?,
+            durability.artifact_generation(),
         )
         .map_err(|e| error("MGB032", Phase::Publish, e))?;
-        let catalog = FileArtifactPublisher::open(
+        let catalog = FileArtifactPublisher::with_observer(
             prepared.storage.catalog_root(),
             Cas::open(cas.root()).map_err(|e| error("MGB031", Phase::Publish, e))?,
+            durability.build_catalog(),
         )
         .map_err(|e| error("MGB032", Phase::Publish, e))?;
         let index_cas =

@@ -28,6 +28,62 @@ pub use services::{
 
 use squish_kernel::{Capability, CapabilityDescriptor, InvocationContext, OperationOutcome};
 use squish_protocol::{OperationKind, OperationRequest, PackageName};
+use squish_publish::{NoopObserver as NoopPublishObserver, PublishObserver};
+use squish_repository::{FaultInjector, NoFault};
+use std::sync::Arc;
+
+/// 持久化边界端口，用于宿主级故障观测与确定性恢复测试。 /
+/// Durability-boundary ports for host-level observation and deterministic recovery tests.
+///
+/// 三个端口按持久化责任分区：仓库事务、目标产物 generation 与 build
+/// catalog generation 不会依赖“第几次事件”这种脆弱的全局计数。生产默认值不注入
+/// 故障且不观测发布事件。 / The three ports are partitioned by durability
+/// responsibility: repository transactions, target artifact generations, and build-catalog
+/// generations never depend on a brittle global occurrence counter. Production defaults inject
+/// no faults and observe no publication events.
+#[derive(Clone)]
+pub struct DurabilityPorts {
+    repository: Arc<dyn FaultInjector>,
+    artifact_generation: Arc<dyn PublishObserver>,
+    build_catalog: Arc<dyn PublishObserver>,
+}
+
+impl DurabilityPorts {
+    /// 由三个独立的持久化端口构造。 / Constructs independent durability ports for each persistence domain.
+    pub fn new(
+        repository: Arc<dyn FaultInjector>,
+        artifact_generation: Arc<dyn PublishObserver>,
+        build_catalog: Arc<dyn PublishObserver>,
+    ) -> Self {
+        Self {
+            repository,
+            artifact_generation,
+            build_catalog,
+        }
+    }
+
+    pub(crate) fn repository(&self) -> Arc<dyn FaultInjector> {
+        self.repository.clone()
+    }
+
+    pub(crate) fn artifact_generation(&self) -> Arc<dyn PublishObserver> {
+        self.artifact_generation.clone()
+    }
+
+    pub(crate) fn build_catalog(&self) -> Arc<dyn PublishObserver> {
+        self.build_catalog.clone()
+    }
+}
+
+impl Default for DurabilityPorts {
+    fn default() -> Self {
+        Self::new(
+            Arc::new(NoFault),
+            Arc::new(NoopPublishObserver),
+            Arc::new(NoopPublishObserver),
+        )
+    }
+}
 
 /// 一次调用的组合根设置；不读取 CLI 或全局状态。 / Composition-root settings for one invocation; reads neither CLI nor global state.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -57,12 +113,35 @@ impl Default for InvocationSettings {
 pub struct ManagerCapability<S> {
     services: S,
     settings: InvocationSettings,
+    durability: Option<DurabilityPorts>,
 }
 
 impl<S> ManagerCapability<S> {
     /// 以显式外部服务构造管理器。 / Constructs the manager with explicit external services.
     pub const fn new(services: S, settings: InvocationSettings) -> Self {
-        Self { services, settings }
+        Self {
+            services,
+            settings,
+            durability: None,
+        }
+    }
+
+    /// 以显式持久化端口构造管理器。 / Constructs the manager with explicit durability ports.
+    ///
+    /// 生产组合根通常使用 [`Self::new`]；只有需要观察已完成持久化边界的
+    /// host adapter 才应使用此构造器。 / Production composition normally uses
+    /// [`Self::new`]; host adapters that must observe completed durability boundaries use this
+    /// constructor.
+    pub fn with_durability(
+        services: S,
+        settings: InvocationSettings,
+        durability: DurabilityPorts,
+    ) -> Self {
+        Self {
+            services,
+            settings,
+            durability: Some(durability),
+        }
     }
 
     /// 使用单作业、继续执行的默认设置构造管理器。 / Constructs the manager with single-job, keep-going defaults.
@@ -105,19 +184,43 @@ impl<S: Services> Capability for ManagerCapability<S> {
         operation: &OperationRequest,
         context: &InvocationContext,
     ) -> OperationOutcome {
+        let default_durability;
+        let durability = match self.durability.as_ref() {
+            Some(durability) => durability,
+            None => {
+                default_durability = DurabilityPorts::default();
+                &default_durability
+            }
+        };
         match operation {
-            OperationRequest::Build(request) => {
-                build::execute(request, &self.services, &self.settings, context)
-            }
-            OperationRequest::Format(request) => {
-                fmt::execute(request, &self.services, &self.settings, context)
-            }
-            OperationRequest::Add(request) => {
-                mutation::add(request, &self.services, &self.settings, context)
-            }
-            OperationRequest::Remove(request) => {
-                mutation::remove(request, &self.services, &self.settings, context)
-            }
+            OperationRequest::Build(request) => build::execute_with_durability(
+                request,
+                &self.services,
+                &self.settings,
+                durability,
+                context,
+            ),
+            OperationRequest::Format(request) => fmt::execute_with_durability(
+                request,
+                &self.services,
+                &self.settings,
+                durability,
+                context,
+            ),
+            OperationRequest::Add(request) => mutation::add_with_durability(
+                request,
+                &self.services,
+                &self.settings,
+                durability,
+                context,
+            ),
+            OperationRequest::Remove(request) => mutation::remove_with_durability(
+                request,
+                &self.services,
+                &self.settings,
+                durability,
+                context,
+            ),
             OperationRequest::Inspect(request) => {
                 inspect::execute(request, &self.services, &self.settings, context)
             }

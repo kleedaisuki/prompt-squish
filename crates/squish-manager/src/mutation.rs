@@ -26,7 +26,8 @@ use squish_repository::{ManifestSnapshot, ProjectRepository, ProjectSnapshot, Re
 use squish_source::{LogicalPath, PackageId, SourceId};
 
 use crate::{
-    Effect, InvocationSettings, ManagerError, PlannedWork, PreparedPlan, ResolveRequest, Services,
+    DurabilityPorts, Effect, InvocationSettings, ManagerError, PlannedWork, PreparedPlan,
+    ResolveRequest, Services,
     orchestrator::{
         self, CachedResult, PlanningFailure, PlanningRecorder, ResolvedInputs, WorkDisposition,
         WorkExecutor,
@@ -79,10 +80,11 @@ pub fn plan(dry_run: bool, identity: &Digest) -> Result<PreparedPlan<MutationWor
 }
 
 /// 执行 add 候选事务；worker 只发布结构化事件。 / Executes an add candidate transaction; the worker only emits structured events.
-pub(crate) fn add(
+pub(crate) fn add_with_durability(
     request: &AddRequest,
     services: &dyn Services,
     settings: &InvocationSettings,
+    durability: &DurabilityPorts,
     context: &InvocationContext,
 ) -> OperationOutcome {
     let intent = match MutationIntent::add(request) {
@@ -98,14 +100,15 @@ pub(crate) fn add(
             );
         }
     };
-    execute(intent, services, settings, context)
+    execute(intent, services, settings, durability, context)
 }
 
 /// 执行 remove 候选事务；worker 不直接打印。 / Executes a remove candidate transaction; the worker never prints.
-pub(crate) fn remove(
+pub(crate) fn remove_with_durability(
     request: &RemoveRequest,
     services: &dyn Services,
     settings: &InvocationSettings,
+    durability: &DurabilityPorts,
     context: &InvocationContext,
 ) -> OperationOutcome {
     let intent = match MutationIntent::remove(request) {
@@ -121,7 +124,7 @@ pub(crate) fn remove(
             );
         }
     };
-    execute(intent, services, settings, context)
+    execute(intent, services, settings, durability, context)
 }
 
 #[derive(Clone)]
@@ -204,10 +207,12 @@ fn load_stage(
     state: &mut MutationState,
     intent: &MutationIntent,
     services: &dyn Services,
+    durability: &DurabilityPorts,
 ) -> Result<(), ManagerError> {
-    let repository = ProjectRepository::discover(squish_repository::Discovery::Explicit(
-        PathBuf::from(intent.project.as_str()),
-    ))
+    let repository = ProjectRepository::discover_with_faults(
+        squish_repository::Discovery::Explicit(PathBuf::from(intent.project.as_str())),
+        durability.repository(),
+    )
     .map_err(|e| err("XS3201", Phase::Discover, "could not load project", e))?;
     services
         .storage_layout(repository.root())
@@ -720,6 +725,7 @@ fn execute(
     intent: MutationIntent,
     services: &dyn Services,
     settings: &InvocationSettings,
+    durability: &DurabilityPorts,
     context: &InvocationContext,
 ) -> OperationOutcome {
     let job = mutation_job(context);
@@ -733,7 +739,7 @@ fn execute(
         };
         let mut state = MutationState::default();
         if let Err(failure) = recorder.step(planning_step("load"), PlanningStepKind::Locate, || {
-            load_stage(&mut state, &intent, services)
+            load_stage(&mut state, &intent, services, durability)
         }) {
             return recorder.unavailable(kind, &failure);
         }
