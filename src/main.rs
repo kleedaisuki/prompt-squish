@@ -100,6 +100,7 @@ struct RenderingState {
     renderer: Box<dyn Renderer + Send>,
     error: Option<RendererError>,
     cancellation_announced: bool,
+    terminal_seen: bool,
 }
 
 /// 周期泵的停止协议。 / Stop protocol for the periodic pump.
@@ -130,6 +131,7 @@ impl RenderingSink {
             renderer,
             error: None,
             cancellation_announced: false,
+            terminal_seen: false,
         }));
         let (stop, pump) = if dynamic {
             let stop = Arc::new(PumpStop::default());
@@ -219,7 +221,8 @@ fn renderer_pump(
         if state.error.is_some() {
             return;
         }
-        if !state.cancellation_announced
+        if !state.terminal_seen
+            && !state.cancellation_announced
             && coordinator
                 .as_ref()
                 .is_some_and(|coordinator| coordinator.cooperative_cancellation_started())
@@ -259,8 +262,12 @@ impl EventSink for RenderingSink {
         if let Some(error) = &state.error {
             return Err(SinkError::new(error.message.clone()));
         }
+        let terminal = matches!(&event.payload, EventPayload::JobFinished(_));
         match state.renderer.render(&event) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                state.terminal_seen |= terminal;
+                Ok(())
+            }
             Err(error) => {
                 let error = RendererError::capture(error);
                 let message = error.message.clone();
@@ -1034,11 +1041,12 @@ fn main() -> ExitCode {
 mod tests {
     use std::sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     };
 
     use super::*;
+    use squish_protocol::{ActionTotals, JobId, JobSummary, Timing};
 
     /// 首次 tick 报错并通知测试线程的呈现器。 /
     /// Renderer that reports an error on its first tick and notifies the test thread.
@@ -1051,6 +1059,39 @@ mod tests {
     struct ActiveTickRenderer {
         ticked: mpsc::Sender<()>,
         finishes: Arc<AtomicUsize>,
+    }
+
+    /// 记录终态、取消提示与周期调用顺序的呈现器。 /
+    /// Renderer recording terminal, cancellation-notice, and periodic-call ordering.
+    struct OrderingRenderer {
+        log: Arc<Mutex<Vec<&'static str>>>,
+        ticked: mpsc::Sender<()>,
+        cancellation_published: Arc<AtomicBool>,
+    }
+
+    impl Renderer for OrderingRenderer {
+        fn render(&mut self, event: &Event) -> io::Result<()> {
+            if matches!(event.payload, EventPayload::JobFinished(_)) {
+                self.log.lock().expect("ordering log").push("terminal");
+            }
+            Ok(())
+        }
+
+        fn tick(&mut self) -> io::Result<()> {
+            if self.cancellation_published.load(Ordering::Acquire) {
+                let _ = self.ticked.send(());
+            }
+            Ok(())
+        }
+
+        fn cancellation_requested(&mut self) -> io::Result<()> {
+            self.log.lock().expect("ordering log").push("notice");
+            Ok(())
+        }
+
+        fn finish(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     impl Renderer for ActiveTickRenderer {
@@ -1135,5 +1176,50 @@ mod tests {
             sink.pump.lock().expect("pump handle lock").is_none(),
             "finish must join and consume the pump handle before renderer.finish"
         );
+    }
+
+    #[test]
+    fn terminal_event_suppresses_later_pump_cancellation_notice() {
+        let (ticked_tx, ticked_rx) = mpsc::channel();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let cancellation_published = Arc::new(AtomicBool::new(false));
+        let coordinator = Arc::new(InterruptCoordinator::new(
+            CancellationToken::default(),
+            Arc::new(StderrEmergencyRestore::capture(false)),
+            Arc::new(StdProcessTerminator),
+        ));
+        let sink = RenderingSink::new(
+            Box::new(OrderingRenderer {
+                log: Arc::clone(&log),
+                ticked: ticked_tx,
+                cancellation_published: Arc::clone(&cancellation_published),
+            }),
+            false,
+            true,
+            Some(Arc::clone(&coordinator)),
+        )
+        .expect("start renderer pump");
+        let terminal = Event::new(
+            InvocationId::new("terminal-ordering").unwrap(),
+            0,
+            EventPayload::JobFinished(JobSummary {
+                job: JobId::new("build-cli-ordering").unwrap(),
+                totals: ActionTotals::default(),
+                root_failures: 0,
+                cache_hits: 0,
+                timing: Timing { elapsed_ms: 1 },
+                status: ExitStatus::Cancelled,
+            }),
+        );
+
+        sink.emit(terminal).expect("render terminal event");
+        coordinator.on_interrupt();
+        cancellation_published.store(true, Ordering::Release);
+        ticked_rx
+            .recv_timeout(DEFAULT_PROGRESS_REFRESH * 5)
+            .expect("pump cycled after cancellation");
+        sink.finish().expect("finish renderer host");
+
+        assert_eq!(*log.lock().expect("ordering log"), ["terminal"]);
     }
 }
