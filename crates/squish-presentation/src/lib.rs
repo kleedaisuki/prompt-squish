@@ -1960,13 +1960,13 @@ fn cache_name(cache: CacheKind) -> &'static str {
     }
 }
 
-/// 将内部内容寻址 URI 投影为用户概念，其余位置保持原样。 / Projects internal
-/// content-addressed URIs to a user concept while preserving ordinary locations verbatim.
+/// 将内部缓存和发布 URI 投影为明确的用户概念，其余位置保持原样。 / Projects internal
+/// cache and publication URIs to explicit user concepts while preserving ordinary locations.
 fn product_artifact_uri(uri: &str) -> String {
     if uri.starts_with("cas://") {
         "content-addressed cache".to_owned()
     } else if let Some(logical) = published_artifact_path(uri) {
-        sanitize(&logical)
+        format!("logical artifact {}", sanitize(&logical))
     } else {
         sanitize(uri)
     }
@@ -2603,11 +2603,11 @@ mod tests {
         );
         assert_eq!(
             product_artifact_uri(&unix),
-            "target/xmlsquish/prompt.prompt"
+            "logical artifact target/xmlsquish/prompt.prompt"
         );
         assert_eq!(
             product_artifact_uri(&windows),
-            "target/xmlsquish/prompt.prompt"
+            "logical artifact target/xmlsquish/prompt.prompt"
         );
 
         let near_miss =
@@ -2625,12 +2625,16 @@ mod tests {
             },
         );
         let normal = render_with_verbosity(std::slice::from_ref(&event), Verbosity::Normal);
-        assert!(normal.contains("Produced binary-ir target/xmlsquish/prompt.prompt (42 bytes)"));
+        assert!(normal.contains(
+            "Produced binary-ir logical artifact target/xmlsquish/prompt.prompt (42 bytes)"
+        ));
         assert!(!normal.contains(&generation));
         assert!(!normal.contains(&target));
 
         let verbose = render_with_verbosity(std::slice::from_ref(&event), Verbosity::Verbose);
-        assert!(verbose.contains("target/xmlsquish/prompt.prompt (42 bytes, sha256:070707070707)"));
+        assert!(verbose.contains(
+            "logical artifact target/xmlsquish/prompt.prompt (42 bytes, sha256:070707070707)"
+        ));
         assert!(!verbose.contains(&generation));
         let trace = render_with_verbosity(&[event], Verbosity::Trace);
         assert!(trace.contains(&unix));
