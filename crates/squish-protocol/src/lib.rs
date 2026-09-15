@@ -1062,6 +1062,27 @@ impl OperationResult {
     pub const fn is_unavailable(&self) -> bool {
         matches!(self, Self::Unavailable { .. })
     }
+
+    /// 返回可用的领域结果是否满足命令的成功策略。 / Returns whether an available domain result satisfies command success policy.
+    ///
+    /// 该判定不是诊断或根失败（root failure）：`fmt --check` 可以成功执行所有工作，
+    /// 却因发现需要改写的源而不满足命令。这种“否定检查结果”应导致非零进程状态，
+    /// 但不应伪造动作失败或诊断。 /
+    /// This predicate is neither a diagnostic nor a root failure: `fmt --check`
+    /// may execute all work successfully yet fail to satisfy the command because
+    /// sources would change. That negative check result should select a non-zero
+    /// process status without manufacturing an action failure or diagnostic.
+    pub fn command_succeeded(&self) -> bool {
+        match self {
+            Self::Unavailable { .. } => false,
+            Self::Format(result) if result.check => result.changed.is_empty(),
+            Self::Build(_)
+            | Self::Format(_)
+            | Self::Add(_)
+            | Self::Remove(_)
+            | Self::Inspect(_) => true,
+        }
+    }
 }
 
 impl InspectResult {
@@ -2051,6 +2072,35 @@ mod tests {
                 kind: OperationKind::Inspect
             }
             .matches_request(&request)
+        );
+    }
+    #[test]
+    fn command_success_distinguishes_negative_format_check_from_execution_failure() {
+        let source = OpaqueSourceId::new("src/main.xml").unwrap();
+        let format = |check, changed| {
+            OperationResult::Format(FormatResult {
+                selected: vec![source.clone()],
+                changed,
+                check,
+                diffs: vec![],
+            })
+        };
+
+        assert!(format(true, vec![]).command_succeeded());
+        assert!(!format(true, vec![source.clone()]).command_succeeded());
+        assert!(format(false, vec![source.clone()]).command_succeeded());
+        assert!(
+            OperationResult::Build(BuildResult {
+                published: vec![],
+                build_record: None,
+            })
+            .command_succeeded()
+        );
+        assert!(
+            !OperationResult::Unavailable {
+                kind: OperationKind::Format,
+            }
+            .command_succeeded()
         );
     }
     #[test]
