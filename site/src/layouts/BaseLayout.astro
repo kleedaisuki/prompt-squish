@@ -2,6 +2,7 @@
 import type { Locale } from "../i18n/messages";
 import { messages } from "../i18n/messages";
 import { paths, type Page } from "../i18n/routes";
+import { latestRelease } from "../data/releases";
 
 interface Props {
   locale: Locale;
@@ -21,12 +22,12 @@ const hasSocialCard = page === "home" || page === "releases";
 const socialImage = new URL(page === "releases" ? "/release-v1.png" : "/social-card.png", Astro.site);
 const socialImageAlt = page === "releases"
   ? locale === "zh-CN"
-    ? "xmlsquish 1.0：XML 提示词项目管理器发布页"
-    : "xmlsquish 1.0: XML prompt project manager release"
+    ? `xmlsquish ${latestRelease.version}：XML 提示词项目管理器发布页`
+    : `xmlsquish ${latestRelease.version}: XML prompt project manager release`
   : locale === "zh-CN"
     ? "xmlsquish：组织多文件 XML 源码，构建可检查的提示词产物"
     : "xmlsquish: compose multi-file XML sources into inspectable prompt artifacts";
-const releaseMetadata = new URL("/releases/1.0.0.json", Astro.site);
+const releaseMetadata = new URL(latestRelease.metadataPath, Astro.site);
 /**
  * Keep product claims factual and rating-free; release availability lives in the machine contract.
  * 仅声明可核实的产品事实，不伪造评分；发布可用性以机器合同为准。
@@ -44,7 +45,7 @@ const productJsonLd = page === "home" ? {
   applicationCategory: "DeveloperApplication",
   applicationSubCategory: "XML prompt project manager and compiler",
   operatingSystem: "Windows, Linux, macOS",
-  softwareVersion: "1.0.0",
+  softwareVersion: latestRelease.version,
   isAccessibleForFree: true,
   license: "https://www.gnu.org/licenses/gpl-3.0.html",
   sameAs: "https://github.com/kleedaisuki/prompt-squish",
@@ -82,7 +83,7 @@ const productJsonLd = page === "home" ? {
     <link rel="alternate" hreflang="zh-CN" href={new URL(paths["zh-CN"][page], Astro.site)} />
     <link rel="alternate" hreflang="en" href={new URL(paths.en[page], Astro.site)} />
     <link rel="alternate" hreflang="x-default" href={new URL(paths["zh-CN"][page], Astro.site)} />
-    {page === "releases" && <link rel="alternate" type="application/json" title="xmlsquish 1.0.0 release metadata" href={releaseMetadata} />}
+    {page === "releases" && <link rel="alternate" type="application/json" title={`xmlsquish ${latestRelease.version} release metadata`} href={releaseMetadata} />}
     <link rel="alternate" type="text/plain" title="Experimental llms.txt agent navigation" href={new URL("/llms.txt", Astro.site)} />
     {productJsonLd && <script is:inline type="application/ld+json" set:html={JSON.stringify(productJsonLd).replaceAll("<", "\\u003c")} />}
     <slot name="head" />
@@ -134,6 +135,13 @@ const productJsonLd = page === "home" ? {
       -webkit-tap-highlight-color: transparent;
     }
 
+    a,
+    a:hover,
+    a:focus,
+    a:visited {
+      text-decoration: none;
+    }
+
     .skip-link {
       position: fixed;
       z-index: 100;
@@ -143,6 +151,7 @@ const productJsonLd = page === "home" ? {
       color: var(--moe-on-accent);
       background: var(--moe-accent-strong);
       transform: translateY(-180%);
+      text-decoration: none;
     }
 
     .skip-link:focus {
