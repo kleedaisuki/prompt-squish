@@ -1,0 +1,2 @@
+# No internal dependencies are permitted in this fixture.
+# 此 fixture 不允许任何内部依赖。

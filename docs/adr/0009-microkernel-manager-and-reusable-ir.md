@@ -217,9 +217,17 @@ kernel's `Manager` port by composing the build, formatting, project mutation,
 and inspection use cases. `squish-build` owns the action engine, build plan, and
 storage/publication port definitions, not orchestration of every command.
 Consequently concrete `squish-store` and `squish-artifact` depend on those ports;
-the build engine never depends on either adapter. This exact direct-edge list,
-rather than the visual layout of crates, is the dependency contract enforced by
-CI. (“`protocol`” in the list means `squish-protocol`.)
+the build engine never depends on either adapter. The exact executable
+direct-edge list in
+[`scripts/architecture_edges.txt`](../../scripts/architecture_edges.txt), rather
+than the conceptual drawing or visual layout of crates, is the dependency
+contract enforced by CI. The versioned
+[`cargo metadata` checker](../../scripts/check_architecture.py) extracts every
+declared direct edge between workspace packages, ignores third-party
+dependencies, and rejects both forbidden and stale allowlisted edges. Normal,
+development, and build dependencies remain separate policy entries so a test
+edge cannot silently become a production edge. (“`protocol`” in the conceptual
+list means `squish-protocol`.)
 
 The exact visual placement is less important than these enforced rules:
 

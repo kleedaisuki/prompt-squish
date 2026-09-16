@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "workspace_members": ["core-id", "adapter-id"],
+  "packages": [
+    {
+      "id": "core-id",
+      "name": "squish-core",
+      "manifest_path": "/workspace/core/Cargo.toml",
+      "dependencies": [
+        {
+          "name": "squish-adapter",
+          "rename": "adapter_alias",
+          "path": "/workspace/adapter",
+          "source": null,
+          "kind": null,
+          "optional": true,
+          "target": "cfg(windows)"
+        }
+      ]
+    },
+    {
+      "id": "adapter-id",
+      "name": "squish-adapter",
+      "manifest_path": "/workspace/adapter/Cargo.toml",
+      "dependencies": []
+    }
+  ]
+}

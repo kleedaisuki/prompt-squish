@@ -36,6 +36,13 @@ jobs:
       - name: Check minimum supported Rust version
         run: cargo +1.88.0 check --workspace --all-targets --locked
 
+      # Keep the declared workspace graph equal to the reviewed architectural contract.
+      # 保持已声明的 workspace 依赖图与经过评审的架构契约完全一致。
+      - name: Check architectural dependency edges
+        run: |
+          python -m unittest discover -s scripts/tests -p "test_*.py"
+          python scripts/check_architecture.py
+
       - name: Check formatting
         run: cargo +1.88.0 fmt --all -- --check
 
