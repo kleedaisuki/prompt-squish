@@ -109,8 +109,8 @@ detailed; contract events are intentionally curated and versioned.
 
 ### 2.1 Observable state model
 
-The observable lifecycle is the accepted ADR 0009/v2 algebra, not a renderer-specific list of
-status verbs:
+The observable lifecycle is the algebra introduced by ADR 0009/protocol v2 and retained by
+protocol v3, not a renderer-specific list of status verbs:
 
 ```text
 PlanningStarted
@@ -158,8 +158,9 @@ The production command set is exactly `new`, `build`, `fmt`, `add`, `remove`, an
 `xmlsquish` prints concise help to stdout and exits `0`; an unknown command exits `2` and is never
 reinterpreted as a path. `-h`/`--help` and `-V`/`--version` do not load a project.
 
-`inspect` is the only pure-query command. It uses `--format=human|json` and rejects the operational
-`--message-format`. `fmt --diff` remains an operation: human/short modes place the requested
+`inspect` is the only pure-query command. It uses `--format=human|json|raw` and rejects the
+operational `--message-format`; `raw` is valid only for `inspect artifact`. `fmt --diff` remains
+an operation: human/short modes place the requested
 unified diff on stdout, while JSON mode carries diff artifacts in the typed operation result.
 
 The earlier decision that grouped `init/new` with optional maintenance commands was incorrect and
@@ -325,7 +326,7 @@ diagnostics. Color may distinguish status verbs but carries no additional meanin
 are used in diagnostics when needed to disambiguate; routine success prefers the user-relative
 path.
 
-JSON mode uses the native v2 operation lifecycle, not a command-specific JSON blob. Its typed
+JSON mode uses the native v3 operation lifecycle, not a command-specific JSON blob. Its typed
 `operation_completed` result has kind `new` and contains:
 
 ```text
@@ -433,7 +434,9 @@ command. Selection is fully resolved before work begins.
 
 Selectors are names, not filesystem paths. Commands that legitimately accept paths label their
 type explicitly: `fmt --path PATH`, `add --path PATH`, `--manifest-path PATH`, and `inspect
-artifact PATH` (where the typed `artifact` subject removes path/identity ambiguity).
+artifact LOCATOR` (where the typed `artifact` subject removes locator/identity ambiguity). An
+artifact locator is a normalized project-relative logical name issued by the publisher; it is not
+a promise about the publisher's physical generation layout.
 
 ### 3.5 Build
 
@@ -556,22 +559,36 @@ or Rust-structure dump:
 xmlsquish inspect ir IDENTIFIER [--format human|json]
 xmlsquish inspect link IDENTIFIER [--format human|json]
 xmlsquish inspect source IDENTIFIER [--format human|json]
+xmlsquish inspect provenance ARTIFACT-ID [--format human|json]
 xmlsquish inspect cache ACTION-KEY [--format human|json]
-xmlsquish inspect artifact PATH [--format human|json]
+xmlsquish inspect artifact LOCATOR [--format human|json|raw]
 ```
 
-The subject word gives `IDENTIFIER` its type, so a module digest cannot be silently interpreted as
-a path or target name. `ir` reports schema/dialect, module identity, imports, exports, semantic and
-provenance digests, and source identities. `link` reports resolved bindings and the selected entry.
-`source` follows provenance metadata without printing source bodies. `cache` explains the declared
-inputs and result digests for an action key. `artifact`
-validates the portable container or published-product digest and follows the committed artifact
-manifest: inspecting a prompt can find its `.psdbg` companion, and inspecting `.psdbg` identifies
-the exact prompt digest it describes.
+The subject word gives each value its type, so a module digest cannot be silently interpreted as a
+locator or target name. `ir` reports schema/dialect, module identity, imports, exports, semantic
+and provenance digests, and source identities. `link` reports resolved bindings and the selected
+entry. `source` follows source metadata without printing source bodies. `cache` explains the
+declared inputs and result digests for an action key.
 
-Human output is descriptive and may evolve. `--format=json` emits one versioned JSON document on
-stdout, not NDJSON events, and includes a stable `kind` discriminator plus typed identities and
-digests. A missing, corrupt, wrong-kind, or unsupported-version object is an operation failure
+Artifact content and provenance are deliberately separate queries:
+
+- `artifact LOCATOR` resolves the publisher-issued logical locator through the authoritative
+  catalog, verifies the selected artifact's size and digest, and returns its descriptor plus
+  bytes. A build result's `PublishedArtifact.locator` is canonical input to this command. The
+  locator remains stable even when a repository stores generations under different private
+  directories or in a non-filesystem backend. It is a stable logical address for the currently
+  cataloged publication, not an immutable content reference; use `ArtifactId` for the latter.
+- `provenance ARTIFACT-ID` explains an immutable artifact identity and returns its typed evidence
+  companions. For example, a prompt may name its `.psdbg` evidence. Content lookup must not be
+  overloaded to guess this relationship from a filename, and provenance lookup does not return
+  the product bytes.
+
+Human output is descriptive and may evolve. `--format=json` emits one typed JSON document on
+stdout, not NDJSON events, and includes a stable `view` discriminator plus typed identities and
+digests. `inspect artifact LOCATOR --format=raw` writes only the complete, digest-verified artifact
+bytes to stdout: it adds no newline, JSON envelope, or status prose. `raw` with any other inspect
+subject is a usage error (exit `2`). A missing, corrupt, wrong-kind, or unsupported-version object
+is an operation failure
 (exit `1`) with a diagnostic on stderr. Inspection never repairs, fetches, recompiles, updates
 access-visible semantic state, or treats a stale file as a successful build. Recovery remains an
 explicit manager lifecycle responsibility during ordinary startup/planning, not a side effect of
@@ -625,7 +642,7 @@ Rules:
 - `--plain` selects color-free, repaint-free, append-only output. An explicit contradictory
   `--color=always` or `--progress=always` is a usage error, not an argv-order precedence rule.
 - `--message-format` selects the operational renderer. `inspect` instead uses its own
-  `--format=human|json` result format.
+  `--format=human|json|raw` result format; `raw` is restricted to artifact content.
 - Repeated `--config` values are applied in argv order and are parsed as typed TOML values.
 
 Configuration precedence is:
@@ -670,6 +687,7 @@ The disclosure contract is:
 | `--message-format=json` | Yes, exactly as typed by the versioned protocol | Not substituted for full values | Yes | Lossless `cache_hit` payload including action key, digest, and output metadata |
 | `inspect ... --format=human` | Yes for the specifically inspected object and its declared relations | May additionally show one for scanning | Only if the selected subject explicitly describes lifecycle state | Labeled cache inputs, decision, outputs, and full identities |
 | `inspect ... --format=json` | Yes, exactly as typed by the inspect schema | Not substituted for full values | When part of the selected subject's schema | Lossless typed query result |
+| `inspect artifact ... --format=raw` | No metadata; digest verification happens before output | No | No | Exact artifact bytes only |
 
 A short fingerprint is an algorithm label plus the first 12 hexadecimal digits, for example
 `blake3:6f82c0a119de`. It is display-only, is never an equality or security boundary, and is never
@@ -729,40 +747,67 @@ Human prose is not the parsing API. Command grammar, exit status, diagnostic cod
 identities, artifact digests, and the versioned JSON schemas are machine contracts. stdout and
 stderr capability decisions are independent.
 
-### 5.2 JSON operation events: native protocol v2
+### 5.2 JSON operation events: native protocol v3
 
 `--message-format=json` writes UTF-8 newline-delimited JSON (NDJSON), one native event object per
 line on stdout. It writes no ANSI or carriage-return repaint sequences; after successful CLI,
 project, configuration, and host bootstrap, stderr remains empty.
 
-The native envelope is `squish_protocol::Event` at protocol version `2.1`. Minor version 1 adds
-the `new` operation request/result and the `cancellation_deferred` event without changing v2's
-envelope or existing variants:
+The native envelope is `squish_protocol::Event` at protocol version `3.0`. Protocol v3 preserves
+the lifecycle envelope and event algebra but deliberately makes an incompatible build-result
+change: published products now expose stable logical locators and typed publication identity
+instead of leaking repository-private artifact URIs. This is a major-version migration, not an
+additive v2.1 extension:
 
 ```json
-{"version":{"major":2,"minor":1},"invocation":"cli-123","sequence":0,"payload":{"type":"planning_started","data":{"job":"build-cli-123","attempt":"attempt-1"}}}
-{"version":{"major":2,"minor":1},"invocation":"cli-123","sequence":1,"payload":{"type":"planning_step_started","data":{"job":"build-cli-123","attempt":"attempt-1","step":"locate","kind":"locate"}}}
-{"version":{"major":2,"minor":1},"invocation":"cli-123","sequence":2,"payload":{"type":"planning_step_succeeded","data":{"job":"build-cli-123","attempt":"attempt-1","step":"locate","timing":{"elapsed_ms":0}}}}
+{"version":{"major":3,"minor":0},"invocation":"cli-123","sequence":0,"payload":{"type":"planning_started","data":{"job":"build-cli-123","attempt":"attempt-1"}}}
+{"version":{"major":3,"minor":0},"invocation":"cli-123","sequence":1,"payload":{"type":"planning_step_started","data":{"job":"build-cli-123","attempt":"attempt-1","step":"locate","kind":"locate"}}}
+{"version":{"major":3,"minor":0},"invocation":"cli-123","sequence":2,"payload":{"type":"planning_step_succeeded","data":{"job":"build-cli-123","attempt":"attempt-1","step":"locate","timing":{"elapsed_ms":0}}}}
 ```
 
 Required envelope fields are:
 
 | Field | Contract |
 | --- | --- |
-| `version` | Object `{major, minor}`; native emission currently uses `{2, 1}` |
+| `version` | Object `{major, minor}`; native emission currently uses `{3, 0}` |
 | `invocation` | Stable identifier shared by all events in one dispatched invocation |
 | `sequence` | Invocation-local, gapless observation order starting at zero |
 | `payload.type` | Snake-case typed discriminator owned by `EventPayload` |
 | `payload.data` | Variant-specific typed data; there is no flattened `reason` field |
 
-The v2 vocabulary is the algebra in `crates/squish-protocol/src/lib.rs`: planning attempts and
+The v3 vocabulary is the algebra in `crates/squish-protocol/src/lib.rs`: planning attempts and
 steps, immutable plan declaration/closure, action lifecycle, cache hits, an additive
 `cancellation_deferred` fact for an action already past its commit decision, post-plan
 finalization, diagnostics, one typed `operation_completed` result, and the terminal
 `job_finished` summary. `job_finished` is the final native event while stdout remains writable;
 its `sequence` equals the number of preceding events. Unknown additive `payload.type` values may
 be skipped by consumers within a supported major. Major version 1 is accepted only by the
-compatibility decoder as an inspection projection; native emission is v2.
+compatibility decoder as an inspection projection; native emission is v3. Protocol v2 is not
+accepted as v3 merely because most lifecycle variants look alike: its build-result wire shape is
+incompatible.
+
+The breaking `operation_completed` build-result shape is:
+
+```text
+BuildResult {
+    published: [PublishedTarget {
+        target,
+        target_id,
+        generation_id,
+        artifacts: [PublishedArtifact { id, kind, locator, size, digest }]
+    }],
+    build_record
+}
+```
+
+In v2.1, `PublishedTarget.artifacts` contained generic `Artifact` values whose `uri` could expose
+the publisher's physical generation path. In v3.0, every committed target supplies an unambiguous
+`target_id` and opaque immutable `generation_id`, while each product is a `PublishedArtifact`
+whose `locator` is a canonical project-relative logical locator. Consumers must use `locator`
+verbatim with `inspect artifact`; they must not reconstruct generation directories, reinterpret
+the locator as a physical path, or substitute the content-addressed `ArtifactId`. `build_record`
+remains a generic content-addressed `Artifact` because it is manager evidence, not a member of the
+published product namespace.
 
 The old flattened example using `schema_version`, `reason`, `operation-started`, and
 `operation-finished` never describes the implemented protocol and is superseded. In particular,
@@ -778,7 +823,9 @@ Executable evidence is exact rather than aspirational:
 
 | Contract | Executable evidence |
 | --- | --- |
-| v2.1 envelope, current version, typed discriminator, additive-event policy | `crates/squish-protocol/src/lib.rs`: `CURRENT_VERSION`, `Event`, `EventPayload`, `unknown_additive_event_is_skipped`, `known_event_round_trips`, `cancellation_deferred_is_a_native_v2_1_typed_event` |
+| v3.0 envelope, current version, typed discriminator, additive-event policy | `crates/squish-protocol/src/lib.rs`: `CURRENT_VERSION`, `Event`, `EventPayload`, `unknown_additive_event_is_skipped`, `known_event_round_trips` |
+| Typed published-product identity and logical locator | `crates/squish-protocol/src/lib.rs`: `PublishedTarget`, `PublishedArtifact`; `crates/squish-manager/tests/build.rs`; `crates/squish-presentation/src/lib.rs::logical_artifact_locator_is_rendered_without_layout_inference` |
+| Digest-verified artifact bytes and independent provenance lookup | `crates/squish-cli/src/lib.rs::raw_query_format_is_restricted_to_artifact_content`; `tests/process.rs::inspect_artifact_locator_reads_verified_bytes_and_provenance_remains_identity_based` |
 | Typed creation request/result identity and cross-platform path wire format | `crates/squish-protocol/src/lib.rs`: `new_request_and_result_round_trip_with_truthful_identity_matching`, `project_destination_wire_round_trips_non_utf8_unix_bytes_losslessly`, `project_destination_wire_round_trips_unpaired_utf16_losslessly` |
 | Legal sequencing and terminal reduction | `crates/squish-kernel/src/lib.rs` lifecycle tests, including `finalization_is_sequential_terminal_work_after_the_final_plan` |
 | One canonical object and immediate flush per line | `crates/squish-presentation/src/lib.rs`: `NdjsonRenderer::render`, `ndjson_is_one_canonical_object_per_line` |
@@ -1041,13 +1088,13 @@ Status terms are intentionally narrow:
 | Bare help/version, unknown-command rejection, six typed commands | **Implemented and exercised** | `crates/squish-cli/tests/cli_contract.rs`, including `help_exposes_exact_six_manager_commands`; `tests/process.rs::{version_reports_the_installed_root_package_version,parse_failure_is_stderr_with_usage_exit_status}` |
 | One CLI -> kernel -> manager route; domains do not render | **Implemented and exercised** | `src/main.rs`, `crates/squish-kernel/src/lib.rs`, `crates/squish-manager/src/lib.rs`; kernel lifecycle tests and root process suite |
 | Human/short stream separation, quiet and append-only non-TTY output | **Implemented and exercised** | `tests/process.rs::{format_check_and_write_preserve_stream_contract,quiet_is_silent_and_non_tty_human_output_is_linear}`; presentation renderer tests |
-| Native v2.1 NDJSON envelope and stdout-only operation stream | **Implemented and exercised** | Section 5.2 evidence table; `Event { version, invocation, sequence, payload }` and `payload.type` are the schema |
+| Native v3.0 NDJSON envelope and stdout-only operation stream, with typed published artifacts | **Implemented and exercised** | Section 5.2 evidence table; `Event { version, invocation, sequence, payload }` and `payload.type` are the schema |
 | Typed bootstrap failure stream before kernel dispatch | **Implemented and exercised** | `src/main.rs::BootstrapRecord`; the two JSON bootstrap process tests named in Section 5.2 |
 | Default keep-going, dependency blocking, cancellation and truthful terminal reduction | **Implemented and exercised** | `crates/squish-build/src/tests.rs`; `crates/squish-kernel/src/lib.rs` lifecycle tests |
 | XML -> canonical `.xsir` -> link/instantiate -> squish -> `.prompt`, with `.psdbg` provenance | **Implemented and exercised** | `crates/squish-manager/tests/build.rs::{complete_build_publishes_prompt_debug_and_ir_from_cas,semantic_example_publishes_fully_traceable_debug_bundle}`; `tests/process.rs::build_warms_cache_and_publishes_all_selected_artifact_kinds` |
 | Semantic formatter, no-write check, human unified diff and JSON diff artifact | **Implemented and exercised** | `crates/squish-format/tests/semantic_oracle.rs`; `crates/squish-manager/tests/fmt.rs`; `tests/process.rs::{format_check_and_write_preserve_stream_contract,fmt_diff_is_unified_stdout_for_humans_and_artifact_based_json}` |
 | Typed path/Git/registry/workspace add/remove with coherent manifest/lock transaction | **Implemented and exercised** | `crates/squish-manager/tests/mutation.rs`, resolver/fetch suites, and `tests/process.rs::add_dry_run_then_add_and_remove_have_truthful_file_effects` |
-| Typed `inspect ir|link|source|cache|artifact`, single JSON document and quiet broken pipe | **Implemented and exercised** | `crates/squish-manager/tests/inspect.rs`; `tests/process.rs::{inspect_json_is_one_stdout_document_after_build,inspect_ir_link_source_and_cache_have_typed_human_and_single_json_views}` |
+| Typed `inspect ir|link|source|provenance|cache|artifact`, single JSON document, raw artifact bytes, and quiet broken pipe | **Implemented and exercised** | `crates/squish-manager/tests/inspect.rs`; `tests/process.rs::{inspect_json_is_one_stdout_document_after_build,inspect_ir_link_source_and_cache_have_typed_human_and_single_json_views,inspect_artifact_locator_reads_verified_bytes_and_provenance_remains_identity_based}` |
 | TTY width/resize, bounded progress, two-stage interruption and restoration | **Implemented and exercised** | `crates/squish-presentation/src/lib.rs` progress/resize tests; `tests/pty.rs` real PTY/ConPTY process tests |
 | Repository, artifact-generation, and build-catalog process-death recovery | **Implemented and exercised** | `tests/recovery_process.rs`; `docs/design/process-recovery-testing.md` |
 | Ubuntu, Windows, and macOS acceptance of the same composed binary | **Workflow gate** | `.github/workflows/ci.yml`; only a completed run recorded in the execution-status ledger satisfies this row |
