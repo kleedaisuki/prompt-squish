@@ -2,7 +2,7 @@
 
 > A local-first, deterministic project manager and compiler for XML prompt projects. It creates, formats, resolves, builds, and inspects reproducible prompt artifacts.
 
-This file follows the experimental community `llms.txt` proposal. It is an additive navigation aid for language-model agents, not a crawler-control, authorization, or normative protocol. Crawlers should use `/robots.txt`; product and release claims remain authoritative only in the linked repository, pages, and machine-readable release metadata.
+This experimental `llms.txt` file is an additive navigation aid for language-model agents. It is not crawler control, authorization, or a normative protocol. Use `/robots.txt` for crawler policy; product and release claims remain authoritative only in the linked repository, pages, specifications, and machine-readable metadata.
 
 ## Product
 
@@ -10,25 +10,34 @@ This file follows the experimental community `llms.txt` proposal. It is an addit
 - [中文产品页](https://xmlsquish.moesegfault.dev/): 产品模型、构建流水线与 CLI 快速入门。
 - [Source repository](https://github.com/kleedaisuki/prompt-squish): Source code, tests, changelog, and license.
 
-## Latest release: 1.0.1
+## Release log and current release
 
-- [English release page](https://xmlsquish.moesegfault.dev/en/releases/): Human-oriented v1.0.1 highlights, downloads, automation migration, and release history.
-- [中文发布页](https://xmlsquish.moesegfault.dev/releases/): 面向用户的 v1.0.1 亮点、下载、自动化迁移与发布历史。
-- [Machine-readable 1.0.1 metadata](https://xmlsquish.moesegfault.dev/releases/1.0.1.json): Stable JSON metadata for the published v1.0.1 release and its six native assets.
-- [Historical 1.0.0 metadata](https://xmlsquish.moesegfault.dev/releases/1.0.0.json): Immutable metadata for the previous release.
+- [English release index](https://xmlsquish.moesegfault.dev/en/releases/): Reverse-chronological catalog of every product release.
+- [中文发布记录目录](https://xmlsquish.moesegfault.dev/releases/): 按时间倒序排列的全部产品版本目录。
+- [English v1.0.1 release detail](https://xmlsquish.moesegfault.dev/en/releases/1.0.1/): Exact changes, downloads, compatibility, and protocol 3.0 migration for the current release.
+- [中文 v1.0.1 发布详情](https://xmlsquish.moesegfault.dev/releases/1.0.1/): 当前版本的精确变更、下载、兼容边界与协议 3.0 迁移。
+- [Machine-readable v1.0.1 metadata](https://xmlsquish.moesegfault.dev/releases/1.0.1.json): Stable JSON metadata for six published native archives.
+- [Historical v1.0.0 metadata](https://xmlsquish.moesegfault.dev/releases/1.0.0.json): Immutable metadata retained for the previous stable release.
 
-## Specifications
+## DSL user manual
 
-- [Machine-friendly XML DSL reference](https://xmlsquish.moesegfault.dev/ns/dsl.md): Markdown reference generated from the normative vocabulary source.
-- [English XML namespace reference](https://xmlsquish.moesegfault.dev/en/ns/): Canonical element and attribute reference.
-- [中文 XML 命名空间参考](https://xmlsquish.moesegfault.dev/ns): 规范元素与属性参考。
-- [XML namespace identity](https://xmlsquish.moesegfault.dev/ns): Stable namespace URI; never localize this identity.
+- [English manual overview](https://xmlsquish.moesegfault.dev/en/ns/): Task-oriented learning path for the XML DSL.
+- [中文手册总览](https://xmlsquish.moesegfault.dev/ns): 面向用户任务的 XML DSL 学习路径。
+- [Getting started](https://xmlsquish.moesegfault.dev/en/ns/getting-started/): Bind the exact namespace, declare a target, and build the first entry.
+- [Source model](https://xmlsquish.moesegfault.dev/en/ns/source-model/): Entry, module, import, and source-closure rules.
+- [Composition](https://xmlsquish.moesegfault.dev/en/ns/composition/): Macros, parameters, expansion, strings, and structured content.
+- [Control and scope](https://xmlsquish.moesegfault.dev/en/ns/control-and-scope/): Conditional matching, bindings, and escaping.
+- [Build and artifacts](https://xmlsquish.moesegfault.dev/en/ns/build-and-artifacts/): Validation, XSIR, linking, and published outputs.
+- [Directive reference](https://xmlsquish.moesegfault.dev/en/ns/reference/): Searchable reference containing each of the eleven directives exactly once.
+- [Limits and invariants](https://xmlsquish.moesegfault.dev/en/ns/limits-and-invariants/): Resource budgets, stable language rules, and historical resources.
+- [Raw DSL specification](https://xmlsquish.moesegfault.dev/ns/dsl.md): Machine-friendly Markdown generated from the normative vocabulary source.
+- [v0.3.0 specification snapshot](https://xmlsquish.moesegfault.dev/ns/0.3.0/dsl.md): Immutable historical language contract.
+- [v0.2.0 specification snapshot](https://xmlsquish.moesegfault.dev/ns/0.2.0/dsl.md): Earlier immutable namespace contract.
 
 ## Operational facts
 
-- CLI commands: `new`, `fmt`, `build`, `add`, `remove`, `inspect`.
+- The stable namespace identity is exactly `https://xmlsquish.moesegfault.dev/ns`; it is unversioned and never localized.
+- CLI commands are `new`, `fmt`, `build`, `add`, `remove`, and `inspect`.
 - Source installation requires Rust 1.88 or newer and a locked Cargo workspace. xmlsquish is not published on crates.io.
-- v1.0.1 is published under the immutable `v1.0.1` Git tag, with native x86-64 and ARM64 assets for Linux, Windows, and macOS.
-- Native `--message-format=json` output uses machine protocol 3.0. This is a breaking migration from the protocol 2.1 emitted by v1.0.0: build results now carry typed publication identity and stable logical artifact locators.
-- `xmlsquish inspect artifact LOCATOR --format=raw` returns digest-verified artifact bytes only.
-- License: GPL-3.0-or-later.
+- v1.0.1 is published from immutable tag `v1.0.1`; its six native archives and `SHA256SUMS` are available from GitHub Releases.
+- Machine-event consumers must migrate from protocol 2.1 to protocol 3.0 together with v1.0.1.

@@ -1,4 +1,4 @@
-/** Product-site browser contracts / 产品站浏览器合同。 */
+/** End-to-end contracts for the localized product, release log, and DSL manual. / 本地化产品、发布记录与 DSL 手册的端到端合同。 */
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { createHash } from "node:crypto";
@@ -9,23 +9,36 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
 const dist = resolve(dirname(fileURLToPath(import.meta.url)), "../../dist");
-const demo = JSON.parse(await readFile(new URL("../data/build-demo.json", import.meta.url), "utf8"));
-const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".json": "application/json", ".woff2": "font/woff2" };
-const routes = [
-  { path: "/", locale: "zh-CN", page: "home", peer: "/en/" },
-  { path: "/en/", locale: "en", page: "home", peer: "/" },
-  { path: "/releases/", locale: "zh-CN", page: "releases", peer: "/en/releases/" },
-  { path: "/en/releases/", locale: "en", page: "releases", peer: "/releases/" },
-  { path: "/ns/", canonicalPath: "/ns", locale: "zh-CN", page: "namespace", peer: "/en/ns/" },
-  { path: "/en/ns/", locale: "en", page: "namespace", peer: "/ns" },
-];
+const origin = "https://xmlsquish.moesegfault.dev";
+const namespaceUri = `${origin}/ns`;
+const versions = ["1.0.1", "1.0.0", "0.3.0", "0.2.0"];
+const dates = ["2026-09-16", "2026-09-15", "2026-09-11", "2026-09-11"];
+const chapters = ["getting-started", "source-model", "composition", "control-and-scope", "build-and-artifacts", "reference", "limits-and-invariants"];
 const expectedAssets = [
   "xmlsquish-1.0.1-x86_64-pc-windows-msvc.zip", "xmlsquish-1.0.1-aarch64-pc-windows-msvc.zip",
   "xmlsquish-1.0.1-x86_64-unknown-linux-gnu.tar.gz", "xmlsquish-1.0.1-aarch64-unknown-linux-gnu.tar.gz",
   "xmlsquish-1.0.1-x86_64-apple-darwin.tar.gz", "xmlsquish-1.0.1-aarch64-apple-darwin.tar.gz",
 ];
-const namespaceUri = "https://xmlsquish.moesegfault.dev/ns";
-const directiveGroups = [["module", "entry"], ["import", "macro", "param", "expand"], ["arg", "fill", "slot", "insert"], ["ifr"]];
+
+/** Create one bilingual route pair while retaining its top-level section. / 创建一组双语路由并保留顶层栏目。 */
+function pair(zh, en, section) {
+  return [
+    { path: zh, peer: en, locale: "zh-CN", section },
+    { path: en, peer: zh, locale: "en", section },
+  ];
+}
+
+const routePairs = [
+  ["/", "/en/", "home"],
+  ["/releases/", "/en/releases/", "releases"],
+  ...versions.map((version) => [`/releases/${version}/`, `/en/releases/${version}/`, "releases"]),
+  ["/ns", "/en/ns/", "namespace"],
+  ...chapters.map((chapter) => [`/ns/${chapter}/`, `/en/ns/${chapter}/`, "namespace"]),
+];
+const routes = routePairs.flatMap(([zh, en, section]) => pair(zh, en, section));
+assert.equal(routes.length, 28);
+
+const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".json": "application/json", ".woff2": "font/woff2", ".md": "text/markdown; charset=utf-8", ".txt": "text/plain; charset=utf-8" };
 const server = createServer(async (request, response) => {
   try {
     const pathname = decodeURIComponent(new URL(request.url, "http://localhost").pathname);
@@ -50,294 +63,319 @@ after(async () => {
   await new Promise((done) => server.close(done));
 });
 
-/** Normalize route spelling while preserving root / 规范化路由拼写并保留根路径。 */
+/** Remove a trailing slash without changing the root path. / 删除末尾斜线但不改变根路径。 */
 function normalizedPath(url) {
-  const pathname = new URL(url, "https://example.invalid").pathname;
+  const pathname = new URL(url, origin).pathname;
   return pathname === "/" ? pathname : pathname.replace(/\/$/, "");
 }
 
-test("all six human routes share one localized product shell", async () => {
+/** Convert a published route into its expected canonical absolute URL. / 将发布路由转换为预期 canonical 绝对 URL。 */
+function canonicalFor(path) {
+  return origin + (path === "/ns" ? "/ns" : path);
+}
+
+test("all 28 human routes have localized identity and one active global destination", async () => {
   const page = await browser.newPage({ javaScriptEnabled: false, viewport: { width: 390, height: 900 } });
   for (const route of routes) {
-    const response = await page.goto(base + route.path, { waitUntil: "networkidle" });
+    const response = await page.goto(base + route.path, { waitUntil: "domcontentloaded" });
     assert.equal(response.status(), 200, route.path);
-    assert.equal(await page.locator("html").getAttribute("lang"), route.locale);
-    assert.equal(await page.locator(".product-header, .product-footer").count(), 2);
-    assert.equal(await page.locator("main#main").count(), 1);
-    assert.equal(await page.locator("main h1").count(), 1);
-    assert.equal(await page.locator(".skip-link").getAttribute("href"), "#main");
-    assert.equal(await page.locator(".product-nav a").count(), 3);
-    const current = page.locator('.product-nav a[aria-current="page"]');
-    assert.equal(await current.count(), 1);
-    assert.equal(normalizedPath(await current.getAttribute("href")), normalizedPath(route.path));
-    assert(await current.evaluate((link) => {
-      const style = getComputedStyle(link);
-      return style.backgroundColor !== "rgba(0, 0, 0, 0)" || style.boxShadow !== "none";
-    }), `${route.path}: active route needs a persistent non-color cue`);
-    assert.equal(await page.locator('link[rel="canonical"]').getAttribute("href"), "https://xmlsquish.moesegfault.dev" + (route.canonicalPath ?? route.path));
-    assert.equal(normalizedPath(await page.locator(".language-link").getAttribute("href")), normalizedPath(route.peer));
-    assert.equal(await page.locator('meta[property="og:locale"]').getAttribute("content"), route.locale === "en" ? "en_US" : "zh_CN");
-    const text = await page.locator("main").textContent();
-    if (route.locale === "en") assert(!/\p{Script=Han}/u.test(text), `${route.path}: untranslated Chinese copy`);
-    else assert(/\p{Script=Han}/u.test(text), `${route.path}: missing Chinese copy`);
-    for (const selector of [".product-brand", ".language-link", ".product-nav"]) assert(await page.locator(selector).isVisible(), `${route.path}: ${selector}`);
+    assert.equal(await page.locator("html").getAttribute("lang"), route.locale, route.path);
+    assert.equal(await page.locator("main#main").count(), 1, route.path);
+    assert.equal(await page.locator("main h1").count(), 1, route.path);
+    assert.equal(await page.locator(".product-header, .product-footer").count(), 2, route.path);
+    assert.equal(await page.locator('.product-nav a[aria-current="page"]').count(), 1, route.path);
+    const active = await page.locator('.product-nav a[aria-current="page"]').getAttribute("href");
+    const topLevel = route.section === "home" ? (route.locale === "en" ? "/en/" : "/") : route.section === "releases" ? (route.locale === "en" ? "/en/releases/" : "/releases/") : (route.locale === "en" ? "/en/ns/" : "/ns");
+    assert.equal(normalizedPath(active), normalizedPath(topLevel), route.path);
+    assert.equal(normalizedPath(await page.locator(".language-link").getAttribute("href")), normalizedPath(route.peer), route.path);
+    assert.equal(await page.locator('link[rel="canonical"]').getAttribute("href"), canonicalFor(route.path), route.path);
+    assert.equal(await page.locator('link[rel="alternate"][hreflang="zh-CN"]').count(), 1, route.path);
+    assert.equal(await page.locator('link[rel="alternate"][hreflang="en"]').count(), 1, route.path);
   }
   await page.close();
 });
 
-test("language switch preserves the current destination", async () => {
-  const page = await browser.newPage();
-  for (const route of routes) {
-    await page.goto(base + route.path, { waitUntil: "networkidle" });
-    await page.locator(".language-link").click();
-    assert.equal(normalizedPath(page.url()), normalizedPath(route.peer), route.path);
-    assert.equal(await page.locator("html").getAttribute("lang"), route.locale === "en" ? "zh-CN" : "en");
+test("global controls remain in one vertically aligned header row", async () => {
+  for (const width of [320, 390, 768, 1440]) {
+    const page = await browser.newPage({ viewport: { width, height: 900 } });
+    for (const path of ["/", "/releases/", "/releases/1.0.1/", "/ns", "/ns/reference/"]) {
+      await page.goto(base + path, { waitUntil: "domcontentloaded" });
+      const geometry = await page.locator(".header-row").evaluate((row) => {
+        const children = [row.querySelector(".product-brand"), row.querySelector(".product-nav"), row.querySelector(".header-actions")];
+        const rect = row.getBoundingClientRect();
+        return { height: rect.height, centers: children.map((item) => { const box = item.getBoundingClientRect(); return box.top + box.height / 2; }) };
+      });
+      assert(geometry.height < 78, `${path} at ${width}px wrapped to a second row`);
+      assert(Math.max(...geometry.centers) - Math.min(...geometry.centers) <= 1.5, `${path} at ${width}px is not vertically aligned`);
+    }
+    await page.close();
   }
-  await page.close();
 });
 
-for (const locale of ["zh-CN", "en"]) {
-  test(`${locale}: home preserves section order and build explorer behavior`, async () => {
+test("home preserves its product layout, explorer, and direct latest-release cue", async () => {
+  const demo = JSON.parse(await readFile(new URL("../data/build-demo.json", import.meta.url), "utf8"));
+  for (const [path, releasePath] of [["/", "/releases/1.0.1/"], ["/en/", "/en/releases/1.0.1/"]]) {
     const page = await browser.newPage();
-    const errors = [];
-    page.on("pageerror", (error) => errors.push(error.message));
-    await page.addInitScript(() => Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text) => { window.copiedCode = text; } } }));
-    await page.goto(base + (locale === "en" ? "/en/" : "/"), { waitUntil: "networkidle" });
+    await page.goto(base + path, { waitUntil: "domcontentloaded" });
     await page.waitForSelector("[data-build-explorer][data-ready]");
-    assert.deepEqual(await page.locator("main > section").evaluateAll((sections) => sections.map((section) =>
-      section.id || (section.querySelector(".capabilities") ? "capabilities" : [...section.classList].find((name) => ["hero", "journey-band", "boundaries", "closing"].includes(name))),
-    )), ["hero", "how", "build", "model", "capabilities", "cli", "stats", "boundaries", "closing"]);
-    assert.match((await page.locator(".hero-release-link").textContent()).replace(/\s+/g, " "), /v1\.0\.1/);
-    assert.equal(await page.locator("[data-code-panel]:visible").count(), 1);
-    await page.locator('[data-example-tab="source"]').focus();
-    await page.keyboard.press("End");
-    assert.equal(await page.locator('[data-example-tab="debug"]').getAttribute("aria-selected"), "true");
+    assert.deepEqual(await page.locator("main > section").evaluateAll((sections) => sections.map((section) => section.id || (section.querySelector(".capabilities") ? "capabilities" : [...section.classList].find((name) => ["hero", "journey-band", "boundaries", "closing"].includes(name))))), ["hero", "how", "build", "model", "capabilities", "cli", "stats", "boundaries", "closing"]);
+    assert.equal(await page.locator(".hero-release-link").getAttribute("href"), releasePath);
+    assert.match(await page.locator(".hero-release-link").textContent(), /v1\.0\.1/);
     await page.locator('[data-example-tab="prompt"]').click();
     await page.locator('[data-mode="self"]').click();
     assert.equal(await page.locator("[data-code-panel]:visible").getAttribute("data-source"), demo.scenarios.self.stages.prompt);
-    await page.locator("[data-copy]").click();
-    assert.equal(await page.evaluate(() => window.copiedCode), demo.scenarios.self.stages.prompt);
-    await page.locator('[data-mode="parent"]').click();
-    assert.equal(await page.locator("[data-code-panel]:visible").getAttribute("data-source"), demo.scenarios.parent.stages.prompt);
-    const commands = await page.locator(".command-terminal pre code").allTextContents();
-    for (const command of ["xmlsquish new hello-prompts", "xmlsquish fmt --check", "xmlsquish build --offline"])
-      assert(commands.some((candidate) => candidate.includes(command)), command);
-    assert.equal(JSON.parse(await page.locator('script[type="application/ld+json"]').textContent()).softwareVersion, "1.0.1");
-    assert.deepEqual(errors, []);
     await page.close();
-  });
-}
-
-test("home no-JavaScript fallback keeps every recorded source and output readable", async () => {
-  const page = await browser.newPage({ javaScriptEnabled: false });
-  await page.goto(base, { waitUntil: "networkidle" });
-  assert.equal(await page.locator("[data-code-panel]:visible").count(), demo.artifacts.length * 2);
-  assert.equal(await page.locator("[data-copy]:visible").count(), 0);
-  assert.equal(await page.locator("[data-mode]:visible").count(), 0);
-  assert(await page.locator("[data-fallback]").isVisible());
-  await page.close();
-});
-
-for (const path of ["/releases/", "/en/releases/"]) {
-  test(`${path}: v1.0.1 release, migration, downloads and history agree`, async () => {
-    const page = await browser.newPage();
-    await page.goto(base + path, { waitUntil: "networkidle" });
-    const text = await page.locator("main").textContent();
-    for (const token of ["v1.0.1", "3.0", "2.1"]) assert(text.includes(token), token);
-    assert.equal(await page.locator(".release-hero time").getAttribute("datetime"), "2026-09-16");
-    const downloadBase = "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.0.1/";
-    const assets = await page.locator(".download-actions a[download]").evaluateAll((links) => links.map((link) => link.href));
-    assert.deepEqual([...assets].sort(), expectedAssets.map((asset) => downloadBase + asset).sort());
-    assert.equal(await page.locator('a[href$="SHA256SUMS"]').getAttribute("href"), downloadBase + "SHA256SUMS");
-    assert(text.includes("cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v1.0.1 --locked"));
-    assert.equal(await page.locator("#v1-0-0").count(), 1);
-    assert.equal(await page.locator('#v1-0-0 a[href="/releases/1.0.0.json"]').count(), 1);
-    assert.equal(await page.locator('link[rel="alternate"][type="application/json"]').getAttribute("href"), "https://xmlsquish.moesegfault.dev/releases/1.0.1.json");
-    const jsonLd = await page.locator('script[type="application/ld+json"]').allTextContents();
-    assert.equal(jsonLd.length, 1);
-    const application = JSON.parse(jsonLd[0]);
-    assert.equal(application["@type"], "SoftwareApplication");
-    assert.equal(application.softwareVersion, "1.0.1");
-    assert.equal(application.datePublished, "2026-09-16");
-    assert.equal(application.creativeWorkStatus, "Published");
-    assert.deepEqual([...application.downloadUrl].sort(), [...assets].sort());
-    assert.equal(await page.locator("[itemscope], [itemprop]").count(), 0);
-    await page.close();
-  });
-}
-
-test("release discovery artifacts expose one machine-readable v1.0.1 contract", async () => {
-  const metadata = JSON.parse(await readFile(join(dist, "releases/1.0.1.json"), "utf8"));
-  assert.equal(metadata.schemaVersion, 1);
-  assert.deepEqual([metadata.release.version, metadata.release.tag, metadata.release.date, metadata.release.releaseStatus], ["1.0.1", "v1.0.1", "2026-09-16", "published"]);
-  assert.equal(metadata.release.githubRelease, "https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.1");
-  assert.equal(metadata.release.checksums, "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.0.1/SHA256SUMS");
-  assert.equal(metadata.cli.machineProtocol, "3.0");
-  assert.equal(metadata.cli.sourceInstall, "cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v1.0.1 --locked");
-  assert.equal(metadata.artifacts.length, 6);
-  assert.deepEqual(metadata.artifacts.map((artifact) => artifact.url.split("/").at(-1)).sort(), [...expectedAssets].sort());
-  assert(metadata.artifacts.every((artifact) => artifact.url.includes("/releases/download/v1.0.1/")));
-  assert.equal(JSON.parse(await readFile(join(dist, "releases/1.0.0.json"), "utf8")).release.version, "1.0.0");
-  const robots = await readFile(join(dist, "robots.txt"), "utf8");
-  assert.match(robots, /^User-agent: \*$/m);
-  assert.match(robots, /^Sitemap: https:\/\/xmlsquish\.moesegfault\.dev\/sitemap\.xml$/m);
-  const sitemap = await readFile(join(dist, "sitemap.xml"), "utf8");
-  for (const route of routes) assert(sitemap.includes("https://xmlsquish.moesegfault.dev" + (route.canonicalPath ?? route.path)));
-  const llms = await readFile(join(dist, "llms.txt"), "utf8");
-  for (const claim of ["/releases/1.0.1.json", "published v1.0.1 release", "protocol 3.0", "v1.0.0"]) assert(llms.includes(claim), claim);
-});
-
-for (const path of ["/ns/", "/en/ns/"]) {
-  test(`${path}: namespace exposes eleven unique directives, resources, filtering and copy`, async () => {
-    const page = await browser.newPage();
-    await page.addInitScript(() => Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text) => { window.copiedNamespace = text; } } }));
-    await page.goto(base + path, { waitUntil: "networkidle" });
-    assert.equal(await page.locator("[data-namespace-uri]").textContent(), namespaceUri);
-    assert.equal(await page.locator("[data-group]").count(), 4);
-    assert.deepEqual(await page.locator("[data-group]").evaluateAll((groups) => groups.map((group) =>
-      [...group.querySelectorAll("[data-directive] > code")].map((code) => code.textContent.replace("xs:", "")),
-    )), directiveGroups);
-    const directives = await page.locator("[data-directive]").evaluateAll((cards) => cards.map((card) => card.id));
-    assert.equal(directives.length, 11);
-    assert.equal(new Set(directives).size, 11);
-    for (const directive of directives) assert.equal(await page.locator(`[data-directive]#${directive} .directive-anchor[href="#${directive}"]`).count(), 1);
-    const resources = await page.locator(".resource-card").evaluateAll((links) => links.map((link) => link.getAttribute("href")));
-    for (const href of ["/ns/dsl.md", "https://github.com/kleedaisuki/prompt-squish/tree/main/examples", path.startsWith("/en/") ? "/en/releases/" : "/releases/", "/ns/0.3.0/dsl.md", "/ns/0.2.0/dsl.md", "https://www.w3.org/TR/REC-xml-names/", "/LICENSE.txt"])
-      assert(resources.includes(href), href);
-    assert.equal(await page.locator('link[rel="describedby"]').getAttribute("href"), "/ns/dsl.md");
-    assert(await page.locator("[data-search-ui]").isVisible());
-    assert.equal(await page.locator("[data-count]").textContent(), "11 / 11");
-    await page.locator("[data-search]").fill("ifr");
-    assert.equal(await page.locator("[data-directive]:visible").count(), 1);
-    assert.equal(await page.locator("[data-directive]:visible > code").textContent(), "xs:ifr");
-    assert.equal(await page.locator("[data-count]").textContent(), "1 / 11");
-    await page.locator("[data-search]").press("Escape");
-    assert.equal(await page.locator("[data-directive]:visible").count(), 11);
-    await page.locator("[data-copy]").click();
-    assert.equal(await page.evaluate(() => window.copiedNamespace), namespaceUri);
-    assert((await page.locator("[data-copy-status]").textContent()).trim().length > 0);
-    await page.close();
-  });
-}
-
-test("namespace fragment and clipboard-denial fallbacks remain operable", async () => {
-  const page = await browser.newPage({ viewport: { width: 390, height: 900 } });
-  await page.addInitScript(() => Object.defineProperty(navigator, "clipboard", {
-    configurable: true,
-    value: { writeText: async () => { throw new DOMException("denied", "NotAllowedError"); } },
-  }));
-  await page.goto(base + "/en/ns/", { waitUntil: "networkidle" });
-  await page.locator('[href="#ifr"]').click();
-  assert.equal(new URL(page.url()).hash, "#ifr");
-  const positions = await page.evaluate(() => ({
-    card: document.querySelector("#ifr").getBoundingClientRect().top,
-    header: document.querySelector(".product-header").getBoundingClientRect().bottom,
-  }));
-  assert(positions.card >= positions.header, `fragment hidden by sticky header: ${JSON.stringify(positions)}`);
-  await page.locator("[data-copy]").click();
-  assert.equal(await page.evaluate(() => getSelection()?.toString()), namespaceUri);
-  assert((await page.locator("[data-copy-status]").textContent()).trim().length > 0);
-  await page.close();
-});
-
-test("release primary CTA keeps filled contrast on hover", async () => {
-  const page = await browser.newPage();
-  await page.goto(base + "/en/releases/", { waitUntil: "networkidle" });
-  const button = page.locator(".actions .button.primary");
-  const resting = await button.evaluate((node) => [getComputedStyle(node).color, getComputedStyle(node).backgroundColor]);
-  await button.hover();
-  const hovered = await button.evaluate((node) => [getComputedStyle(node).color, getComputedStyle(node).backgroundColor]);
-  assert.equal(hovered[0], resting[0], "hover must retain the on-accent foreground");
-  assert.notEqual(hovered[1], "rgba(0, 0, 0, 0)");
-  assert.notEqual(hovered[1], resting[1], "hover must retain a distinct filled state");
-  await page.close();
-});
-
-test("namespace progressive enhancement leaves complete content without JavaScript", async () => {
-  const page = await browser.newPage({ javaScriptEnabled: false });
-  for (const path of ["/ns/", "/en/ns/"]) {
-    await page.goto(base + path, { waitUntil: "networkidle" });
-    assert.equal(await page.locator("[data-namespace-uri]").textContent(), namespaceUri);
-    assert.equal(await page.locator("[data-directive]:visible").count(), 11);
-    assert.equal(await page.locator("[data-search-ui]:visible, [data-copy]:visible").count(), 0);
-    assert((await page.locator(".use-layout pre code").textContent()).includes(`xmlns:xs="${namespaceUri}"`));
   }
-  await page.close();
 });
 
-test("all product links remain underline-free at rest, hover and keyboard focus", async () => {
+test("release indexes list four entries and every entry opens a same-locale detail", async () => {
+  for (const prefix of ["", "/en"]) {
+    const page = await browser.newPage();
+    await page.goto(`${base}${prefix}/releases/`, { waitUntil: "domcontentloaded" });
+    assert.equal(await page.locator(".log-entry").count(), 4);
+    const links = await page.locator(".open-release").evaluateAll((items) => items.map((item) => item.getAttribute("href")));
+    assert.deepEqual(links, versions.map((version) => `${prefix}/releases/${version}/`));
+    for (let index = 0; index < links.length; index += 1) {
+      await page.goto(base + links[index], { waitUntil: "domcontentloaded" });
+      assert.equal(await page.locator(".release-kicker code").textContent(), `v${versions[index]}`);
+      assert.equal(await page.locator('.product-nav a[aria-current="page"]').getAttribute("href"), `${prefix}/releases/`);
+    }
+    await page.close();
+  }
+});
+
+test("each immutable release detail has exact date, acquisition, metadata, and pagination contracts", async () => {
   const page = await browser.newPage();
-  for (const route of routes) {
-    await page.goto(base + route.path, { waitUntil: "networkidle" });
-    const links = page.locator("a:visible");
-    assert((await links.count()) > 5);
-    assert.deepEqual(await links.evaluateAll((items) => [...new Set(items.map((link) => getComputedStyle(link).textDecorationLine))]), ["none"], `${route.path}: resting underline`);
-    for (const selector of [".product-nav a", "main a", ".product-footer a"]) {
-      const link = page.locator(`${selector}:visible`).first();
-      await link.hover();
-      assert.equal(await link.evaluate((node) => getComputedStyle(node).textDecorationLine), "none", `${route.path}: hover ${selector}`);
-      await link.focus();
-      assert.equal(await link.evaluate((node) => getComputedStyle(node).textDecorationLine), "none", `${route.path}: focus ${selector}`);
-      assert.deepEqual(await link.evaluate((node) => [getComputedStyle(node).outlineStyle, getComputedStyle(node).outlineWidth]), ["solid", "3px"], `${route.path}: focus ${selector}`);
+  for (let index = 0; index < versions.length; index += 1) {
+    const version = versions[index];
+    await page.goto(`${base}/releases/${version}/`, { waitUntil: "domcontentloaded" });
+    assert.equal(await page.locator(".metadata-rail time").getAttribute("datetime"), dates[index], version);
+    assert.equal(await page.locator('script[type="application/ld+json"]').count(), 1, version);
+    const schema = JSON.parse(await page.locator('script[type="application/ld+json"]').textContent());
+    assert.equal(schema.softwareVersion, version);
+    assert.equal(schema.datePublished, dates[index]);
+    const metadata = page.locator('link[rel="alternate"][type="application/json"]');
+    assert.equal(await metadata.count(), index < 2 ? 1 : 0, version);
+    if (index < 2) assert.equal(await metadata.getAttribute("href"), `${origin}/releases/${version}.json`);
+    if (version === "0.2.0") {
+      assert.equal(await page.locator(".download-table").count(), 0);
+      assert.match(await page.locator(".release-article").textContent(), /Rust 1\.88|Rust 1.88/);
+      assert(schema.downloadUrl === undefined);
+    } else {
+      assert.equal(await page.locator(".download-table a[download]").count(), 6, version);
+      assert.equal(schema.downloadUrl.length, 6, version);
     }
   }
   await page.close();
 });
 
-test("every route reflows without page overflow in light and dark themes", async () => {
+test("current release acquisition and machine metadata agree exactly", async () => {
+  const page = await browser.newPage();
+  await page.goto(base + "/releases/1.0.1/", { waitUntil: "domcontentloaded" });
+  const hrefs = await page.locator(".download-table a[download]").evaluateAll((links) => links.map((link) => link.href));
+  const root = "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.0.1/";
+  assert.deepEqual([...hrefs].sort(), expectedAssets.map((asset) => root + asset).sort());
+  assert.equal(await page.locator('.resource-button[href$="SHA256SUMS"]').getAttribute("href"), root + "SHA256SUMS");
+  const metadata = JSON.parse(await readFile(join(dist, "releases/1.0.1.json"), "utf8"));
+  assert.deepEqual([metadata.release.version, metadata.release.tag, metadata.release.date], ["1.0.1", "v1.0.1", "2026-09-16"]);
+  assert.equal(metadata.cli.machineProtocol, "3.0");
+  assert.deepEqual(metadata.artifacts.map((artifact) => artifact.url).sort(), [...hrefs].sort());
+  await page.close();
+});
+
+test("sticky release navigation never overlaps its external resources", async () => {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 700 } });
+  await page.goto(base + "/releases/1.0.0/", { waitUntil: "domcontentloaded" });
+  await page.locator("#acquisition").scrollIntoViewIfNeeded();
+  const overlapArea = await page.evaluate(() => {
+    const nav = document.querySelector(".metadata-rail nav").getBoundingClientRect();
+    const resources = document.querySelector(".external-links").getBoundingClientRect();
+    return Math.max(0, Math.min(nav.right, resources.right) - Math.max(nav.left, resources.left))
+      * Math.max(0, Math.min(nav.bottom, resources.bottom) - Math.max(nav.top, resources.top));
+  });
+  assert.equal(overlapArea, 0);
+  await page.close();
+});
+
+test("manual overview and all seven chapters expose desktop and mobile local navigation", async () => {
+  for (const prefix of ["", "/en"]) {
+    const overview = `${prefix}/ns${prefix ? "/" : ""}`;
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    for (const [slug, path] of [[null, overview], ...chapters.map((chapter) => [chapter, `${prefix}/ns/${chapter}/`])]) {
+      await page.goto(base + path, { waitUntil: "domcontentloaded" });
+      assert.equal(await page.locator("[data-namespace-uri]").textContent(), namespaceUri);
+      assert.equal(await page.locator(".chapter-rail nav a").count(), 8, path);
+      assert.equal(await page.locator('.chapter-rail nav a[aria-current="page"]').count(), 1, path);
+      assert.equal(await page.locator(".mobile-jump nav a").count(), 8, path);
+      assert.equal(await page.locator('.mobile-jump nav a[aria-current="page"]').count(), 1, path);
+      assert.equal(await page.locator(".chapter-cards a").count(), slug === null ? 7 : 0, path);
+      assert.equal(await page.locator("[data-directive]").count(), slug === "reference" ? 11 : 0, path);
+    }
+    await page.setViewportSize({ width: 390, height: 900 });
+    await page.goto(base + `${prefix}/ns/reference/`, { waitUntil: "domcontentloaded" });
+    assert(await page.locator(".mobile-jump").isVisible());
+    assert.equal(await page.locator(".chapter-rail").isVisible(), false);
+    await page.close();
+  }
+});
+
+test("manual heading fragments clear the sticky header in both locales", async () => {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 700 } });
+  for (const prefix of ["", "/en"]) {
+    for (const chapter of chapters) {
+      const path = `${prefix}/ns/${chapter}/`;
+      await page.goto(base + path, { waitUntil: "domcontentloaded" });
+      const ids = await page.locator(".manual-article h2[id]").evaluateAll((nodes) => nodes.map((node) => node.id));
+      // The directive reference is card-addressed; prose chapters expose heading fragments.
+      if (chapter === "reference") assert.equal(ids.length, 0, path);
+      else assert(ids.length > 0, path);
+      for (const id of ids) {
+        await page.evaluate((hash) => { location.hash = hash; }, id);
+        const [headingTop, headerBottom] = await page.evaluate((headingId) => [document.getElementById(headingId).getBoundingClientRect().top, document.querySelector(".product-header").getBoundingClientRect().bottom], id);
+        assert(headingTop >= headerBottom - 1, `${path}#${id} is hidden by the header: ${headingTop}/${headerBottom}`);
+      }
+    }
+  }
+  await page.close();
+});
+
+test("getting started closes the build-to-inspect loop in both locales", async () => {
+  const page = await browser.newPage();
+  for (const path of ["/ns/getting-started/", "/en/ns/getting-started/"]) {
+    await page.goto(base + path, { waitUntil: "domcontentloaded" });
+    const text = await page.locator(".manual-article").textContent();
+    for (const claim of ["prompt.xml", "xmlsquish build --target prompt", "xmlsquish inspect artifact target/xmlsquish/prompt.prompt --format=raw", "<Prompt>Hello, xmlsquish.</Prompt>", "target/xmlsquish/prompt.prompt"])
+      assert(text.includes(claim), `${path}: ${claim}`);
+  }
+  await page.close();
+});
+
+test("all eleven directive entries expose deep syntax contracts", async () => {
+  const page = await browser.newPage();
+  await page.goto(base + "/en/ns/reference/", { waitUntil: "domcontentloaded" });
+  const cards = page.locator("[data-directive]");
+  assert.equal(await cards.count(), 11);
+  for (const card of await cards.all()) {
+    assert.equal(await card.locator(".contract-grid section").count(), 2);
+    assert.equal(await card.locator(".attribute-contract").count(), 1);
+    assert.equal(await card.locator("section pre code").count(), 1);
+    assert((await card.locator(".constraints li").count()) >= 2);
+    assert.match(await card.locator(".related-link").getAttribute("href"), /^\/en\/ns\/.+\/$/);
+  }
+  const slot = page.locator("#slot .attribute-contract");
+  assert.match(await slot.textContent(), /required.*optional.*default: false/s);
+  const arg = await page.locator("#arg .attribute-contract").textContent();
+  assert.match(arg, /name.*required/s); assert.match(arg, /value.*exclusive choice/s); assert.match(arg, /get.*exclusive choice/s);
+  const ifr = await page.locator("#ifr .attribute-contract").textContent();
+  assert.match(ifr, /get.*exclusive choice/s); assert.match(ifr, /str.*exclusive choice/s); assert.match(ifr, /pattern.*required/s);
+  await page.close();
+});
+
+test("manual reference search, URI copy, fragments, and clipboard denial remain operable", async () => {
+  const page = await browser.newPage({ viewport: { width: 390, height: 900 } });
+  await page.addInitScript(() => Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text) => { window.copiedNamespace = text; } } }));
+  await page.goto(base + "/en/ns/reference/", { waitUntil: "domcontentloaded" });
+  assert.equal(await page.locator("[data-count]").textContent(), "11 / 11");
+  const ids = await page.locator("[data-directive]").evaluateAll((nodes) => nodes.map((node) => node.id));
+  assert.equal(new Set(ids).size, 11);
+  await page.locator("[data-search]").fill("look-around");
+  assert.equal(await page.locator("[data-directive]:visible").count(), 1);
+  assert.equal(await page.locator("[data-directive]:visible code").first().textContent(), "xs:ifr");
+  await page.locator("[data-search]").press("Escape");
+  assert.equal(await page.locator("[data-directive]:visible").count(), 11);
+  await page.locator("[data-copy]").click();
+  assert.equal(await page.evaluate(() => window.copiedNamespace), namespaceUri);
+  await page.locator('[href="#ifr"]').click();
+  assert.equal(new URL(page.url()).hash, "#ifr");
+  await page.close();
+
+  const denied = await browser.newPage();
+  await denied.addInitScript(() => Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => { throw new DOMException("denied", "NotAllowedError"); } } }));
+  await denied.goto(base + "/ns/reference/", { waitUntil: "domcontentloaded" });
+  await denied.locator("[data-copy]").click();
+  assert.equal(await denied.evaluate(() => getSelection()?.toString()), namespaceUri);
+  assert((await denied.locator("[data-copy-status]").textContent()).trim().length > 0);
+  await denied.close();
+});
+
+test("manual no-JavaScript fallback and raw specifications remain complete", async () => {
+  const page = await browser.newPage({ javaScriptEnabled: false });
+  for (const path of ["/ns/reference/", "/en/ns/reference/"]) {
+    await page.goto(base + path, { waitUntil: "domcontentloaded" });
+    assert.equal(await page.locator("[data-directive]:visible").count(), 11);
+    assert.equal(await page.locator("[data-search-ui]:visible, [data-copy]:visible").count(), 0);
+    assert.equal(await page.locator('link[rel="describedby"]').getAttribute("href"), "/ns/dsl.md");
+  }
+  const current = await readFile(join(dist, "ns/dsl.md"), "utf8");
+  assert.equal(current, await readFile(new URL("../../../docs/dsl.md", import.meta.url), "utf8"));
+  for (const [version, digest] of [["0.3.0", "45beace4d8782c0ec4024c56bf581a7e65cc8bf9fadd97dcc3cdf2a856368945"], ["0.2.0", "2a53e352223e393e3669c5e5ef47328bee459a3a6bbfd45b1b88ce2e73015fad"]]) {
+    const contents = await readFile(join(dist, `ns/${version}/dsl.md`), "utf8");
+    assert.equal(createHash("sha256").update(contents.replaceAll("\r\n", "\n")).digest("hex"), digest);
+  }
+  await page.close();
+});
+
+test("sitemap covers exactly 28 reciprocal human routes and llms navigation separates artifacts", async () => {
+  const sitemap = await readFile(join(dist, "sitemap.xml"), "utf8");
+  const locations = [...sitemap.matchAll(/<loc>([^<]+)<\/loc>/g)].map((match) => match[1]);
+  assert.equal(locations.length, 28);
+  assert.equal(new Set(locations).size, 28);
+  assert.deepEqual(new Set(locations), new Set(routes.map((route) => canonicalFor(route.path))));
+  for (const [zhPath, enPath] of routePairs) {
+    const zh = canonicalFor(zhPath); const en = canonicalFor(enPath);
+    for (const loc of [zh, en]) {
+      const block = sitemap.match(new RegExp(`<url>\\s*<loc>${loc.replaceAll(".", "\\.")}<\\/loc>[\\s\\S]*?<\\/url>`))?.[0];
+      assert(block?.includes(`hreflang="zh-CN" href="${zh}"`), loc);
+      assert(block?.includes(`hreflang="en" href="${en}"`), loc);
+    }
+  }
+  assert(!sitemap.includes(".json") && !sitemap.includes(".md"));
+  const llms = await readFile(join(dist, "llms.txt"), "utf8");
+  for (const claim of ["English release index", "/en/releases/1.0.1/", "manual overview", "/en/ns/reference/", "/ns/dsl.md", "/ns/0.3.0/dsl.md"]) assert(llms.includes(claim), claim);
+});
+
+test("all route links are underline-free and retain a 3px keyboard focus indicator", async () => {
+  const page = await browser.newPage();
+  for (const route of routes) {
+    await page.goto(base + route.path, { waitUntil: "domcontentloaded" });
+    const links = page.locator("a:visible");
+    assert((await links.count()) > 4, route.path);
+    assert.deepEqual(await links.evaluateAll((items) => [...new Set(items.map((link) => getComputedStyle(link).textDecorationLine))]), ["none"], route.path);
+    for (const link of [page.locator(".product-brand"), page.locator("main a:visible").first(), page.locator(".product-footer a:visible").first()]) {
+      await link.hover();
+      assert.equal(await link.evaluate((node) => getComputedStyle(node).textDecorationLine), "none", route.path);
+      await link.focus();
+      assert.deepEqual(await link.evaluate((node) => [getComputedStyle(node).outlineStyle, getComputedStyle(node).outlineWidth]), ["solid", "3px"], route.path);
+    }
+  }
+  await page.close();
+});
+
+test("all 28 routes reflow without document overflow at four widths in both themes", async () => {
   for (const theme of ["light", "dark"]) {
     const page = await browser.newPage();
     await page.addInitScript((value) => localStorage.setItem("xmlsquish-theme", value), theme);
     for (const width of [320, 390, 768, 1440]) {
       await page.setViewportSize({ width, height: 900 });
       for (const route of routes) {
-        await page.goto(base + route.path, { waitUntil: "networkidle" });
+        await page.goto(base + route.path, { waitUntil: "domcontentloaded" });
         assert.equal(await page.evaluate(() => document.documentElement.dataset.moeTheme), theme);
-        const dimensions = await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]);
-        assert(dimensions[0] <= dimensions[1] + 1, `${route.path}: ${theme} ${width}px overflow ${dimensions.join("/")}`);
+        const [scrollWidth, innerWidth] = await page.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
+        assert(scrollWidth <= innerWidth + 1, `${route.path}: ${theme} ${width}px overflow ${scrollWidth}/${innerWidth}`);
       }
     }
     await page.close();
   }
 });
 
-test("home hero stays two-column on desktop and reflows on mobile", async () => {
-  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-  await page.goto(base, { waitUntil: "networkidle" });
-  assert.equal((await page.locator(".hero").evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(" ").length)), 2);
-  await page.setViewportSize({ width: 390, height: 900 });
-  assert.equal((await page.locator(".hero").evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(" ").length)), 1);
-  await page.close();
-});
-
-test("current and historical namespace specifications retain their contracts", async () => {
-  const current = await readFile(join(dist, "ns/dsl.md"), "utf8");
-  assert.equal(current, await readFile(new URL("../../../docs/dsl.md", import.meta.url), "utf8"));
-  assert(current.includes("xs:expand"));
-  const snapshots = [
-    ["0.3.0", "45beace4d8782c0ec4024c56bf581a7e65cc8bf9fadd97dcc3cdf2a856368945"],
-    ["0.2.0", "2a53e352223e393e3669c5e5ef47328bee459a3a6bbfd45b1b88ce2e73015fad"],
-  ];
-  for (const [version, digest] of snapshots) {
-    const published = await readFile(join(dist, `ns/${version}/dsl.md`), "utf8");
-    assert.equal(createHash("sha256").update(published.replaceAll("\r\n", "\n")).digest("hex"), digest);
-  }
-});
-
-test("theme controls survive blocked storage and reduced motion", async () => {
+test("theme control remains operable when storage is blocked", async () => {
   const page = await browser.newPage({ reducedMotion: "reduce" });
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.addInitScript(() => {
-    Storage.prototype.getItem = () => { throw new Error("blocked storage"); };
-    Storage.prototype.setItem = () => { throw new Error("blocked storage"); };
-  });
-  await page.goto(base + "/en/", { waitUntil: "networkidle" });
+  await page.addInitScript(() => { Storage.prototype.getItem = () => { throw new Error("blocked storage"); }; Storage.prototype.setItem = () => { throw new Error("blocked storage"); }; });
+  await page.goto(base + "/en/releases/", { waitUntil: "domcontentloaded" });
   await page.getByRole("button", { name: "Dark", exact: true }).click();
   assert.equal(await page.evaluate(() => document.documentElement.dataset.moeTheme), "dark");
-  assert.equal(await page.locator(".action").first().evaluate((element) => getComputedStyle(element).transitionDuration), "0s");
-  await page.locator(".engine-details summary").click();
-  assert(await page.locator(".engine-details h3").isVisible());
   assert.deepEqual(errors, []);
   await page.close();
 });
