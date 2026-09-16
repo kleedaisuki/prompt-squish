@@ -44,8 +44,9 @@ use squish_protocol::{
     ActionKeyId, Event, EventPayload, ExitStatus, InvocationId, OperationRequest, OperationResult,
     ProjectPath, VcsChoice,
 };
+#[cfg(feature = "fault-injection")]
+use squish_publish::{NoopObserver as NoopPublishObserver, PublishObserver};
 use squish_repository::{Discovery, ProjectRepository};
-use squish_store::{BlobDigest, Cas};
 
 use crate::interrupt::{InterruptCoordinator, StdProcessTerminator, StderrEmergencyRestore};
 
@@ -76,6 +77,28 @@ struct DispatchRuntime {
     terminal: SystemTerminal,
     emergency_terminal: Arc<StderrEmergencyRestore>,
     coordinator: Arc<InterruptCoordinator>,
+}
+
+/// 由组合根分别交给 manager 与具体发布器的故障端口。 /
+/// Fault ports routed independently to the manager and concrete publishers by the composition root.
+struct FaultPorts {
+    durability: DurabilityPorts,
+    #[cfg(feature = "fault-injection")]
+    target_observer: Arc<dyn PublishObserver>,
+    #[cfg(feature = "fault-injection")]
+    catalog_observer: Arc<dyn PublishObserver>,
+}
+
+impl Default for FaultPorts {
+    fn default() -> Self {
+        Self {
+            durability: DurabilityPorts::default(),
+            #[cfg(feature = "fault-injection")]
+            target_observer: Arc::new(NoopPublishObserver),
+            #[cfg(feature = "fault-injection")]
+            catalog_observer: Arc::new(NoopPublishObserver),
+        }
+    }
 }
 
 /// 可跨线程重建的输出故障。 / An output failure that can be reconstructed across threads.
@@ -350,8 +373,8 @@ fn execute(
             true,
         ));
     }
-    let durability = match durability_ports(&environment) {
-        Ok(durability) => durability,
+    let faults = match fault_ports(&environment) {
+        Ok(faults) => faults,
         Err(error) => {
             let message = format!("invalid process-recovery fault selector: {error}");
             return Ok(bootstrap_failure(
@@ -422,7 +445,7 @@ fn execute(
                 ));
             }
         };
-        return dispatch_operation(invocation, config, host, None, runtime, durability);
+        return dispatch_operation(invocation, config, host, runtime, faults.durability);
     }
 
     let explicit = requested_project(&invocation.request)
@@ -463,7 +486,7 @@ fn execute(
         }
     };
     let operation_json = operation_json_requested(&invocation, &config);
-    let (host, storage) = match compose_host(root, &config, environment) {
+    let host = match compose_host(root, &config, environment, &faults) {
         Ok(composed) => composed,
         Err(error) => {
             let message = format!("could not initialize project services: {error}");
@@ -477,21 +500,7 @@ fn execute(
             ));
         }
     };
-    let cas = match Cas::open(storage.cas_root()) {
-        Ok(cas) => cas,
-        Err(error) => {
-            let message = format!("could not open output store: {error}");
-            return Ok(bootstrap_failure(
-                operation_json,
-                "host",
-                "HOST001",
-                &message,
-                1,
-                true,
-            ));
-        }
-    };
-    dispatch_operation(invocation, config, host, Some(cas), runtime, durability)
+    dispatch_operation(invocation, config, host, runtime, faults.durability)
 }
 
 /// 在已有项目与待创建项目完成各自组合后，共享唯一调度和呈现路径。 /
@@ -500,7 +509,6 @@ fn dispatch_operation<S: squish_manager::Services>(
     invocation: ParsedInvocation,
     config: Config,
     host: S,
-    cas: Option<Cas>,
     runtime: DispatchRuntime,
     durability: DurabilityPorts,
 ) -> Result<u8, Box<dyn std::error::Error>> {
@@ -590,8 +598,8 @@ fn dispatch_operation<S: squish_manager::Services>(
     }
     if !query
         && !operation_json
-        && let Some(cas) = cas.as_ref()
-        && let Err(error) = render_format_diffs(&outcome.result, cas)
+        && let Some(project) = requested_project(&invocation.request)
+        && let Err(error) = render_format_diffs(&outcome.result, manager.services(), project)
     {
         return Ok(output_failure(
             Box::new(error),
@@ -612,18 +620,18 @@ fn operation_json_requested(invocation: &ParsedInvocation, config: &Config) -> b
 /// 从进程边界已捕获的环境构造持久化端口。 /
 /// Builds durability ports from the environment snapshot captured at the process boundary.
 #[cfg(feature = "fault-injection")]
-fn durability_ports(
+fn fault_ports(
     environment: &[(OsString, OsString)],
-) -> Result<DurabilityPorts, fault_injection::FaultConfigurationError> {
+) -> Result<FaultPorts, fault_injection::FaultConfigurationError> {
     fault_injection::from_environment(environment)
 }
 
 /// 默认二进制不包含故障配置入口。 / The default binary contains no fault-configuration entry point.
 #[cfg(not(feature = "fault-injection"))]
-fn durability_ports(
+fn fault_ports(
     _environment: &[(OsString, OsString)],
-) -> Result<DurabilityPorts, std::convert::Infallible> {
-    Ok(DurabilityPorts::default())
+) -> Result<FaultPorts, std::convert::Infallible> {
+    Ok(FaultPorts::default())
 }
 
 /// 用互不重叠的持久责任组合生产服务。 / Composes production services with non-overlapping persistence responsibilities.
@@ -636,7 +644,8 @@ fn compose_host(
     root: std::path::PathBuf,
     config: &Config,
     environment: Vec<(OsString, OsString)>,
-) -> Result<(ProductionHost, StorageLayout), Box<dyn std::error::Error>> {
+    faults: &FaultPorts,
+) -> Result<ProductionHost, Box<dyn std::error::Error>> {
     let state = &config.manager.storage_root;
     let catalog = state
         .join("catalog")
@@ -684,7 +693,23 @@ fn compose_host(
         observer: Arc::new(NoopObserver),
         filesystem,
     })?;
-    Ok((host, storage))
+    Ok(install_build_observers(host, faults))
+}
+
+/// 在测试构建中把发布观察者安装到拥有发布器的宿主。 /
+/// Installs publication observers in the publisher-owning host for test builds.
+#[cfg(feature = "fault-injection")]
+fn install_build_observers(host: ProductionHost, faults: &FaultPorts) -> ProductionHost {
+    host.with_build_observers(
+        Arc::clone(&faults.target_observer),
+        Arc::clone(&faults.catalog_observer),
+    )
+}
+
+/// 生产构建不暴露故障注入入口。 / Production builds expose no fault-injection entry point.
+#[cfg(not(feature = "fault-injection"))]
+fn install_build_observers(host: ProductionHost, _faults: &FaultPorts) -> ProductionHost {
+    host
 }
 
 /// 从已验证的 sparse index URL 取得规范 ASCII origin。 / Extracts the canonical ASCII
@@ -1087,7 +1112,11 @@ fn bootstrap_failure(
 }
 
 /// 将人类 fmt 差异产物按结果顺序流式写入 stdout。 / Streams human fmt diff artifacts to stdout in result order.
-fn render_format_diffs(result: &OperationResult, cas: &Cas) -> io::Result<()> {
+fn render_format_diffs<S: squish_manager::Services>(
+    result: &OperationResult,
+    services: &S,
+    project: &Path,
+) -> io::Result<()> {
     let OperationResult::Format(result) = result else {
         return Ok(());
     };
@@ -1096,12 +1125,8 @@ fn render_format_diffs(result: &OperationResult, cas: &Cas) -> io::Result<()> {
     }
     let mut stdout = io::stdout().lock();
     for artifact in &result.diffs {
-        if *artifact.digest.algorithm() != squish_protocol::DigestAlgorithm::Blake3 {
-            return Err(io::Error::other("format diff uses an unsupported digest"));
-        }
-        let digest: BlobDigest = artifact.digest.hex().parse().map_err(io::Error::other)?;
-        let bytes = cas
-            .get(digest)
+        let bytes = services
+            .read_blob(project, &artifact.digest)
             .map_err(io::Error::other)?
             .ok_or_else(|| io::Error::other("format diff is absent from the content store"))?;
         stdout.write_all(&bytes)?;

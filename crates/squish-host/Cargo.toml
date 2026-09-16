@@ -11,16 +11,22 @@ description = "Explicit production composition root for prompt-squish"
 hex = "0.4"
 semver = "1.0"
 sha2 = "0.10"
+squish-backend = { path = "../squish-backend" }
 squish-config = { path = "../squish-config" }
 squish-build = { path = "../squish-build" }
 squish-fetch = { path = "../squish-fetch" }
+squish-ir = { path = "../squish-ir" }
+squish-link = { path = "../squish-link" }
 squish-manager = { path = "../squish-manager" }
 squish-kernel = { path = "../squish-kernel" }
 squish-project = { path = "../squish-project" }
 squish-protocol = { path = "../squish-protocol" }
+squish-publish = { path = "../squish-publish" }
 squish-repository = { path = "../squish-repository" }
 squish-resolver = { path = "../squish-resolver" }
+squish-source = { path = "../squish-source" }
 squish-store = { path = "../squish-store" }
+squish-xml-front = { path = "../squish-xml-front" }
 thiserror = "2.0"
 url = "2.5"
 

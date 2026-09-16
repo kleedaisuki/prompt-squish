@@ -20,25 +20,29 @@ ARIES provides the classic academic treatment of
 
 ## 2. Architecture
 
-The manager owns a single typed `DurabilityPorts` value with three independent ports:
+The three failure domains remain independent, but their injection follows adapter ownership:
 
 ```text
-DurabilityPorts
-├── repository          -> squish_repository::FaultInjector
-├── artifact_generation -> squish_publish::PublishObserver
-└── build_catalog       -> squish_publish::PublishObserver
+xmlsquish composition root
+├── squish-manager::DurabilityPorts
+│   └── repository          -> squish_repository::FaultInjector
+└── ProductionHost / ProductionBuildRuntime
+    ├── artifact_generation -> squish_publish::PublishObserver
+    └── build_catalog       -> squish_publish::PublishObserver
 ```
 
-The separation is semantic, not cosmetic. Target publication and build-catalog publication use
-the same publisher event type, but they have different recovery responsibilities. A global event
-occurrence counter would couple the test to scheduler order and the number of artifacts. Separate
-ports make the scope part of the type-level composition contract.
+The separation is semantic, not cosmetic. Repository mutation remains a manager-selected domain
+capability. Target publication and build-catalog publication are concrete runtime adapters, so
+their observers are installed by `squish-host` when it constructs the two corresponding
+`FileArtifactPublisher` instances. The manager receives only `Arc<dyn BuildRuntime>` and never
+handles publisher observers or constructs publishers.
 
-`ManagerCapability::new` supplies `NoFault` / no-op observers. Hosts requiring explicit
-durability observation use `ManagerCapability::with_durability`. The repository port is installed
-when build, format, add, or remove discovers its `ProjectRepository`; the two publisher ports are
-installed on their corresponding `FileArtifactPublisher` instances. No CLI, environment, or exit
-logic enters a domain crate.
+Target publication and build-catalog publication use the same publisher event type, but they have
+different recovery responsibilities. A global event occurrence counter would couple the test to
+scheduler order and the number of artifacts. Separate host-composed observer inputs preserve that
+scope in the composition contract. Normal composition supplies `NoFault` and no-op observers;
+fault-enabled composition uses `ProductionHost::with_build_observers` to replace only the selected
+publication port. No CLI, environment, or exit logic enters a domain crate.
 
 ## 3. Test-only process adapter
 
@@ -50,7 +54,8 @@ therefore has no runtime hook to activate.
 
 At the composition boundary, the root captures the process environment once. The adapter parses
 `XMLSQUISH_TEST_PROCESS_EXIT_AT` once from that snapshot and maps its closed selector language to
-one durability port. An unknown or non-Unicode value is a deterministic `TEST_FAULT001`
+one repository fault port or one host runtime publisher observer. An unknown or non-Unicode value
+is a deterministic `TEST_FAULT001`
 configuration failure; it never silently degrades to a no-op. A matched observer calls
 `std::process::exit(86)` after the durable operation has completed. It does not panic, unwind, run
 destructors, or ask a domain service to emulate a crash.

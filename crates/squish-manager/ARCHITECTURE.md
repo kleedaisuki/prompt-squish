@@ -19,8 +19,46 @@ publication that crossed the decision emits `CancellationDeferred` immediately
 before its successful action terminal, preserving both the created result and
 the invocation's interrupted status.
 
-`src/services.rs` defines external ports. Concrete registry, Git, checkout,
-filesystem, CAS, index, and artifact adapters remain composition-root concerns.
+`src/services.rs` defines external ports. `src/runtime.rs` defines the
+object-safe `BuildRuntime` and `BuildRuntimeProvider` boundary. Concrete
+registry, Git, checkout, filesystem, CAS, index, publisher, frontend, linker,
+evaluator, and backend adapters remain host/composition-root concerns.
+
+## Injected build runtime
+
+`Services::open_build_runtime` is called once during the recorded planning
+recovery step. The blanket `BuildRuntimeProvider` implementation for `Services`
+keeps command services and runtime acquisition on one injected capability while
+still making the build runtime explicit. Opening it there, rather than during
+process bootstrap, preserves planning failure and event ordering.
+
+The returned `Arc<dyn BuildRuntime>` lives for the complete invocation and is
+shared across scheduler workers. Its `BuildRuntimeDescriptor` freezes
+`frontend_abi`, `linker_abi`, `evaluator_abi`, and `document_abi`; planning also
+queries that runtime's option-dependent backend identity before plan sealing.
+Planning and execution therefore cannot accidentally use different toolchain
+identities.
+
+The boundary divides responsibility as follows:
+
+| Manager | Runtime implementation |
+| --- | --- |
+| Build requests, action keys, cache eligibility, named output contracts | Blob and action-index effects |
+| Digest/size/schema/result validation and cache hydration | Target and build-catalog generation I/O |
+| Reconciliation, cancellation accounting, lifecycle events, finalization policy | Frontend, linker, evaluator, and backend implementation selection |
+| Typed `GenerationSpace` choice (`TargetArtifacts` or `BuildCatalog`) | Publisher locks, recovery, and physical layout |
+
+Runtime methods return domain values or `BuildRuntimeError`. They never emit
+kernel events, print, or choose process exits. `BuildExecutor` owns the runtime
+plus invocation-local semantic state; it does not name or open `Cas`,
+`VerifiedActionIndex`, or `FileArtifactPublisher`.
+
+`squish-host::ProductionHost` owns the production implementation. It opens one
+coherent CAS/action-index graph, distinct target and catalog publishers backed
+by that graph, and the selected compiler toolchain. Publisher observers are
+installed with `ProductionHost::with_build_observers` because they are adapter
+construction inputs. Manager
+`DurabilityPorts` retains only repository mutation fault injection.
 
 ## Plan invariant
 
@@ -98,9 +136,13 @@ A production host must implement every raw port and validate its adapter inputs:
   destination plus VCS/workspace placement consistent with the requested policy.
 - `create_project`: publish the exact candidate through the repository recovery
   transaction and return `Cancelled` only before its commit decision.
+- `open_build_runtime`: open or return one coherent invocation runtime whose
+  descriptor and adapters remain stable through planning, execution, and
+  finalization.
 - `storage_layout`: return four absolute, normalized, non-overlapping paths for
   CAS blobs, the action-index database, generation publication, and durable
-  catalogs. Production adapters must not infer these locations independently.
+  catalogs. This path contract remains for repository mutation and inspection;
+  build and format workers must not use it to construct storage adapters.
 - `materialize_locked`: materialize registry/Git packages pinned by an existing
   lock before the repository freezes the full candidate snapshot.
 - `resolve`: resolve the complete manifest snapshot, canonical digest, prior
@@ -117,9 +159,9 @@ A production host must implement every raw port and validate its adapter inputs:
   manager-side graph validation.
 
 Hard-coded storage paths exist only in
-`StorageLayout::project_local_for_tests`. Every production operation obtains and
-authorizes a `StorageLayout` before opening CAS, action-index, publication, or
-catalog state; no worker independently derives a project-local fallback.
+`StorageLayout::project_local_for_tests`. `ProductionHost` validates and
+authorizes the layout before composing the runtime; no manager worker opens an
+adapter or independently derives a project-local fallback.
 
 ## External artifact contracts
 
@@ -198,6 +240,10 @@ user repair.
   hydrate their state from verified CAS bytes. The fresh-manager cache test in
   `tests/build.rs` proves that no executor-local map is required across an
   invocation boundary.
+- Build and format effects use the injected `BuildRuntime`; concrete CAS,
+  action-index, publisher, and toolchain construction lives in `squish-host`.
+  Runtime descriptors are frozen before plan sealing, and target/catalog
+  publisher observers are composed at that host boundary.
 - A target's prompt, debug companion, emitted IR, and target record commit as
   one publisher generation. The aggregate `BuildRecord` is post-generation
   coordination describing completed target generations; it is not falsely

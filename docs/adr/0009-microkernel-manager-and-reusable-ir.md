@@ -112,6 +112,14 @@ stringly typed message passing. Future frontend and backend registration may
 use compile-time registries or an explicitly versioned process protocol; Rust
 ABI dynamic loading is outside this decision.
 
+Production build composition is performed by `squish-host`, selected by the
+executable root. The manager receives an invocation-scoped `BuildRuntime`
+through `BuildRuntimeProvider`; it does not open a CAS, action index, publisher,
+frontend, linker, evaluator, or backend implementation. The provider is opened
+during the recorded planning recovery step rather than at process bootstrap, so
+adapter failures preserve the planning lifecycle and event order. One returned
+runtime is shared for the complete invocation and across its worker threads.
+
 The kernel may perform only these responsibilities:
 
 - parse a top-level command into a typed request;
@@ -130,6 +138,8 @@ Ports express capabilities rather than expose concrete objects:
 
 ```text
 Manager              execute a typed project use case through one orchestration path
+BuildRuntimeProvider open one coherent, invocation-scoped build runtime
+BuildRuntime         blob/action storage, typed generations, and selected toolchain
 ProjectRepository    load/edit manifest and workspace intent
 DependencyResolver   resolve intent to an exact graph
 SourceProvider       resolve SourceRef and load immutable SourceEnvelope
@@ -145,6 +155,14 @@ EventSink             receive typed lifecycle/diagnostic/progress events
 Clock/TerminalProbe   adapter-only capabilities, never implicit semantics
 ```
 
+`BuildRuntimeDescriptor` freezes the frontend, linker, evaluator, and document
+ABIs; planning also queries the same runtime's option-dependent backend identity
+before the plan is sealed. The
+manager owns action-key recipes, cache eligibility, result validation,
+reconciliation policy, and lifecycle events; the runtime owns effects and
+implementation selection. Runtime implementations return values and typed
+failures and never emit kernel events or write terminal output.
+
 Ports return domain values and typed failures. They do not print, terminate the
 process, discover global singletons, or smuggle an open database connection
 through an IR type. Adapters own filesystem, network, SQLite, and terminal
@@ -158,7 +176,7 @@ they are private implementation crates unless separately declared public.
 | Crate/context | Owns | Forbidden knowledge |
 | --- | --- | --- |
 | `squish-kernel` | bootstrap contracts, command/result envelope, lifecycle | XML, TOML, SQLite schemas, ANSI |
-| `squish-manager` | unified `fmt`/`build`/`add`/`remove`/`inspect` use cases, planning-attempt control, post-plan finalization, and the `Manager` implementation | concrete terminal rendering, XML parser internals |
+| `squish-manager` | unified `fmt`/`build`/`add`/`remove`/`inspect` use cases, runtime port contracts, planning-attempt control, post-plan finalization, and the `Manager` implementation | concrete store/publisher/toolchain adapters, terminal rendering, XML parser internals |
 | `squish-project` | manifests, workspaces, targets, profiles, typed edits | XML operations, cache layout |
 | `squish-resolver` | requirements, exact package graph, lock model | DSL syntax, terminal output |
 | `squish-source` | canonical `SourceIdentity` validation, `SourceRef` resolution, source envelopes and snapshots | wire event schemas, macros, artifact publication |
@@ -177,6 +195,7 @@ they are private implementation crates unless separately declared public.
 | `squish-diagnostic` | diagnostic codes, labels, causes, suggestions | rendering and stream ownership |
 | `squish-protocol` | opaque cross-context `SourceId` wire newtype; versioned command, diagnostic, event, plan, result and NDJSON envelopes | source-identity validation, domain execution and rendering policy |
 | `squish-presentation` | human/NDJSON rendering and micro-interactions | executing or mutating jobs |
+| `squish-host` | production filesystem, fetch, resolver, `BuildRuntime`, and observer composition | manager planning policy, lifecycle rendering |
 | `xmlsquish` | binary composition root and adapters | domain implementations in `main` |
 
 The permitted dependency structure is acyclic. Arrows below mean “depends on”:
@@ -201,9 +220,11 @@ build        ----> protocol, project, resolver, source, ir, frontend-xml,
 store        ----> build (storage ports), source, diagnostic
 artifact     ----> build (publication/transaction ports), diagnostic
 manager      ----> kernel (Manager port), protocol, build, project, resolver,
-                   format-xml, ir-codec
+                   format-xml, ir-codec, domain toolchain types
+host         ----> manager (runtime ports), store, artifact, frontend-xml,
+                   link, runtime, backend-squish, repository, resolver
 presentation ----> protocol, diagnostic
-xmlsquish    ----> kernel, manager, presentation, concrete adapters
+xmlsquish    ----> kernel, manager, host, presentation
 ```
 
 The drawing groups many direct edges for readability. The normative ownership
@@ -217,7 +238,10 @@ kernel's `Manager` port by composing the build, formatting, project mutation,
 and inspection use cases. `squish-build` owns the action engine, build plan, and
 storage/publication port definitions, not orchestration of every command.
 Consequently concrete `squish-store` and `squish-artifact` depend on those ports;
-the build engine never depends on either adapter. The exact executable
+the build engine and manager never depend on either adapter. `squish-host`
+implements the manager-owned runtime port and composes one coherent CAS/index,
+the target and catalog generation repositories, and the selected compilation
+toolchain. The exact executable
 direct-edge list in
 [`scripts/architecture_edges.txt`](../../scripts/architecture_edges.txt), rather
 than the conceptual drawing or visual layout of crates, is the dependency
@@ -237,7 +261,8 @@ The exact visual placement is less important than these enforced rules:
 - `squish-manager` orchestrates use cases and `squish-build` schedules build
   capabilities without owning their semantics;
 - `squish-presentation` consumes public events but cannot call executors; and
-- `xmlsquish` is the only crate allowed to assemble the complete graph.
+- `squish-host` assembles concrete production runtimes, while `xmlsquish` alone
+  selects that host and assembles the complete application graph.
 
 CI checks the crate graph (including forbidden dependencies) so architectural
 boundaries cannot silently decay into module naming conventions.
@@ -349,7 +374,7 @@ Two immutable records bridge authoritative intent and derived execution state:
 `BuildInputSnapshot` records the exact manifest/lock revisions, complete source
 envelopes (logical identity, exact bytes, encoding/BOM facts, content digest and
 load outcome), remote package blobs, and options observed by one invocation;
-`BuildRecordV2` records the snapshot and plan digests, materialized action keys,
+`BuildRecordV3` records the snapshot and plan digests, materialized action keys,
 every terminal action fact (including failed, blocked, and cancelled actions),
 result digests, diagnostics/trace references, publication generations, and the
 execution outcome observed before catalog persistence. It is constructed only
@@ -371,7 +396,7 @@ content digest, transitive edges, resolver version/policy, and relevant source
 metadata. Path dependencies record their locator and declared manifest/package
 identity, not a content snapshot: they remain deliberately mutable. Exact
 content digests for path packages belong to the per-invocation
-`BuildInputSnapshot` and durable `BuildRecordV2`, never the resolution lock.
+`BuildInputSnapshot` and durable `BuildRecordV3`, never the resolution lock.
 Registry archives and Git dependencies require an immutable content digest or
 commit identity.
 
@@ -621,7 +646,7 @@ in the execution plan.
 A final, non-DAG **finalization** phase follows the final non-superseded plan.
 It consumes the now-immutable plan inspection, terminal action facts,
 publication generations, diagnostics, and provisional outcome. The first
-finalizer is `PersistBuildCatalog`, which writes `BuildRecordV2` even when
+finalizer is `PersistBuildCatalog`, which writes `BuildRecordV3` even when
 execution failed or was cancelled. It cannot be a normal action: before the
 other actions terminate its complete inputs do not exist, and adding it after
 `PlanReady` would reopen the graph. It also cannot remain a silent call after
@@ -788,7 +813,7 @@ must be `Superseded`.
 The kernel binds the requested `OperationKind` into the lifecycle at dispatch.
 Under the initial policy, an executable `Build` plan requires exactly one
 terminal `PersistBuildCatalog` finalizer. A pre-plan build failure and non-build
-operation may have no finalizer; `BuildRecordV2` requires a final plan and the
+operation may have no finalizer; `BuildRecordV3` requires a final plan and the
 manager must not invent one. `ReportOnly` build has no catalog finalizer because
 dry-run performs no write. `OperationCompleted` occurs exactly once, closes the
 finalization set, and rejects an active/nonterminal finalizer or a missing
@@ -832,7 +857,7 @@ sequential `orchestrator::finalize` coordinator emits
 `FinalizationStarted`, invokes one typed finalization closure, and emits exactly
 one matching success/failure event; it is not the scheduler and cannot call
 `BuildPlan::new`, look up an action cache key, publish an action transition, or
-change the report. `PersistBuildCatalog` canonically encodes `BuildRecordV2`,
+change the report. `PersistBuildCatalog` canonically encodes `BuildRecordV3`,
 puts the immutable bytes in CAS, and advances the recoverable catalog
 generation. Its returned artifact appears in the final `BuildResult`;
 `FinalizationSucceeded` records lifecycle/timing without duplicating the
@@ -865,7 +890,7 @@ is conditional on the observed revision set and says so in machine output.
 
 Required finalization is cleanup, not new domain work, so an already-requested
 cooperative cancellation does not skip `PersistBuildCatalog`; the cancellation
-state is instead recorded in `BuildRecordV2`. A required finalizer does not use
+state is instead recorded in `BuildRecordV3`. A required finalizer does not use
 the cooperative token as an abort condition; it runs to a terminal event and
 reports ordinary I/O failure as `FinalizationFailed`. In particular, after the
 catalog transaction writes its durable commit decision, cooperative
@@ -924,7 +949,7 @@ The content-addressed store holds immutable source snapshots, dependency
 archives, `.xsir` containers, persistable `StaticLinkMap` and non-executable
 `LinkedImage` metadata, `LinkedDocumentIR` artifacts where profitable,
 backend products awaiting publication, `.psdbg` components, and immutable
-`BuildRecordV2` bytes awaiting catalog-generation publication. A blob key is
+`BuildRecordV3` bytes awaiting catalog-generation publication. A blob key is
 `algorithm:digest(bytes)`. Writes use a temporary file, streaming digest and
 length verification, durable close, and atomic placement. Concurrent insertion
 of identical content converges on one blob. Blob bytes are never modified in
@@ -1156,7 +1181,7 @@ silently reported as wholly complete.
     the last committed generation.
 22. **Honest dry-run.** `ReportOnly` plans declare the exact graph and candidate
     effects but start no actions and publish no authoritative bytes.
-23. **Post-plan evidence.** `BuildRecordV2` is produced only from a closed final
+23. **Post-plan evidence.** `BuildRecordV3` is produced only from a closed final
     plan and its complete terminal facts. It is never a plan action and never
     requires reopening or appending to the DAG.
 24. **Observable finalization.** Every selected finalizer has one typed start
@@ -1321,7 +1346,7 @@ conflict without mutating the old graph or asking the user to repair manager
 state. One seal per `PlanId`, with sequential plans inside one job, preserves
 both immutability and recovery. The common path still has exactly one plan.
 
-### Persist `BuildRecordV2` as the last DAG action
+### Persist `BuildRecordV3` as the last DAG action
 
 Rejected. The record contains the terminal states of failed, blocked, and
 cancelled actions, including actions that would be peers or predecessors of
@@ -1370,6 +1395,10 @@ explicit ephemeral project through the same manager.
 Implementation of this accepted decision is complete only when evidence demonstrates:
 
 - the crate graph obeys the declared dependency rules;
+- production build and format effects enter through an injected
+  `BuildRuntime`; manager code names no concrete CAS, action-index, publisher,
+  frontend, linker, evaluator, or backend implementation, and deterministic
+  test runtimes use the same port;
 - every ADR 0007 primitive lowers to, survives codec round-trip in, and executes
   from `ModuleIR` with equivalent semantics and diagnostics;
 - canonical IR and debug containers reject truncation, checksum failure,
@@ -1398,7 +1427,7 @@ Implementation of this accepted decision is complete only when evidence demonstr
   cancellation traces all order `PlanClosed` ->
   `FinalizationStarted(PersistBuildCatalog)` -> `FinalizationSucceeded` ->
   `OperationCompleted`, and
-  their decoded `BuildRecordV2` contains exactly the final plan's sorted
+  their decoded `BuildRecordV3` contains exactly the final plan's sorted
   terminal action facts and provisional outcome;
 - lifecycle negative tests reject finalization before a final plan/pre-plan
   terminal path, duplicate `FinalizationId`, a nonterminal finalizer at

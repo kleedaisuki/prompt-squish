@@ -7,13 +7,17 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod runtime;
+
+pub use runtime::ProductionBuildRuntime;
+
 use std::{
     collections::BTreeMap,
     ffi::OsString,
     fmt,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -28,14 +32,15 @@ use squish_fetch::{
     Materializer, Observer, RegistryConfig, SourceEvent, SparseRegistry, SystemGitRunner,
 };
 use squish_manager::{
-    ArtifactLocator, ProjectCreationLocation, ProjectCreationStatus, ProvenanceNonApplicability,
-    ProvenanceRelation, ResolveRequest, ResolvedDependencies, ServiceError, Services,
-    StorageLayout,
+    ArtifactLocator, BuildRuntime, BuildRuntimeError, ProjectCreationLocation,
+    ProjectCreationStatus, ProvenanceNonApplicability, ProvenanceRelation, ResolveRequest,
+    ResolvedDependencies, ServiceError, Services, StorageLayout,
 };
 use squish_project::{
     DependencyResolver, LockedSource, Lockfile, Manifest, ResolutionInput, ResolutionMode,
 };
 use squish_protocol::VcsChoice;
+use squish_publish::{NoopObserver as NoopPublishObserver, PublishObserver};
 use squish_repository::{
     CreateProjectRequest, FaultInjector, PackageLocation, ProjectVcs, RepositoryError,
     StagePreparer, WorkspaceMembership, create_project,
@@ -44,7 +49,8 @@ use squish_resolver::{
     Access as ResolverAccess, FilesystemPort, GitCandidate, GitPort, LocalPackage, LocalRequest,
     RegistryCandidate, RegistryPort, Resolver, SourceUnavailable,
 };
-use squish_store::{ActionKey as StoreActionKey, BlobDigest, Cas, VerifiedActionIndex};
+#[cfg(test)]
+use squish_store::{BlobDigest, Cas, VerifiedActionIndex};
 
 /// 一个 resolver registry 名称及其稳定 fetch 配置。 / One resolver registry name and its stable fetch configuration.
 #[derive(Clone, Debug)]
@@ -523,6 +529,9 @@ pub struct ProductionHost {
     git: GitHost,
     git_runner: Arc<dyn GitRunner>,
     filesystem: Arc<dyn FilesystemPort + Send + Sync>,
+    build_runtime: Mutex<Option<Arc<ProductionBuildRuntime>>>,
+    target_publish_observer: Arc<dyn PublishObserver>,
+    catalog_publish_observer: Arc<dyn PublishObserver>,
 }
 
 impl ProductionHost {
@@ -613,7 +622,28 @@ impl ProductionHost {
             git,
             git_runner,
             filesystem: config.filesystem,
+            build_runtime: Mutex::new(None),
+            target_publish_observer: Arc::new(NoopPublishObserver),
+            catalog_publish_observer: Arc::new(NoopPublishObserver),
         })
+    }
+
+    /// 注入彼此隔离的目标产物与 build-catalog 持久化观察者。 /
+    /// Installs isolated durability observers for target artifacts and the build catalog.
+    ///
+    /// 观察者必须只观察已完成的发布边界；运行时不会借此发射 kernel 事件。 / Observers
+    /// must observe only completed publication boundaries; the runtime never uses them to emit
+    /// kernel events.
+    #[must_use]
+    pub fn with_build_observers(
+        mut self,
+        target: Arc<dyn PublishObserver>,
+        catalog: Arc<dyn PublishObserver>,
+    ) -> Self {
+        self.target_publish_observer = target;
+        self.catalog_publish_observer = catalog;
+        self.build_runtime = Mutex::new(None);
+        self
     }
 
     /// 返回规范化项目根。 / Returns the canonical project root.
@@ -1191,6 +1221,16 @@ fn nearest_existing_directory(path: &Path) -> std::io::Result<PathBuf> {
 }
 
 impl Services for ProductionHost {
+    fn open_build_runtime(
+        &self,
+        project_root: &Path,
+    ) -> Result<Arc<dyn BuildRuntime>, ServiceError> {
+        self.require_project(project_root)?;
+        self.runtime()
+            .map(|runtime| runtime as Arc<dyn BuildRuntime>)
+            .map_err(|error| ServiceError::new(error.code(), error.message()))
+    }
+
     fn locate_project_creation(
         &self,
         destination: &Path,
@@ -1244,8 +1284,10 @@ impl Services for ProductionHost {
         project: &Path,
     ) -> Result<Vec<squish_protocol::CachedAction>, ServiceError> {
         self.require_project(project)?;
-        cache_records(self.storage.cas_root(), self.storage.action_index())
-            .map_err(|error| ServiceError::new("cache_catalog_failed", error))
+        self.runtime()
+            .map_err(|error| ServiceError::new(error.code(), error.message()))?
+            .cache_records()
+            .map_err(|error| ServiceError::new(error.code(), error.message()))
     }
 
     fn read_blob(
@@ -1254,8 +1296,10 @@ impl Services for ProductionHost {
         digest: &squish_protocol::Digest,
     ) -> Result<Option<Vec<u8>>, ServiceError> {
         self.require_project(project)?;
-        read_blob(self.storage.cas_root(), digest)
-            .map_err(|error| ServiceError::new("blob_read_failed", error))
+        self.runtime()
+            .map_err(|error| ServiceError::new(error.code(), error.message()))?
+            .read_blob(digest)
+            .map_err(|error| ServiceError::new(error.code(), error.message()))
     }
 
     fn artifact(
@@ -1335,6 +1379,25 @@ impl Services for ProductionHost {
 }
 
 impl ProductionHost {
+    fn runtime(&self) -> Result<Arc<ProductionBuildRuntime>, BuildRuntimeError> {
+        let mut slot = self.build_runtime.lock().map_err(|_| {
+            BuildRuntimeError::storage(
+                "host_runtime_coordination",
+                "build-runtime coordination mutex is poisoned",
+            )
+        })?;
+        if let Some(runtime) = slot.as_ref() {
+            return Ok(runtime.clone());
+        }
+        let runtime = Arc::new(ProductionBuildRuntime::open(
+            &self.storage,
+            self.target_publish_observer.clone(),
+            self.catalog_publish_observer.clone(),
+        )?);
+        *slot = Some(runtime.clone());
+        Ok(runtime)
+    }
+
     fn require_project(&self, project: &Path) -> Result<(), ServiceError> {
         let canonical = std::fs::canonicalize(project)
             .map_err(|error| ServiceError::new("project_root_unavailable", error.to_string()))?;
@@ -1354,83 +1417,16 @@ impl ProductionHost {
     fn current_catalog(
         &self,
     ) -> Result<Option<squish_manager::build::BuildCatalogSnapshot>, ServiceError> {
-        squish_manager::build::read_current_build_catalog(&self.storage)
+        let runtime = self
+            .runtime()
+            .map_err(|error| ServiceError::new(error.code(), error.message()))?;
+        squish_manager::build::read_current_build_catalog(runtime.as_ref())
             .map_err(|error| ServiceError::new("build_catalog_failed", error.to_string()))
     }
 }
 
 fn service_error(code: &str, error: SourceUnavailable) -> ServiceError {
     ServiceError::new(code, format!("{}: {}", error.identity, error.detail))
-}
-
-fn protocol_digest(digest: BlobDigest) -> squish_protocol::Digest {
-    squish_protocol::Digest::new(
-        squish_protocol::DigestAlgorithm::Blake3,
-        digest.as_bytes().to_vec(),
-    )
-    .expect("BLAKE3 digest has the protocol's canonical length")
-}
-
-fn blob_digest(digest: &squish_protocol::Digest) -> Option<BlobDigest> {
-    if digest.algorithm() != &squish_protocol::DigestAlgorithm::Blake3 {
-        return None;
-    }
-    let bytes: [u8; 32] = digest.bytes().try_into().ok()?;
-    Some(BlobDigest::from_bytes(bytes))
-}
-
-fn cache_records(
-    cas_root: &Path,
-    action_index: &Path,
-) -> Result<Vec<squish_protocol::CachedAction>, String> {
-    let cas = Arc::new(Cas::open(cas_root).map_err(|error| error.to_string())?);
-    let index = VerifiedActionIndex::open(action_index, cas).map_err(|error| error.to_string())?;
-    let mut after: Option<StoreActionKey> = None;
-    let mut records = Vec::new();
-    loop {
-        let page = index
-            .manifest_page(after, squish_store::MAX_MANIFEST_PAGE_SIZE)
-            .map_err(|error| error.to_string())?;
-        for manifest in page.manifests {
-            let action_key =
-                squish_protocol::ActionKeyId::new(manifest.record.key.as_str().to_owned())
-                    .map_err(|error| error.to_string())?;
-            let outputs = manifest
-                .record
-                .outputs
-                .into_iter()
-                .map(|output| {
-                    Ok(squish_protocol::Artifact {
-                        id: squish_protocol::ArtifactId::new(output.name.as_str().to_owned())
-                            .map_err(|error| error.to_string())?,
-                        kind: output.kind,
-                        uri: format!("cas:blake3:{}", output.digest.hex()),
-                        size: output.size,
-                        digest: output.digest,
-                    })
-                })
-                .collect::<Result<Vec<_>, String>>()?;
-            records.push(squish_protocol::CachedAction {
-                action_key,
-                result_digest: protocol_digest(manifest.result_digest),
-                outputs,
-            });
-        }
-        after = page.next_after;
-        if after.is_none() {
-            break;
-        }
-    }
-    Ok(records)
-}
-
-fn read_blob(cas_root: &Path, digest: &squish_protocol::Digest) -> Result<Option<Vec<u8>>, String> {
-    let Some(digest) = blob_digest(digest) else {
-        return Ok(None);
-    };
-    Cas::open(cas_root)
-        .and_then(|cas| cas.get(digest))
-        .map_err(|error| error.to_string())
 }
 
 struct RegistryView<'a>(&'a ProductionHost);

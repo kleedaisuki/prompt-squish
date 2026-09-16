@@ -7,6 +7,8 @@ use squish_manager::DurabilityPorts;
 use squish_publish::{DurablePoint, NoopObserver, PublishEvent, PublishObserver};
 use squish_repository::{FaultInjector, FaultPoint, NoFault};
 
+use crate::FaultPorts;
+
 const SELECTOR_VARIABLE: &str = "XMLSQUISH_TEST_PROCESS_EXIT_AT";
 const PROCESS_DEATH_EXIT_CODE: i32 = 86;
 
@@ -33,34 +35,34 @@ enum Selection {
 /// Parses the closed selector once from an already captured environment snapshot.
 pub fn from_environment(
     environment: &[(OsString, OsString)],
-) -> Result<DurabilityPorts, FaultConfigurationError> {
+) -> Result<FaultPorts, FaultConfigurationError> {
     let value = environment
         .iter()
         .find(|(name, _)| name == SELECTOR_VARIABLE)
         .map(|(_, value)| value);
     let Some(value) = value else {
-        return Ok(DurabilityPorts::default());
+        return Ok(FaultPorts::default());
     };
     let value = value.to_str().ok_or_else(|| {
         FaultConfigurationError(format!("{SELECTOR_VARIABLE} must contain valid Unicode"))
     })?;
     let selection = parse(value)?;
     Ok(match selection {
-        Selection::ArtifactGeneration(point) => DurabilityPorts::new(
-            Arc::new(NoFault),
-            Arc::new(ExitPublisher(point)),
-            Arc::new(NoopObserver),
-        ),
-        Selection::BuildCatalog(point) => DurabilityPorts::new(
-            Arc::new(NoFault),
-            Arc::new(NoopObserver),
-            Arc::new(ExitPublisher(point)),
-        ),
-        Selection::Repository(point) => DurabilityPorts::new(
-            Arc::new(ExitRepository(point)),
-            Arc::new(NoopObserver),
-            Arc::new(NoopObserver),
-        ),
+        Selection::ArtifactGeneration(point) => FaultPorts {
+            durability: DurabilityPorts::new(Arc::new(NoFault)),
+            target_observer: Arc::new(ExitPublisher(point)),
+            catalog_observer: Arc::new(NoopObserver),
+        },
+        Selection::BuildCatalog(point) => FaultPorts {
+            durability: DurabilityPorts::new(Arc::new(NoFault)),
+            target_observer: Arc::new(NoopObserver),
+            catalog_observer: Arc::new(ExitPublisher(point)),
+        },
+        Selection::Repository(point) => FaultPorts {
+            durability: DurabilityPorts::new(Arc::new(ExitRepository(point))),
+            target_observer: Arc::new(NoopObserver),
+            catalog_observer: Arc::new(NoopObserver),
+        },
     })
 }
 

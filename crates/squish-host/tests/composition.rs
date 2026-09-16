@@ -2,12 +2,13 @@
 
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
+use squish_build::PublicationTargetId;
 use squish_fetch::{
     FetchError, GitInvocation, GitRunOutput, GitRunner, HttpRequest, HttpResponse, HttpTransport,
     Limits, NoCredentials, NoopObserver,
 };
 use squish_host::{GitExecution, HostConfig, ProductionHost};
-use squish_manager::{ResolveRequest, Services, StorageLayout};
+use squish_manager::{GenerationSpace, ResolveRequest, Services, StorageLayout};
 use squish_project::{Manifest, ResolutionMode};
 
 struct NoHttp;
@@ -91,4 +92,43 @@ fn public_services_preserve_exact_locked_and_frozen_resolution() {
         assert_eq!(reused.lockfile, initial.lockfile);
         assert!(reused.packages.is_empty());
     }
+}
+
+#[test]
+fn production_runtime_uses_one_cas_and_isolated_generation_spaces() {
+    let (_temporary, host) = fixture();
+    let runtime = Services::open_build_runtime(&host, host.project_root()).unwrap();
+    let reopened = Services::open_build_runtime(&host, host.project_root()).unwrap();
+    assert!(Arc::ptr_eq(&runtime, &reopened));
+    let descriptor = runtime.descriptor();
+    assert_eq!(descriptor.frontend_abi, "xmlsquish.xml/1");
+    assert_eq!(descriptor.linker_abi, "xmlsquish.link/1");
+    assert_eq!(descriptor.evaluator_abi, "xmlsquish.instantiate/1");
+    assert_eq!(descriptor.document_abi, squish_backend::DOCUMENT_ABI);
+
+    let digest = runtime.write_blob(b"shared runtime blob").unwrap();
+    assert_eq!(
+        Services::read_blob(&host, host.project_root(), &digest).unwrap(),
+        Some(b"shared runtime blob".to_vec())
+    );
+
+    let target = PublicationTargetId::new("runtime-fixture").unwrap();
+    let target_generation = runtime
+        .publish_generation(GenerationSpace::TargetArtifacts, &target, &[])
+        .unwrap();
+    let catalog_generation = runtime
+        .publish_generation(GenerationSpace::BuildCatalog, &target, &[])
+        .unwrap();
+    assert_eq!(
+        runtime
+            .current_generation(GenerationSpace::TargetArtifacts, &target)
+            .unwrap(),
+        Some(target_generation)
+    );
+    assert_eq!(
+        runtime
+            .current_generation(GenerationSpace::BuildCatalog, &target)
+            .unwrap(),
+        Some(catalog_generation)
+    );
 }

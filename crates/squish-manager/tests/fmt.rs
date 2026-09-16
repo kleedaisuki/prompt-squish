@@ -1,3 +1,5 @@
+mod common;
+
 use std::{
     path::Path,
     sync::{
@@ -19,6 +21,8 @@ use squish_protocol::{
 use squish_repository::{Discovery, PackageLocation, ProjectRepository};
 use squish_store::{BlobDigest, Cas};
 use squish_xml_front::DSL_NAMESPACE;
+
+use common::TestBuildRuntime;
 
 #[derive(Default)]
 struct Events(Mutex<Vec<Event>>);
@@ -70,6 +74,16 @@ impl EventSink for FormatBarrierEvents {
 struct UnusedServices;
 
 impl Services for UnusedServices {
+    fn open_build_runtime(
+        &self,
+        project: &Path,
+    ) -> Result<Arc<dyn squish_manager::BuildRuntime>, ServiceError> {
+        let layout = StorageLayout::project_local_for_tests(project);
+        TestBuildRuntime::open(&layout)
+            .map(|runtime| Arc::new(runtime) as Arc<dyn squish_manager::BuildRuntime>)
+            .map_err(|error| ServiceError::new(error.code(), error.message()))
+    }
+
     fn storage_layout(&self, project: &Path) -> Result<StorageLayout, ServiceError> {
         Ok(StorageLayout::project_local_for_tests(project))
     }
@@ -357,7 +371,8 @@ fn graph_digest(project: &Path, check: bool, diff: bool) -> squish_build::Semant
         ProjectRepository::discover(Discovery::Explicit(project.to_path_buf())).unwrap();
     let snapshot = repository.snapshot_workspace().unwrap();
     let storage = StorageLayout::project_local_for_tests(repository.root());
-    fmt::prepare(&request, &snapshot, &[], &storage)
+    let runtime = Arc::new(TestBuildRuntime::open(&storage).unwrap());
+    fmt::prepare(&request, &snapshot, &[], runtime)
         .unwrap()
         .plan()
         .unwrap()

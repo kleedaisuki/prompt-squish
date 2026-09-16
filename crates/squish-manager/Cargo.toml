@@ -20,15 +20,15 @@ squish-format = { path = "../squish-format" }
 squish-ir = { path = "../squish-ir" }
 squish-kernel = { path = "../squish-kernel" }
 squish-link = { path = "../squish-link" }
-squish-publish = { path = "../squish-publish" }
 squish-project = { path = "../squish-project" }
 squish-protocol = { path = "../squish-protocol" }
 squish-repository = { path = "../squish-repository" }
 squish-resolver = { path = "../squish-resolver" }
 squish-source = { path = "../squish-source" }
-squish-store = { path = "../squish-store" }
 squish-xml-front = { path = "../squish-xml-front" }
 walkdir = "2.5"
 
 [dev-dependencies]
+squish-publish = { path = "../squish-publish" }
+squish-store = { path = "../squish-store" }
 tempfile = "3.23"

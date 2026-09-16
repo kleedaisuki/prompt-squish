@@ -15,12 +15,17 @@ mod model;
 pub mod mutation;
 pub mod new;
 pub mod orchestrator;
+mod runtime;
 mod services;
 
 pub use error::{ManagerError, ServiceError};
 pub use model::{
     ArtifactLocator, Effect, InspectSubject, InvalidArtifactLocator, PlannedWork, PreparedPlan,
     PreparedPlanError,
+};
+pub use runtime::{
+    BuildRuntime, BuildRuntimeDescriptor, BuildRuntimeError, BuildRuntimeErrorKind,
+    BuildRuntimeProvider, GenerationSpace,
 };
 pub use services::{
     ProjectCreationLocation, ProjectCreationStatus, ProvenanceNonApplicability, ProvenanceRelation,
@@ -29,60 +34,34 @@ pub use services::{
 
 use squish_kernel::{Capability, CapabilityDescriptor, InvocationContext, OperationOutcome};
 use squish_protocol::{OperationKind, OperationRequest, PackageName, VcsChoice};
-use squish_publish::{NoopObserver as NoopPublishObserver, PublishObserver};
 use squish_repository::{FaultInjector, NoFault};
 use std::sync::Arc;
 
 /// 持久化边界端口，用于宿主级故障观测与确定性恢复测试。 /
 /// Durability-boundary ports for host-level observation and deterministic recovery tests.
 ///
-/// 三个端口按持久化责任分区：仓库事务、目标产物 generation 与 build
-/// catalog generation 不会依赖“第几次事件”这种脆弱的全局计数。生产默认值不注入
-/// 故障且不观测发布事件。 / The three ports are partitioned by durability
-/// responsibility: repository transactions, target artifact generations, and build-catalog
-/// generations never depend on a brittle global occurrence counter. Production defaults inject
-/// no faults and observe no publication events.
+/// 发布 observer 是具体发布器的构造输入，因而属于 host/root 组合根，不经过
+/// manager。 / Publication observers are concrete-publisher construction inputs and therefore
+/// belong to the host/root composition boundary rather than the manager.
 #[derive(Clone)]
 pub struct DurabilityPorts {
     repository: Arc<dyn FaultInjector>,
-    artifact_generation: Arc<dyn PublishObserver>,
-    build_catalog: Arc<dyn PublishObserver>,
 }
 
 impl DurabilityPorts {
-    /// 由三个独立的持久化端口构造。 / Constructs independent durability ports for each persistence domain.
-    pub fn new(
-        repository: Arc<dyn FaultInjector>,
-        artifact_generation: Arc<dyn PublishObserver>,
-        build_catalog: Arc<dyn PublishObserver>,
-    ) -> Self {
-        Self {
-            repository,
-            artifact_generation,
-            build_catalog,
-        }
+    /// 由仓库事务故障端口构造。 / Constructs from the repository-transaction fault port.
+    pub fn new(repository: Arc<dyn FaultInjector>) -> Self {
+        Self { repository }
     }
 
     pub(crate) fn repository(&self) -> Arc<dyn FaultInjector> {
         self.repository.clone()
     }
-
-    pub(crate) fn artifact_generation(&self) -> Arc<dyn PublishObserver> {
-        self.artifact_generation.clone()
-    }
-
-    pub(crate) fn build_catalog(&self) -> Arc<dyn PublishObserver> {
-        self.build_catalog.clone()
-    }
 }
 
 impl Default for DurabilityPorts {
     fn default() -> Self {
-        Self::new(
-            Arc::new(NoFault),
-            Arc::new(NoopPublishObserver),
-            Arc::new(NoopPublishObserver),
-        )
+        Self::new(Arc::new(NoFault))
     }
 }
 

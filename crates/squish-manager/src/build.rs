@@ -3,18 +3,16 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    io::Cursor,
     path::{Component, Path},
     sync::{Arc, Mutex},
 };
 
-use squish_backend::{Backend, BackendOutput, BackendRequest, SquishBackend, SquishOptions};
+use squish_backend::{BackendCacheIdentity, BackendOutput, BackendRequest, SquishOptions};
 use squish_build::{
-    Action, ActionEvent, ActionIndex, ActionKind, ActionRecord, ActionResult, ArtifactDescriptor,
-    ArtifactRead, BlobStore, BuildPlan, CommittedGeneration, Dispatch, GenerationArtifact,
-    GenerationId, GenerationRef, InputRef, KeyRecipe, LogicalArtifactName, Output, OutputName,
-    OutputRef, ProducedOutput, Publication, PublicationPath, PublicationTargetId, ResourceClass,
-    Resources, ResultSource,
+    Action, ActionEvent, ActionKind, ActionRecord, ActionResult, ArtifactDescriptor, ArtifactRead,
+    BuildPlan, CommittedGeneration, Dispatch, GenerationArtifact, GenerationId, GenerationRef,
+    InputRef, KeyRecipe, LogicalArtifactName, Output, OutputName, OutputRef, ProducedOutput,
+    Publication, PublicationPath, PublicationTargetId, ResourceClass, Resources, ResultSource,
 };
 use squish_ir::{
     ArtifactDigest, ArtifactIdentity, BundledSourceBlob, DebugBundle, DebugDigest, DocumentDigest,
@@ -25,10 +23,7 @@ use squish_ir::{
     decode_unit_container, encode_debug_bundle, encode_expansion_trace, encode_link_trace,
     encode_linked_document, encode_linked_image, encode_static_link_map, encode_unit_container,
 };
-use squish_link::{
-    Budgets, InstantiateOutput, Instantiator, LinkKeyProjection, LinkOutput, StaticLinker,
-    UnitClosure,
-};
+use squish_link::{Budgets, InstantiateOutput, LinkKeyProjection, LinkOutput, UnitClosure};
 use squish_project::{
     Lockfile, Manifest, MutationFile, MutationKind, MutationPlanner, ResolutionMode, TransactionId,
 };
@@ -38,16 +33,14 @@ use squish_protocol::{
     PlanMode, PlanningAttemptId, PlanningStepId, PlanningStepKind, PublishedArtifact,
     PublishedTarget, TargetName, WorkspaceScope,
 };
-use squish_publish::FileArtifactPublisher;
-use squish_publish::PublishError;
 use squish_repository::{Discovery, ProjectRepository, ProjectSnapshot, ResolvedTarget};
 use squish_source::{FileSourceProvider, LogicalPath, SnapshotBuilder, SourceBlob};
-use squish_store::{BlobDigest, Cas, VerifiedActionIndex};
-use squish_xml_front::{FrontendSourceContext, compile};
+use squish_xml_front::FrontendSourceContext;
 
 use crate::{
-    DurabilityPorts, Effect, InvocationSettings, ManagerError, PlannedWork, PreparedPlan,
-    ResolveRequest, Services, StorageLayout,
+    BuildRuntime, BuildRuntimeDescriptor, BuildRuntimeError, BuildRuntimeErrorKind,
+    DurabilityPorts, Effect, GenerationSpace, InvocationSettings, ManagerError, PlannedWork,
+    PreparedPlan, ResolveRequest, Services,
     orchestrator::{
         self, ActionExecutionFact, CachedResult, ExecutionReport, ExecutionState, PlanningFailure,
         PlanningRecorder, ResolvedInputs, WorkDisposition, WorkExecutor,
@@ -56,7 +49,6 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use squish_kernel::{CancellationToken, InvocationContext, OperationOutcome};
 
-const XML_FRONTEND_ABI: &str = "xmlsquish.xml/1";
 /// 当前构建目录所使用的稳定 generation 身份。 / Stable generation identity used by the current-build catalog.
 pub const BUILD_CATALOG_TARGET: &str = "xmlsquish-build-record";
 
@@ -409,51 +401,22 @@ impl fmt::Display for BuildCatalogError {
 
 impl std::error::Error for BuildCatalogError {}
 
-fn publisher_read_error<E: fmt::Display>(error: PublishError<E>) -> BuildCatalogError {
-    match error {
-        PublishError::Store(error) => BuildCatalogError::Storage(error.to_string()),
-        PublishError::Io(error) => BuildCatalogError::Storage(error.to_string()),
-        PublishError::Journal(error) => BuildCatalogError::Corrupt(error.to_string()),
-        PublishError::InvalidDestination(value) => {
-            BuildCatalogError::Corrupt(format!("invalid persisted destination `{value}`"))
-        }
-        PublishError::AliasConflict(path) => BuildCatalogError::Corrupt(format!(
-            "persisted destination aliases `{}`",
-            path.display()
-        )),
-        PublishError::Symlink(path) => BuildCatalogError::Corrupt(format!(
-            "persisted destination traverses symlink `{}`",
-            path.display()
-        )),
-        PublishError::MissingBlob => {
-            BuildCatalogError::Corrupt("persisted generation references a missing blob".into())
-        }
-        PublishError::IntegrityMismatch => {
-            BuildCatalogError::Corrupt("persisted generation failed integrity validation".into())
-        }
-        PublishError::UnsupportedDigest(name) => {
-            BuildCatalogError::Corrupt(format!("persisted digest `{name}` is unsupported"))
+fn runtime_catalog_error(error: BuildRuntimeError) -> BuildCatalogError {
+    match error.kind() {
+        BuildRuntimeErrorKind::Corrupt => BuildCatalogError::Corrupt(error.to_string()),
+        BuildRuntimeErrorKind::Storage | BuildRuntimeErrorKind::Tool => {
+            BuildCatalogError::Storage(error.to_string())
         }
     }
 }
 
 fn read_base_build_catalog(
-    layout: &StorageLayout,
-    durability: &DurabilityPorts,
+    runtime: &dyn BuildRuntime,
 ) -> Result<Option<BuildCatalogSnapshot>, BuildCatalogError> {
-    let publisher = FileArtifactPublisher::with_observer(
-        layout.catalog_root(),
-        Cas::open(layout.cas_root())
-            .map_err(|error| BuildCatalogError::Storage(error.to_string()))?,
-        durability.build_catalog(),
-    )
-    .map_err(publisher_read_error)?;
-    let cas = Cas::open(layout.cas_root())
-        .map_err(|error| BuildCatalogError::Storage(error.to_string()))?;
     let target = publication_target(BUILD_CATALOG_TARGET)?;
-    let Some(generation) = publisher
-        .current_generation(&target)
-        .map_err(publisher_read_error)?
+    let Some(generation) = runtime
+        .current_generation(GenerationSpace::BuildCatalog, &target)
+        .map_err(runtime_catalog_error)?
     else {
         return Ok(None);
     };
@@ -470,11 +433,16 @@ fn read_base_build_catalog(
             "current generation has no canonical build-record-v3 artifact".into(),
         ));
     }
-    let bytes = read_published_bytes(&publisher, &generation.identity, artifact)?;
+    let bytes = read_published_bytes(
+        runtime,
+        GenerationSpace::BuildCatalog,
+        &generation.identity,
+        artifact,
+    )?;
     let record = decode_build_record(&bytes)
         .map_err(|error| BuildCatalogError::Corrupt(error.to_string()))?;
     let stored_record = verify_catalog_blob(
-        &cas,
+        runtime,
         &artifact.descriptor.digest,
         artifact.descriptor.size,
         "build-record artifact",
@@ -486,19 +454,12 @@ fn read_base_build_catalog(
     }
     for output in record.actions.iter().flat_map(|action| &action.outputs) {
         verify_catalog_blob(
-            &cas,
+            runtime,
             &output.digest,
             output.size,
             &format!("action output `{}`", output.name),
         )?;
     }
-    let publication = FileArtifactPublisher::with_observer(
-        layout.publication_root(),
-        Cas::open(layout.cas_root())
-            .map_err(|error| BuildCatalogError::Storage(error.to_string()))?,
-        durability.artifact_generation(),
-    )
-    .map_err(publisher_read_error)?;
     for target in &record.targets {
         let reference = GenerationRef {
             target: target.target_id.clone(),
@@ -506,7 +467,8 @@ fn read_base_build_catalog(
         };
         for item in &target.artifacts {
             let published = read_published_bytes(
-                &publication,
+                runtime,
+                GenerationSpace::TargetArtifacts,
                 &reference,
                 &GenerationArtifact {
                     descriptor: item.descriptor.clone(),
@@ -514,7 +476,7 @@ fn read_base_build_catalog(
                 },
             )?;
             let stored = verify_catalog_blob(
-                &cas,
+                runtime,
                 &item.descriptor.digest,
                 item.descriptor.size,
                 &format!("artifact `{}`", item.descriptor.id),
@@ -528,7 +490,7 @@ fn read_base_build_catalog(
             validate_target_artifact_schema(&item.descriptor, &stored)?;
         }
         validate_recorded_generation(target)?;
-        validate_generation_target_record(target, &cas)?;
+        validate_generation_target_record(target, runtime)?;
     }
     Ok(Some(BuildCatalogSnapshot {
         record,
@@ -542,15 +504,15 @@ fn publication_target(value: &str) -> Result<PublicationTargetId, BuildCatalogEr
 }
 
 fn read_published_bytes(
-    publisher: &FileArtifactPublisher<Cas>,
+    runtime: &dyn BuildRuntime,
+    space: GenerationSpace,
     generation: &GenerationRef,
     artifact: &GenerationArtifact,
 ) -> Result<Vec<u8>, BuildCatalogError> {
-    let mut bytes = Vec::new();
-    match publisher
-        .read_generation_artifact(generation, &artifact.path, &mut bytes)
-        .map_err(publisher_read_error)?
-    {
+    let (read, bytes) = runtime
+        .read_generation_artifact(space, generation, &artifact.path)
+        .map_err(runtime_catalog_error)?;
+    match read {
         ArtifactRead::NotFound => Err(BuildCatalogError::Corrupt(format!(
             "generation member `{}` is missing",
             artifact.path
@@ -600,16 +562,14 @@ fn validate_target_artifact_schema(
 }
 
 fn verify_catalog_blob(
-    cas: &Cas,
+    runtime: &dyn BuildRuntime,
     digest: &squish_protocol::Digest,
     size: u64,
     subject: &str,
 ) -> Result<Vec<u8>, BuildCatalogError> {
-    let blob =
-        blob_digest(digest).map_err(|error| BuildCatalogError::Corrupt(error.to_string()))?;
-    let stored = cas
-        .get(blob)
-        .map_err(|error| BuildCatalogError::Storage(error.to_string()))?
+    let stored = runtime
+        .read_blob(digest)
+        .map_err(runtime_catalog_error)?
         .ok_or_else(|| BuildCatalogError::Corrupt(format!("{subject} is absent from CAS")))?;
     if stored.len() as u64 != size || protocol_blake3(&stored) != *digest {
         Err(BuildCatalogError::Corrupt(format!(
@@ -620,31 +580,17 @@ fn verify_catalog_blob(
     }
 }
 
-/// 从显式布局读取并严格验证当前 BuildRecord v3。 / Reads and strictly validates the current BuildRecord v3.
+/// 通过注入运行时读取并严格验证当前 BuildRecord v3。 / Reads and strictly validates the current BuildRecord v3 through an injected runtime.
 pub fn read_current_build_catalog(
-    layout: &StorageLayout,
+    runtime: &dyn BuildRuntime,
 ) -> Result<Option<BuildCatalogSnapshot>, BuildCatalogError> {
-    read_current_build_catalog_with(layout, &DurabilityPorts::default())
-}
-
-fn read_current_build_catalog_with(
-    layout: &StorageLayout,
-    durability: &DurabilityPorts,
-) -> Result<Option<BuildCatalogSnapshot>, BuildCatalogError> {
-    let Some(snapshot) = read_base_build_catalog(layout, durability)? else {
+    let Some(snapshot) = read_base_build_catalog(runtime)? else {
         return Ok(None);
     };
-    let publisher = FileArtifactPublisher::with_observer(
-        layout.publication_root(),
-        Cas::open(layout.cas_root())
-            .map_err(|error| BuildCatalogError::Storage(error.to_string()))?,
-        durability.artifact_generation(),
-    )
-    .map_err(publisher_read_error)?;
     for target in &snapshot.record.targets {
-        let Some(current) = publisher
-            .current_generation(&target.target_id)
-            .map_err(publisher_read_error)?
+        let Some(current) = runtime
+            .current_generation(GenerationSpace::TargetArtifacts, &target.target_id)
+            .map_err(runtime_catalog_error)?
         else {
             return Err(BuildCatalogError::MissingCurrent {
                 target: target.target_id.to_string(),
@@ -670,37 +616,25 @@ fn read_current_build_catalog_with(
 
 /// 读取当前记录的便利投影。 / Convenience projection that reads the current record.
 pub fn read_current_build_record(
-    layout: &StorageLayout,
+    runtime: &dyn BuildRuntime,
 ) -> Result<Option<BuildRecordV3>, BuildCatalogError> {
-    read_current_build_catalog(layout).map(|snapshot| snapshot.map(|snapshot| snapshot.record))
+    read_current_build_catalog(runtime).map(|snapshot| snapshot.map(|snapshot| snapshot.record))
 }
 
 fn recover_build_catalog(
-    layout: &StorageLayout,
-    durability: &DurabilityPorts,
+    runtime: &dyn BuildRuntime,
 ) -> Result<Option<BuildRecordV3>, BuildCatalogError> {
-    let Some(snapshot) = read_base_build_catalog(layout, durability)? else {
+    let Some(snapshot) = read_base_build_catalog(runtime)? else {
         return Ok(None);
     };
-    let publisher = FileArtifactPublisher::with_observer(
-        layout.publication_root(),
-        Cas::open(layout.cas_root())
-            .map_err(|error| BuildCatalogError::Storage(error.to_string()))?,
-        durability.artifact_generation(),
-    )
-    .map_err(publisher_read_error)?;
-    let cas = Cas::open(layout.cas_root())
-        .map_err(|error| BuildCatalogError::Storage(error.to_string()))?;
     let mut recovered = Vec::with_capacity(snapshot.record.targets.len());
     for recorded in &snapshot.record.targets {
-        match publisher
-            .current_generation(&recorded.target_id)
-            .map_err(publisher_read_error)?
+        match runtime
+            .current_generation(GenerationSpace::TargetArtifacts, &recorded.target_id)
+            .map_err(runtime_catalog_error)?
         {
-            Some(current) => {
-                recovered.push(validate_committed_generation(&publisher, &cas, &current)?)
-            }
-            None => recovered.push(restore_recorded_generation(&publisher, recorded)?),
+            Some(current) => recovered.push(validate_committed_generation(runtime, &current)?),
+            None => recovered.push(restore_recorded_generation(runtime, recorded)?),
         }
     }
     let mut record = snapshot.record;
@@ -712,14 +646,18 @@ fn recover_build_catalog(
 }
 
 fn validate_committed_generation(
-    publisher: &FileArtifactPublisher<Cas>,
-    cas: &Cas,
+    runtime: &dyn BuildRuntime,
     current: &CommittedGeneration,
 ) -> Result<RecordedGeneration, BuildCatalogError> {
     for member in &current.artifacts {
-        let published = read_published_bytes(publisher, &current.identity, member)?;
+        let published = read_published_bytes(
+            runtime,
+            GenerationSpace::TargetArtifacts,
+            &current.identity,
+            member,
+        )?;
         let stored = verify_catalog_blob(
-            cas,
+            runtime,
             &member.descriptor.digest,
             member.descriptor.size,
             &format!("artifact `{}`", member.descriptor.id),
@@ -734,7 +672,7 @@ fn validate_committed_generation(
     }
     let recorded = recorded_generation(current);
     validate_recorded_generation(&recorded)?;
-    validate_generation_target_record(&recorded, cas)?;
+    validate_generation_target_record(&recorded, runtime)?;
     Ok(recorded)
 }
 
@@ -802,7 +740,7 @@ fn validate_recorded_generation(generation: &RecordedGeneration) -> Result<(), B
 
 fn validate_generation_target_record(
     generation: &RecordedGeneration,
-    cas: &Cas,
+    runtime: &dyn BuildRuntime,
 ) -> Result<(), BuildCatalogError> {
     let item = generation
         .artifacts
@@ -818,7 +756,7 @@ fn validate_generation_target_record(
             ))
         })?;
     let bytes = verify_catalog_blob(
-        cas,
+        runtime,
         &item.descriptor.digest,
         item.descriptor.size,
         &format!("target record `{}`", item.descriptor.id),
@@ -866,7 +804,7 @@ fn validate_generation_target_record(
 }
 
 fn restore_recorded_generation(
-    publisher: &FileArtifactPublisher<Cas>,
+    runtime: &dyn BuildRuntime,
     recorded: &RecordedGeneration,
 ) -> Result<RecordedGeneration, BuildCatalogError> {
     let publications: Vec<_> = recorded
@@ -891,8 +829,13 @@ fn restore_recorded_generation(
             })
         })
         .collect::<Result<_, BuildCatalogError>>()?;
-    let restored = publish_generation(publisher, &recorded.target_id, &publications)
-        .map_err(|error| BuildCatalogError::Storage(error.to_string()))?;
+    let restored = runtime
+        .publish_generation(
+            GenerationSpace::TargetArtifacts,
+            &recorded.target_id,
+            &publications,
+        )
+        .map_err(runtime_catalog_error)?;
     if recorded_generation(&restored) != *recorded {
         return Err(BuildCatalogError::Corrupt(format!(
             "target `{}` could not restore its recorded generation",
@@ -1145,7 +1088,9 @@ pub struct PreparedBuild {
     targets: Vec<TargetBuild>,
     emit: Vec<EmitKind>,
     locations: Vec<squish_repository::PackageLocation>,
-    storage: StorageLayout,
+    runtime: Arc<dyn BuildRuntime>,
+    runtime_descriptor: BuildRuntimeDescriptor,
+    backend_identities: BTreeMap<String, BackendCacheIdentity>,
     prior_record: Option<BuildRecordV3>,
 }
 
@@ -1211,10 +1156,11 @@ fn prepare_excluding(
         durability.repository(),
     )
     .map_err(|e| error("MGB001", Phase::Discover, e))?;
-    let storage = services
-        .storage_layout(repository.root())
+    let runtime = services
+        .open_build_runtime(repository.root())
         .map_err(|e| ManagerError::new(e.code(), Phase::Cache, e.message()))?;
-    let prior_record = recover_build_catalog(&storage, durability)
+    let runtime_descriptor = runtime.descriptor();
+    let prior_record = recover_build_catalog(runtime.as_ref())
         .map_err(|e| ManagerError::new("MGB124", Phase::Cache, e.to_string()))?;
     let mode = resolution_mode(request);
     let bare = repository.snapshot();
@@ -1256,7 +1202,15 @@ fn prepare_excluding(
         .map_err(|e| error("MGB004", Phase::Discover, e))?;
     let sources = freeze_sources(&snapshot, &resolved.packages)?;
     let targets = select_targets(request, &snapshot, &sources, excluded)?;
-    let plan = build_plan(&snapshot, &sources, &targets, &request.emit)?;
+    let backend_identities = freeze_backend_identities(&targets, runtime.as_ref())?;
+    let plan = build_plan(
+        &snapshot,
+        &sources,
+        &targets,
+        &request.emit,
+        &backend_identities,
+        &runtime_descriptor,
+    )?;
     Ok(PreparedBuild {
         plan,
         repository,
@@ -1265,7 +1219,9 @@ fn prepare_excluding(
         targets,
         emit: request.emit.clone(),
         locations: resolved.packages,
-        storage,
+        runtime,
+        runtime_descriptor,
+        backend_identities,
         prior_record,
     })
 }
@@ -1292,17 +1248,22 @@ fn prepare_recorded(
             .recover()
             .map_err(|e| error("MGB001", Phase::Discover, e))
     })?;
-    let storage = planning.step(step("locate-storage"), PlanningStepKind::Locate, || {
-        services
-            .storage_layout(repository.root())
-            .map_err(|e| ManagerError::new(e.code(), Phase::Cache, e.message()))
-    })?;
+    let runtime = planning.step(
+        step("open-build-runtime"),
+        PlanningStepKind::Recover,
+        || {
+            services
+                .open_build_runtime(repository.root())
+                .map_err(|e| ManagerError::new(e.code(), Phase::Cache, e.message()))
+        },
+    )?;
+    let runtime_descriptor = runtime.descriptor();
     let prior_record = planning.step(
         step("recover-build-catalog"),
         PlanningStepKind::Recover,
         || {
             planning_not_cancelled(context)?;
-            recover_build_catalog(&storage, durability)
+            recover_build_catalog(runtime.as_ref())
                 .map_err(|e| ManagerError::new("MGB124", Phase::Cache, e.to_string()))
         },
     )?;
@@ -1368,12 +1329,21 @@ fn prepare_recorded(
         let targets = select_targets(request, &snapshot, &sources, excluded)?;
         Ok((sources, targets))
     })?;
-    let plan = planning.step(
+    let (backend_identities, plan) = planning.step(
         step("validate-plan"),
         PlanningStepKind::ValidatePlan,
         || {
             planning_not_cancelled(context)?;
-            build_plan(&snapshot, &sources, &targets, &request.emit)
+            let backend_identities = freeze_backend_identities(&targets, runtime.as_ref())?;
+            let plan = build_plan(
+                &snapshot,
+                &sources,
+                &targets,
+                &request.emit,
+                &backend_identities,
+                &runtime_descriptor,
+            )?;
+            Ok((backend_identities, plan))
         },
     )?;
     Ok(PreparedBuild {
@@ -1384,7 +1354,9 @@ fn prepare_recorded(
         targets,
         emit: request.emit.clone(),
         locations: resolved.packages,
-        storage,
+        runtime,
+        runtime_descriptor,
+        backend_identities,
         prior_record,
     })
 }
@@ -1456,7 +1428,7 @@ pub(crate) fn execute_with_durability(
     let plan = prepared.plan.clone();
     let snapshot = planning_snapshot_digest(&prepared);
     let executor = match planning.step(step("open-build-state"), PlanningStepKind::Recover, || {
-        BuildExecutor::new(prepared, durability)
+        Ok(BuildExecutor::new(prepared))
     }) {
         Ok(executor) => executor,
         Err(failure) => return planning.unavailable(OperationKind::Build, &failure),
@@ -1558,11 +1530,8 @@ fn planning_snapshot_digest(prepared: &PreparedBuild) -> squish_protocol::Digest
 }
 
 struct BuildExecutor {
+    runtime: Arc<dyn BuildRuntime>,
     prepared: PreparedBuild,
-    cas: Cas,
-    publisher: Mutex<FileArtifactPublisher<Cas>>,
-    catalog: FileArtifactPublisher<Cas>,
-    index: VerifiedActionIndex,
     state: Mutex<BuildExecutionState>,
 }
 
@@ -1577,33 +1546,13 @@ struct BuildExecutionState {
 }
 
 impl BuildExecutor {
-    fn new(prepared: PreparedBuild, durability: &DurabilityPorts) -> Result<Self, ManagerError> {
-        let cas =
-            Cas::open(prepared.storage.cas_root()).map_err(|e| error("MGB030", Phase::Cache, e))?;
-        let publisher = FileArtifactPublisher::with_observer(
-            prepared.storage.publication_root(),
-            Cas::open(cas.root()).map_err(|e| error("MGB031", Phase::Publish, e))?,
-            durability.artifact_generation(),
-        )
-        .map_err(|e| error("MGB032", Phase::Publish, e))?;
-        let catalog = FileArtifactPublisher::with_observer(
-            prepared.storage.catalog_root(),
-            Cas::open(cas.root()).map_err(|e| error("MGB031", Phase::Publish, e))?,
-            durability.build_catalog(),
-        )
-        .map_err(|e| error("MGB032", Phase::Publish, e))?;
-        let index_cas =
-            Arc::new(Cas::open(cas.root()).map_err(|e| error("MGB035", Phase::Cache, e))?);
-        let index = VerifiedActionIndex::open(prepared.storage.action_index(), index_cas)
-            .map_err(|e| error("MGB036", Phase::Cache, e))?;
-        Ok(Self {
+    fn new(prepared: PreparedBuild) -> Self {
+        let runtime = Arc::clone(&prepared.runtime);
+        Self {
+            runtime,
             prepared,
-            cas,
-            publisher: Mutex::new(publisher),
-            catalog,
-            index,
             state: Mutex::new(BuildExecutionState::default()),
-        })
+        }
     }
 
     fn published(&self) -> Vec<PublishedTarget> {
@@ -1656,25 +1605,27 @@ impl BuildExecutor {
         };
         let bytes = encode_build_record(&record)
             .map_err(|error| ManagerError::new("MGB121", Phase::Publish, error.to_string()))?;
-        let digest = self
-            .cas
-            .write_from(&mut Cursor::new(&bytes))
-            .map_err(|cause| error("MGB122", Phase::Cache, cause))?;
-        let publication = publication(
-            "build-record-v3",
-            ArtifactKind::Metadata,
-            &self
-                .prepared
-                .storage
-                .catalog_root()
-                .join("build-record-v3.json"),
-            digest,
-            bytes.len() as u64,
-            self.prepared.storage.catalog_root(),
-        )?;
+        let digest = self.store_blob(&bytes, "MGB122", Phase::Cache)?;
+        let publication = Publication {
+            output: ProducedOutput {
+                name: output_name("build-record-v3"),
+                kind: ArtifactKind::Metadata,
+                digest,
+                size: bytes.len() as u64,
+            },
+            name: LogicalArtifactName::new("build-record-v3").expect("static logical name"),
+            destination: PublicationPath::new("build-record-v3.json").expect("static catalog path"),
+        };
         let catalog_target =
             PublicationTargetId::new(BUILD_CATALOG_TARGET).expect("static catalog target");
-        let generation = publish_generation(&self.catalog, &catalog_target, &[publication])?;
+        let generation = self
+            .runtime
+            .publish_generation(
+                GenerationSpace::BuildCatalog,
+                &catalog_target,
+                &[publication],
+            )
+            .map_err(|cause| ManagerError::new(cause.code(), Phase::Publish, cause.message()))?;
         generation
             .artifacts
             .into_iter()
@@ -1687,6 +1638,27 @@ impl BuildExecutor {
                     "build catalog committed an empty generation",
                 )
             })
+    }
+
+    fn store_blob(
+        &self,
+        bytes: &[u8],
+        code: &'static str,
+        phase: Phase,
+    ) -> Result<squish_protocol::Digest, ManagerError> {
+        let expected = protocol_blake3(bytes);
+        let actual = self
+            .runtime
+            .write_blob(bytes)
+            .map_err(|cause| ManagerError::new(cause.code(), phase, cause.message()))?;
+        if actual != expected {
+            return Err(ManagerError::new(
+                code,
+                phase,
+                "runtime returned a mismatched blob digest",
+            ));
+        }
+        Ok(actual)
     }
 
     fn target(&self, name: &str) -> Result<&TargetBuild, ManagerError> {
@@ -1788,18 +1760,23 @@ impl BuildExecutor {
             .ok_or_else(|| {
                 ManagerError::new("MGB101", Phase::Analyze, "planned source is absent")
             })?;
-        let unit = compile(
-            &source.blob,
-            &FrontendSourceContext::new(source.package.clone()),
-        )
-        .map_err(|diagnostic| {
-            ManagerError::new("MGB040", Phase::Analyze, diagnostic.message.clone())
-        })?
-        .unit;
+        let unit = self
+            .runtime
+            .compile(
+                &source.blob,
+                &FrontendSourceContext::new(source.package.clone()),
+            )
+            .map_err(|cause| ManagerError::new(cause.code(), Phase::Analyze, cause.message()))?
+            .unit;
+        if header(&unit).frontend_abi.0 != self.prepared.runtime_descriptor.frontend_abi {
+            return Err(ManagerError::new(
+                "MGB040",
+                Phase::Analyze,
+                "frontend returned an output with a different frozen ABI",
+            ));
+        }
         let bytes = encode_unit_container(&unit).map_err(|e| error("MGB041", Phase::Analyze, e))?;
-        self.cas
-            .put(&bytes)
-            .map_err(|e| error("MGB042", Phase::Cache, e))?;
+        self.store_blob(&bytes, "MGB042", Phase::Cache)?;
         let container = decode_container(&bytes).map_err(|e| error("MGB043", Phase::Analyze, e))?;
         let output = produced("xsir", ArtifactKind::BinaryIr, &bytes);
         self.state
@@ -1839,7 +1816,8 @@ impl BuildExecutor {
             .map(|(key, value)| (key.clone(), value.unit.clone()))
             .collect();
         drop(state);
-        let linked = StaticLinker
+        let linked = self
+            .runtime
             .link(
                 entry,
                 UnitClosure {
@@ -1850,12 +1828,8 @@ impl BuildExecutor {
             .map_err(|e| error("MGB070", Phase::Link, e))?;
         let image = encode_linked_image(&linked.image);
         let map = encode_static_link_map(&linked.map);
-        self.cas
-            .put(&image)
-            .map_err(|e| error("MGB071", Phase::Cache, e))?;
-        self.cas
-            .put(&map)
-            .map_err(|e| error("MGB072", Phase::Cache, e))?;
+        self.store_blob(&image, "MGB071", Phase::Cache)?;
+        self.store_blob(&map, "MGB072", Phase::Cache)?;
         self.state
             .lock()
             .expect("build state mutex is not poisoned")
@@ -1877,7 +1851,8 @@ impl BuildExecutor {
     ) -> Result<(Vec<ProducedOutput>, Vec<ActionEvent>), ManagerError> {
         let target = self.target(target_name)?;
         let linked = self.linked_for(target_name, inputs)?;
-        let instantiated = Instantiator
+        let instantiated = self
+            .runtime
             .instantiate(
                 &linked.program,
                 target.arguments.clone(),
@@ -1885,15 +1860,12 @@ impl BuildExecutor {
             )
             .map_err(|e| error("MGB073", Phase::Instantiate, e))?;
         let mut document = instantiated.document.clone();
-        document.document_abi = squish_ir::AbiId(squish_backend::DOCUMENT_ABI.to_owned());
+        document.document_abi =
+            squish_ir::AbiId(self.prepared.runtime_descriptor.document_abi.clone());
         let document_bytes = encode_linked_document(&document);
         let trace_bytes = encode_expansion_trace(&instantiated.trace);
-        self.cas
-            .put(&document_bytes)
-            .map_err(|e| error("MGB074", Phase::Cache, e))?;
-        self.cas
-            .put(&trace_bytes)
-            .map_err(|e| error("MGB075", Phase::Cache, e))?;
+        self.store_blob(&document_bytes, "MGB074", Phase::Cache)?;
+        self.store_blob(&trace_bytes, "MGB075", Phase::Cache)?;
         self.state
             .lock()
             .expect("build state mutex is not poisoned")
@@ -1916,8 +1888,9 @@ impl BuildExecutor {
         let target = self.target(target_name)?;
         let (document, instantiated) = self.instantiated_for(target_name, inputs)?;
         let linked = self.linked_for(target_name, inputs)?;
-        let output = SquishBackend
-            .emit(BackendRequest {
+        let output = self
+            .runtime
+            .render(BackendRequest {
                 document: document.clone(),
                 trace: instantiated.trace,
                 options: SquishOptions {
@@ -1925,9 +1898,19 @@ impl BuildExecutor {
                 },
             })
             .map_err(|e| error("MGB076", Phase::Emit, e))?;
-        self.cas
-            .write_from(&mut Cursor::new(&output.bytes))
-            .map_err(|e| error("MGB077", Phase::Cache, e))?;
+        let expected_identity = self
+            .prepared
+            .backend_identities
+            .get(target_name)
+            .expect("every planned target has a frozen backend identity");
+        if output.cache_identity != *expected_identity {
+            return Err(ManagerError::new(
+                "MGB076",
+                Phase::Emit,
+                "backend returned an output with a different frozen cache identity",
+            ));
+        }
+        self.store_blob(&output.bytes, "MGB077", Phase::Cache)?;
         let state = self
             .state
             .lock()
@@ -1951,9 +1934,7 @@ impl BuildExecutor {
             &self.prepared.sources,
         );
         let debug = encode_debug_bundle(&bundle).map_err(|e| error("MGB078", Phase::Emit, e))?;
-        self.cas
-            .write_from(&mut Cursor::new(&debug))
-            .map_err(|e| error("MGB079", Phase::Cache, e))?;
+        self.store_blob(&debug, "MGB079", Phase::Cache)?;
         let produced = vec![
             produced("prompt", ArtifactKind::Prompt, &output.bytes),
             produced("backend-result", ArtifactKind::DebugInfo, &debug),
@@ -2031,17 +2012,11 @@ impl BuildExecutor {
                 )
             })?;
         drop(state);
-        let prompt_digest = self
-            .cas
-            .write_from(&mut Cursor::new(&output.output.bytes))
-            .map_err(|e| error("MGB077", Phase::Cache, e))?;
+        let prompt_digest = self.store_blob(&output.output.bytes, "MGB077", Phase::Cache)?;
         let mut publications = Vec::new();
         if has_emit(&self.prepared.emit, EmitKind::BinaryIr) {
             for (source, unit) in &compiled {
-                let digest = self
-                    .cas
-                    .write_from(&mut Cursor::new(&unit.bytes))
-                    .map_err(|e| error("MGB077", Phase::Cache, e))?;
+                let digest = self.store_blob(&unit.bytes, "MGB077", Phase::Cache)?;
                 publications.push(publication(
                     &format!("{target_name}:ir-{}", publications.len()),
                     ArtifactKind::BinaryIr,
@@ -2066,10 +2041,7 @@ impl BuildExecutor {
         }
         if has_emit(&self.prepared.emit, EmitKind::DebugInfo) {
             let bytes = output.debug;
-            let digest = self
-                .cas
-                .write_from(&mut Cursor::new(&bytes))
-                .map_err(|e| error("MGB079", Phase::Cache, e))?;
+            let digest = self.store_blob(&bytes, "MGB079", Phase::Cache)?;
             publications.push(publication(
                 &format!("{target_name}:debug"),
                 ArtifactKind::DebugInfo,
@@ -2079,10 +2051,7 @@ impl BuildExecutor {
                 self.prepared.repository.root(),
             )?);
         }
-        let link_map_digest = self
-            .cas
-            .write_from(&mut Cursor::new(&link_map))
-            .map_err(|e| error("MGB120", Phase::Cache, e))?;
+        let link_map_digest = self.store_blob(&link_map, "MGB120", Phase::Cache)?;
         publications.push(publication(
             &format!("{target_name}:static-link-map"),
             ArtifactKind::Other("static-link-map".into()),
@@ -2096,10 +2065,7 @@ impl BuildExecutor {
             self.prepared.snapshot.manifest_digest(),
             &publications,
         )?;
-        let record_digest = self
-            .cas
-            .write_from(&mut Cursor::new(&target_record))
-            .map_err(|e| error("MGB118", Phase::Cache, e))?;
+        let record_digest = self.store_blob(&target_record, "MGB118", Phase::Cache)?;
         publications.push(publication(
             &format!("{target_name}:target-record"),
             ArtifactKind::Metadata,
@@ -2109,9 +2075,6 @@ impl BuildExecutor {
             self.prepared.repository.root(),
         )?);
         publications.sort_by(|left, right| left.output.name.cmp(&right.output.name));
-        let publisher = self.publisher.lock().map_err(|_| {
-            ManagerError::new("MGB119", Phase::Publish, "publisher coordination failed")
-        })?;
         let target_id = PublicationTargetId::new(target_name).map_err(|_| {
             ManagerError::new(
                 "MGB119",
@@ -2119,7 +2082,10 @@ impl BuildExecutor {
                 "invalid target publication identity",
             )
         })?;
-        let generation = publish_generation(&publisher, &target_id, &publications)?;
+        let generation = self
+            .runtime
+            .publish_generation(GenerationSpace::TargetArtifacts, &target_id, &publications)
+            .map_err(|cause| ManagerError::new(cause.code(), Phase::Publish, cause.message()))?;
         let published = PublishedTarget {
             target: TargetName::new(target.name.clone()).expect("validated target name"),
             target_id: generation.identity.target.to_string(),
@@ -2168,6 +2134,13 @@ impl BuildExecutor {
                 let bytes = self.cached_bytes(record, "xsir")?;
                 let unit =
                     decode_unit_container(&bytes).map_err(|e| error("MGB111", Phase::Cache, e))?;
+                if header(&unit).frontend_abi.0 != self.prepared.runtime_descriptor.frontend_abi {
+                    return Err(ManagerError::new(
+                        "MGB111",
+                        Phase::Cache,
+                        "cached unit was produced by a different frontend ABI",
+                    ));
+                }
                 let container =
                     decode_container(&bytes).map_err(|e| error("MGB112", Phase::Cache, e))?;
                 self.state
@@ -2241,6 +2214,13 @@ impl BuildExecutor {
                     .map_err(|e| error("MGB125", Phase::Cache, e))?;
                 let trace = decode_expansion_trace(&self.cached_bytes(record, "trace")?)
                     .map_err(|e| error("MGB126", Phase::Cache, e))?;
+                if document.document_abi.0 != self.prepared.runtime_descriptor.document_abi {
+                    return Err(ManagerError::new(
+                        "MGB125",
+                        Phase::Cache,
+                        "cached document was produced for a different document ABI",
+                    ));
+                }
                 self.state
                     .lock()
                     .expect("build state mutex is not poisoned")
@@ -2253,7 +2233,6 @@ impl BuildExecutor {
             BuildWork::Backend { target } => {
                 let bytes = self.cached_bytes(record, "prompt")?;
                 let debug = self.cached_bytes(record, "backend-result")?;
-                let target_build = self.target(target)?;
                 let bundle = squish_ir::decode_debug_bundle(&debug)
                     .map_err(|e| error("MGB127", Phase::Cache, e))?;
                 if bundle.artifact.digest != ArtifactDigest::of(&bytes)
@@ -2269,9 +2248,12 @@ impl BuildExecutor {
                     bytes,
                     byte_map: bundle.artifact_map,
                     trace: bundle.expansion_trace,
-                    cache_identity: SquishBackend.cache_identity(SquishOptions {
-                        max_output_bytes: budgets(&target_build.resolved).max_output_bytes,
-                    }),
+                    cache_identity: self
+                        .prepared
+                        .backend_identities
+                        .get(target)
+                        .expect("every planned target has a frozen backend identity")
+                        .clone(),
                     metrics: Default::default(),
                 };
                 self.state
@@ -2303,16 +2285,25 @@ impl BuildExecutor {
                     format!("cached action has no `{name}` output"),
                 )
             })?;
-        self.cas
-            .get(blob_digest(&output.digest)?)
-            .map_err(|e| error("MGB109", Phase::Cache, e))?
+        let bytes = self
+            .runtime
+            .read_blob(&output.digest)
+            .map_err(|cause| ManagerError::new(cause.code(), Phase::Cache, cause.message()))?
             .ok_or_else(|| {
                 ManagerError::new(
                     "MGB110",
                     Phase::Cache,
                     format!("cached `{name}` blob disappeared"),
                 )
-            })
+            })?;
+        if bytes.len() as u64 != output.size || protocol_blake3(&bytes) != output.digest {
+            return Err(ManagerError::new(
+                "MGB110",
+                Phase::Cache,
+                format!("cached `{name}` blob differs from its declared identity"),
+            ));
+        }
+        Ok(bytes)
     }
 }
 
@@ -2334,9 +2325,9 @@ impl WorkExecutor<BuildWork> for BuildExecutor {
             return Ok(None);
         }
         let Some(record) = self
-            .index
-            .lookup(&dispatch.key)
-            .map_err(|e| error("MGB107", Phase::Cache, e))?
+            .runtime
+            .lookup_action(&dispatch.key)
+            .map_err(|cause| ManagerError::new(cause.code(), Phase::Cache, cause.message()))?
         else {
             return Ok(None);
         };
@@ -2378,25 +2369,15 @@ impl WorkExecutor<BuildWork> for BuildExecutor {
         result: &ActionResult,
     ) -> Result<(), ManagerError> {
         if work.effect() == Effect::Transform && result.outcome.is_ok() {
-            self.index
-                .record(&ActionRecord {
+            self.runtime
+                .record_action(&ActionRecord {
                     key: dispatch.key.clone(),
                     outputs: result.outputs.clone(),
                 })
-                .map_err(|e| error("MGB113", Phase::Cache, e))?;
+                .map_err(|cause| ManagerError::new(cause.code(), Phase::Cache, cause.message()))?;
         }
         Ok(())
     }
-}
-
-fn publish_generation(
-    publisher: &FileArtifactPublisher<Cas>,
-    target: &PublicationTargetId,
-    publications: &[Publication],
-) -> Result<CommittedGeneration, ManagerError> {
-    publisher
-        .publish_generation(target, publications)
-        .map_err(|cause| error("MGB119", Phase::Publish, cause))
 }
 
 fn build_action_fact(fact: &ActionExecutionFact) -> BuildActionFact {
@@ -2434,20 +2415,6 @@ fn build_action_fact(fact: &ActionExecutionFact) -> BuildActionFact {
             ResultSource::Cache => BuildResultSource::Cache,
         }),
     }
-}
-
-fn blob_digest(digest: &squish_protocol::Digest) -> Result<BlobDigest, ManagerError> {
-    if digest.algorithm() != &DigestAlgorithm::Blake3 {
-        return Err(ManagerError::new(
-            "MGB114",
-            Phase::Cache,
-            "cached blob does not use BLAKE3",
-        ));
-    }
-    let bytes: [u8; 32] = digest.bytes().try_into().map_err(|_| {
-        ManagerError::new("MGB114", Phase::Cache, "cached digest has invalid length")
-    })?;
-    Ok(BlobDigest::from_bytes(bytes))
 }
 
 fn expected_output(inputs: &ResolvedInputs, name: &str) -> Option<squish_protocol::Digest> {
@@ -2705,6 +2672,8 @@ fn build_plan(
     sources: &[FrozenSource],
     targets: &[TargetBuild],
     emit: &[EmitKind],
+    backend_identities: &BTreeMap<String, BackendCacheIdentity>,
+    descriptor: &BuildRuntimeDescriptor,
 ) -> Result<PreparedPlan<BuildWork>, ManagerError> {
     let mut actions = Vec::new();
     let mut work = BTreeMap::new();
@@ -2729,7 +2698,7 @@ fn build_plan(
                 vec![InputRef::Blob(source.blob.digest().to_protocol())],
                 BTreeMap::from([
                     ("source-key".into(), canonical_source_key(&key)),
-                    ("frontend-abi".into(), XML_FRONTEND_ABI.into()),
+                    ("frontend-abi".into(), descriptor.frontend_abi.clone()),
                 ]),
             ),
         )?;
@@ -2739,6 +2708,7 @@ fn build_plan(
         let link = action_id("link", &identity);
         let link_options = BTreeMap::from([
             ("entry".into(), canonical_source_key(&target.entry)),
+            ("linker-abi".into(), descriptor.linker_abi.clone()),
             (
                 "resolution-fingerprint".into(),
                 resolution_fingerprint(snapshot, sources),
@@ -2798,7 +2768,7 @@ fn build_plan(
                     kind: ArtifactKind::DebugInfo,
                 },
             ],
-            (instantiate_inputs, instantiate_options(target)),
+            (instantiate_inputs, instantiate_options(target, descriptor)),
         )?;
         let backend = action_id("backend", &identity);
         let backend_inputs = vec![
@@ -2829,7 +2799,14 @@ fn build_plan(
                     kind: ArtifactKind::DebugInfo,
                 },
             ],
-            (backend_inputs, backend_options(target)),
+            (
+                backend_inputs,
+                backend_options(
+                    backend_identities
+                        .get(&identity)
+                        .expect("every target identity is frozen"),
+                ),
+            ),
         )?;
         let publish = action_id("publish", &identity);
         let publish_inputs = vec![
@@ -2904,9 +2881,14 @@ fn add_action(
     Ok(())
 }
 
-fn instantiate_options(target: &TargetBuild) -> BTreeMap<String, String> {
+fn instantiate_options(
+    target: &TargetBuild,
+    descriptor: &BuildRuntimeDescriptor,
+) -> BTreeMap<String, String> {
     let limits = budgets(&target.resolved);
     let mut options = BTreeMap::from([
+        ("evaluator-abi".into(), descriptor.evaluator_abi.clone()),
+        ("document-abi".into(), descriptor.document_abi.clone()),
         ("max-depth".into(), limits.max_depth.to_string()),
         ("max-expansions".into(), limits.max_expansions.to_string()),
         (
@@ -2920,15 +2902,30 @@ fn instantiate_options(target: &TargetBuild) -> BTreeMap<String, String> {
     options
 }
 
-fn backend_options(target: &TargetBuild) -> BTreeMap<String, String> {
-    let identity = SquishBackend.cache_identity(SquishOptions {
-        max_output_bytes: budgets(&target.resolved).max_output_bytes,
-    });
+fn backend_options(identity: &BackendCacheIdentity) -> BTreeMap<String, String> {
     BTreeMap::from([
         ("backend-id".into(), identity.backend_id.into()),
         ("backend-version".into(), identity.backend_version.into()),
         ("canonical-options".into(), hex(&identity.canonical_options)),
     ])
+}
+
+fn freeze_backend_identities(
+    targets: &[TargetBuild],
+    runtime: &dyn BuildRuntime,
+) -> Result<BTreeMap<String, BackendCacheIdentity>, ManagerError> {
+    targets
+        .iter()
+        .map(|target| {
+            let target_name = format!("{}:{}", target.package, target.name);
+            let identity = runtime
+                .backend_identity(SquishOptions {
+                    max_output_bytes: budgets(&target.resolved).max_output_bytes,
+                })
+                .map_err(|error| ManagerError::new(error.code(), Phase::Manage, error.message()))?;
+            Ok((target_name, identity))
+        })
+        .collect()
 }
 
 fn resolution_fingerprint(snapshot: &ProjectSnapshot, sources: &[FrozenSource]) -> String {

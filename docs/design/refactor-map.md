@@ -17,8 +17,8 @@ implementation exists in the accepted tree.
 
 `xmlsquish` is a microkernel-style executable. The root composition adapter
 parses configuration, wires one manager capability into the kernel, connects
-host services and presentation, and translates the terminal outcome to a
-process exit status:
+host services, an injected build runtime, and presentation, and translates the
+terminal outcome to a process exit status:
 
 ```text
 argv
@@ -26,6 +26,7 @@ argv
   -> squish-protocol request
   -> squish-kernel lifecycle
   -> squish-manager planning and orchestration
+  -> squish-host BuildRuntime composition
   -> repository / resolver / fetch / source snapshot
   -> XML frontend -> canonical XSIR -> static link -> instantiation
   -> squish backend -> .prompt
@@ -46,7 +47,8 @@ and emergency interrupt coordination is isolated in
 | Layered configuration | [`../../crates/squish-config/src/lib.rs`](../../crates/squish-config/src/lib.rs) loads configuration independently of command execution. |
 | Wire and lifecycle vocabulary | [`../../crates/squish-protocol/src/lib.rs`](../../crates/squish-protocol/src/lib.rs) owns operation requests, events, typed IDs, diagnostics, artifacts, plans, and finalization records. |
 | Microkernel dispatch and validation | [`../../crates/squish-kernel/src/lib.rs`](../../crates/squish-kernel/src/lib.rs) routes capabilities and validates planning, plan, action, finalization, cancellation, and completion transitions. |
-| Unified manager capability | [`../../crates/squish-manager/src/lib.rs`](../../crates/squish-manager/src/lib.rs) is the sole capability for `fmt`, `build`, `add`, `remove`, and `inspect`. |
+| Unified manager capability | [`../../crates/squish-manager/src/lib.rs`](../../crates/squish-manager/src/lib.rs) is the sole capability for `fmt`, `build`, `add`, `remove`, and `inspect`; it receives production effects through `BuildRuntimeProvider`. |
+| Build-runtime contract | [`../../crates/squish-manager/src/runtime.rs`](../../crates/squish-manager/src/runtime.rs) owns the object-safe `BuildRuntime`, its provider, normalized failures, generation-space partition, and the descriptor frozen before plan sealing. |
 | Shared manager orchestration | [`../../crates/squish-manager/src/orchestrator.rs`](../../crates/squish-manager/src/orchestrator.rs) records planning, seals plans, drives the scheduler, maps worker facts to events, and coordinates finalization without printing from workers. |
 | Domain-specific plans and workers | [`../../crates/squish-manager/src/build.rs`](../../crates/squish-manager/src/build.rs), [`../../crates/squish-manager/src/fmt.rs`](../../crates/squish-manager/src/fmt.rs), [`../../crates/squish-manager/src/mutation.rs`](../../crates/squish-manager/src/mutation.rs), and [`../../crates/squish-manager/src/inspect.rs`](../../crates/squish-manager/src/inspect.rs). |
 | Typed plan graph and bounded scheduler | [`../../crates/squish-build/src/plan.rs`](../../crates/squish-build/src/plan.rs) and [`../../crates/squish-build/src/scheduler.rs`](../../crates/squish-build/src/scheduler.rs). |
@@ -59,12 +61,20 @@ and emergency interrupt coordination is isolated in
 | Output backend | [`../../crates/squish-backend/src/lib.rs`](../../crates/squish-backend/src/lib.rs) consumes linked document IR and expansion trace; the squish backend is the first implementation. |
 | Content and action storage | [`../../crates/squish-store/src/cas.rs`](../../crates/squish-store/src/cas.rs) and [`../../crates/squish-store/src/action.rs`](../../crates/squish-store/src/action.rs). |
 | Recoverable artifact generations | [`../../crates/squish-publish/src/lib.rs`](../../crates/squish-publish/src/lib.rs). |
-| Concrete production adapters | [`../../crates/squish-host/src/lib.rs`](../../crates/squish-host/src/lib.rs) composes filesystem, registry, Git, credentials, CAS, action-index, publisher, and catalogue services. |
+| Concrete production adapters | [`../../crates/squish-host/src/lib.rs`](../../crates/squish-host/src/lib.rs) composes filesystem, registry, Git, credentials, and one coherent production `BuildRuntime`: shared CAS/action-index handles, distinct target/catalogue publishers and their observers, and the XML/link/evaluation/squish toolchain. |
 | Human, short, and NDJSON presentation | [`../../crates/squish-presentation/src/lib.rs`](../../crates/squish-presentation/src/lib.rs) owns color, progress, terminal-width observation, stable non-TTY output, inspection rendering, and final summaries. |
 
 The crate boundary is the enforcement mechanism: semantic crates do not own
 CLI parsing or terminal output, and workers return typed facts instead of
 printing or choosing process exits.
+
+The runtime is opened once through `Services::open_build_runtime` inside the
+recorded planning recovery step. Its `BuildRuntimeDescriptor` supplies the
+frontend, linker, evaluator, and document identities; planning queries the same
+runtime for the option-dependent backend identity used by the sealed plan.
+`BuildExecutor` retains that same runtime for worker execution and finalization;
+it owns cache policy and semantic validation but
+does not construct `Cas`, `VerifiedActionIndex`, or `FileArtifactPublisher`.
 
 ## Current representation and build flow
 
@@ -114,6 +124,12 @@ vocabulary is:
 The detailed schemas and evidence limits are recorded in
 [`ir-model.md`](ir-model.md) and
 [`project-storage-namespaces.md`](project-storage-namespaces.md).
+
+Those production mechanisms are reached through the injected runtime. The
+manager verifies returned identities, sizes, codecs, schemas, and generation
+membership; `squish-host` owns adapter opening, shared handle lifetimes,
+publisher locking/recovery, and implementation selection. Neither layer treats
+the runtime as a plugin registry.
 
 ## Historical pre-cutover sources and completed destinations
 
@@ -187,7 +203,8 @@ The current invariants are implemented in:
   bounded re-planning on a pre-decision race; and
 - [`../../crates/squish-manager/src/build.rs`](../../crates/squish-manager/src/build.rs):
   build planning, cache restoration, typed generation publication, `BuildRecordV3`,
-  catalogue recovery, and `PersistBuildCatalog` finalization.
+  catalogue reconciliation, and `PersistBuildCatalog` finalization through the
+  injected runtime.
 
 `--dry-run` is represented as report-only planning rather than fake execution.
 Pre-plan failure can terminate with zero actions. A worker never writes the

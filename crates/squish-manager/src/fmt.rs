@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Mutex},
 };
 
@@ -26,11 +26,11 @@ use squish_repository::{
 use squish_source::{
     FileSourceProvider, SnapshotBuilder, SourceBlob, SourceIdentity, SourceProvider,
 };
-use squish_xml_front::{FrontendSourceContext, compile};
+use squish_xml_front::FrontendSourceContext;
 
 use crate::{
-    DurabilityPorts, Effect, InvocationSettings, ManagerError, PlannedWork, PreparedPlan, Services,
-    StorageLayout,
+    BuildRuntime, DurabilityPorts, Effect, InvocationSettings, ManagerError, PlannedWork,
+    PreparedPlan, Services,
     orchestrator::{
         self, CachedResult, PlanningRecorder, ResolvedInputs, WorkDisposition, WorkExecutor,
     },
@@ -83,15 +83,28 @@ struct BatchState {
 }
 
 /// 仅冻结选择与源码字节的格式化批次；候选由 Format worker 产生。 / Formatting batch containing only frozen selection and bytes; Format workers produce candidates.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FormatBatch {
     selected: Vec<OpaqueSourceId>,
     sources: BTreeMap<OpaqueSourceId, FrozenFormatSource>,
     state: Arc<Mutex<BatchState>>,
-    cas_root: PathBuf,
+    runtime: Arc<dyn BuildRuntime>,
     style: FormatStyle,
     check: bool,
     diff: bool,
+}
+
+impl std::fmt::Debug for FormatBatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FormatBatch")
+            .field("selected", &self.selected)
+            .field("sources", &self.sources)
+            .field("style", &self.style)
+            .field("check", &self.check)
+            .field("diff", &self.diff)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FormatBatch {
@@ -115,7 +128,12 @@ impl FormatBatch {
             .sources
             .get(id)
             .expect("plan only names frozen sources");
-        let bytes = candidate(&frozen.blob, &frozen.source, self.style)?;
+        let bytes = candidate(
+            &frozen.blob,
+            &frozen.source,
+            self.style,
+            self.runtime.as_ref(),
+        )?;
         if bytes == frozen.blob.bytes() {
             return Ok(());
         }
@@ -172,7 +190,7 @@ impl FormatBatch {
                 state.updates.values().cloned().collect::<Vec<_>>(),
             )
         };
-        let artifacts = store_diffs(&self.cas_root, &diffs)?;
+        let artifacts = store_diffs(self.runtime.as_ref(), &diffs)?;
         if !self.check && !updates.is_empty() {
             repository
                 .write_formatted_files(&updates)
@@ -245,7 +263,7 @@ pub fn prepare(
     request: &FormatRequest,
     snapshot: &ProjectSnapshot,
     locations: &[PackageLocation],
-    storage: &StorageLayout,
+    runtime: Arc<dyn BuildRuntime>,
 ) -> Result<FormatBatch, ManagerError> {
     let style = style(request)?;
     let _ = locations;
@@ -265,7 +283,7 @@ pub fn prepare(
         style,
         snapshot.root(),
         selected,
-        storage.cas_root().to_path_buf(),
+        runtime,
     )
 }
 
@@ -299,12 +317,16 @@ pub(crate) fn execute_with_durability(
         Ok(repository) => repository,
         Err(failure) => return planning.unavailable(OperationKind::Format, &failure),
     };
-    let layout = match planning.step(step("storage-layout"), PlanningStepKind::Locate, || {
-        services
-            .storage_layout(repository.root())
-            .map_err(|error| ManagerError::new(error.code(), Phase::Cache, error.message()))
-    }) {
-        Ok(layout) => layout,
+    let runtime = match planning.step(
+        step("open-build-runtime"),
+        PlanningStepKind::Recover,
+        || {
+            services
+                .open_build_runtime(repository.root())
+                .map_err(|error| ManagerError::new(error.code(), Phase::Cache, error.message()))
+        },
+    ) {
+        Ok(runtime) => runtime,
         Err(failure) => return planning.unavailable(OperationKind::Format, &failure),
     };
     let snapshot = match planning.step(
@@ -347,7 +369,7 @@ pub(crate) fn execute_with_durability(
             style,
             snapshot.root(),
             selected,
-            layout.cas_root().to_path_buf(),
+            Arc::clone(&runtime),
         )
     }) {
         Ok(batch) => batch,
@@ -505,7 +527,7 @@ fn prepare_selected(
     style: FormatStyle,
     _root: &Path,
     selected: Vec<ProjectSource>,
-    cas_root: PathBuf,
+    runtime: Arc<dyn BuildRuntime>,
 ) -> Result<FormatBatch, ManagerError> {
     let mut builder = SnapshotBuilder::new(FileSourceProvider);
     let mut loaded = BTreeMap::new();
@@ -545,7 +567,7 @@ fn prepare_selected(
         selected: ids,
         sources,
         state: Arc::new(Mutex::new(BatchState::default())),
-        cas_root,
+        runtime,
         style,
         check,
         diff,
@@ -556,6 +578,7 @@ fn candidate(
     blob: &SourceBlob,
     source: &ProjectSource,
     style: FormatStyle,
+    runtime: &dyn BuildRuntime,
 ) -> Result<Vec<u8>, ManagerError> {
     std::str::from_utf8(blob.bytes()).map_err(|error| {
         manager_error("XS3114", Phase::Format, "format source is not UTF-8", error)
@@ -577,21 +600,21 @@ fn candidate(
         )
     })?;
     let context = FrontendSourceContext::new(source.package.clone());
-    let before = compile(blob, &context).map_err(|error| {
+    let before = runtime.compile(blob, &context).map_err(|error| {
         manager_error(
             "XS3107",
             Phase::Analyze,
             "source failed semantic preflight",
-            error.message.clone(),
+            error.message(),
         )
     })?;
     let after_blob = candidate_blob(source, &bytes)?;
-    let after = compile(&after_blob, &context).map_err(|error| {
+    let after = runtime.compile(&after_blob, &context).map_err(|error| {
         manager_error(
             "XS3107",
             Phase::Analyze,
             "formatted candidate failed semantic preflight",
-            error.message.clone(),
+            error.message(),
         )
     })?;
     if !same_semantics(&before.unit, &after.unit) {
@@ -743,29 +766,37 @@ fn append_diff_lines(output: &mut Vec<u8>, prefix: u8, lines: &[DiffLine<'_>]) {
 }
 
 fn store_diffs(
-    cas_root: &Path,
+    runtime: &dyn BuildRuntime,
     diffs: &BTreeMap<OpaqueSourceId, Vec<u8>>,
 ) -> Result<Vec<Artifact>, ManagerError> {
     if diffs.is_empty() {
         return Ok(Vec::new());
     }
-    let cas = squish_store::Cas::open(cas_root).map_err(|error| {
-        manager_error("XS3113", Phase::Cache, "could not open diff store", error)
-    })?;
     diffs
         .iter()
         .map(|(source, bytes)| {
-            let digest = cas.put(bytes).map_err(|error| {
+            let digest = runtime.write_blob(bytes).map_err(|error| {
                 manager_error("XS3113", Phase::Cache, "could not store format diff", error)
             })?;
+            let expected = Digest::new(
+                DigestAlgorithm::Blake3,
+                blake3::hash(bytes).as_bytes().to_vec(),
+            )
+            .expect("BLAKE3 is non-empty");
+            if digest != expected {
+                return Err(ManagerError::new(
+                    "XS3113",
+                    Phase::Cache,
+                    "runtime returned a mismatched format-diff digest",
+                ));
+            }
             Ok(Artifact {
                 id: ArtifactId::new(format!("format-diff:{source}"))
                     .expect("source IDs are non-empty"),
                 kind: ArtifactKind::Other("text/x-diff".into()),
-                uri: format!("cas://blake3/{}", digest.to_hex()),
+                uri: format!("cas://blake3/{}", digest.hex()),
                 size: bytes.len() as u64,
-                digest: Digest::new(DigestAlgorithm::Blake3, digest.as_bytes().to_vec())
-                    .expect("BLAKE3 is non-empty"),
+                digest,
             })
         })
         .collect()

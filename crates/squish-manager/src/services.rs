@@ -16,6 +16,7 @@ use squish_repository::{
 use std::sync::Arc;
 
 use crate::{ArtifactLocator, ServiceError};
+use crate::{BuildRuntime, BuildRuntimeProvider};
 
 /// 创建目标经宿主定位后冻结的外部环境。 / Host-located external environment frozen for project creation.
 ///
@@ -259,6 +260,13 @@ pub enum ProvenanceNonApplicability {
 /// ports. A production composition root must implement every raw catalog and blob port and must
 /// never rely on these defaults.
 pub trait Services: Send + Sync {
+    /// 在规划恢复阶段打开唯一调用级构建运行时。 / Opens the sole invocation-scoped build runtime during planning recovery.
+    fn open_build_runtime(
+        &self,
+        _project_root: &Path,
+    ) -> Result<Arc<dyn BuildRuntime>, ServiceError> {
+        unavailable("build runtime")
+    }
     /// 只读定位新项目的绝对目标、Git 与外围工作区语义。 / Read-only locates a new project's absolute destination, Git, and enclosing-workspace semantics.
     fn locate_project_creation(
         &self,
@@ -351,6 +359,15 @@ pub trait Services: Send + Sync {
     /// 返回持久 build record 的计划投影；管理器仍会验证 ID 与依赖。 / Returns the plan projection from a persistent build record; the manager still validates IDs and dependencies.
     fn planned_actions(&self, _project: &Path) -> Result<Option<PlanInspection>, ServiceError> {
         unavailable("plan catalog")
+    }
+}
+
+impl<T: Services + ?Sized> BuildRuntimeProvider for T {
+    fn open_build_runtime(
+        &self,
+        project_root: &Path,
+    ) -> Result<Arc<dyn BuildRuntime>, ServiceError> {
+        Services::open_build_runtime(self, project_root)
     }
 }
 

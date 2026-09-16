@@ -447,8 +447,8 @@ fn wait_for_notice_after(session: &PtySession, offset: usize, timeout: Duration)
     }
 }
 
-/// 等待已完成的 scan/validate 证据及其后的同作业恢复帧。 /
-/// Waits for completed scan/validate evidence and the same job's later recovery frame.
+/// 等待已完成的 repository recovery 证据及其后的同作业 runtime 恢复帧。 /
+/// Waits for completed repository-recovery evidence and the same job's later runtime recovery frame.
 fn wait_for_blocked_recovery(session: &PtySession, timeout: Duration) -> Vec<u8> {
     let deadline = Instant::now() + timeout;
     let mut bytes = session.output.bytes.lock().expect("PTY output lock");
@@ -472,16 +472,11 @@ fn wait_for_blocked_recovery(session: &PtySession, timeout: Duration) -> Vec<u8>
     }
 }
 
-/// 从持久步骤终态和完整重绘语法中证明 open-build-state 恢复阶段。 /
-/// Proves the open-build-state recovery phase from persistent step terminals and a full repaint.
+/// 从持久步骤终态和完整重绘语法中证明 open-build-runtime 恢复阶段。 /
+/// Proves the open-build-runtime recovery phase from persistent step terminals and a full repaint.
 fn ordered_recovery_frame(transcript: &str) -> Option<String> {
-    let (scan_end, job) = completed_step_after(transcript, 0, "scan")?;
-    let (validate_end, validated_job) =
-        completed_step_after(transcript, scan_end, "validate-plan")?;
-    if validated_job != job {
-        return None;
-    }
-    let suffix = &transcript[validate_end..];
+    let (recover_end, job) = completed_step_after(transcript, 0, "recover")?;
+    let suffix = &transcript[recover_end..];
     let mut offset = 0;
     while let Some(relative) = suffix[offset..].find("Recovering ") {
         let start = offset + relative;

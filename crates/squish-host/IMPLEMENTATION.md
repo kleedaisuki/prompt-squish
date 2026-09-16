@@ -12,6 +12,49 @@ credential port, an HTTP client policy/client, the Git executable, and the works
 port. No constructor is permitted to consult the current directory, environment variables,
 home-directory conventions, a process-global client, or an implicit executable search path.
 
+`ProductionHost::open` installs no-op publication observers. Recovery tests and executable
+composition may replace them with
+`ProductionHost::with_build_observers(target_observer, catalog_observer)`. The two arguments are
+intentionally separate: target generations and build-catalog generations are distinct durability
+domains and must never depend on a shared occurrence counter.
+
+## Build runtime composition
+
+`Services::open_build_runtime` lazily constructs and then retains one invocation-scoped
+`ProductionBuildRuntime` after checking that the requested canonical root is the configured
+project. Eager construction is deliberately avoided: storage-open failures remain inside the
+manager's recorded planning step rather than becoming unrecorded host bootstrap failures.
+Inspection calls reuse that same retained runtime. The runtime owns one shared `Arc<Cas>`, one
+`VerifiedActionIndex` bound to that CAS, and two
+`FileArtifactPublisher` values backed by the same CAS but rooted in the distinct target and catalog
+publication directories. It also selects the production XML frontend, static linker, evaluator,
+and squish backend.
+
+The runtime exposes only `squish_manager::BuildRuntime` domain values. Concrete CAS paths,
+SQLite handles, publisher journals, current pointers, and immutable-generation paths do not cross
+back into the manager. `GenerationSpace::{TargetArtifacts, BuildCatalog}` selects one of the two
+publisher instances without adding a third filesystem layout recipe. Runtime methods never emit
+kernel events; scheduling and event ordering remain manager responsibilities.
+
+The descriptor currently freezes these semantic identities before plan sealing:
+
+| Stage | Identity |
+| --- | --- |
+| XML frontend | `xmlsquish.xml/1` |
+| static linker | `xmlsquish.link/1` |
+| evaluator | `xmlsquish.instantiate/1` |
+| linked document | `xmlsquish.document.v1` |
+
+Changing implementation semantics requires changing the corresponding identity so an older
+action-cache entry cannot be reused by a different toolchain.
+
+Runtime errors retain their causal category. CAS, SQLite, publisher-store, and publisher-I/O
+availability failures are `Storage`; malformed journals, invalid or aliased destinations,
+symlink violations, missing publication blobs, digest/size mismatches, and unsupported publisher
+digests are `Corrupt`; frontend, linker, evaluator, and backend failures are `Tool`. Manager
+recovery policy therefore never mistakes an operational I/O failure for evidence that persisted
+state may safely be replaced.
+
 ## Port-to-owner map
 
 | `squish_manager::Services` port | Authoritative owner | Contract used by this host |
