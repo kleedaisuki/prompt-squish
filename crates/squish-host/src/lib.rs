@@ -17,7 +17,7 @@ use std::{
     fmt,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -32,9 +32,9 @@ use squish_fetch::{
     Materializer, Observer, RegistryConfig, SourceEvent, SparseRegistry, SystemGitRunner,
 };
 use squish_manager::{
-    ArtifactLocator, BuildRuntime, BuildRuntimeError, ProjectCreationLocation,
-    ProjectCreationStatus, ProvenanceNonApplicability, ProvenanceRelation, ResolveRequest,
-    ResolvedDependencies, ServiceError, Services, StorageLayout,
+    ArtifactLocator, BuildRuntime, ProjectCreationLocation, ProjectCreationStatus,
+    ProvenanceNonApplicability, ProvenanceRelation, ResolveRequest, ResolvedDependencies,
+    ServiceError, Services, StorageLayout,
 };
 use squish_project::{
     DependencyResolver, LockedSource, Lockfile, Manifest, ResolutionInput, ResolutionMode,
@@ -529,9 +529,7 @@ pub struct ProductionHost {
     git: GitHost,
     git_runner: Arc<dyn GitRunner>,
     filesystem: Arc<dyn FilesystemPort + Send + Sync>,
-    build_runtime: Mutex<Option<Arc<ProductionBuildRuntime>>>,
-    target_publish_observer: Arc<dyn PublishObserver>,
-    catalog_publish_observer: Arc<dyn PublishObserver>,
+    build_runtime: Arc<ProductionBuildRuntime>,
 }
 
 impl ProductionHost {
@@ -613,6 +611,11 @@ impl ProductionHost {
         }
         let git_runner = git_runner(config.git)?;
         let git = GitHost::with_runner(context.clone(), git_runner.clone());
+        let build_runtime = Arc::new(ProductionBuildRuntime::new(
+            config.storage.clone(),
+            Arc::new(NoopPublishObserver),
+            Arc::new(NoopPublishObserver),
+        ));
         Ok(Self {
             project_root,
             source_cache_root,
@@ -622,9 +625,7 @@ impl ProductionHost {
             git,
             git_runner,
             filesystem: config.filesystem,
-            build_runtime: Mutex::new(None),
-            target_publish_observer: Arc::new(NoopPublishObserver),
-            catalog_publish_observer: Arc::new(NoopPublishObserver),
+            build_runtime,
         })
     }
 
@@ -640,9 +641,11 @@ impl ProductionHost {
         target: Arc<dyn PublishObserver>,
         catalog: Arc<dyn PublishObserver>,
     ) -> Self {
-        self.target_publish_observer = target;
-        self.catalog_publish_observer = catalog;
-        self.build_runtime = Mutex::new(None);
+        self.build_runtime = Arc::new(ProductionBuildRuntime::new(
+            self.storage.clone(),
+            target,
+            catalog,
+        ));
         self
     }
 
@@ -1226,9 +1229,7 @@ impl Services for ProductionHost {
         project_root: &Path,
     ) -> Result<Arc<dyn BuildRuntime>, ServiceError> {
         self.require_project(project_root)?;
-        self.runtime()
-            .map(|runtime| runtime as Arc<dyn BuildRuntime>)
-            .map_err(|error| ServiceError::new(error.code(), error.message()))
+        Ok(self.build_runtime.clone())
     }
 
     fn locate_project_creation(
@@ -1284,8 +1285,7 @@ impl Services for ProductionHost {
         project: &Path,
     ) -> Result<Vec<squish_protocol::CachedAction>, ServiceError> {
         self.require_project(project)?;
-        self.runtime()
-            .map_err(|error| ServiceError::new(error.code(), error.message()))?
+        self.build_runtime
             .cache_records()
             .map_err(|error| ServiceError::new(error.code(), error.message()))
     }
@@ -1296,8 +1296,7 @@ impl Services for ProductionHost {
         digest: &squish_protocol::Digest,
     ) -> Result<Option<Vec<u8>>, ServiceError> {
         self.require_project(project)?;
-        self.runtime()
-            .map_err(|error| ServiceError::new(error.code(), error.message()))?
+        self.build_runtime
             .read_blob(digest)
             .map_err(|error| ServiceError::new(error.code(), error.message()))
     }
@@ -1379,25 +1378,6 @@ impl Services for ProductionHost {
 }
 
 impl ProductionHost {
-    fn runtime(&self) -> Result<Arc<ProductionBuildRuntime>, BuildRuntimeError> {
-        let mut slot = self.build_runtime.lock().map_err(|_| {
-            BuildRuntimeError::storage(
-                "host_runtime_coordination",
-                "build-runtime coordination mutex is poisoned",
-            )
-        })?;
-        if let Some(runtime) = slot.as_ref() {
-            return Ok(runtime.clone());
-        }
-        let runtime = Arc::new(ProductionBuildRuntime::open(
-            &self.storage,
-            self.target_publish_observer.clone(),
-            self.catalog_publish_observer.clone(),
-        )?);
-        *slot = Some(runtime.clone());
-        Ok(runtime)
-    }
-
     fn require_project(&self, project: &Path) -> Result<(), ServiceError> {
         let canonical = std::fs::canonicalize(project)
             .map_err(|error| ServiceError::new("project_root_unavailable", error.to_string()))?;
@@ -1417,10 +1397,7 @@ impl ProductionHost {
     fn current_catalog(
         &self,
     ) -> Result<Option<squish_manager::build::BuildCatalogSnapshot>, ServiceError> {
-        let runtime = self
-            .runtime()
-            .map_err(|error| ServiceError::new(error.code(), error.message()))?;
-        squish_manager::build::read_current_build_catalog(runtime.as_ref())
+        squish_manager::build::read_current_build_catalog(self.build_runtime.as_ref())
             .map_err(|error| ServiceError::new("build_catalog_failed", error.to_string()))
     }
 }

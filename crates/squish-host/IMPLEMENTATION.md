@@ -20,15 +20,20 @@ domains and must never depend on a shared occurrence counter.
 
 ## Build runtime composition
 
-`Services::open_build_runtime` lazily constructs and then retains one invocation-scoped
-`ProductionBuildRuntime` after checking that the requested canonical root is the configured
-project. Eager construction is deliberately avoided: storage-open failures remain inside the
-manager's recorded planning step rather than becoming unrecorded host bootstrap failures.
-Inspection calls reuse that same retained runtime. The runtime owns one shared `Arc<Cas>`, one
-`VerifiedActionIndex` bound to that CAS, and two
-`FileArtifactPublisher` values backed by the same CAS but rooted in the distinct target and catalog
-publication directories. It also selects the production XML frontend, static linker, evaluator,
-and squish backend.
+`ProductionHost` cheaply constructs and retains one invocation-scoped `ProductionBuildRuntime`
+after validating configuration; `Services::open_build_runtime` only clones its `Arc`. The runtime
+records layout and observers without touching persistence. CAS, action index, target publisher,
+and catalog publisher each have an independent retryable single-flight initialization cell. The
+index and both publishers reuse the one CAS, while a blob-only operation never opens SQLite or a
+publisher. A failed component initialization is not cached and may succeed after an operational
+condition is repaired. Compile, link, instantiate, descriptor, and backend-identity operations
+create no storage paths.
+
+This per-capability laziness keeps storage failures inside the exact manager action that first
+needs that capability. Inspection calls reuse initialized components. Target and catalog
+`FileArtifactPublisher` values remain rooted in distinct directories and receive their respective
+observers. The runtime also selects the production XML frontend, static linker, evaluator, and
+squish backend.
 
 The runtime exposes only `squish_manager::BuildRuntime` domain values. Concrete CAS paths,
 SQLite handles, publisher journals, current pointers, and immutable-generation paths do not cross

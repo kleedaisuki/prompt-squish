@@ -178,9 +178,13 @@ impl StderrEmergencyRestore {
 impl EmergencyRestore for StderrEmergencyRestore {
     fn restore(&self) {
         if self.enabled.load(Ordering::Acquire) {
-            platform::write_stderr_once(EMERGENCY_RESET);
+            write_emergency_reset(platform::write_stderr_once);
         }
     }
+}
+
+fn write_emergency_reset(write: impl FnOnce(&'static [u8])) {
+    write(EMERGENCY_RESET);
 }
 
 /// 使用标准库立即终止进程。 / Immediately terminates the process through the standard library.
@@ -324,6 +328,13 @@ mod tests {
 
         coordinator.on_interrupt();
         assert_eq!(log.entries(), ["restore", "exit:130"]);
+    }
+
+    #[test]
+    fn emergency_restore_writes_the_exact_fixed_sequence() {
+        let written = Mutex::new(Vec::new());
+        write_emergency_reset(|bytes| written.lock().unwrap().extend_from_slice(bytes));
+        assert_eq!(*written.lock().unwrap(), b"\x1b[0m\x1b[?25h\r\x1b[2K");
     }
 
     #[test]

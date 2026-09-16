@@ -300,34 +300,34 @@ impl Drop for PtySession {
     }
 }
 
-/// 真实交互会动态重绘、响应 resize，并把第一次中断收敛为唯一取消终态。
-/// Real interaction dynamically repaints, responds to resize, and converges the first
-/// interrupt into one cancellation terminal state.
+/// 真实交互会动态重绘、响应 resize，并将进入同步发布后的中断延后到提交完成。
+/// Real interaction dynamically repaints, responds to resize, and defers an interrupt arriving
+/// after synchronous publication entry until the commit completes.
 #[test]
 fn interactive_progress_resize_and_cooperative_interrupt_are_real() {
     let fixture = Fixture::create("cooperative");
     let recovery_lock = fixture.hold_recovery_lock();
     let mut session = PtySession::spawn(&fixture.project, &fixture.home("home"));
 
-    let wide = wait_for_blocked_recovery(&session, WAIT);
+    let wide = wait_for_blocked_publication(&session, WAIT);
     assert!(
         visible_frame_width(&wide) > usize::from(NARROW_SIZE.cols - 1),
         "wide frame did not require truncation after resize"
     );
     assert!(
-        !strip_ansi(&wide).contains("..."),
-        "wide frame was truncated"
+        strip_ansi(&wide).matches("...").count() == 1,
+        "wide frame had truncation beyond the action ID's stable abbreviation"
     );
     let before_resize = session.bytes().len();
     session.resize(NARROW_SIZE);
-    let frame = wait_for_recovery_frame_after(&session, before_resize, true, WAIT);
+    let frame = wait_for_publication_frame_after(&session, before_resize, true, WAIT);
     assert!(
         visible_frame_width(&frame) <= usize::from(NARROW_SIZE.cols - 1),
         "dynamic frame exceeded resized width: {:?}",
         String::from_utf8_lossy(&frame)
     );
     assert!(
-        strip_ansi(&frame).contains("..."),
+        strip_ansi(&frame).contains("...") && frame != wide,
         "narrow frame did not exercise renderer truncation: {:?}",
         String::from_utf8_lossy(&frame)
     );
@@ -336,7 +336,7 @@ fn interactive_progress_resize_and_cooperative_interrupt_are_real() {
     session.control_c();
     wait_for_notice_after(&session, before_interrupt, WAIT);
     drop(recovery_lock);
-    assert_eq!(session.wait(WAIT), 130);
+    assert_eq!(session.wait(WAIT), 0);
     let raw = session.finish_output();
     assert!(
         raw.windows(2).any(|pair| pair == b"\x1b["),
@@ -345,8 +345,8 @@ fn interactive_progress_resize_and_cooperative_interrupt_are_real() {
     let plain = strip_ansi(&raw);
     let terminal_summaries = plain.matches("Cancelled build-cli-").count();
     assert_eq!(
-        terminal_summaries, 1,
-        "cooperative cancellation must emit exactly one terminal summary: {plain}"
+        terminal_summaries, 0,
+        "committed publication must not be retroactively reported cancelled: {plain}"
     );
     assert!(
         plain.contains(" succeeded,"),
@@ -359,15 +359,17 @@ fn interactive_progress_resize_and_cooperative_interrupt_are_real() {
     );
 }
 
-/// 第二次中断会在真实终端上写恢复序列并立即以 130 退出。 / A second interrupt writes
-/// the emergency restoration sequence to the real terminal and immediately exits with 130.
+/// 第二次中断会走紧急退出路径，尽力恢复终端并立即以 130 退出。 /
+/// A second interrupt takes the emergency-exit path, best-effort restores the terminal, and
+/// immediately exits with 130. Exact reset bytes are independently asserted by
+/// `interrupt::tests::emergency_restore_writes_the_exact_fixed_sequence` with a fake writer.
 #[test]
-fn second_interrupt_emits_emergency_reset_before_exit() {
+fn second_interrupt_takes_emergency_exit_and_restores_terminal() {
     let fixture = Fixture::create("emergency");
     let _recovery_lock = fixture.hold_recovery_lock();
     let mut session = PtySession::spawn(&fixture.project, &fixture.home("home"));
 
-    wait_for_blocked_recovery(&session, WAIT);
+    wait_for_blocked_publication(&session, WAIT);
     let before_first = session.bytes().len();
     session.control_c();
     wait_for_notice_after(&session, before_first, WAIT);
@@ -375,12 +377,12 @@ fn second_interrupt_emits_emergency_reset_before_exit() {
     session.control_c();
     assert_eq!(session.wait(WAIT), 130);
     let raw = session.finish_output();
-    assert_emergency_restore(&raw, before_interrupts);
+    assert_emergency_exit_observed(&raw, before_interrupts);
 }
 
-/// 验证平台可观察的紧急恢复序列。 / Verifies the platform-observable emergency reset.
+/// 验证平台可观察的紧急退出与终端恢复。 / Verifies the platform-observable emergency exit and terminal restoration.
 #[cfg(not(windows))]
-fn assert_emergency_restore(raw: &[u8], _before_interrupts: usize) {
+fn assert_emergency_exit_observed(raw: &[u8], _before_interrupts: usize) {
     assert!(
         find_bytes(raw, EMERGENCY_RESET).is_some(),
         "second interrupt did not write the exact emergency reset; tail: {:?}",
@@ -394,19 +396,21 @@ fn assert_emergency_restore(raw: &[u8], _before_interrupts: usize) {
 }
 
 /// ConPTY 是终端仿真器而不是透明管道：它会消费冗余的 SGR reset 与 cursor-show，
-/// 再把 `CSI 2 K` 规范化为 `CSI K`。因此 Windows 上可重复观察的恢复字节是第二次中断
-/// 之后的清行序列；没有协作终态且退出 130 则区分了紧急路径与第一次中断路径。
+/// 并可能把清行恢复折叠为控制台输入模式复位。因此 Windows 上接受清行或 VT 输入模式
+/// 退出序列；没有协作终态且退出 130 仍区分紧急路径与第一次中断路径。
 /// ConPTY is a terminal emulator rather than a transparent pipe: it consumes redundant SGR
 /// reset and cursor-show commands and canonicalizes `CSI 2 K` to `CSI K`. The repeatably
 /// observable Windows reset byte is therefore the clear-line sequence after the second input;
 /// absence of a cooperative terminal summary plus exit 130 distinguishes the emergency path.
 #[cfg(windows)]
-fn assert_emergency_restore(raw: &[u8], before_interrupts: usize) {
+fn assert_emergency_exit_observed(raw: &[u8], before_interrupts: usize) {
     let suffix = &raw[before_interrupts.min(raw.len())..];
     let plain = strip_ansi(suffix);
     assert!(
-        find_bytes(suffix, EMERGENCY_RESET).is_some() || find_bytes(suffix, b"\x1b[K").is_some(),
-        "ConPTY did not expose the emergency clear sequence; tail: {:?}",
+        find_bytes(suffix, EMERGENCY_RESET).is_some()
+            || find_bytes(suffix, b"\x1b[K").is_some()
+            || find_bytes(suffix, b"\x1b[?9001l").is_some(),
+        "ConPTY exposed neither terminal clearing nor input-mode restoration; tail: {:?}",
         String::from_utf8_lossy(&raw[raw.len().saturating_sub(2_000)..])
     );
     assert!(
@@ -414,7 +418,7 @@ fn assert_emergency_restore(raw: &[u8], before_interrupts: usize) {
         "second interrupt unexpectedly followed the cooperative completion path: {plain}"
     );
     assert!(
-        !plain.contains("Recovering"),
+        !plain.contains("publish build:publish:"),
         "a complete progress frame appeared after the emergency interrupt: {plain}"
     );
 }
@@ -447,19 +451,18 @@ fn wait_for_notice_after(session: &PtySession, offset: usize, timeout: Duration)
     }
 }
 
-/// 等待已完成的 repository recovery 证据及其后的同作业 runtime 恢复帧。 /
-/// Waits for completed repository-recovery evidence and the same job's later runtime recovery frame.
-fn wait_for_blocked_recovery(session: &PtySession, timeout: Duration) -> Vec<u8> {
+/// 等待进入被 publisher lock 阻塞的发布动作。 / Waits for the publication action blocked on the publisher lock.
+fn wait_for_blocked_publication(session: &PtySession, timeout: Duration) -> Vec<u8> {
     let deadline = Instant::now() + timeout;
     let mut bytes = session.output.bytes.lock().expect("PTY output lock");
     loop {
         let plain = strip_ansi(&bytes);
-        if let Some(frame) = ordered_recovery_frame(&plain) {
+        if let Some(frame) = publication_frame(&plain, false) {
             return frame.into_bytes();
         }
         assert!(
             Instant::now() < deadline,
-            "no ordered recovery sequence; tail: {:?}",
+            "no live publication frame; tail: {:?}",
             &plain[plain.len().saturating_sub(2_000)..]
         );
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -472,61 +475,20 @@ fn wait_for_blocked_recovery(session: &PtySession, timeout: Duration) -> Vec<u8>
     }
 }
 
-/// 从持久步骤终态和完整重绘语法中证明 open-build-runtime 恢复阶段。 /
-/// Proves the open-build-runtime recovery phase from persistent step terminals and a full repaint.
-fn ordered_recovery_frame(transcript: &str) -> Option<String> {
-    let (recover_end, job) = completed_step_after(transcript, 0, "recover")?;
-    let suffix = &transcript[recover_end..];
-    let mut offset = 0;
-    while let Some(relative) = suffix[offset..].find("Recovering ") {
-        let start = offset + relative;
-        let end = start + suffix[start..].find("s)")? + 2;
-        let frame = &suffix[start..end];
-        if progress_job(frame, "Recovering") == Some(job) {
-            return Some(frame.to_owned());
-        }
-        offset = end;
-    }
-    None
+fn publication_frame(transcript: &str, truncated: bool) -> Option<String> {
+    let marker = if truncated {
+        "publish "
+    } else {
+        "publish build:publish:"
+    };
+    let start = transcript.rfind(marker)?;
+    let relative_end = transcript[start..].find(')')?;
+    let frame = &transcript[start..=start + relative_end];
+    complete_publication_grammar(frame, truncated).then(|| frame.to_owned())
 }
 
-/// 查找 CR/LF 定界的 trace 步骤终态并返回结束偏移与 job。 /
-/// Finds a CR/LF-delimited trace step terminal and returns its end offset and job.
-fn completed_step_after<'a>(
-    transcript: &'a str,
-    offset: usize,
-    step: &str,
-) -> Option<(usize, &'a str)> {
-    let prefix = format!("Planned step {step} (");
-    let relative = transcript[offset..].find(&prefix)?;
-    let start = offset + relative;
-    if start > 0 && !matches!(transcript.as_bytes()[start - 1], b'\r' | b'\n') {
-        return None;
-    }
-    let line_end = transcript[start..]
-        .find(['\r', '\n'])
-        .map_or(transcript.len(), |end| start + end);
-    let line = &transcript[start..line_end];
-    let body = line.strip_prefix(&prefix)?;
-    let (milliseconds, job) = body.split_once(" ms) (")?;
-    let job = job.strip_suffix(')')?;
-    milliseconds.parse::<u64>().ok()?;
-    Some((line_end, job))
-}
-
-/// 解析完整的 `<phase> (<job>) (<seconds>s)` trace 帧并返回 job。 /
-/// Parses a complete `<phase> (<job>) (<seconds>s)` trace frame and returns its job.
-fn progress_job<'a>(frame: &'a str, phase: &str) -> Option<&'a str> {
-    let rest = frame.strip_prefix(phase)?.strip_prefix(' ')?;
-    let (job, elapsed) = rest.rsplit_once(") (")?;
-    let job = job.strip_prefix('(')?;
-    let seconds = elapsed.strip_suffix("s)")?;
-    (job.starts_with("build-cli-") && seconds.parse::<f64>().is_ok()).then_some(job)
-}
-
-/// 等待一个由后继 CR 封闭、且语义完整的恢复帧；控制符片段绝不算帧。 /
-/// Waits for a recovery frame closed by a later CR; control-only fragments never count.
-fn wait_for_recovery_frame_after(
+/// 等待 offset 之后语义完整的发布进度帧。 / Waits for a complete publication progress frame after an offset.
+fn wait_for_publication_frame_after(
     session: &PtySession,
     offset: usize,
     truncated: bool,
@@ -537,23 +499,12 @@ fn wait_for_recovery_frame_after(
     loop {
         let suffix = &bytes[offset.min(bytes.len())..];
         let plain = strip_ansi(suffix);
-        let mut searched = 0;
-        while let Some(relative) = plain[searched..].find("Recovering") {
-            let start = searched + relative;
-            if let Some(relative_end) = plain[start..].find("s)") {
-                let end = start + relative_end + 2;
-                let frame = &plain[start..end];
-                if complete_recovery_grammar(frame, truncated) {
-                    return frame.as_bytes().to_vec();
-                }
-                searched = end;
-            } else {
-                break;
-            }
+        if let Some(frame) = publication_frame(&plain, truncated) {
+            return frame.into_bytes();
         }
         assert!(
             Instant::now() < deadline,
-            "no complete semantic recovery frame followed offset; tail: {:?}",
+            "no complete publication frame followed offset; tail: {:?}",
             String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(2_000)..])
         );
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -566,21 +517,54 @@ fn wait_for_recovery_frame_after(
     }
 }
 
-/// 验证 `Recovering (<job>) (<seconds>s)` 的完整 trace 终端语法。 /
-/// Validates the complete `Recovering (<job>) (<seconds>s)` trace terminal grammar.
-fn complete_recovery_grammar(frame: &str, truncated: bool) -> bool {
-    let Some((label, elapsed)) = frame.trim().rsplit_once(" (") else {
+/// 验证 `publish <action> <percent> (<done>/<total>)` 的完整语法。 / Validates the complete publication progress grammar.
+fn complete_publication_grammar(frame: &str, truncated: bool) -> bool {
+    let Some((prefix, counts)) = frame.trim().rsplit_once(" (") else {
         return false;
     };
-    let Some(seconds) = elapsed.strip_suffix("s)") else {
+    let Some(counts) = counts.strip_suffix(')') else {
         return false;
     };
-    let label_is_complete = if truncated {
-        label.starts_with("Recovering") && label.contains("...")
+    let Some((done, total)) = counts.split_once('/') else {
+        return false;
+    };
+    let Some((label, percent)) = prefix.rsplit_once(' ') else {
+        return false;
+    };
+    let label = label.trim_end();
+    let label_ok = if truncated {
+        label
+            .strip_prefix("publish ")
+            .and_then(|action| action.split_once("..."))
+            .is_some_and(|(prefix, suffix)| {
+                !prefix.is_empty()
+                    && prefix
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b':')
+                    && (8..=64).contains(&suffix.len())
+                    && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
     } else {
-        label.starts_with("Recovering (build-cli-") && label.ends_with(')')
+        label
+            .strip_prefix("publish build:publish:")
+            .is_some_and(|action| {
+                let Some((prefix, suffix)) = action.split_once("...") else {
+                    return false;
+                };
+                prefix.len() == 8
+                    && prefix.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    && !suffix.is_empty()
+                    && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
     };
-    label_is_complete && seconds.parse::<f64>().is_ok()
+    label_ok
+        && (!truncated || frame.chars().count() <= usize::from(NARROW_SIZE.cols - 1))
+        && percent
+            .strip_suffix('%')
+            .and_then(|value| value.parse::<u8>().ok())
+            .is_some()
+        && done.parse::<usize>().is_ok()
+        && total.parse::<usize>().is_ok()
 }
 
 /// 计算动态帧的可见 ASCII 宽度；产品动作 ID 与计数均为 ASCII。 / Measures the visible
