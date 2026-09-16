@@ -9,4 +9,5 @@ description = "Build planning and scheduling domain for prompt-squish"
 
 [dependencies]
 blake3 = "1.8"
+serde = { version = "1.0", features = ["derive"] }
 squish-protocol = { path = "../squish-protocol" }

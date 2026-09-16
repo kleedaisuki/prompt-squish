@@ -186,7 +186,7 @@ The current invariants are implemented in:
   candidate planning followed by revision-checked manifest/lock mutation and
   bounded re-planning on a pre-decision race; and
 - [`../../crates/squish-manager/src/build.rs`](../../crates/squish-manager/src/build.rs):
-  build planning, cache restoration, generation publication, `BuildRecordV2`,
+  build planning, cache restoration, typed generation publication, `BuildRecordV3`,
   catalogue recovery, and `PersistBuildCatalog` finalization.
 
 `--dry-run` is represented as report-only planning rather than fake execution.
@@ -221,10 +221,11 @@ Completion of this cutover does not erase explicit evidence limits:
 - authenticated registry behavior is accepted at component/composition scope;
   the CI workflow does not contact a live authenticated registry;
 - source installation is exercised remotely on Linux only; and
-- [`../../crates/squish-manager/ARCHITECTURE.md`](../../crates/squish-manager/ARCHITECTURE.md)
-  records a non-milestone coupling in catalogue recovery: manager validation
-  currently understands the publisher's stable URI layout, which should
-  eventually move behind a typed publisher API.
+- Publication layout is now exclusively owned by
+  [`../../crates/squish-publish/src/lib.rs`](../../crates/squish-publish/src/lib.rs).
+  Manager recovery exchanges `PublicationTargetId`, `GenerationRef`,
+  `ArtifactDescriptor`, and `PublicationPath` through the typed
+  `GenerationRepository` port; it never reconstructs publisher paths.
 
 These are not hidden fallback implementations and did not invalidate the
 accepted milestone. Any future migration must be opened from concrete product

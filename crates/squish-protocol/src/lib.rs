@@ -11,7 +11,7 @@ use std::{
 };
 
 /// 当前协议版本。 / Current protocol version.
-pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion::new(2, 1);
+pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion::new(3, 0);
 
 /// 在过渡期内仍可解码的旧事件协议主版本。 / Legacy event-protocol major decoded during the compatibility window.
 pub const LEGACY_EVENT_MAJOR: u16 = 1;
@@ -1191,8 +1191,27 @@ pub struct NewResult {
 pub struct PublishedTarget {
     /// 目标名。 / Target name.
     pub target: TargetName,
+    /// 工作区内无歧义的完整发布目标身份。 / Unambiguous complete publication target identity in the workspace.
+    pub target_id: String,
+    /// 发布器签发的不透明不可变 generation 身份。 / Opaque immutable generation identity issued by the publisher.
+    pub generation_id: String,
     /// 同一提交世代中的全部产物。 / Every artifact in the same committed generation.
-    pub artifacts: Vec<Artifact>,
+    pub artifacts: Vec<PublishedArtifact>,
+}
+
+/// 成功发布的产物及其稳定逻辑定位器。 / Successfully published artifact and its stable logical locator.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PublishedArtifact {
+    /// 不依赖发布布局的产物 ID。 / Publication-layout-independent artifact ID.
+    pub id: ArtifactId,
+    /// 类别。 / Kind.
+    pub kind: ArtifactKind,
+    /// 可原样传给 `inspect artifact` 的规范逻辑定位器。 / Canonical logical locator accepted verbatim by `inspect artifact`.
+    pub locator: ProjectFilePath,
+    /// 字节数。 / Byte size.
+    pub size: u64,
+    /// 内容寻址摘要。 / Content-addressed digest.
+    pub digest: Digest,
 }
 
 /// 构建操作结果；动作失败仍由统一作业摘要计数。 / Build-operation result; action failures remain counted by the common job summary.
@@ -1336,6 +1355,15 @@ pub struct SourceInspection {
     pub size: u64,
 }
 
+/// 已按 catalog 描述符验证的产物内容。 / Artifact content verified against its catalog descriptor.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ArtifactInspection {
+    /// 被读取的权威产物描述。 / Authoritative artifact descriptor that was read.
+    pub artifact: Artifact,
+    /// 完整、摘要验证后的原始字节。 / Complete digest-verified raw bytes.
+    pub bytes: Vec<u8>,
+}
+
 /// 产物来源证明查询结果。 / Artifact-provenance inspection result.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProvenanceInspection {
@@ -1361,6 +1389,8 @@ pub enum InspectResult {
     Link(LinkInspection),
     /// 源码摘要。 / Source summary.
     Source(SourceInspection),
+    /// 逻辑定位器解析出的已验证产物内容。 / Verified artifact content resolved from a logical locator.
+    Artifact(ArtifactInspection),
     /// 产物来源证明。 / Artifact provenance.
     Provenance(ProvenanceInspection),
 }
@@ -1466,13 +1496,13 @@ impl InspectResult {
             (Self::Ir(result), InspectView::Ir(requested)) => &result.artifact.id == requested,
             (Self::Link(result), InspectView::Link(requested)) => &result.target == requested,
             (Self::Source(result), InspectView::Source(requested)) => &result.source == requested,
+            (Self::Artifact(_), InspectView::Artifact(_)) => true,
             (Self::Provenance(result), InspectView::Provenance(requested)) => {
                 &result.artifact.id == requested
             }
             // A path selects an artifact but does not prescribe its content identity. The
             // manager validates the catalog mapping before returning this typed result. /
             // 路径只选择产物，不预设其内容身份；管理器在返回类型化结果前验证目录映射。
-            (Self::Provenance(_), InspectView::Artifact(_)) => true,
             _ => false,
         }
     }
@@ -1866,7 +1896,7 @@ impl Event {
     /// 验证单事件的局部规范不变式。 / Validates local canonical invariants of one event.
     pub fn validate(&self) -> Result<(), EventValidationError> {
         if matches!(self.payload, EventPayload::CancellationDeferred { .. })
-            && (self.version.major != 2 || self.version.minor < 1)
+            && (self.version.major < 2 || (self.version.major == 2 && self.version.minor < 1))
         {
             return Err(EventValidationError::EventRequiresProtocolMinor {
                 required: 1,
@@ -2201,7 +2231,7 @@ mod tests {
     use super::*;
     #[test]
     fn other_major_is_rejected() {
-        let json = br#"{"version":{"major":3,"minor":0},"operation":{"type":"inspect","request":{"project":".","view":"project"}}}"#;
+        let json = br#"{"version":{"major":4,"minor":0},"operation":{"type":"inspect","request":{"project":".","view":"project"}}}"#;
         assert!(matches!(
             OperationEnvelope::decode_json(json),
             Err(DecodeError::UnsupportedMajor { .. })
@@ -2209,7 +2239,7 @@ mod tests {
     }
     #[test]
     fn unknown_additive_event_is_skipped() {
-        let json = br#"{"version":{"major":2,"minor":9},"invocation":"i","sequence":7,"payload":{"type":"future_metric","data":{}}}"#;
+        let json = br#"{"version":{"major":3,"minor":9},"invocation":"i","sequence":7,"payload":{"type":"future_metric","data":{}}}"#;
         assert!(matches!(
             Event::decode_json(json),
             Ok(DecodedEvent::SkippedUnknown { .. })
@@ -2267,12 +2297,7 @@ mod tests {
         );
         assert!(matches!(
             Event::decode_json(&serde_json::to_vec(&mislabeled).unwrap()),
-            Err(DecodeError::InvalidEvent(
-                EventValidationError::EventRequiresProtocolMinor {
-                    required: 1,
-                    received: 0
-                }
-            ))
+            Err(DecodeError::UnsupportedMajor { .. })
         ));
     }
     #[test]
@@ -2498,7 +2523,7 @@ mod tests {
             );
         }
 
-        let empty_id = br#"{"version":{"major":2,"minor":0},"invocation":"i","sequence":1,"payload":{"type":"finalization_started","data":{"job":"j","id":"","kind":"persist_build_catalog"}}}"#;
+        let empty_id = br#"{"version":{"major":3,"minor":0},"invocation":"i","sequence":1,"payload":{"type":"finalization_started","data":{"job":"j","id":"","kind":"persist_build_catalog"}}}"#;
         assert!(matches!(
             Event::decode_json(empty_id),
             Err(DecodeError::Malformed(_))
@@ -2536,7 +2561,7 @@ mod tests {
         );
     }
     #[test]
-    fn artifact_path_selector_matches_resolved_provenance_by_result_type() {
+    fn artifact_path_selector_matches_resolved_content_by_result_type() {
         let request = OperationRequest::Inspect(InspectRequest {
             project: ProjectPath::new(".").unwrap(),
             view: InspectView::Artifact(ProjectPath::new("target/main.prompt").unwrap()),
@@ -2548,9 +2573,9 @@ mod tests {
             digest: Digest::new(DigestAlgorithm::Sha256, vec![7; 32]).unwrap(),
             size: 42,
         };
-        let result = OperationResult::Inspect(InspectResult::Provenance(ProvenanceInspection {
+        let result = OperationResult::Inspect(InspectResult::Artifact(ArtifactInspection {
             artifact,
-            evidence: Vec::new(),
+            bytes: vec![7; 42],
         }));
 
         assert!(result.matches_request(&request));

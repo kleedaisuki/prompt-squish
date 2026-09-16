@@ -68,10 +68,10 @@
       "stages": {
         "manifest": "manifest-version = 1\n\n[package]\nname = \"site-demo\"\nversion = \"1.0.0\"\nsource-root = \".\"\n\n[target.agent]\nentry = \"agent.xml\"\n",
         "source": "<xs:entry xmlns:xs=\"https://xmlsquish.moesegfault.dev/ns\" xmlns:demo=\"https://example.com/macros/demo\">\n  <xs:import src=\"persona.xml\"/>\n  <xs:import src=\"tasks.xml\"/>\n  <prompt>\n    <xs:expand ref=\"demo:persona\"><xs:arg name=\"audience\" value=\"researchers\"/></xs:expand>\n    <xs:expand ref=\"demo:task\"/>\n  </prompt>\n</xs:entry>\n",
-        "xsir": "XSIR/1 canonical binary module set\ntarget/xmlsquish/ir/agent/site-demo/agent.xsir  2513 bytes  sha256:079f8121e55fe92d\ntarget/xmlsquish/ir/agent/site-demo/persona.xsir  2425 bytes  sha256:0da60505661640ed\ntarget/xmlsquish/ir/agent/site-demo/tasks.xsir  1664 bytes  sha256:219650a08cefa851",
+        "xsir": "XSIR/1 canonical binary module set\ntarget/xmlsquish/ir/agent/site-demo/agent.xsir  2513 bytes  blake3:aa7dead167b48592\ntarget/xmlsquish/ir/agent/site-demo/persona.xsir  2425 bytes  blake3:0d9f9fb8856fe17f\ntarget/xmlsquish/ir/agent/site-demo/tasks.xsir  1664 bytes  blake3:df7fb6784b80fa04",
         "link": "target site-demo:agent\ncompile 3 modules → link → instantiate → backend → publish",
         "prompt": "<prompt> <Persona> <audience> researchers </audience> <voice> clear &amp; kind </voice> </Persona> <task> Explain the trade-offs. </task> </prompt>",
-        "debug": "PSDBG/1 self-contained debug companion\ntarget/xmlsquish/agent.psdbg  9578 bytes  sha256:9f194aca16ee79c4"
+        "debug": "PSDBG/1 self-contained debug companion\ntarget/xmlsquish/agent.psdbg  9578 bytes  blake3:f07806701e6c47a9"
       },
       "metrics": {
         "actions": 7,
@@ -83,10 +83,10 @@
       "stages": {
         "manifest": "manifest-version = 1\n\n[package]\nname = \"site-demo\"\nversion = \"1.0.0\"\nsource-root = \".\"\n\n[target.agent]\nentry = \"agent.xml\"\n",
         "source": "<xs:entry xmlns:xs=\"https://xmlsquish.moesegfault.dev/ns\" xmlns:demo=\"https://example.com/macros/demo\">\n  <xs:import src=\"persona.xml\"/>\n  <xs:import src=\"tasks.xml\"/>\n  <prompt>\n    <xs:expand ref=\"demo:persona\"><xs:arg name=\"audience\" value=\"everyone\"/></xs:expand>\n    <xs:expand ref=\"demo:task\"/>\n  </prompt>\n</xs:entry>\n",
-        "xsir": "XSIR/1 canonical binary module set\ntarget/xmlsquish/ir/agent/site-demo/agent.xsir  2507 bytes  sha256:f9e56d6add667b99\ntarget/xmlsquish/ir/agent/site-demo/persona.xsir  2425 bytes  sha256:0da60505661640ed\ntarget/xmlsquish/ir/agent/site-demo/tasks.xsir  1664 bytes  sha256:219650a08cefa851",
+        "xsir": "XSIR/1 canonical binary module set\ntarget/xmlsquish/ir/agent/site-demo/agent.xsir  2507 bytes  blake3:3c2b20d238494ae3\ntarget/xmlsquish/ir/agent/site-demo/persona.xsir  2425 bytes  blake3:0d9f9fb8856fe17f\ntarget/xmlsquish/ir/agent/site-demo/tasks.xsir  1664 bytes  blake3:df7fb6784b80fa04",
         "link": "target site-demo:agent\ncompile 3 modules → link → instantiate → backend → publish",
         "prompt": "<prompt> <Persona> <audience> everyone </audience> <voice> clear &amp; kind </voice> </Persona> <task> Explain the trade-offs. </task> </prompt>",
-        "debug": "PSDBG/1 self-contained debug companion\ntarget/xmlsquish/agent.psdbg  9569 bytes  sha256:7e178da6f7f258e0"
+        "debug": "PSDBG/1 self-contained debug companion\ntarget/xmlsquish/agent.psdbg  9569 bytes  blake3:b27cf01ae2a97c41"
       },
       "metrics": {
         "actions": 7,
@@ -95,5 +95,5 @@
       }
     }
   },
-  "diagnostic": "{\"version\":{\"major\":2,\"minor\":1},\"sequence\":0,\"payload\":{\"type\":\"planning_started\"}}\n{\"version\":{\"major\":2,\"minor\":1},\"sequence\":1,\"payload\":{\"type\":\"action_succeeded\",\"data\":{\"kind\":\"compile\",\"cache\":\"persistent\"}}}\n{\"version\":{\"major\":2,\"minor\":1},\"sequence\":2,\"payload\":{\"type\":\"job_finished\",\"data\":{\"status\":\"success\"}}}"
+  "diagnostic": "{\"version\":{\"major\":3,\"minor\":0},\"sequence\":0,\"payload\":{\"type\":\"planning_started\"}}\n{\"version\":{\"major\":3,\"minor\":0},\"sequence\":1,\"payload\":{\"type\":\"action_succeeded\",\"data\":{\"kind\":\"compile\",\"cache\":\"persistent\"}}}\n{\"version\":{\"major\":3,\"minor\":0},\"sequence\":2,\"payload\":{\"type\":\"job_finished\",\"data\":{\"status\":\"success\"}}}"
 }

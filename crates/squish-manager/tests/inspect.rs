@@ -6,8 +6,11 @@ use std::{
 };
 
 use sha2::{Digest as _, Sha256};
+use squish_build::{
+    ArtifactDescriptor, GenerationId, LogicalArtifactName, PublicationPath, PublicationTargetId,
+};
 use squish_manager::build::{
-    BuildActionFact, BuildRecordV2, BuildResultSource, BuildTerminalState, CatalogArtifact,
+    BuildActionFact, BuildRecordV3, BuildResultSource, BuildTerminalState, CatalogArtifact,
     RecordedGeneration, encode_build_record,
 };
 use squish_manager::{
@@ -165,6 +168,16 @@ fn artifact(id: &str, kind: ArtifactKind, bytes: &[u8]) -> Artifact {
     }
 }
 
+fn descriptor(artifact: &Artifact, name: &str) -> ArtifactDescriptor {
+    ArtifactDescriptor {
+        id: artifact.id.clone(),
+        name: LogicalArtifactName::new(name).unwrap(),
+        kind: artifact.kind.clone(),
+        digest: artifact.digest.clone(),
+        size: artifact.size,
+    }
+}
+
 fn insert_blob(services: &FakeServices, bytes: &[u8]) -> Digest {
     let value = digest(bytes);
     services
@@ -306,12 +319,12 @@ fn capability_resolves_artifact_path_before_kernel_result_matching() {
     ));
 
     let outcome = kernel.dispatch(&operation, &context).unwrap();
-    let squish_protocol::OperationResult::Inspect(InspectResult::Provenance(result)) =
-        outcome.result
+    let squish_protocol::OperationResult::Inspect(InspectResult::Artifact(result)) = outcome.result
     else {
-        panic!("artifact path must return provenance")
+        panic!("artifact path must return verified content")
     };
     assert_eq!(result.artifact.id, artifact.id);
+    assert_eq!(result.bytes, bytes);
     assert_eq!(outcome.summary.status, squish_protocol::ExitStatus::Success);
 }
 
@@ -511,7 +524,7 @@ fn provenance_parses_build_record_and_rejects_empty_evidence() {
     let product_bytes = b"hello";
     insert_blob(&services, product_bytes);
     let mut product = artifact("demo:main:prompt", ArtifactKind::Prompt, product_bytes);
-    product.uri = "generations/generation-1/prompt".into();
+    product.uri = "target/main.prompt".into();
     services
         .artifacts
         .lock()
@@ -525,9 +538,9 @@ fn provenance_parses_build_record_and_rejects_empty_evidence() {
         ArtifactKind::Other("static-link-map".into()),
         &link_bytes,
     );
-    link_map.uri = "generations/generation-1/static-link-map".into();
-    let record = BuildRecordV2 {
-        schema: 2,
+    link_map.uri = "target/main.xsmap".into();
+    let record = BuildRecordV3 {
+        schema: 3,
         job: plan.job.clone(),
         plan,
         actions: vec![BuildActionFact {
@@ -540,21 +553,21 @@ fn provenance_parses_build_record_and_rejects_empty_evidence() {
             source: Some(BuildResultSource::Worker),
         }],
         targets: vec![RecordedGeneration {
-            target_id: "demo:main".into(),
-            generation_id: "generation-1".into(),
-            manifest: "generations/generation-1/manifest.json".into(),
+            target_id: PublicationTargetId::new("demo:main").unwrap(),
+            generation_id: GenerationId::from_bytes([1; 32]),
             artifacts: vec![
                 CatalogArtifact {
-                    artifact: product.clone(),
-                    destination: "target/main.prompt".into(),
+                    descriptor: descriptor(&product, "prompt"),
+                    destination: PublicationPath::new("target/main.prompt").unwrap(),
                 },
                 CatalogArtifact {
-                    artifact: link_map,
-                    destination: "target/main.xsmap".into(),
+                    descriptor: descriptor(&link_map, "static-link-map"),
+                    destination: PublicationPath::new("target/main.xsmap").unwrap(),
                 },
             ],
         }],
-        catalog_target: squish_manager::build::BUILD_CATALOG_TARGET.into(),
+        catalog_target: PublicationTargetId::new(squish_manager::build::BUILD_CATALOG_TARGET)
+            .unwrap(),
     };
     let record_bytes = encode_build_record(&record).unwrap();
     insert_blob(&services, &record_bytes);

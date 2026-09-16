@@ -60,7 +60,7 @@ xmlsquish fmt --manifest-path examples/semantic/xmlsquish.toml --check
 xmlsquish build --manifest-path examples/semantic/xmlsquish.toml --emit prompt --emit ir --emit debug
 ```
 
-该示例的逻辑产品定位符是 `target/xmlsquish/prompt.prompt`。管理器把完整目标原子发布到项目内 `examples/semantic/target/xmlsquish/.squish-publish/generations/…`，并在构建事件中报告当前 generation 的实际路径；不要绕过 current manifest 修改 generation 内文件。重复 `--emit` 可物化：
+该示例的稳定逻辑产品定位符是 `target/xmlsquish/prompt.prompt`，可原样传给 `xmlsquish inspect artifact`；加 `--format=raw` 可将摘要验证后的真实产物字节写到 stdout。发布器以完整目标为单位原子提交并验证 generation；其 journal、hash、current pointer 与物理目录都是私有实现，不会出现在构建结果或普通终端输出中。重复 `--emit` 可物化：
 
 | 后缀 / Suffix | 含义 / Meaning |
 | --- | --- |

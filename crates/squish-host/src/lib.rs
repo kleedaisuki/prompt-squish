@@ -1266,7 +1266,7 @@ impl Services for ProductionHost {
         self.require_project(project)?;
         Ok(self
             .current_catalog()?
-            .and_then(|catalog| catalog.artifact(id).cloned()))
+            .and_then(|catalog| catalog.artifact(id)))
     }
 
     fn artifact_at(
@@ -1292,7 +1292,7 @@ impl Services for ProductionHost {
             .map_err(|error| ServiceError::new("invalid_artifact_path", error.to_string()))?;
         Ok(self
             .current_catalog()?
-            .and_then(|catalog| catalog.artifact_at(&relative).cloned()))
+            .and_then(|catalog| catalog.artifact_at(&relative)))
     }
 
     fn link_map(
@@ -1303,12 +1303,9 @@ impl Services for ProductionHost {
         self.require_project(project)?;
         self.current_catalog()?
             .map(|catalog| {
-                catalog
-                    .link_map(target)
-                    .map(|artifact| artifact.cloned())
-                    .map_err(|error| {
-                        ServiceError::new("artifact_catalog_ambiguous", error.to_string())
-                    })
+                catalog.link_map(target).map_err(|error| {
+                    ServiceError::new("artifact_catalog_ambiguous", error.to_string())
+                })
             })
             .transpose()
             .map(Option::flatten)

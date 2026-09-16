@@ -18,7 +18,12 @@ pub use model::{
     Output, OutputName, OutputRef, ProducedOutput, ResourceClass, Resources, WorkerFailure,
 };
 pub use plan::{BuildPlan, PlanError, SemanticGraphDigest};
-pub use ports::{ActionIndex, ActionRecord, ArtifactPublisher, BlobStore, Publication};
+pub use ports::{
+    ActionIndex, ActionRecord, ArtifactDescriptor, ArtifactPublisher, ArtifactRead, BlobStore,
+    CommittedGeneration, GenerationArtifact, GenerationId, GenerationRef, GenerationRepository,
+    InvalidGenerationId, InvalidPublicationIdentity, LogicalArtifactName, Publication,
+    PublicationPath, PublicationTargetId,
+};
 pub use scheduler::{
     ActionState, CompletionError, Dispatch, ResultSource, ScheduleEvent, Scheduler, SchedulerError,
 };

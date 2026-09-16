@@ -14,8 +14,12 @@
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use squish_build::{ArtifactPublisher, BlobStore, Publication};
-use squish_protocol::{Artifact, ArtifactId, Digest, DigestAlgorithm};
+use squish_build::{
+    ArtifactDescriptor, ArtifactPublisher, ArtifactRead, BlobStore, CommittedGeneration,
+    GenerationArtifact, GenerationId, GenerationRef, GenerationRepository, LogicalArtifactName,
+    Publication, PublicationPath, PublicationTargetId,
+};
+use squish_protocol::{ArtifactId, Digest, DigestAlgorithm};
 use std::{
     ffi::OsStr,
     fmt,
@@ -105,22 +109,21 @@ struct Journal {
     digest: Digest,
 }
 
-/// 一次原子提交的完整产物集合。 / Complete artifact set committed in one atomic generation.
-///
-/// `manifest` 是稳定的 current manifest URI；其中一次原子文件替换就是 generation 的
-/// 唯一可见提交点。每个 artifact URI 指向不可变 generation 目录中的字节。
-/// `manifest` is the stable current-manifest URI. Its single atomic replacement is the
-/// generation's only visibility point; artifact URIs address immutable generation bytes.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct PublishedGeneration {
-    /// 调用者提供的目标身份。 / Caller-provided target identity.
-    pub target_id: String,
-    /// 由完整请求内容导出的稳定 generation 身份。 / Stable generation identity derived from the complete request.
-    pub generation_id: String,
-    /// 相对于发布根目录的稳定 current manifest URI。 / Stable current-manifest URI relative to the publication root.
-    pub manifest: String,
-    /// 本 generation 的不可变产物。 / Immutable artifacts in this generation.
-    pub artifacts: Vec<Artifact>,
+struct GenerationManifest {
+    target_id: String,
+    generation_id: String,
+    artifacts: Vec<ManifestArtifact>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct ManifestArtifact {
+    id: String,
+    name: String,
+    kind: squish_protocol::ArtifactKind,
+    destination: String,
+    size: u64,
+    digest: Digest,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -248,11 +251,10 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
     pub fn publish_artifact(
         &self,
         publication: &Publication,
-    ) -> Result<Artifact, PublishError<S::Error>> {
+    ) -> Result<GenerationArtifact, PublishError<S::Error>> {
         self.with_lock(|this| {
             this.recover_locked()?;
-            let relative = parse_destination(&publication.destination)
-                .map_err(PublishError::InvalidDestination)?;
+            let relative = PathBuf::from(publication.destination.as_str());
             let destination = this.root.join(&relative);
             this.prepare_path(&relative)?;
             this.reject_physical_alias(&destination)?;
@@ -275,7 +277,7 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
                 .to_string_lossy()
                 .into_owned();
             let journal = Journal {
-                destination: publication.destination.clone(),
+                destination: publication.destination.as_str().to_owned(),
                 temporary: temporary_name,
                 size: publication.output.size,
                 digest: publication.output.digest.clone(),
@@ -307,41 +309,49 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
     /// ```no_run
     /// # use squish_publish::FileArtifactPublisher;
     /// # fn publish<S: squish_build::BlobStore>(p: &FileArtifactPublisher<S>, files: &[squish_build::Publication]) -> Result<(), squish_publish::PublishError<S::Error>> {
-    /// let generation = p.publish_generation("app", files)?;
-    /// assert_eq!(generation.target_id, "app");
+    /// let target = squish_build::PublicationTargetId::new("app").unwrap();
+    /// let generation = p.publish_generation(&target, files)?;
+    /// assert_eq!(generation.identity.target, target);
     /// # Ok(()) }
     /// ```
     pub fn publish_generation(
         &self,
-        target_id: &str,
+        target_id: &PublicationTargetId,
         publications: &[Publication],
-    ) -> Result<PublishedGeneration, PublishError<S::Error>> {
-        self.with_lock(|this| {
-            this.recover_locked()?;
-            this.recover_generation_locked()?;
-            this.publish_generation_locked(target_id, publications)
-        })
+    ) -> Result<CommittedGeneration, PublishError<S::Error>> {
+        for attempt in 0..3 {
+            let result = self.with_lock(|this| {
+                this.recover_locked()?;
+                this.recover_generation_locked()?;
+                this.publish_generation_locked(target_id, publications)
+            });
+            match result {
+                Err(PublishError::Io(error))
+                    if attempt < 2 && error.kind() == io::ErrorKind::PermissionDenied =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                other => return other,
+            }
+        }
+        unreachable!("bounded retry loop always returns")
     }
 
     /// 读取一个 target 最近完整提交的 generation。 / Reads the most recently committed complete generation for a target.
     pub fn current_generation(
         &self,
-        target_id: &str,
-    ) -> Result<Option<PublishedGeneration>, PublishError<S::Error>> {
-        let key = target_key(target_id)?;
+        target_id: &PublicationTargetId,
+    ) -> Result<Option<CommittedGeneration>, PublishError<S::Error>> {
+        let key = target_key(target_id);
         self.with_lock(|this| {
             this.recover_generation_locked()?;
             let path = this.current_manifest_path(&key);
             match fs::read(path) {
                 Ok(bytes) => {
-                    let generation: PublishedGeneration =
+                    let manifest: GenerationManifest =
                         serde_json::from_slice(&bytes).map_err(PublishError::Journal)?;
-                    if generation.target_id != target_id
-                        || generation.manifest != current_manifest_uri(&key)
-                    {
-                        return Err(PublishError::IntegrityMismatch);
-                    }
-                    Ok(Some(generation))
+                    this.validate_manifest(&key, Some(target_id), &manifest)
+                        .map(Some)
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
                 Err(error) => Err(error.into()),
@@ -349,14 +359,161 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
         })
     }
 
+    /// 按类型化 generation 与逻辑路径读取并完整验证一个成员。 / Reads and fully verifies one member by typed generation and logical path.
+    pub fn read_generation_artifact(
+        &self,
+        generation: &GenerationRef,
+        destination: &PublicationPath,
+        sink: &mut dyn Write,
+    ) -> Result<ArtifactRead, PublishError<S::Error>> {
+        let key = target_key(&generation.target);
+        self.with_lock(|this| {
+            this.recover_generation_locked()?;
+            let manifest_path = this.generation_manifest_path(&key, generation.generation);
+            let bytes = match fs::read(manifest_path) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Ok(ArtifactRead::NotFound);
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let manifest: GenerationManifest =
+                serde_json::from_slice(&bytes).map_err(PublishError::Journal)?;
+            // 成员读取只校验 manifest 的身份与集合结构，再读取并校验所选字节。
+            // Member reads validate manifest identity and membership structure, then read and
+            // verify only the selected bytes. `current_generation` already performs the one
+            // full-generation validation required for snapshot discovery.
+            let committed = this.decode_manifest(&key, Some(&generation.target), &manifest)?;
+            if committed.identity != *generation {
+                return Err(PublishError::IntegrityMismatch);
+            }
+            let Some(member) = committed
+                .artifacts
+                .into_iter()
+                .find(|item| &item.path == destination)
+            else {
+                return Ok(ArtifactRead::NotFound);
+            };
+            let path = this.generation_artifact_path(&key, generation.generation, destination);
+            let mut file = match File::open(path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Err(PublishError::IntegrityMismatch);
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let mut verifier = VerifyingWriter::new(sink, &member.descriptor.digest)
+                .map_err(PublishError::UnsupportedDigest)?;
+            io::copy(&mut file, &mut verifier)?;
+            let (size, matches) = verifier.finish();
+            if size != member.descriptor.size || !matches {
+                return Err(PublishError::IntegrityMismatch);
+            }
+            Ok(ArtifactRead::Verified(member.descriptor))
+        })
+    }
+
+    fn generation_manifest_path(&self, key: &str, generation: GenerationId) -> PathBuf {
+        self.state
+            .join(GENERATIONS)
+            .join(key)
+            .join(generation.to_hex())
+            .join("manifest.json")
+    }
+
+    fn generation_artifact_path(
+        &self,
+        key: &str,
+        generation: GenerationId,
+        destination: &PublicationPath,
+    ) -> PathBuf {
+        self.state
+            .join(GENERATIONS)
+            .join(key)
+            .join(generation.to_hex())
+            .join("artifacts")
+            .join(destination.as_str())
+    }
+
+    fn validate_manifest(
+        &self,
+        key: &str,
+        expected_target: Option<&PublicationTargetId>,
+        manifest: &GenerationManifest,
+    ) -> Result<CommittedGeneration, PublishError<S::Error>> {
+        let committed = self.decode_manifest(key, expected_target, manifest)?;
+        for artifact in &committed.artifacts {
+            if !valid_file(
+                &self.generation_artifact_path(key, committed.identity.generation, &artifact.path),
+                artifact.descriptor.size,
+                &artifact.descriptor.digest,
+            )? {
+                return Err(PublishError::IntegrityMismatch);
+            }
+        }
+        Ok(committed)
+    }
+
+    fn decode_manifest(
+        &self,
+        key: &str,
+        expected_target: Option<&PublicationTargetId>,
+        manifest: &GenerationManifest,
+    ) -> Result<CommittedGeneration, PublishError<S::Error>> {
+        let target = PublicationTargetId::new(manifest.target_id.clone())
+            .map_err(|_| PublishError::IntegrityMismatch)?;
+        if expected_target.is_some_and(|expected| expected != &target) || target_key(&target) != key
+        {
+            return Err(PublishError::IntegrityMismatch);
+        }
+        let generation = GenerationId::from_hex(&manifest.generation_id)
+            .map_err(|_| PublishError::IntegrityMismatch)?;
+        let mut artifacts = Vec::with_capacity(manifest.artifacts.len());
+        for stored in &manifest.artifacts {
+            let path = PublicationPath::new(stored.destination.clone())
+                .map_err(|_| PublishError::IntegrityMismatch)?;
+            let descriptor = ArtifactDescriptor {
+                id: ArtifactId::new(stored.id.clone())
+                    .map_err(|_| PublishError::IntegrityMismatch)?,
+                name: LogicalArtifactName::new(stored.name.clone())
+                    .map_err(|_| PublishError::IntegrityMismatch)?,
+                kind: stored.kind.clone(),
+                digest: stored.digest.clone(),
+                size: stored.size,
+            };
+            artifacts.push(GenerationArtifact { descriptor, path });
+        }
+        if !artifacts.windows(2).all(|pair| {
+            (&pair[0].path, &pair[0].descriptor.id) < (&pair[1].path, &pair[1].descriptor.id)
+        }) {
+            return Err(PublishError::IntegrityMismatch);
+        }
+        validate_artifact_members(&artifacts)?;
+        let computed = generation_id_from_artifacts(&target, &artifacts);
+        if computed != generation {
+            return Err(PublishError::IntegrityMismatch);
+        }
+        Ok(CommittedGeneration {
+            identity: GenerationRef { target, generation },
+            artifacts,
+        })
+    }
+
     fn publish_generation_locked(
         &self,
-        target_id: &str,
+        target_id: &PublicationTargetId,
         publications: &[Publication],
-    ) -> Result<PublishedGeneration, PublishError<S::Error>> {
-        let key = target_key(target_id)?;
-        let destinations = validate_generation_destinations(publications)?;
-        let generation_id = generation_id(target_id, publications);
+    ) -> Result<CommittedGeneration, PublishError<S::Error>> {
+        let key = target_key(target_id);
+        let mut publications = publications.to_vec();
+        publications.sort_by(|left, right| {
+            left.destination
+                .cmp(&right.destination)
+                .then_with(|| left.output.name.cmp(&right.output.name))
+        });
+        let destinations = validate_generation_destinations(&publications)?;
+        validate_generation_members(&publications)?;
+        let generation_id = generation_id(target_id, &publications);
         let target_dir = self.state.join(GENERATIONS).join(&key);
         create_directory_tree(&target_dir, self.observer.as_ref())?;
 
@@ -366,6 +523,7 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
         let artifact_root = temporary.path().join("artifacts");
         fs::create_dir(&artifact_root)?;
         let mut artifacts = Vec::with_capacity(publications.len());
+        let mut manifest_artifacts = Vec::with_capacity(publications.len());
         for (publication, relative) in publications.iter().zip(&destinations) {
             let path = artifact_root.join(relative);
             create_directory_tree(
@@ -377,7 +535,7 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
                 .create_new(true)
                 .open(&path)?;
             let verification = Journal {
-                destination: publication.destination.clone(),
+                destination: publication.destination.as_str().to_owned(),
                 temporary: String::new(),
                 size: publication.output.size,
                 digest: publication.output.digest.clone(),
@@ -385,26 +543,24 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
             self.fill_and_verify(&file, &verification)?;
             self.observer
                 .observe(&PublishEvent::DurablePoint(DurablePoint::ArtifactStaged));
-            let mut published = artifact(publication)?;
-            published.uri = generation_artifact_uri(&key, &generation_id, &publication.destination);
+            let published = artifact(publication)?;
+            manifest_artifacts.push(manifest_artifact(&published));
             artifacts.push(published);
         }
 
-        let manifest_uri = current_manifest_uri(&key);
-        let generation = PublishedGeneration {
-            target_id: target_id.to_owned(),
-            generation_id: generation_id.clone(),
-            manifest: manifest_uri,
-            artifacts,
+        let manifest = GenerationManifest {
+            target_id: target_id.as_str().to_owned(),
+            generation_id: generation_id.to_hex(),
+            artifacts: manifest_artifacts,
         };
-        let manifest_bytes = serde_json::to_vec(&generation).map_err(PublishError::Journal)?;
+        let manifest_bytes = serde_json::to_vec(&manifest).map_err(PublishError::Journal)?;
         let manifest_path = temporary.path().join("manifest.json");
         write_new_synced(&manifest_path, &manifest_bytes)?;
         self.observer
             .observe(&PublishEvent::DurablePoint(DurablePoint::ManifestStaged));
         sync_tree_directories(temporary.path(), self.observer.as_ref())?;
 
-        let final_dir = target_dir.join(&generation_id);
+        let final_dir = target_dir.join(generation_id.to_hex());
         if final_dir.exists() {
             let existing = fs::read(final_dir.join("manifest.json"))?;
             if existing != manifest_bytes {
@@ -429,7 +585,7 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
 
         self.write_generation_journal(&GenerationJournal {
             target_key: key.clone(),
-            generation_id,
+            generation_id: generation_id.to_hex(),
         })?;
         self.observer
             .observe(&PublishEvent::DurablePoint(DurablePoint::CommitDecision));
@@ -439,7 +595,13 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
         self.finish_generation_journal()?;
         self.observer
             .observe(&PublishEvent::DurablePoint(DurablePoint::JournalCleared));
-        Ok(generation)
+        Ok(CommittedGeneration {
+            identity: GenerationRef {
+                target: target_id.clone(),
+                generation: generation_id,
+            },
+            artifacts,
+        })
     }
 
     fn with_lock<T>(
@@ -527,14 +689,16 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
             .join(&journal.generation_id)
             .join("manifest.json");
         let bytes = fs::read(manifest)?;
-        let parsed: PublishedGeneration =
+        let parsed: GenerationManifest =
             serde_json::from_slice(&bytes).map_err(PublishError::Journal)?;
+        let target = PublicationTargetId::new(parsed.target_id.clone())
+            .map_err(|_| PublishError::IntegrityMismatch)?;
         if parsed.generation_id != journal.generation_id
-            || target_key::<S::Error>(&parsed.target_id)? != journal.target_key
-            || parsed.manifest != current_manifest_uri(&journal.target_key)
+            || target_key(&target) != journal.target_key
         {
             return Err(PublishError::IntegrityMismatch);
         }
+        self.validate_manifest(&journal.target_key, Some(&target), &parsed)?;
         self.commit_current(&journal.target_key, &bytes)?;
         self.finish_generation_journal()
     }
@@ -691,45 +855,103 @@ impl<S: BlobStore> ArtifactPublisher for FileArtifactPublisher<S> {
     }
 }
 
-fn artifact<E>(publication: &Publication) -> Result<Artifact, PublishError<E>> {
-    let id = ArtifactId::new(publication.output.name.as_str()).expect("OutputName is non-empty");
-    Ok(Artifact {
-        id,
-        kind: publication.output.kind.clone(),
-        uri: publication.destination.clone(),
-        size: publication.output.size,
-        digest: publication.output.digest.clone(),
+impl<S> GenerationRepository for FileArtifactPublisher<S>
+where
+    S: BlobStore + Send + Sync,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    type Error = PublishError<S::Error>;
+
+    fn publish_generation(
+        &self,
+        target: &PublicationTargetId,
+        publications: &[Publication],
+    ) -> Result<CommittedGeneration, Self::Error> {
+        FileArtifactPublisher::publish_generation(self, target, publications)
+    }
+
+    fn current_generation(
+        &self,
+        target: &PublicationTargetId,
+    ) -> Result<Option<CommittedGeneration>, Self::Error> {
+        FileArtifactPublisher::current_generation(self, target)
+    }
+
+    fn read_generation_artifact(
+        &self,
+        generation: &GenerationRef,
+        destination: &PublicationPath,
+        sink: &mut dyn Write,
+    ) -> Result<ArtifactRead, Self::Error> {
+        FileArtifactPublisher::read_generation_artifact(self, generation, destination, sink)
+    }
+}
+
+fn artifact<E>(publication: &Publication) -> Result<GenerationArtifact, PublishError<E>> {
+    Ok(GenerationArtifact {
+        descriptor: ArtifactDescriptor {
+            id: ArtifactId::new(publication.output.name.as_str()).expect("OutputName is non-empty"),
+            name: publication.name.clone(),
+            kind: publication.output.kind.clone(),
+            digest: publication.output.digest.clone(),
+            size: publication.output.size,
+        },
+        path: publication.destination.clone(),
     })
 }
 
-fn target_key<E>(target_id: &str) -> Result<String, PublishError<E>> {
-    if target_id.is_empty() || target_id.chars().any(char::is_control) {
-        return Err(PublishError::InvalidDestination(target_id.to_owned()));
+fn manifest_artifact(artifact: &GenerationArtifact) -> ManifestArtifact {
+    ManifestArtifact {
+        id: artifact.descriptor.id.as_str().into(),
+        name: artifact.descriptor.name.as_str().into(),
+        kind: artifact.descriptor.kind.clone(),
+        destination: artifact.path.as_str().into(),
+        size: artifact.descriptor.size,
+        digest: artifact.descriptor.digest.clone(),
     }
-    Ok(hex_bytes(&Sha256::digest(target_id.as_bytes())))
 }
 
-fn generation_id(target_id: &str, publications: &[Publication]) -> String {
+fn target_key(target_id: &PublicationTargetId) -> String {
+    hex_bytes(&Sha256::digest(target_id.as_str().as_bytes()))
+}
+
+fn generation_id(target_id: &PublicationTargetId, publications: &[Publication]) -> GenerationId {
+    let artifacts = publications
+        .iter()
+        .map(|publication| {
+            artifact::<std::convert::Infallible>(publication).expect("typed publication is valid")
+        })
+        .collect::<Vec<_>>();
+    generation_id_from_artifacts(target_id, &artifacts)
+}
+
+fn generation_id_from_artifacts(
+    target_id: &PublicationTargetId,
+    artifacts: &[GenerationArtifact],
+) -> GenerationId {
     let mut hasher = Sha256::new();
-    feed_field(&mut hasher, target_id.as_bytes());
-    for publication in publications {
-        feed_field(&mut hasher, publication.destination.as_bytes());
-        feed_field(&mut hasher, publication.output.name.as_str().as_bytes());
+    feed_field(&mut hasher, b"xmlsquish-published-generation-v1");
+    feed_field(&mut hasher, target_id.as_str().as_bytes());
+    hasher.update((artifacts.len() as u64).to_le_bytes());
+    for artifact in artifacts {
+        feed_field(&mut hasher, artifact.path.as_str().as_bytes());
+        feed_field(&mut hasher, artifact.descriptor.id.as_str().as_bytes());
+        feed_field(&mut hasher, artifact.descriptor.name.as_str().as_bytes());
         feed_field(
             &mut hasher,
-            serde_json::to_string(&publication.output.kind)
+            serde_json::to_string(&artifact.descriptor.kind)
                 .expect("ArtifactKind serialization is infallible")
                 .as_bytes(),
         );
         feed_field(
             &mut hasher,
-            serde_json::to_string(&publication.output.digest)
+            serde_json::to_string(&artifact.descriptor.digest)
                 .expect("Digest serialization is infallible")
                 .as_bytes(),
         );
-        hasher.update(publication.output.size.to_le_bytes());
+        hasher.update(artifact.descriptor.size.to_le_bytes());
     }
-    hex_bytes(&hasher.finalize())
+    GenerationId::from_bytes(hasher.finalize().into())
 }
 
 fn feed_field(hasher: &mut Sha256, value: &[u8]) {
@@ -757,8 +979,7 @@ fn validate_generation_destinations<E>(
     let mut destinations = Vec::with_capacity(publications.len());
     let mut normalized = Vec::<(String, PathBuf)>::with_capacity(publications.len());
     for publication in publications {
-        let path = parse_destination(&publication.destination)
-            .map_err(PublishError::InvalidDestination)?;
+        let path = PathBuf::from(publication.destination.as_str());
         let folded = path
             .iter()
             .map(portable_component_key)
@@ -782,15 +1003,49 @@ fn validate_generation_destinations<E>(
     Ok(destinations)
 }
 
-fn generation_artifact_uri(key: &str, generation: &str, destination: &str) -> String {
-    format!(
-        "{STATE_DIR}/{GENERATIONS}/{key}/{generation}/artifacts/{}",
-        destination.replace('\\', "/")
-    )
+fn validate_generation_members<E>(publications: &[Publication]) -> Result<(), PublishError<E>> {
+    let mut ids = std::collections::BTreeSet::new();
+    let mut names = std::collections::BTreeSet::new();
+    for publication in publications {
+        if !ids.insert(publication.output.name.as_str()) || !names.insert(publication.name.as_str())
+        {
+            return Err(PublishError::InvalidDestination(
+                "generation artifact IDs and logical names must be unique".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
-fn current_manifest_uri(key: &str) -> String {
-    format!("{STATE_DIR}/{TARGETS}/{key}/current.json")
+fn validate_artifact_members<E>(artifacts: &[GenerationArtifact]) -> Result<(), PublishError<E>> {
+    let mut ids = std::collections::BTreeSet::new();
+    let mut names = std::collections::BTreeSet::new();
+    let mut paths = Vec::<String>::new();
+    for artifact in artifacts {
+        if !ids.insert(artifact.descriptor.id.as_str())
+            || !names.insert(artifact.descriptor.name.as_str())
+        {
+            return Err(PublishError::IntegrityMismatch);
+        }
+        let folded = Path::new(artifact.path.as_str())
+            .iter()
+            .map(portable_component_key)
+            .collect::<Vec<_>>()
+            .join("/");
+        if paths.iter().any(|prior| {
+            folded == *prior
+                || folded
+                    .strip_prefix(prior)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+                || prior
+                    .strip_prefix(&folded)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        }) {
+            return Err(PublishError::IntegrityMismatch);
+        }
+        paths.push(folded);
+    }
+    Ok(())
 }
 
 fn write_new_synced<E>(path: &Path, bytes: &[u8]) -> Result<(), PublishError<E>> {

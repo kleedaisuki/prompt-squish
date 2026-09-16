@@ -6,6 +6,38 @@ use squish_protocol::{ArtifactKind, DigestAlgorithm};
 fn id(value: &str) -> ActionId {
     ActionId::new(value).unwrap()
 }
+
+#[test]
+fn publication_types_reject_nonportable_or_ambiguous_text() {
+    for invalid in [
+        "",
+        "../escape",
+        "a\\b",
+        "NUL",
+        "name.",
+        "a:b",
+        ".squish-publish/x",
+    ] {
+        assert!(
+            PublicationPath::new(invalid).is_err(),
+            "accepted `{invalid}`"
+        );
+    }
+    assert_eq!(
+        PublicationPath::new("target/chat.prompt").unwrap().as_str(),
+        "target/chat.prompt"
+    );
+    assert!(PublicationTargetId::new("").is_err());
+    assert!(LogicalArtifactName::new("\n").is_err());
+}
+
+#[test]
+fn generation_id_has_one_canonical_boundary_encoding() {
+    let id = GenerationId::from_bytes([0xab; 32]);
+    assert_eq!(GenerationId::from_hex(&id.to_hex()).unwrap(), id);
+    assert!(GenerationId::from_hex(&"AB".repeat(32)).is_err());
+    assert!(GenerationId::from_hex("ab").is_err());
+}
 fn digest(value: &str) -> ContentDigest {
     ContentDigest::new(
         DigestAlgorithm::Other("test".to_owned()),

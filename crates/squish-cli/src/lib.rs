@@ -76,6 +76,8 @@ pub enum QueryFormat {
     Human,
     /// 单个版本化 JSON 文档。 / One versioned JSON document.
     Json,
+    /// 仅对 artifact 查询写出摘要验证后的原始字节。 / Write digest-verified raw bytes for artifact queries only.
+    Raw,
 }
 
 /// 与领域请求正交的显示设置。 / Presentation settings orthogonal to the domain request.
@@ -167,6 +169,8 @@ pub enum InspectSubject {
     Link(TargetName),
     /// 源码标识。 / Source identifier.
     Source(OpaqueSourceId),
+    /// 来源证明产物标识。 / Provenance artifact identifier.
+    Provenance(ArtifactId),
     /// 缓存动作键。 / Cache action key.
     Cache(String),
 }
@@ -595,7 +599,7 @@ struct InspectArgs {
     /// Use an explicit project manifest (no file is opened during parsing).
     #[arg(long, value_name = "PATH", global = true)]
     manifest_path: Option<String>,
-    /// Choose a human description or one JSON document.
+    /// Choose human, JSON, or raw artifact output.
     #[arg(long, default_value = "human", global = true)]
     format: QueryFormat,
     #[command(subcommand)]
@@ -610,6 +614,8 @@ enum InspectCommand {
     Link { identifier: String },
     /// Inspect source provenance.
     Source { identifier: String },
+    /// Inspect artifact provenance by immutable artifact ID.
+    Provenance { identifier: String },
     /// Explain an action cache key.
     Cache { action_key: String },
     /// Validate an explicitly named artifact path.
@@ -805,7 +811,7 @@ fn inspect_invocation(
 ) -> Result<ParsedInvocation, clap::Error> {
     if presentation.message_format.is_some() {
         return Err(usage(
-            "inspect uses --format=human|json and rejects --message-format",
+            "inspect uses --format=human|json|raw and rejects --message-format",
         ));
     }
     presentation.query_format = Some(args.format);
@@ -831,6 +837,13 @@ fn inspect_invocation(
                 Some(InspectSubject::Source(value)),
             )
         }
+        InspectCommand::Provenance { identifier } => {
+            let value = id(identifier, ArtifactId::new, "artifact identifier")?;
+            (
+                InspectView::Provenance(value.clone()),
+                Some(InspectSubject::Provenance(value)),
+            )
+        }
         InspectCommand::Cache { action_key } => {
             require_nonempty(&action_key, "action key")?;
             (InspectView::Cache, Some(InspectSubject::Cache(action_key)))
@@ -840,6 +853,9 @@ fn inspect_invocation(
             (InspectView::Artifact(path), None)
         }
     };
+    if args.format == QueryFormat::Raw && !matches!(view, InspectView::Artifact(_)) {
+        return Err(usage("inspect --format=raw is supported only for artifact"));
+    }
     Ok(ParsedInvocation {
         request: OperationRequest::Inspect(InspectRequest {
             project: project(args.manifest_path)?,
@@ -1333,6 +1349,21 @@ mod tests {
                 ..
             }) if path.as_str() == "missing.prompt"
         ));
+    }
+
+    #[test]
+    fn raw_query_format_is_restricted_to_artifact_content() {
+        let parsed = invocation([
+            "xmlsquish",
+            "inspect",
+            "artifact",
+            "target/chat.prompt",
+            "--format=raw",
+        ]);
+        assert_eq!(parsed.presentation.query_format, Some(QueryFormat::Raw));
+        let error =
+            parse_from(["xmlsquish", "inspect", "ir", "module", "--format=raw"]).unwrap_err();
+        assert_eq!(error.exit_code(), 2);
     }
 
     #[test]

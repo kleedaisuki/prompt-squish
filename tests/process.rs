@@ -416,7 +416,7 @@ fn human_detail_levels_hide_noise_without_erasing_machine_identity() {
         assert_no_internal_identity(product_output);
         assert!(product_output.contains("cached") || product_output.contains("Cached"));
     }
-    assert!(normal.contains("logical artifact target/xmlsquish/chat.prompt"));
+    assert!(normal.contains("logical artifact locator target/xmlsquish/chat.prompt"));
     assert!(!project.path().join("target/xmlsquish/chat.prompt").exists());
 
     let verbose_lengths = digest_token_lengths(&verbose);
@@ -426,7 +426,7 @@ fn human_detail_levels_hide_noise_without_erasing_machine_identity() {
 
     assert!(digest_token_lengths(&trace).contains(&64));
     assert!(trace.contains("build-cli-"));
-    assert!(trace.contains(".squish-publish/generations/"));
+    assert!(!trace.contains(".squish-publish"));
 
     let json = binary()
         .current_dir(project.path())
@@ -849,6 +849,7 @@ struct InspectFixture {
     project: tempfile::TempDir,
     ir_id: String,
     prompt_id: String,
+    prompt_locator: String,
     prompt_digest: String,
     debug_digest: String,
     cache_key: String,
@@ -930,6 +931,7 @@ fn built_inspect_fixture(name: &str) -> InspectFixture {
         project,
         ir_id: json_string(ir, "id"),
         prompt_id: json_string(prompt, "id"),
+        prompt_locator: json_string(prompt, "locator"),
         prompt_digest: digest_string(prompt),
         debug_digest: digest_string(debug),
         cache_key,
@@ -1050,9 +1052,9 @@ fn inspect_ir_link_source_and_cache_have_typed_human_and_single_json_views() {
 }
 
 #[test]
-fn inspect_artifact_resolves_the_public_path_and_exact_prompt_debug_relation() {
+fn inspect_artifact_locator_reads_verified_bytes_and_provenance_remains_identity_based() {
     let fixture = built_inspect_fixture("root-inspect-artifact-");
-    let locator = "target/xmlsquish/chat.prompt";
+    let locator = &fixture.prompt_locator;
     let human = inspect(&fixture, "artifact", locator, "--format=human");
     assert!(
         human.status.success(),
@@ -1063,17 +1065,29 @@ fn inspect_artifact_resolves_the_public_path_and_exact_prompt_debug_relation() {
     assert!(
         String::from_utf8(human.stdout)
             .unwrap()
-            .starts_with("Provenance\n")
+            .starts_with("Artifact\n")
     );
 
     let document = assert_inspect_document(
         inspect(&fixture, "artifact", locator, "--format=json"),
-        "provenance",
+        "artifact",
     );
     let artifact = &document["value"]["artifact"];
     assert_eq!(artifact["id"], fixture.prompt_id);
     assert_eq!(artifact["kind"]["type"], "prompt");
     assert_eq!(digest_string(artifact), fixture.prompt_digest);
+    let raw = inspect(&fixture, "artifact", locator, "--format=raw");
+    assert!(
+        raw.status.success(),
+        "{}",
+        String::from_utf8_lossy(&raw.stderr)
+    );
+    assert_eq!(raw.stdout, b"<message> Hello world </message>");
+
+    let document = assert_inspect_document(
+        inspect(&fixture, "provenance", &fixture.prompt_id, "--format=json"),
+        "provenance",
+    );
     let evidence = document["value"]["evidence"]
         .as_array()
         .expect("provenance evidence is an array");
@@ -1191,7 +1205,7 @@ fn absolute_manifest_path_builds_and_inspects_the_same_project_from_outside() {
         ])
         .output()
         .unwrap();
-    let artifact = assert_inspect_document(artifact, "provenance");
+    let artifact = assert_inspect_document(artifact, "artifact");
     assert_eq!(artifact["value"]["artifact"]["id"], "fixture:chat:prompt");
 }
 

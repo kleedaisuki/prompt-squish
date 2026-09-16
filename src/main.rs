@@ -804,7 +804,10 @@ fn manager_inspect_subject(
             Some(InspectSubject::CacheKey(ActionKeyId::new(value)?))
         }
         Some(
-            CliInspectSubject::Ir(_) | CliInspectSubject::Link(_) | CliInspectSubject::Source(_),
+            CliInspectSubject::Ir(_)
+            | CliInspectSubject::Link(_)
+            | CliInspectSubject::Source(_)
+            | CliInspectSubject::Provenance(_),
         )
         | None => None,
     })
@@ -853,6 +856,16 @@ fn render_query_result(result: &OperationResult, format: Option<QueryFormat>) ->
             let mut renderer = InspectHumanRenderer::new(stdout);
             renderer.render(result)?;
             renderer.finish()?;
+            return Ok(());
+        }
+        QueryFormat::Raw => {
+            let squish_protocol::InspectResult::Artifact(artifact) = result else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "raw query output requires an artifact inspection",
+                ));
+            };
+            stdout.write_all(&artifact.bytes)?;
             return Ok(());
         }
     }

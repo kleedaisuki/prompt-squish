@@ -140,74 +140,41 @@ to `Services`. Nonexistent absolute paths, paths outside the project, and path
 traversal are rejected. Already-relative catalog locators retain their catalog
 identity after validation rather than being replaced by host-absolute paths.
 
-## Build record and current catalog
+## Build record and typed publication catalog
 
-`BuildRecordV2` in `src/build.rs` is the durable, publicly decodable statement
-of one completed or terminal build. It carries the exact `PlanInspection`
-identity (`PlanId`, `PlanDigest`, and mode), stable per-action terminal facts,
-and the exact target generations committed by that run. Each
-`RecordedGeneration` preserves its target owner, immutable generation ID,
-publisher current-manifest locator, complete artifacts, and canonical logical
-destinations. Static link-map artifacts are members of the recorded generation,
-so target graph inspection does not reconstruct them from transient state.
+`BuildRecordV3` is the durable semantic statement of the sealed plan, terminal
+action facts, and retained target generations. It stores typed publication target
+and generation identities plus `ArtifactDescriptor` and `PublicationPath`; it does
+not store publisher manifests, target hashes, generation-directory URIs, or physical
+paths.
 
-`BuildCatalogSnapshot` is the fully verified view of the current catalog. Its
-loader verifies the catalog publication generation, record artifact, CAS digest
-and size, typed record schema, target publication manifests, generation IDs,
-destinations, and artifact membership before exposing queries. Absence means
-only that the build-catalog publisher has no current generation and is returned
-as `None`. `MissingCurrent` means a present catalog names a target generation
-whose target publisher has no current pointer. `Historical` means that pointer
-exists but has advanced to a generation different from the one recorded by the
-catalog. `Corrupt` covers malformed, missing, or inconsistent catalog bytes,
-CAS objects, manifests, identities, and memberships. None of these three typed
-states collapses to absence.
+The inward-facing `squish-build::GenerationRepository` port owns the complete
+publication conversation: atomic generation publication, current-generation query,
+and verified member reads. `squish-publish::FileArtifactPublisher` implements that
+port and exclusively interprets journals, locks, current pointers, target hashes,
+generation directories, filesystem aliases, and digest verification. A read returns
+`NotFound` only when the logical member is absent from the manifest; a promised but
+missing or mismatched member is an integrity error.
 
-Catalog recovery is deliberately separate from strict inspection. Inspect
-preserves `Historical`, `MissingCurrent`, and `Corrupt` as observable typed
-results. Build planning instead performs recovery in an observable `Recover`
-step: it reads a fully verified base catalog, then validates any authoritative
-newer current generation's complete manifest, artifact URIs, logical
-destinations, CAS contents, and typed schemas before a typed reconciliation.
-A missing or corrupt current generation may be repaired only through the
-publisher generation API, atomically restoring a previously verified good
-generation; storage errors are propagated rather than treated as absence.
-Finalization persists a verified recovery candidate so interruption between G1
-(target generation publication) and G2 (catalog publication) cannot leave a
-permanent recovery deadlock. The manager currently depends on the publisher's
-stable URI layout to validate generations; that parser should move behind a
-public typed publisher API rather than remain a long-term layout dependency.
+Manager reconciliation remains semantic. It compares typed `GenerationId` values,
+validates plan/action coverage and required artifact membership, compares verified
+published bytes with CAS, and may adopt or restore a generation through the typed
+API. It never joins a publication root with an artifact locator or parses an adapter
+URI. `BuildCatalogSnapshot` exposes queries by immutable artifact ID and stable
+logical locator. Successful build results report `(target_id, generation_id,
+locator, descriptor)`; the locator is stable across generations and is accepted
+verbatim by `inspect artifact`. The artifact inspection result carries bytes that
+the manager has checked against the descriptor; `--format=raw` writes those bytes
+without exposing the publisher's physical location. Provenance remains a separate
+identity-based query.
 
-Successful action manifests preserve the complete declared named-output set,
-including the backend result rather than only user-published files. Every
-behavior-changing option participates in the corresponding action recipe, so a
-cache hit cannot silently reuse different semantics. Catalog reads validate the
-publisher's authoritative current-generation pointer instead of trusting only a
-record that happens to exist in CAS.
-
-Persisting the aggregate build catalog is observable terminal work after
-`PlanClosed`. It runs only through `orchestrator::finalize`, which emits
-`FinalizationStarted` followed by exactly one timed success or structured
-failure event. Once started this finalization is intentionally non-cancellable;
-a failure contributes one root failure to the caller's kernel outcome.
-
-Artifact ID/path, plan, static link-map, and provenance queries are projections
-of this snapshot. Provenance is closed and typed: prompt and target-record
-relations name exact evidence, self-describing IR/debug/link evidence declares
-non-applicability, and unsupported kinds remain distinct from a missing catalog.
-
-Backend provenance closes over real static source identities rather than merely
-over trace-node shapes: a bare `Expansion` node is not itself evidence of a
-static source. For every dynamic producer, the manager follows its `LinkedOpRef`
-through the `LinkedImage` unit slot into the compiled unit's `OriginTable` and
-recovers all real `QualifiedOriginRef` values with stable deduplication. It
-preserves the original provenance DAG as `Input` and appends topologically valid
-`SourceSpan` and `BackendTransform` wrappers, rewiring only the artifact segment
-that corresponds to that producer. Traversal may follow an existing
-`Synthetic.nearest` edge, but closure never invents `Synthetic` or `Unknown`
-origins, falls back to `definition_origin`, or flattens provenance to the first
-source. The `semantic_example_publishes_fully_traceable_debug_bundle` regression
-in `tests/build.rs` exercises this end-to-end closure contract.
+Absence of the build-catalog current generation is `None`. A recorded target with no
+current generation is `MissingCurrent`; a different current generation is
+`Historical`; malformed semantic records or publisher integrity failures are
+`Corrupt`. Storage availability failures remain distinct. Target publication (G1)
+and catalog publication (G2) retain separate crash-safe commit decisions, so an
+interrupted finalization is recovered during ordinary publisher opening without
+user repair.
 
 ## Reviewer issues resolved
 

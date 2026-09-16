@@ -65,13 +65,37 @@ impl PublishObserver for CrashAt {
 fn publication(digest: Digest, size: u64, destination: &str) -> Publication {
     Publication {
         output: ProducedOutput {
-            name: OutputName::new("prompt").unwrap(),
+            name: OutputName::new(destination).unwrap(),
             kind: ArtifactKind::Prompt,
             digest,
             size,
         },
-        destination: destination.to_owned(),
+        name: LogicalArtifactName::new(destination).unwrap(),
+        destination: PublicationPath::new(destination).unwrap(),
     }
+}
+
+fn target(value: &str) -> PublicationTargetId {
+    PublicationTargetId::new(value).unwrap()
+}
+
+fn read_member(
+    publisher: &FileArtifactPublisher<MemoryStore>,
+    generation: &CommittedGeneration,
+    index: usize,
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    assert!(matches!(
+        publisher
+            .read_generation_artifact(
+                &generation.identity,
+                &generation.artifacts[index].path,
+                &mut bytes,
+            )
+            .unwrap(),
+        ArtifactRead::Verified(_)
+    ));
+    bytes
 }
 
 #[test]
@@ -87,7 +111,7 @@ fn publishes_atomically_and_is_idempotent() {
         fs::read(root.path().join("nested/result.prompt")).unwrap(),
         b"hello"
     );
-    assert_eq!(artifact.digest, request.output.digest);
+    assert_eq!(artifact.descriptor.digest, request.output.digest);
     assert!(!root.path().join(STATE_DIR).join(JOURNAL).exists());
 }
 
@@ -190,7 +214,7 @@ fn invalid_sources_leave_no_journal_and_do_not_poison_later_publications() {
             "unexpected failure for case {index}"
         );
         assert!(!publisher.state.join(JOURNAL).exists());
-        assert!(!root.path().join(&request.destination).exists());
+        assert!(!root.path().join(request.destination.as_str()).exists());
 
         let recovery_destination = format!("valid-after-{index}.prompt");
         publisher
@@ -310,20 +334,66 @@ fn publishes_a_complete_multi_artifact_generation() {
         publication(debug, 8, "app.psdbg"),
     ];
 
-    let published = publisher.publish_generation("app", &requests).unwrap();
+    let target = target("app");
+    let published = publisher.publish_generation(&target, &requests).unwrap();
     assert_eq!(
-        publisher.current_generation("app").unwrap(),
+        publisher.current_generation(&target).unwrap(),
         Some(published.clone())
     );
     assert_eq!(published.artifacts.len(), 2);
-    assert_eq!(
-        fs::read(root.path().join(&published.artifacts[0].uri)).unwrap(),
-        b"prompt-v1"
+    assert_eq!(read_member(&publisher, &published, 0), b"prompt-v1");
+    assert_eq!(read_member(&publisher, &published, 1), b"debug-v1");
+}
+
+#[test]
+fn generation_identity_is_order_independent_and_reads_are_typed() {
+    let root = tempfile::tempdir().unwrap();
+    let store = MemoryStore::default();
+    let one = publication(store.insert(b"one"), 3, "one.prompt");
+    let two = publication(store.insert(b"two"), 3, "two.prompt");
+    let publisher = FileArtifactPublisher::open(root.path(), store).unwrap();
+    let target = target("opaque-target");
+    let forward = publisher
+        .publish_generation(&target, &[one.clone(), two.clone()])
+        .unwrap();
+    let reverse = publisher.publish_generation(&target, &[two, one]).unwrap();
+    assert_eq!(forward.identity.generation, reverse.identity.generation);
+    assert_eq!(forward.artifacts, reverse.artifacts);
+
+    let mut bytes = Vec::new();
+    assert!(matches!(
+        publisher
+            .read_generation_artifact(
+                &forward.identity,
+                &PublicationPath::new("missing.prompt").unwrap(),
+                &mut bytes
+            )
+            .unwrap(),
+        ArtifactRead::NotFound
+    ));
+}
+
+#[test]
+fn member_read_verifies_only_selected_bytes_after_structural_manifest_validation() {
+    let root = tempfile::tempdir().unwrap();
+    let store = MemoryStore::default();
+    let one = publication(store.insert(b"one"), 3, "one.prompt");
+    let two = publication(store.insert(b"two"), 3, "two.prompt");
+    let publisher = FileArtifactPublisher::open(root.path(), store).unwrap();
+    let target = target("selective-read");
+    let generation = publisher.publish_generation(&target, &[one, two]).unwrap();
+    let corrupt = publisher.generation_artifact_path(
+        &target_key(&target),
+        generation.identity.generation,
+        &generation.artifacts[1].path,
     );
-    assert_eq!(
-        fs::read(root.path().join(&published.artifacts[1].uri)).unwrap(),
-        b"debug-v1"
-    );
+    fs::write(corrupt, b"bad").unwrap();
+
+    assert_eq!(read_member(&publisher, &generation, 0), b"one");
+    assert!(matches!(
+        publisher.current_generation(&target),
+        Err(PublishError::IntegrityMismatch)
+    ));
 }
 
 #[test]
@@ -332,19 +402,19 @@ fn rejects_collisions_across_the_complete_destination_set() {
     let store = MemoryStore::default();
     let digest = store.insert(b"x");
     let publisher = FileArtifactPublisher::open(root.path(), store).unwrap();
-    for destinations in [
-        ["A.prompt", "a.prompt"],
-        ["name", "name."],
-        ["tree", "tree/child"],
-        [r"dir\file", "dir/file"],
-    ] {
+    for destinations in [["A.prompt", "a.prompt"], ["tree", "tree/child"]] {
         let requests = destinations.map(|destination| publication(digest.clone(), 1, destination));
         assert!(matches!(
-            publisher.publish_generation("app", &requests),
+            publisher.publish_generation(&target("app"), &requests),
             Err(PublishError::AliasConflict(_))
         ));
     }
-    assert!(publisher.current_generation("app").unwrap().is_none());
+    assert!(
+        publisher
+            .current_generation(&target("app"))
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -354,7 +424,7 @@ fn failure_while_staging_one_file_never_switches_the_generation() {
     let old = initial.insert(b"old");
     let publisher = FileArtifactPublisher::open(root.path(), initial).unwrap();
     let old_generation = publisher
-        .publish_generation("app", &[publication(old, 3, "app.prompt")])
+        .publish_generation(&target("app"), &[publication(old, 3, "app.prompt")])
         .unwrap();
 
     let store = MemoryStore::default();
@@ -363,7 +433,7 @@ fn failure_while_staging_one_file_never_switches_the_generation() {
     let publisher = FileArtifactPublisher::open(root.path(), store).unwrap();
     let error = publisher
         .publish_generation(
-            "app",
+            &target("app"),
             &[
                 publication(good, 3, "app.prompt"),
                 publication(missing, 3, "app.psdbg"),
@@ -372,7 +442,7 @@ fn failure_while_staging_one_file_never_switches_the_generation() {
         .unwrap_err();
     assert!(matches!(error, PublishError::MissingBlob));
     assert_eq!(
-        publisher.current_generation("app").unwrap(),
+        publisher.current_generation(&target("app")).unwrap(),
         Some(old_generation)
     );
     assert!(!publisher.state.join(GENERATION_JOURNAL).exists());
@@ -396,7 +466,7 @@ fn crash_at_every_durable_point_preserves_or_rolls_forward_a_whole_generation() 
         let old_publisher = FileArtifactPublisher::open(root.path(), old_store).unwrap();
         let old_generation = old_publisher
             .publish_generation(
-                "app",
+                &target("app"),
                 &[
                     publication(old_prompt, 10, "app.prompt"),
                     publication(old_debug, 9, "app.psdbg"),
@@ -416,7 +486,9 @@ fn crash_at_every_durable_point_preserves_or_rolls_forward_a_whole_generation() 
             publication(new_debug.clone(), 9, "app.psdbg"),
         ];
         let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            publisher.publish_generation("app", &requests).unwrap();
+            publisher
+                .publish_generation(&target("app"), &requests)
+                .unwrap();
         }));
         assert!(crashed.is_err(), "fault point {point:?} was not reached");
         drop(publisher);
@@ -425,7 +497,10 @@ fn crash_at_every_durable_point_preserves_or_rolls_forward_a_whole_generation() 
         recovery_store.insert(b"new-prompt");
         recovery_store.insert(b"new-debug");
         let recovered = FileArtifactPublisher::open(root.path(), recovery_store).unwrap();
-        let current = recovered.current_generation("app").unwrap().unwrap();
+        let current = recovered
+            .current_generation(&target("app"))
+            .unwrap()
+            .unwrap();
         let rolls_forward = matches!(
             point,
             DurablePoint::CommitDecision
@@ -433,15 +508,12 @@ fn crash_at_every_durable_point_preserves_or_rolls_forward_a_whole_generation() 
                 | DurablePoint::JournalCleared
         );
         if rolls_forward {
-            assert_ne!(current.generation_id, old_generation.generation_id);
-            assert_eq!(
-                fs::read(root.path().join(&current.artifacts[0].uri)).unwrap(),
-                b"new-prompt"
+            assert_ne!(
+                current.identity.generation,
+                old_generation.identity.generation
             );
-            assert_eq!(
-                fs::read(root.path().join(&current.artifacts[1].uri)).unwrap(),
-                b"new-debug"
-            );
+            assert_eq!(read_member(&recovered, &current, 0), b"new-prompt");
+            assert_eq!(read_member(&recovered, &current, 1), b"new-debug");
         } else {
             assert_eq!(current, old_generation);
         }

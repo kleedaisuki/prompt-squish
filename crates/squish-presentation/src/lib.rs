@@ -1648,6 +1648,11 @@ impl<W: Write, T: TerminalProbe> InspectHumanRenderer<W, T> {
                 self.key("Digest", &format_digest(&value.digest))?;
                 self.key("Size", &format!("{} bytes", value.size))
             }
+            squish_protocol::InspectResult::Artifact(value) => {
+                self.line("Artifact")?;
+                self.artifact(2, &value.artifact)?;
+                self.key("Verified content", &format!("{} bytes", value.bytes.len()))
+            }
             squish_protocol::InspectResult::Provenance(value) => {
                 self.line("Provenance")?;
                 self.line("  Artifact")?;
@@ -1951,32 +1956,9 @@ fn cache_name(cache: CacheKind) -> &'static str {
 fn product_artifact_uri(uri: &str) -> String {
     if uri.starts_with("cas://") {
         "content-addressed cache".to_owned()
-    } else if let Some(logical) = published_artifact_path(uri) {
-        format!("logical artifact {}", sanitize(&logical))
     } else {
-        sanitize(uri)
+        format!("logical artifact locator {}", sanitize(uri))
     }
-}
-
-/// 仅识别发布器拥有的 generation 布局并返回 `artifacts/` 后的逻辑路径。 / Recognizes
-/// only the publisher-owned generation layout and returns the logical path after `artifacts/`.
-fn published_artifact_path(uri: &str) -> Option<String> {
-    let parts = uri.split(['/', '\\']).collect::<Vec<_>>();
-    let marker = parts.windows(5).position(|window| {
-        window[0] == ".squish-publish"
-            && window[1] == "generations"
-            && is_hex_64(window[2])
-            && is_hex_64(window[3])
-            && window[4] == "artifacts"
-    })?;
-    let logical = &parts[marker + 5..];
-    (!logical.is_empty()).then(|| logical.join("/"))
-}
-
-/// 判断一个路径段是否恰为内部 generation 身份。 / Reports whether one path component is
-/// exactly an internal generation identity.
-fn is_hex_64(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 fn operation_kind_name(kind: squish_protocol::OperationKind) -> &'static str {
     match kind {
@@ -2102,6 +2084,7 @@ fn inspect_result_name(result: &squish_protocol::InspectResult) -> &'static str 
         squish_protocol::InspectResult::Ir(_) => "IR",
         squish_protocol::InspectResult::Link(_) => "link",
         squish_protocol::InspectResult::Source(_) => "source",
+        squish_protocol::InspectResult::Artifact(_) => "artifact",
         squish_protocol::InspectResult::Provenance(_) => "provenance",
     }
 }
@@ -2542,7 +2525,7 @@ mod tests {
         let normal = render_with_verbosity(&events, Verbosity::Normal);
         assert_eq!(
             normal,
-            "Planning\nPlanned: 1 actions, 0 issues (execute)\nProduced binary-ir target/prompt.xsir (42 bytes)\nCompleted: 1 succeeded, 0 failed, 0 blocked, 0 cancelled, 1 cached (11 ms)\n"
+            "Planning\nPlanned: 1 actions, 0 issues (execute)\nProduced binary-ir logical artifact locator target/prompt.xsir (42 bytes)\nCompleted: 1 succeeded, 0 failed, 0 blocked, 0 cancelled, 1 cached (11 ms)\n"
         );
         assert!(!normal.contains("sha256"));
         assert!(!normal.contains("blake3"));
@@ -2551,7 +2534,7 @@ mod tests {
         let verbose = render_with_verbosity(&events, Verbosity::Verbose);
         assert_eq!(
             verbose,
-            "Planning\nPlanned: 1 actions, 0 issues (execute)\nRunning compile\nCached compile (local, blake3:060606060606, 1 outputs)\nFinished compile (9 ms)\nProduced binary-ir target/prompt.xsir (42 bytes, sha256:070707070707)\nCompleted: 1 succeeded, 0 failed, 0 blocked, 0 cancelled, 1 cached (11 ms)\n"
+            "Planning\nPlanned: 1 actions, 0 issues (execute)\nRunning compile\nCached compile (local, blake3:060606060606, 1 outputs)\nFinished compile (9 ms)\nProduced binary-ir logical artifact locator target/prompt.xsir (42 bytes, sha256:070707070707)\nCompleted: 1 succeeded, 0 failed, 0 blocked, 0 cancelled, 1 cached (11 ms)\n"
         );
         assert!(!verbose.contains("0123456789abcdef"));
         assert!(!verbose.contains("0606060606060606"));
@@ -2581,27 +2564,17 @@ mod tests {
     }
 
     #[test]
-    fn published_generation_uri_projects_only_the_owned_internal_shape() {
-        let generation = "a".repeat(64);
-        let target = "b".repeat(64);
-        let unix = format!(
-            "/workspace/.squish-publish/generations/{generation}/{target}/artifacts/target/xmlsquish/prompt.prompt"
-        );
-        let windows = format!(
-            r"C:\workspace\.squish-publish\generations\{generation}\{target}\artifacts\target\xmlsquish\prompt.prompt"
-        );
+    fn logical_artifact_locator_is_rendered_without_layout_inference() {
+        let locator = "target/xmlsquish/prompt.prompt";
         assert_eq!(
-            product_artifact_uri(&unix),
-            "logical artifact target/xmlsquish/prompt.prompt"
+            product_artifact_uri(locator),
+            "logical artifact locator target/xmlsquish/prompt.prompt"
         );
+        let opaque = "publisher+memory:opaque";
         assert_eq!(
-            product_artifact_uri(&windows),
-            "logical artifact target/xmlsquish/prompt.prompt"
+            product_artifact_uri(opaque),
+            "logical artifact locator publisher+memory:opaque"
         );
-
-        let near_miss =
-            format!("/workspace/generations/{generation}/{target}/artifacts/target/prompt.prompt");
-        assert_eq!(product_artifact_uri(&near_miss), near_miss);
 
         let event = event(
             0,
@@ -2610,23 +2583,19 @@ mod tests {
                 plan: id::<PlanId>("plan-internal"),
                 action: id::<ActionId>("action-internal"),
                 timing: Timing { elapsed_ms: 3 },
-                artifacts: vec![artifact("artifact-internal", &unix)],
+                artifacts: vec![artifact("artifact-internal", locator)],
             },
         );
         let normal = render_with_verbosity(std::slice::from_ref(&event), Verbosity::Normal);
         assert!(normal.contains(
-            "Produced binary-ir logical artifact target/xmlsquish/prompt.prompt (42 bytes)"
+            "Produced binary-ir logical artifact locator target/xmlsquish/prompt.prompt (42 bytes)"
         ));
-        assert!(!normal.contains(&generation));
-        assert!(!normal.contains(&target));
-
         let verbose = render_with_verbosity(std::slice::from_ref(&event), Verbosity::Verbose);
         assert!(verbose.contains(
-            "logical artifact target/xmlsquish/prompt.prompt (42 bytes, sha256:070707070707)"
+            "logical artifact locator target/xmlsquish/prompt.prompt (42 bytes, sha256:070707070707)"
         ));
-        assert!(!verbose.contains(&generation));
         let trace = render_with_verbosity(&[event], Verbosity::Trace);
-        assert!(trace.contains(&unix));
+        assert!(trace.contains(locator));
     }
 
     #[test]

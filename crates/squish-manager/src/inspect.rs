@@ -18,8 +18,8 @@ use squish_ir::{
 use squish_kernel::{CancellationToken, InvocationContext, OperationOutcome};
 use squish_project::{LOCK_FILE_NAME, Lockfile, ResolutionMode};
 use squish_protocol::{
-    ActionId, ActionKeyId, ActionKind, Artifact, ArtifactKind, CacheInspection, Digest,
-    DigestAlgorithm, InspectRequest, InspectResult, InspectView, IrInspection, JobId,
+    ActionId, ActionKeyId, ActionKind, Artifact, ArtifactInspection, ArtifactKind, CacheInspection,
+    Digest, DigestAlgorithm, InspectRequest, InspectResult, InspectView, IrInspection, JobId,
     LinkInspection, OperationKind, OperationResult, PackageName, Phase, PlanInspection, PlanMode,
     PlannedAction, PlanningAttemptId, PlanningStepId, PlanningStepKind, ProjectInspection,
     ProvenanceInspection, SourceInspection, TargetName,
@@ -342,7 +342,7 @@ fn inspect_at_repository<S: Services>(
             provenance(repository.root(), id, services).map(InspectResult::Provenance)
         }
         InspectView::Artifact(path) => {
-            artifact_provenance(repository.root(), path, services).map(InspectResult::Provenance)
+            artifact_content(repository.root(), path, services).map(InspectResult::Artifact)
         }
     }
 }
@@ -362,7 +362,7 @@ fn inspect_at_root<S: Services>(
             provenance(root, id, services).map(InspectResult::Provenance)
         }
         InspectView::Artifact(path) => {
-            artifact_provenance(root, path, services).map(InspectResult::Provenance)
+            artifact_content(root, path, services).map(InspectResult::Artifact)
         }
         InspectView::Project | InspectView::Source(_) => Err(ManagerError::new(
             "XS3407",
@@ -778,14 +778,13 @@ fn provenance<S: Services>(
     provenance_for_artifact(root, artifact, services)
 }
 
-/// 将项目路径选择器解析为权威产物，再以真实身份查询证据。 /
-/// Resolves a project-path selector to an authoritative artifact, then queries evidence with
-/// the artifact's real identity.
-fn artifact_provenance<S: Services>(
+/// 将项目路径选择器解析为权威产物并返回已验证字节。 /
+/// Resolves a project-path selector to an authoritative artifact and returns verified bytes.
+fn artifact_content<S: Services>(
     root: &Path,
     path: &squish_protocol::ProjectPath,
     services: &S,
-) -> Result<ProvenanceInspection, ManagerError> {
+) -> Result<ArtifactInspection, ManagerError> {
     let locator = ArtifactLocator::new(path.as_str()).map_err(|error| {
         manager_error(
             "XS3424",
@@ -808,7 +807,8 @@ fn artifact_provenance<S: Services>(
                 ),
             )
         })?;
-    provenance_for_artifact(root, artifact, services)
+    let bytes = validate_artifact(root, &artifact, services)?;
+    Ok(ArtifactInspection { artifact, bytes })
 }
 
 /// 验证已解析产物并按其内容身份加载来源证据。 /
@@ -1042,7 +1042,12 @@ fn validate_build_record(bytes: &[u8], subject: &Artifact) -> Result<(), Manager
     let names_subject = record
         .targets
         .iter()
-        .flat_map(|target| target.artifacts.iter().map(|item| &item.artifact))
+        .flat_map(|target| {
+            target
+                .artifacts
+                .iter()
+                .map(crate::build::catalog_protocol_artifact)
+        })
         .any(|artifact| {
             artifact.id == subject.id
                 && artifact.digest == subject.digest
