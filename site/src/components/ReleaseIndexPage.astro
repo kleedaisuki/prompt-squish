@@ -1,0 +1,72 @@
+---
+import ProductShell from "../layouts/ProductShell.astro";
+import type { Locale } from "../i18n/messages";
+import { releaseMessages } from "../i18n/releases";
+import { releases } from "../data/releases";
+
+/** Release-log index input. / 发布记录目录输入。 */
+interface Props { locale: Locale; }
+const { locale } = Astro.props;
+const m = releaseMessages[locale];
+/** Keep every card on the same locale-specific release branch. / 让每张卡片保持在当前语言的发布路径。 */
+const detailPath = (version: string) => locale === "en" ? `/en/releases/${version}/` : `/releases/${version}/`;
+const structuredData = JSON.stringify({
+  "@context": "https://schema.org",
+  "@type": "ItemList",
+  name: m.index.heading,
+  itemListOrder: "https://schema.org/ItemListOrderDescending",
+  numberOfItems: releases.length,
+  itemListElement: releases.map((release, index) => ({
+    "@type": "ListItem",
+    position: index + 1,
+    url: new URL(detailPath(release.version), Astro.site).href,
+    name: `xmlsquish ${release.version}`,
+  })),
+}).replaceAll("<", "\\u003c");
+---
+
+<ProductShell locale={locale} page="releases" title={m.index.title} description={m.index.description}>
+  <Fragment slot="head"><script is:inline type="application/ld+json" set:html={structuredData}></script></Fragment>
+  <main id="main" class="release-index">
+    <header class="log-masthead product-width">
+      <p class="eyebrow">{m.index.eyebrow}</p>
+      <h1>{m.index.heading}</h1>
+      <p>{m.index.introduction}</p>
+    </header>
+    <section class="release-ledger product-width" aria-label={m.index.eyebrow}>
+      <ol>
+        {releases.map((release) => {
+          const copy = m.versions[release.version];
+          return <li>
+            <article class:list={["log-entry", { current: release.status === "current" }]}>
+              <div class="entry-date"><time datetime={release.date}>{copy.date}</time><span>{release.status === "current" ? m.index.current : m.index.historical}</span></div>
+              <div class="entry-body">
+                <div class="version-line"><code>{release.tag}</code>{release.protocol && <span>{m.index.protocol} {release.protocol}</span>}<span>{release.acquisition.kind === "native" ? m.index.acquisitionNative : m.index.acquisitionSource}</span></div>
+                <h2><a href={detailPath(release.version)}>{copy.title}</a></h2>
+                <p>{copy.summary}</p>
+              </div>
+              <a class="open-release" href={detailPath(release.version)} aria-label={`${m.index.read}: ${release.tag}`}>
+                {m.index.read}<span aria-hidden="true">→</span>
+              </a>
+            </article>
+          </li>;
+        })}
+      </ol>
+    </section>
+  </main>
+</ProductShell>
+
+<style>
+  .release-index{min-height:70vh}.log-masthead{padding-block:clamp(3rem,7vw,5.25rem) 2.4rem;border-bottom:1px solid var(--xs-line)}
+  .eyebrow{margin:0 0 .8rem;color:var(--moe-accent-strong);font:800 .7rem var(--moe-font-family-mono,monospace);letter-spacing:.13em;text-transform:uppercase}
+  h1{max-width:52rem;margin:0;font-size:clamp(2.5rem,5.5vw,4.75rem);line-height:1;letter-spacing:-.055em}
+  .log-masthead>p:last-child{max-width:48rem;margin:1.25rem 0 0;color:var(--moe-text-soft);font-size:1.04rem;line-height:1.75}
+  .release-ledger{padding-block:2rem 5.5rem}.release-ledger ol{margin:0;padding:0;list-style:none}.release-ledger li{border-bottom:1px solid var(--xs-line)}
+  .log-entry{position:relative;display:grid;grid-template-columns:10.5rem minmax(0,1fr) auto;gap:clamp(1.2rem,4vw,3rem);align-items:start;padding:1.8rem .6rem}
+  .log-entry.current::before{position:absolute;inset:.8rem auto .8rem -.7rem;width:3px;border-radius:99px;background:var(--moe-accent-strong);content:""}
+  .entry-date{display:grid;gap:.55rem;color:var(--moe-text-soft);font-size:.76rem}.entry-date span{width:max-content;padding:.22rem .48rem;border:1px solid var(--xs-line);border-radius:999px;font:700 .64rem var(--moe-font-family-mono,monospace)}
+  .version-line{display:flex;flex-wrap:wrap;gap:.45rem;align-items:center}.version-line code{color:var(--moe-accent-strong);font-size:.88rem;font-weight:800}.version-line span{padding:.18rem .4rem;border-radius:.3rem;background:var(--moe-accent-wash);color:var(--moe-text-soft);font:700 .63rem var(--moe-font-family-mono,monospace)}
+  h2{margin:.62rem 0 .55rem;font-size:clamp(1.35rem,2.4vw,1.85rem);letter-spacing:-.025em}h2 a{display:inline;border-radius:.3rem;color:var(--moe-heading)}h2 a:hover{color:var(--moe-accent-strong);background:var(--moe-accent-wash)}
+  .entry-body>p{max-width:48rem;margin:0;color:var(--moe-text-soft);line-height:1.65}.open-release{display:inline-flex;align-items:center;gap:.55rem;min-height:2.4rem;padding:.45rem .65rem;border:1px solid var(--xs-line);border-radius:.45rem;color:var(--moe-heading);font-size:.75rem;font-weight:800;white-space:nowrap}.open-release:hover{border-color:var(--moe-accent);color:var(--moe-accent-strong);background:var(--moe-accent-wash)}
+  @media(max-width:760px){.log-entry{grid-template-columns:1fr;padding-block:1.5rem}.entry-date{display:flex;align-items:center;justify-content:space-between}.open-release{width:max-content}.log-entry.current::before{inset:.8rem auto .8rem -.3rem}.log-masthead{padding-top:2.5rem}}
+</style>

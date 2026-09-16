@@ -1,0 +1,13 @@
+---
+import ReleaseDetailPage from "../../../components/ReleaseDetailPage.astro";
+import { releases, type ProductRelease } from "../../../data/releases";
+
+/** Materialize every catalog version as an immutable English route. / 为目录中每个版本生成不可变英文路由。 */
+export function getStaticPaths() {
+  return releases.map((release) => ({ params: { version: release.version }, props: { release } }));
+}
+
+interface Props { release: ProductRelease; }
+const { release } = Astro.props;
+---
+<ReleaseDetailPage locale="en" release={release} />
