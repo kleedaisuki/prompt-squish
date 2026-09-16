@@ -1,5 +1,5 @@
-# Exact internal direct-dependency contract; dependency kinds remain distinct and target predicates are included.
-# 精确的内部直接依赖契约；依赖类别保持独立，并包含所有目标条件下的边。
+# Exact internal direct-dependency contract; kinds remain distinct, while target-specific declarations are included but predicates intentionally collapse.
+# 精确的内部直接依赖契约；类别保持独立；目标特定声明会被纳入，但其目标谓词有意折叠。
 squish-backend -[normal]-> squish-ir
 squish-backend -[normal]-> squish-protocol
 squish-build -[normal]-> squish-protocol
