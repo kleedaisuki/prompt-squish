@@ -2388,7 +2388,7 @@ checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
 
 [[package]]
 name = "xmlsquish"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "blake3",
  "ctrlc",

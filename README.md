@@ -103,7 +103,7 @@ name = "Klee"
 | `xmlsquish fmt` | 格式化项目自有 XML；保持 DSL 语义 | `--check`, `--diff`, `--path`, `--style-edition` |
 | `xmlsquish add SPEC` | 新增或更新有类型依赖，并协调清单与锁文件 | `--path`, `--git`, `--rev/--tag/--branch`, `--registry`, `--rename`, `--dry-run` |
 | `xmlsquish remove ALIAS` | 按别名移除直接依赖 | `-p/--package`, `--dev`, `--build`, `--dry-run` |
-| `xmlsquish inspect …` | 只读检查 IR、链接、源码来源、缓存键或产物 | `ir`, `link`, `source`, `cache`, `artifact`; `--format human|json` |
+| `xmlsquish inspect …` | 只读检查 IR、链接、源码来源、缓存键或产物 | `ir`, `link`, `source`, `cache`, `artifact`; `--format human|json|raw` |
 
 除 `new` 外，项目命令从当前目录向上发现 `xmlsquish.toml`；`--manifest-path PATH` 显式选择清单。`new` 接受待创建的目标路径，并在适用时把项目加入外围工作区。不存在松散文件编译语法：路径必须通过清单目标或 `fmt --path` 等有类型选项表达。
 
@@ -149,7 +149,11 @@ defaults
 
 相对路径按声明它的配置文件目录解析；CLI 覆盖中的相对路径按当前工作目录解析。支持的配置表是 `source`、`manager`、`build`、`term` 与 `registries.<alias>`。
 
-操作消息支持 `--message-format human|short|json`。`json` 是换行分隔 JSON（Newline-Delimited JSON, NDJSON），每行一个版本化事件，写入 stdout；human/short 状态与诊断写入 stderr，stdout 留给查询数据。`inspect` 使用 `--format human|json` 返回一个文档，而不是操作事件流。`--plain` 禁用颜色和动态进度；`--quiet` 抑制成功状态。
+操作消息支持 `--message-format human|short|json`。`json` 是换行分隔 JSON（Newline-Delimited JSON, NDJSON），每行一个协议 3.0 事件，写入 stdout；human/short 状态与诊断写入 stderr，stdout 留给查询数据。`inspect` 使用 `--format human|json|raw` 返回一个查询结果；`raw` 仅适用于 `inspect artifact`，且只向 stdout 写入经摘要验证的产物字节。`--plain` 禁用颜色和动态进度；`--quiet` 抑制成功状态。
+
+> **自动化迁移 / Automation migration:** xmlsquish 1.0.1 发送协议 `3.0`，而不是 1.0.0 的 `2.1`。这是一次机器协议主版本迁移，尽管产品版本只增加了补丁号。构建结果现在提供有类型的发布身份和稳定逻辑 `locator`，不再暴露发布器的物理 generation URI。解析 `--message-format=json` 的消费者必须在升级 CLI 时同步迁移到 v3 结构；不要将 v2 构建结果视为可加性更改。
+
+> **Automation migration:** xmlsquish 1.0.1 emits protocol `3.0`, not the `2.1` emitted by 1.0.0. This is a machine-protocol major migration even though the product version advances only by a patch. Build results now carry typed publication identity and stable logical `locator` values instead of publisher-private physical generation URIs. Consumers parsing `--message-format=json` must migrate to the v3 shape when upgrading the CLI; do not treat the v2 build-result shape as an additive change.
 
 ## 退出与自动化 / Process exits and automation
 

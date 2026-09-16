@@ -8,6 +8,26 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 
 尚无已记录的面向用户变化。 / No user-facing changes recorded yet.
 
+## [1.0.1] — 2026-09-16
+
+完整发布说明与安装方法 / Full release notes and installation: [1.0.1](docs/releases/1.0.1.md).
+
+### 发布与运行时边界 / Publication and runtime boundaries
+
+- 构建结果改用有类型的发布目录，以稳定、项目相对的逻辑定位符表示产物；发布器 generation 路径保持为私有实现。
+  Build results now use a typed publication catalog and stable, project-relative logical artifact locators; publisher generation paths remain private implementation details.
+- `xmlsquish inspect artifact LOCATOR --format=raw` 解析发布器签发的定位符，在写入 stdout 之前验证摘要与大小。
+  `xmlsquish inspect artifact LOCATOR --format=raw` resolves a publisher-issued locator and verifies digest and size before writing exact artifact bytes to stdout.
+- 生产主机现在向 manager 注入一个 invocation-scoped 构建运行时，并按能力延迟初始化 CAS、索引与发布器；不需要存储的操作不再创建存储状态。
+  The production host now injects an invocation-scoped build runtime and lazily initializes CAS, indexes, and publishers per capability; operations that need no storage no longer create storage state.
+- CI 通过可评审的 workspace 依赖边策略与自测程序阻止已禁止或未审批的架构边。
+  CI now enforces the reviewed workspace dependency-edge policy with both checker self-tests and the real metadata graph.
+
+### 自动化的破坏性迁移 / Breaking automation migration
+
+- **1.0.1 发送机器协议 `3.0`，而不是 1.0.0 的 `2.1`。** 尽管产品版本是补丁更新，但解析 `--message-format=json` 的消费者必须升级。`operation_completed` 的构建结果现在包含 `target_id`、`generation_id` 以及有类型的 `PublishedArtifact { id, kind, locator, size, digest }`；v2 的物理 `uri` 不是 v3 协议。
+  **1.0.1 emits machine protocol `3.0`, not the `2.1` emitted by 1.0.0.** Consumers of `--message-format=json` must migrate despite the product patch version. The `operation_completed` build result now includes `target_id`, `generation_id`, and typed `PublishedArtifact { id, kind, locator, size, digest }` values; the v2 physical `uri` shape is not a v3 contract.
+
 ## [1.0.0] — 2026-09-15
 
 完整发布说明与安装方法 / Full release notes and installation: [1.0.0](docs/releases/1.0.0.md).
@@ -59,7 +79,8 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 - 引入命名空间感知模块、不可变命名宏、显式字符串参数与 XML slot。
   Introduced namespace-aware modules, immutable named macros, explicit scalar parameters, and XML slots.
 
-[Unreleased]: https://github.com/kleedaisuki/prompt-squish/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/kleedaisuki/prompt-squish/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.1
 [1.0.0]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.0
 [0.3.0]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v0.3.0
 [0.2.0]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v0.2.0

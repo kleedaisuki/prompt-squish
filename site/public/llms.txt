@@ -10,11 +10,12 @@ This file follows the experimental community `llms.txt` proposal. It is an addit
 - [中文产品页](https://xmlsquish.moesegfault.dev/): 产品模型、构建流水线与 CLI 快速入门。
 - [Source repository](https://github.com/kleedaisuki/prompt-squish): Source code, tests, changelog, and license.
 
-## Version 1.0
+## Latest release: 1.0.1
 
-- [English release page](https://xmlsquish.moesegfault.dev/en/releases/): Human-oriented v1.0 release and migration information.
-- [中文发布页](https://xmlsquish.moesegfault.dev/releases/): 面向用户的 v1.0 发布与迁移说明。
-- [Machine-readable release metadata](https://xmlsquish.moesegfault.dev/releases/1.0.0.json): Stable JSON contract for the published v1.0.0 release and its native assets.
+- [English release page](https://xmlsquish.moesegfault.dev/en/releases/): Human-oriented v1.0.1 highlights, downloads, automation migration, and release history.
+- [中文发布页](https://xmlsquish.moesegfault.dev/releases/): 面向用户的 v1.0.1 亮点、下载、自动化迁移与发布历史。
+- [Machine-readable 1.0.1 metadata](https://xmlsquish.moesegfault.dev/releases/1.0.1.json): Stable JSON metadata for the published v1.0.1 release and its six native assets.
+- [Historical 1.0.0 metadata](https://xmlsquish.moesegfault.dev/releases/1.0.0.json): Immutable metadata for the previous release.
 
 ## Specifications
 
@@ -27,5 +28,7 @@ This file follows the experimental community `llms.txt` proposal. It is an addit
 
 - CLI commands: `new`, `fmt`, `build`, `add`, `remove`, `inspect`.
 - Source installation requires Rust 1.88 or newer and a locked Cargo workspace. xmlsquish is not published on crates.io.
-- v1.0.0 is published under the immutable `v1.0.0` Git tag, with native x86-64 and ARM64 assets for Linux, Windows, and macOS.
+- v1.0.1 is published under the immutable `v1.0.1` Git tag, with native x86-64 and ARM64 assets for Linux, Windows, and macOS.
+- Native `--message-format=json` output uses machine protocol 3.0. This is a breaking migration from the protocol 2.1 emitted by v1.0.0: build results now carry typed publication identity and stable logical artifact locators.
+- `xmlsquish inspect artifact LOCATOR --format=raw` returns digest-verified artifact bytes only.
 - License: GPL-3.0-or-later.
