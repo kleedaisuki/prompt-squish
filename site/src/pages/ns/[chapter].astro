@@ -1,0 +1,9 @@
+---
+import NamespacePage from "../../components/NamespacePage.astro";
+import { manualChapters, type ManualChapter } from "../../data/dsl";
+
+/** Generate every public Chinese manual chapter. / 生成所有中文公共手册章节。 */
+export function getStaticPaths() { return manualChapters.map((chapter) => ({ params: { chapter }, props: { chapter } })); }
+const { chapter } = Astro.props as { chapter: ManualChapter };
+---
+<NamespacePage locale="zh-CN" chapter={chapter} />
