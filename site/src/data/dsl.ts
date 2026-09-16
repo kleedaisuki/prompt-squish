@@ -4,7 +4,9 @@
 export type Directive = {
   readonly name: "module" | "entry" | "import" | "macro" | "param" | "expand" | "arg" | "fill" | "slot" | "insert" | "ifr";
   readonly group: "project" | "composition" | "values" | "control";
-  readonly attributes: readonly string[];
+  readonly attributes: readonly { readonly name: string; readonly requirement: "required" | "optional" | "exclusive"; readonly default?: string }[];
+  readonly syntax: string;
+  readonly relatedChapter: ManualChapter;
 };
 
 /** The complete public vocabulary, ordered for the manual reference.
@@ -14,17 +16,17 @@ export type Directive = {
  * one source of truth. / 每个名称只出现一次，使导航、搜索和稳定片段共享单一事实来源。
  */
 export const directives = [
-  { name: "entry", group: "project", attributes: [] },
-  { name: "module", group: "project", attributes: [] },
-  { name: "import", group: "project", attributes: ["src"] },
-  { name: "macro", group: "composition", attributes: ["name"] },
-  { name: "param", group: "composition", attributes: ["name"] },
-  { name: "expand", group: "composition", attributes: ["ref"] },
-  { name: "arg", group: "values", attributes: ["name", "value | get | body"] },
-  { name: "fill", group: "values", attributes: ["name"] },
-  { name: "slot", group: "values", attributes: ["name", "required?"] },
-  { name: "insert", group: "values", attributes: ["get"] },
-  { name: "ifr", group: "control", attributes: ["get | str", "pattern"] },
+  { name: "entry", group: "project", attributes: [], syntax: `<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns">\n  <Prompt>Hello</Prompt>\n</xs:entry>`, relatedChapter: "getting-started" },
+  { name: "module", group: "project", attributes: [], syntax: `<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"\n           xmlns:app="urn:example:app">\n  <xs:macro name="app:hello"/>\n</xs:module>`, relatedChapter: "source-model" },
+  { name: "import", group: "project", attributes: [{ name: "src", requirement: "required" }], syntax: `<xs:import src="./macros.xml"/>`, relatedChapter: "source-model" },
+  { name: "macro", group: "composition", attributes: [{ name: "name", requirement: "required" }], syntax: `<xs:macro name="app:hello">\n  <Message>Hello</Message>\n</xs:macro>`, relatedChapter: "composition" },
+  { name: "param", group: "composition", attributes: [{ name: "name", requirement: "required" }], syntax: `<xs:param name="title"/>`, relatedChapter: "composition" },
+  { name: "expand", group: "composition", attributes: [{ name: "ref", requirement: "required" }], syntax: `<xs:expand ref="app:hello">\n  <xs:arg name="title" value="Hello"/>\n</xs:expand>`, relatedChapter: "composition" },
+  { name: "arg", group: "values", attributes: [{ name: "name", requirement: "required" }, { name: "value", requirement: "exclusive" }, { name: "get", requirement: "exclusive" }], syntax: `<xs:arg name="title" get="arg.heading"/>`, relatedChapter: "composition" },
+  { name: "fill", group: "values", attributes: [{ name: "name", requirement: "required" }], syntax: `<xs:fill name="body"><Message>Hello</Message></xs:fill>`, relatedChapter: "composition" },
+  { name: "slot", group: "values", attributes: [{ name: "name", requirement: "required" }, { name: "required", requirement: "optional", default: "false" }], syntax: `<xs:slot name="body" required="true"/>`, relatedChapter: "composition" },
+  { name: "insert", group: "values", attributes: [{ name: "get", requirement: "required" }], syntax: `<xs:insert get="arg.name"/>`, relatedChapter: "control-and-scope" },
+  { name: "ifr", group: "control", attributes: [{ name: "get", requirement: "exclusive" }, { name: "str", requirement: "exclusive" }, { name: "pattern", requirement: "required" }], syntax: `<xs:ifr get="arg.value" pattern="^(?&lt;head&gt;.)$">\n  <xs:insert get="match.head"/>\n</xs:ifr>`, relatedChapter: "control-and-scope" },
 ] as const satisfies readonly Directive[];
 
 export type DirectiveName = (typeof directives)[number]["name"];
