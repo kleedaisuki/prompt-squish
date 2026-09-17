@@ -2,11 +2,11 @@ name: Release binaries
 
 on:
   push:
-    tags: ['v*']
+    tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing stable tag to publish, for example v1.0.1'
+        description: 'Existing stable tag to publish, for example v1.0.2'
         required: true
         type: string
 

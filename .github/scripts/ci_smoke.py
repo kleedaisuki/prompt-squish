@@ -8,7 +8,7 @@ import sys
 import tempfile
 
 
-COMMANDS = ("new", "build", "fmt", "add", "remove", "inspect")
+COMMANDS = ("new", "build", "clean", "fmt", "add", "remove", "inspect")
 
 
 def invoke(binary: Path, *arguments: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -91,15 +91,31 @@ def smoke(binary: Path, scratch: Path) -> None:
             raise RuntimeError("human fmt --diff did not emit a unified diff on stdout")
         run(binary, "fmt", "--plain", cwd=project)
         run(binary, "build", "--offline", "--plain", cwd=project)
-        prompts = list((project / "target" / "xmlsquish").rglob("*.prompt"))
-        if not prompts:
-            raise RuntimeError("bare build did not publish its default .prompt artifact")
+        target = project / "target" / "xmlsquish"
+        prompt = target / "prompt.prompt"
+        if not prompt.is_file():
+            raise RuntimeError("bare build did not publish target/xmlsquish/prompt.prompt")
         run(binary, "build", "--emit=ir", "--offline", "--plain", cwd=project)
-        if not list((project / "target" / "xmlsquish").rglob("*.xsir")):
-            raise RuntimeError("explicit IR build did not publish an .xsir artifact")
+        ir = list((target / "ir").rglob("*.xsir"))
+        if len(ir) != 1:
+            raise RuntimeError("explicit IR build did not publish exactly one stable IR artifact")
+        exposed_private = [
+            path for path in target.rglob("*")
+            if path.name == ".squish-publish"
+            or re.fullmatch(r"[0-9a-f]{32,}", path.name)
+            or path.name.endswith((".xsmap", ".build.json"))
+        ]
+        if exposed_private or (target / "artifacts" / "target" / "xmlsquish").exists():
+            raise RuntimeError("target directory exposes private publication state")
         inspected = run(binary, "inspect", "link", "prompt", "--format=json", cwd=project)
         if json.loads(inspected).get("view") != "link":
             raise RuntimeError("inspect did not return the requested link view")
+        run(binary, "clean", "--plain", cwd=project)
+        if target.exists():
+            raise RuntimeError("clean retained project build artifacts or private build state")
+        run(binary, "build", "--offline", "--plain", cwd=project)
+        if not prompt.is_file():
+            raise RuntimeError("project did not rebuild after clean")
 
 
 def main() -> None:

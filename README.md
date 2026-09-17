@@ -60,7 +60,7 @@ xmlsquish fmt --manifest-path examples/semantic/xmlsquish.toml --check
 xmlsquish build --manifest-path examples/semantic/xmlsquish.toml --emit prompt --emit ir --emit debug
 ```
 
-该示例的稳定逻辑产品定位符是 `target/xmlsquish/prompt.prompt`，可原样传给 `xmlsquish inspect artifact`；加 `--format=raw` 可将摘要验证后的真实产物字节写到 stdout。发布器以完整目标为单位原子提交并验证 generation；其 journal、hash、current pointer 与物理目录都是私有实现，不会出现在构建结果或普通终端输出中。重复 `--emit` 可物化：
+该示例的稳定逻辑产品定位符和真实文件路径都是 `target/xmlsquish/prompt.prompt`，可原样传给 `xmlsquish inspect artifact`；加 `--format=raw` 可将摘要验证后的真实产物字节写到 stdout。发布器以完整目标为单位提交并验证 generation；其 journal、hash、current pointer、`.xsmap` 与 build record 均保存在 manager 的项目私有状态，不会出现在 target 产品目录、构建结果路径或普通终端输出中。重复 `--emit` 可物化：
 
 | 后缀 / Suffix | 含义 / Meaning |
 | --- | --- |
@@ -104,6 +104,7 @@ name = "Klee"
 | `xmlsquish add SPEC` | 新增或更新有类型依赖，并协调清单与锁文件 | `--path`, `--git`, `--rev/--tag/--branch`, `--registry`, `--rename`, `--dry-run` |
 | `xmlsquish remove ALIAS` | 按别名移除直接依赖 | `-p/--package`, `--dev`, `--build`, `--dry-run` |
 | `xmlsquish inspect …` | 只读检查 IR、链接、源码来源、缓存键或产物 | `ir`, `link`, `source`, `cache`, `artifact`; `--format human|json|raw` |
+| `xmlsquish clean` | 删除当前项目/工作区产物并裁剪可证明失效的依赖缓存 | `--manifest-path` |
 
 除 `new` 外，项目命令从当前目录向上发现 `xmlsquish.toml`；`--manifest-path PATH` 显式选择清单。`new` 接受待创建的目标路径，并在适用时把项目加入外围工作区。不存在松散文件编译语法：路径必须通过清单目标或 `fmt --path` 等有类型选项表达。
 
@@ -129,6 +130,14 @@ xmlsquish build --frozen
 
 These modes apply to `build`, `add`, and `remove`. A dependency edit is planned and validated before commit; `--dry-run` writes neither manifest nor lock state. Adding or removing a dependency never rewrites `xs:import` automatically.
 
+`clean` 不改写清单或锁文件，也不会仅因当前项目未引用就删除健康的共享依赖。它保留
+全局内容寻址存储（Content-Addressed Store, CAS）与 action index；清理后仍可通过
+`build --offline` 复用有效缓存。
+
+`clean` rewrites neither manifests nor the lockfile and never removes a healthy shared dependency
+merely because this project does not reference it. The global content-addressed store (CAS) and
+action index remain available, so valid cached work can be reused by `build --offline`.
+
 ## 配置与输出 / Configuration and output
 
 配置按以下优先级分层合并（后者覆盖前者）：
@@ -149,11 +158,17 @@ defaults
 
 相对路径按声明它的配置文件目录解析；CLI 覆盖中的相对路径按当前工作目录解析。支持的配置表是 `source`、`manager`、`build`、`term` 与 `registries.<alias>`。
 
-操作消息支持 `--message-format human|short|json`。`json` 是换行分隔 JSON（Newline-Delimited JSON, NDJSON），每行一个协议 3.0 事件，写入 stdout；human/short 状态与诊断写入 stderr，stdout 留给查询数据。`inspect` 使用 `--format human|json|raw` 返回一个查询结果；`raw` 仅适用于 `inspect artifact`，且只向 stdout 写入经摘要验证的产物字节。`--plain` 禁用颜色和动态进度；`--quiet` 抑制成功状态。
+操作消息支持 `--message-format human|short|json`。`json` 是换行分隔 JSON（Newline-Delimited JSON, NDJSON），每行一个协议 3.1 事件，写入 stdout；human/short 状态与诊断写入 stderr，stdout 留给查询数据。`inspect` 使用 `--format human|json|raw` 返回一个查询结果；`raw` 仅适用于 `inspect artifact`，且只向 stdout 写入经摘要验证的产物字节。`--plain` 禁用颜色和动态进度；`--quiet` 抑制成功状态。
 
 > **自动化迁移 / Automation migration:** xmlsquish 1.0.1 发送协议 `3.0`，而不是 1.0.0 的 `2.1`。这是一次机器协议主版本迁移，尽管产品版本只增加了补丁号。构建结果现在提供有类型的发布身份和稳定逻辑 `locator`，不再暴露发布器的物理 generation URI。解析 `--message-format=json` 的消费者必须在升级 CLI 时同步迁移到 v3 结构；不要将 v2 构建结果视为可加性更改。
 
 > **Automation migration:** xmlsquish 1.0.1 emits protocol `3.0`, not the `2.1` emitted by 1.0.0. This is a machine-protocol major migration even though the product version advances only by a patch. Build results now carry typed publication identity and stable logical `locator` values instead of publisher-private physical generation URIs. Consumers parsing `--message-format=json` must migrate to the v3 shape when upgrading the CLI; do not treat the v2 build-result shape as an additive change.
+
+xmlsquish 1.0.2 将协议可加性提升到 `3.1`，为 `clean` 增加有类型的请求、动作和统计结果；
+现有 3.0 构建、格式化、依赖与查询结果结构保持不变。
+
+xmlsquish 1.0.2 advances the additive protocol minor to `3.1` for typed `clean` requests, actions,
+and statistics; existing 3.0 build, format, dependency, and inspection result shapes are unchanged.
 
 ## 退出与自动化 / Process exits and automation
 

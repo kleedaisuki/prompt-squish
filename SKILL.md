@@ -16,7 +16,7 @@ xmlsquish fmt --check                 # use `fmt` without --check to rewrite
 xmlsquish build --offline             # local verified cache only
 xmlsquish build -t chat --arg chat.name=Klee
 xmlsquish inspect artifact target/xmlsquish/chat.prompt
-xmlsquish clean                       # remove build products and provably stale dependency data
+xmlsquish clean                       # remove build products and provably invalid dependency data
 ```
 
 Project commands discover `xmlsquish.toml` upward; use `--manifest-path PATH` to select one. `clean` removes the current project/workspace products, private build directory, and dependency-cache entries proven stale or abandoned; it does not delete valid shared dependencies merely because this project does not reference them. Use `--locked` to forbid lockfile changes, `--offline` to forbid network access, or `--frozen` for both. In automation prefer exit codes and `--message-format=json` (NDJSON), not human text. Run `xmlsquish <command> --help` before using less common/version-specific flags.

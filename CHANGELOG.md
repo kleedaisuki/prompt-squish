@@ -8,6 +8,24 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 
 尚无已记录的面向用户变化。 / No user-facing changes recorded yet.
 
+## [1.0.2] — 2026-09-17
+
+完整发布说明与安装方法 / Full release notes and installation: [1.0.2](docs/releases/1.0.2.md).
+
+### 简洁的项目状态 / Legible project state
+
+- 保留兼容的 `target/xmlsquish` 公共定位符根目录，但不再向用户暴露发布 generation 哈希、重复的嵌套产物路径或私有发布状态；最终产物与可复用 IR 使用稳定、可预测的声明式路径。
+  Preserve the compatible public `target/xmlsquish` locator root while no longer exposing publication-generation hashes, duplicated nested artifact paths, or private publication state; final artifacts and reusable IR use stable, predictable declarative paths.
+- 新增无参数 `xmlsquish clean`：删除当前项目或工作区的编译产物与项目私有构建状态，并回收缓存中可证明失效或遗留的依赖条目；仍有效的共享依赖不会仅因当前项目未引用它们而被删除。
+  Add argument-free `xmlsquish clean`: it removes the current project or workspace's build artifacts and private build state, and reclaims provably invalid or abandoned dependency cache entries; valid shared dependencies are not deleted merely because the current project does not reference them.
+- 仓库根目录新增精简的 `SKILL.md`，让 Agent 能快速查阅 XML DSL、项目清单和包管理命令。
+  Add a concise root `SKILL.md` so agents can quickly reference the XML DSL, project manifest, and package-management commands.
+
+### 发布工程 / Release engineering
+
+- 持续集成在 Linux、Windows 和 macOS 上使用锁定依赖执行 workspace 构建、测试与根 CLI 冒烟测试；版本标签在完整原生目标矩阵通过后才发布校验和及二进制归档。
+  Continuous integration builds and tests the locked workspace and smoke-tests the root CLI on Linux, Windows, and macOS; version tags publish checksums and binary archives only after the complete native target matrix succeeds.
+
 ## [1.0.1] — 2026-09-16
 
 完整发布说明与安装方法 / Full release notes and installation: [1.0.1](docs/releases/1.0.1.md).
@@ -79,7 +97,8 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 - 引入命名空间感知模块、不可变命名宏、显式字符串参数与 XML slot。
   Introduced namespace-aware modules, immutable named macros, explicit scalar parameters, and XML slots.
 
-[Unreleased]: https://github.com/kleedaisuki/prompt-squish/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/kleedaisuki/prompt-squish/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.2
 [1.0.1]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.1
 [1.0.0]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.0
 [0.3.0]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v0.3.0

@@ -1,7 +1,7 @@
 """Package native binaries and publish a complete matrix. / 原生二进制打包及完整矩阵发布。
 
 Run from the checkout parent: / 从检出目录的父目录运行：
-    RELEASE_TAG=v1.0.1 RELEASE_TARGET=x86_64-unknown-linux-gnu \
+    RELEASE_TAG=v1.0.2 RELEASE_TARGET=x86_64-unknown-linux-gnu \
       python automation/.github/scripts/release.py package source dist
 """
 
@@ -26,7 +26,7 @@ TARGETS = (
     "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc",
     "x86_64-apple-darwin", "aarch64-apple-darwin",
 )
-COMMANDS = ("new", "build", "fmt", "add", "remove", "inspect")
+COMMANDS = ("new", "build", "clean", "fmt", "add", "remove", "inspect")
 
 
 def run(*args, cwd=None):
@@ -126,14 +126,31 @@ def package(source, dist, tag):
         )
         run(str(binary), "fmt", "--plain", cwd=project)
         run(str(binary), "build", "--offline", "--plain", cwd=project)
-        if not list((project / "target" / "xmlsquish").rglob("*.prompt")):
-            raise ValueError("native bare build smoke test did not publish its default .prompt artifact")
+        target_root = project / "target" / "xmlsquish"
+        prompt = target_root / "prompt.prompt"
+        if not prompt.is_file():
+            raise ValueError("native bare build smoke test did not publish target/xmlsquish/prompt.prompt")
         run(str(binary), "build", "--emit=ir", "--offline", "--plain", cwd=project)
-        if not list((project / "target" / "xmlsquish").rglob("*.xsir")):
-            raise ValueError("native explicit IR build smoke test did not publish an .xsir artifact")
+        ir = list((target_root / "ir").rglob("*.xsir"))
+        if len(ir) != 1:
+            raise ValueError("native explicit IR build smoke test did not publish exactly one stable IR artifact")
+        exposed_private = [
+            path for path in target_root.rglob("*")
+            if path.name == ".squish-publish"
+            or re.fullmatch(r"[0-9a-f]{32,}", path.name)
+            or path.name.endswith((".xsmap", ".build.json"))
+        ]
+        if exposed_private or (target_root / "artifacts" / "target" / "xmlsquish").exists():
+            raise ValueError("native build exposes private publication state below target/xmlsquish")
         inspected = json.loads(run(str(binary), "inspect", "link", "prompt", "--format=json", cwd=project))
         if inspected.get("view") != "link":
             raise ValueError("native inspect smoke test returned the wrong view")
+        run(str(binary), "clean", "--plain", cwd=project)
+        if target_root.exists():
+            raise ValueError("native clean smoke test retained project build artifacts or private build state")
+        run(str(binary), "build", "--offline", "--plain", cwd=project)
+        if not prompt.is_file():
+            raise ValueError("native project did not rebuild after clean")
         root = staging / f"xmlsquish-{version}-{target}"
         root.mkdir()
         shutil.copy2(binary, root / executable)
