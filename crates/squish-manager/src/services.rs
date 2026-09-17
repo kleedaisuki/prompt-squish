@@ -7,7 +7,7 @@ use std::{
 use squish_kernel::CancellationToken;
 use squish_project::{Lockfile, Manifest, ResolutionMode};
 use squish_protocol::{
-    Artifact, ArtifactId, CachedAction, Digest, PlanInspection, TargetName, VcsChoice,
+    Artifact, ArtifactId, CachedAction, CleanResult, Digest, PlanInspection, TargetName, VcsChoice,
 };
 use squish_repository::{
     CreateProjectRequest, CreatedProject, FaultInjector, PackageLocation, ProjectVcs,
@@ -41,6 +41,22 @@ pub enum ProjectCreationStatus {
     /// 已越过提交决定，但完成或恢复报告失败。 / The commit decision was crossed, but completion or recovery reported a failure.
     CommittedFailure(ServiceError),
     /// 在提交决定前响应取消，未发布项目。 / Cancellation was honored before the commit decision; no project was published.
+    Cancelled,
+}
+
+/// 项目清理端口的封闭完成状态。 / Closed completion status of the project-clean port.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProjectCleanStatus {
+    /// 清理已完成，并返回实际删除统计。 / Cleaning completed with statistics for actual removals.
+    Cleaned(CleanResult),
+    /// 删除已经开始，但后续工作失败；统计仅描述已完成删除。 / Removal started but later work failed; statistics describe only completed removals.
+    CommittedFailure {
+        /// 失败前已经完成的删除统计。 / Removal statistics completed before the failure.
+        result: CleanResult,
+        /// 清理失败。 / Cleaning failure.
+        error: ServiceError,
+    },
+    /// 在删除任何状态前响应取消。 / Cancellation was honored before any state was removed.
     Cancelled,
 }
 
@@ -85,6 +101,7 @@ pub struct StorageLayout {
     cas_root: PathBuf,
     action_index: PathBuf,
     publication_root: PathBuf,
+    publication_prefix: PathBuf,
     catalog_root: PathBuf,
 }
 
@@ -125,8 +142,23 @@ impl StorageLayout {
             cas_root,
             action_index,
             publication_root,
+            publication_prefix: PathBuf::from("target/xmlsquish"),
             catalog_root,
         })
+    }
+
+    /// 设置项目相对的公开产物定位符前缀。 / Sets the project-relative public artifact-locator prefix.
+    ///
+    /// 前缀表达清单中的 `workspace.target-dir`，与绝对的 [`Self::publication_root`]
+    /// 分离，从类型上避免把 `target/xmlsquish` 拼接两次。 / The prefix represents the
+    /// manifest's `workspace.target-dir` separately from the absolute
+    /// [`Self::publication_root`], preventing a duplicated `target/xmlsquish` join by construction.
+    pub fn with_publication_prefix(
+        mut self,
+        prefix: impl Into<PathBuf>,
+    ) -> Result<Self, StorageLayoutError> {
+        self.publication_prefix = normalize_layout_prefix(prefix.into())?;
+        Ok(self)
     }
 
     /// 仅供测试适配器使用的项目内布局。 / Project-local layout intended only for test adapters.
@@ -154,10 +186,31 @@ impl StorageLayout {
     pub fn publication_root(&self) -> &Path {
         &self.publication_root
     }
+    /// 返回项目相对的公开产物定位符前缀。 / Returns the project-relative public artifact-locator prefix.
+    pub fn publication_prefix(&self) -> &Path {
+        &self.publication_prefix
+    }
     /// 返回查询目录根路径。 / Returns the inspection-catalog root.
     pub fn catalog_root(&self) -> &Path {
         &self.catalog_root
     }
+}
+
+fn normalize_layout_prefix(path: PathBuf) -> Result<PathBuf, StorageLayoutError> {
+    if path.as_os_str().is_empty() {
+        return Err(StorageLayoutError::Empty("publication_prefix"));
+    }
+    if path.is_absolute() {
+        return Err(StorageLayoutError::NonNormalized("publication_prefix"));
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => normalized.push(value),
+            _ => return Err(StorageLayoutError::NonNormalized("publication_prefix")),
+        }
+    }
+    Ok(normalized)
 }
 
 fn validate_layout(values: &[(&'static str, PathBuf); 4]) -> Result<(), StorageLayoutError> {
@@ -290,6 +343,23 @@ pub trait Services: Send + Sync {
         _faults: Arc<dyn FaultInjector>,
     ) -> Result<ProjectCreationStatus, ServiceError> {
         unavailable("project creation publisher")
+    }
+
+    /// 删除项目私有构建状态，并只裁剪可证明失效或废弃的依赖缓存。 / Removes project-private build state and prunes only provably invalid or abandoned dependency-cache entries.
+    ///
+    /// 健康的共享依赖、全局内容寻址存储（CAS）和全局动作索引不属于此端口的删除范围。
+    /// [`ProjectCleanStatus::Cancelled`] 仅允许在尚未删除任何状态时返回；一旦开始删除，
+    /// 适配器必须完成可恢复清理并返回 [`ProjectCleanStatus::Cleaned`]。 / Healthy shared
+    /// dependencies, the global content-addressed store (CAS), and the global action index are
+    /// outside this port's deletion scope. [`ProjectCleanStatus::Cancelled`] is valid only before
+    /// any state is removed; after removal begins the adapter must finish recoverably and return
+    /// [`ProjectCleanStatus::Cleaned`] or [`ProjectCleanStatus::CommittedFailure`].
+    fn clean_project(
+        &self,
+        _project_root: &Path,
+        _cancellation: CancellationToken,
+    ) -> Result<ProjectCleanStatus, ServiceError> {
+        unavailable("project cleaner")
     }
 
     /// 返回生产适配器使用的显式持久存储布局。 / Returns the explicit persistent-storage layout used by production adapters.

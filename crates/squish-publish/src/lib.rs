@@ -36,6 +36,106 @@ const GENERATION_JOURNAL: &str = "generation-journal.json";
 const GENERATIONS: &str = "generations";
 const TARGETS: &str = "targets";
 const LOCK: &str = "lock";
+const LEGACY_MIGRATION: &str = "legacy-migrated";
+
+/// 推导项目发布与 clean 共用、且位于 catalog 外部的稳定锁路径。 /
+/// Derives the stable project lock shared by publishers and clean, outside the catalog.
+///
+/// 锁位于 catalog 的同级 `.locks` 目录；文件名由完整 catalog 路径派生，因此同一
+/// 父目录下的多个项目不会互相串行化。调用者只需向 publish 与 clean 传入相同的
+/// catalog root，无需公开 publisher 的私有状态布局。
+/// The lock lives in a sibling `.locks` directory. Its name derives from the complete catalog
+/// path, so projects sharing a parent do not serialize each other.
+#[must_use]
+pub fn project_lock_path(catalog_root: impl AsRef<Path>) -> PathBuf {
+    let catalog_root = catalog_root.as_ref();
+    let parent = catalog_root.parent().unwrap_or_else(|| Path::new("."));
+    let mut identity = catalog_root.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) {
+        identity.make_ascii_lowercase();
+    }
+    parent.join(".locks").join(format!(
+        "{}.lock",
+        hex_bytes(&Sha256::digest(identity.as_bytes()))
+    ))
+}
+
+/// 返回项目 clean epoch 文件的稳定路径。 / Returns the stable project-clean epoch path.
+#[must_use]
+pub fn project_epoch_path(catalog_root: impl AsRef<Path>) -> PathBuf {
+    project_lock_path(catalog_root).with_extension("epoch")
+}
+
+/// clean epoch 的不透明快照。 / Opaque snapshot of a clean epoch.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectEpoch(u64);
+
+impl ProjectEpoch {
+    /// 返回下一 epoch；计数器耗尽时返回 `None`。 / Returns the next epoch, or `None` on counter exhaustion.
+    #[must_use]
+    pub fn checked_next(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
+    }
+}
+
+/// 读取当前项目 clean epoch；尚无 epoch 文件也是一个稳定状态。 /
+/// Reads the current project-clean epoch; an absent epoch file is also a stable state.
+pub fn read_project_epoch(catalog_root: impl AsRef<Path>) -> io::Result<ProjectEpoch> {
+    read_project_epoch_path(&project_epoch_path(catalog_root))
+}
+
+/// 原子持久写入 canonical epoch；调用者必须已经持有项目锁。 /
+/// Atomically persists a canonical epoch; the caller must already hold the project lock.
+pub fn write_project_epoch(path: impl AsRef<Path>, epoch: &ProjectEpoch) -> io::Result<()> {
+    let path = path.as_ref();
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "epoch path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let mut temporary = NamedTempFile::new_in(parent)?;
+    writeln!(temporary, "{}", epoch.0)?;
+    temporary.flush()?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    sync_epoch_parent(parent)
+}
+
+fn read_project_epoch_path(path: &Path) -> io::Result<ProjectEpoch> {
+    match fs::read(path) {
+        Ok(bytes) => {
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let digits = text.strip_suffix('\n').ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "epoch lacks canonical newline")
+            })?;
+            if digits.is_empty()
+                || (digits.len() > 1 && digits.starts_with('0'))
+                || !digits.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "epoch is not canonical unsigned decimal",
+                ));
+            }
+            digits
+                .parse::<u64>()
+                .map(ProjectEpoch)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(ProjectEpoch(0)),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn sync_epoch_parent(parent: &Path) -> io::Result<()> {
+    File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_epoch_parent(_parent: &Path) -> io::Result<()> {
+    Ok(())
+}
 
 /// 文件发布失败。 / Filesystem publication failure.
 #[derive(Debug)]
@@ -46,6 +146,10 @@ pub enum PublishError<E> {
     AliasConflict(PathBuf),
     /// 路径经过符号链接。 / A path traverses a symbolic link.
     Symlink(PathBuf),
+    /// clean 事务尚未完成；发布必须等待其恢复。 / A clean transaction is pending and must recover before publication.
+    MaintenancePending(PathBuf),
+    /// publisher 属于已被 clean 取代的旧 runtime。 / The publisher belongs to a runtime superseded by clean.
+    Superseded(PathBuf),
     /// Blob 后端失败。 / Blob backend failed.
     Store(E),
     /// Blob 不存在。 / Blob is absent.
@@ -71,6 +175,16 @@ impl<E: fmt::Display> fmt::Display for PublishError<E> {
             }
             Self::Symlink(path) => {
                 write!(f, "publication path traverses symlink {}", path.display())
+            }
+            Self::MaintenancePending(path) => {
+                write!(f, "project maintenance is pending at {}", path.display())
+            }
+            Self::Superseded(path) => {
+                write!(
+                    f,
+                    "publication runtime was superseded at {}",
+                    path.display()
+                )
             }
             Self::Store(error) => write!(f, "blob store failed: {error}"),
             Self::MissingBlob => f.write_str("publication blob is missing"),
@@ -207,11 +321,71 @@ impl PublishObserver for NoopObserver {
 pub struct FileArtifactPublisher<S> {
     root: PathBuf,
     state: PathBuf,
+    lock: PathBuf,
+    maintenance_marker: Option<PathBuf>,
+    epoch_fence: Option<(PathBuf, ProjectEpoch)>,
+    logical_prefix: PathBuf,
     store: S,
     observer: Arc<dyn PublishObserver>,
 }
 
+/// 显式项目锁发布器的文件系统布局。 / Filesystem layout for an explicit project-lock publisher.
+pub struct ExternalPublisherLayout {
+    artifact_root: PathBuf,
+    state_root: PathBuf,
+    logical_prefix: PathBuf,
+    lock_path: PathBuf,
+    maintenance_marker: Option<PathBuf>,
+    legacy_state: Option<PathBuf>,
+    epoch_fence: Option<(PathBuf, ProjectEpoch)>,
+}
+
+impl ExternalPublisherLayout {
+    /// 创建会检查 clean marker 的显式锁布局。 / Creates an explicit-lock layout guarded by the clean marker.
+    #[must_use]
+    pub fn new(
+        artifact_root: impl Into<PathBuf>,
+        state_root: impl Into<PathBuf>,
+        logical_prefix: impl Into<PathBuf>,
+        lock_path: impl Into<PathBuf>,
+    ) -> Self {
+        let lock_path = lock_path.into();
+        Self {
+            artifact_root: artifact_root.into(),
+            state_root: state_root.into(),
+            logical_prefix: logical_prefix.into(),
+            maintenance_marker: Some(lock_path.with_extension("clean.json")),
+            lock_path,
+            legacy_state: None,
+            epoch_fence: None,
+        }
+    }
+
+    /// 配置一次性 legacy state 迁移。 / Configures one-time legacy-state migration.
+    #[must_use]
+    pub fn with_legacy_state(mut self, path: impl Into<PathBuf>) -> Self {
+        self.legacy_state = Some(path.into());
+        self
+    }
+
+    /// 配置 clean epoch 栅栏。 / Configures the clean-epoch fence.
+    #[must_use]
+    pub fn with_epoch(mut self, path: impl Into<PathBuf>, expected: ProjectEpoch) -> Self {
+        self.epoch_fence = Some((path.into(), expected));
+        self
+    }
+}
+
 impl<S: BlobStore> FileArtifactPublisher<S> {
+    /// 打开完全配置的显式项目锁布局。 / Opens a fully configured explicit project-lock layout.
+    pub fn with_external_layout(
+        layout: ExternalPublisherLayout,
+        store: S,
+        observer: Arc<dyn PublishObserver>,
+    ) -> Result<Self, PublishError<S::Error>> {
+        Self::open_layout(layout, store, observer)
+    }
+
     /// 打开发布根目录并自动恢复未完成的 journal。 / Opens a publication root and automatically recovers an unfinished journal.
     pub fn open(root: impl AsRef<Path>, store: S) -> Result<Self, PublishError<S::Error>> {
         Self::with_observer(root, store, Arc::new(NoopObserver))
@@ -223,28 +397,248 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
         store: S,
         observer: Arc<dyn PublishObserver>,
     ) -> Result<Self, PublishError<S::Error>> {
-        create_directory_tree(root.as_ref(), observer.as_ref())?;
-        let root = fs::canonicalize(root.as_ref())?;
+        let root = root.as_ref().to_path_buf();
         let state = root.join(STATE_DIR);
+        // 兼容 API 把锁放在尚不存在的 state 内，因此必须先引导该目录；production
+        // 的显式 external-lock API 不走这个锁外初始化分支。
+        // The compatible API stores its lock inside an initially absent state directory and
+        // therefore must bootstrap it; the production external-lock API skips this branch.
+        create_directory_tree(&root, observer.as_ref())?;
         create_directory_tree(&state, observer.as_ref())?;
-        reject_symlink(&state)?;
-        let publisher = Self {
-            root,
-            state,
+        let lock = state.join(LOCK);
+        Self::open_layout(
+            ExternalPublisherLayout {
+                artifact_root: root,
+                state_root: state,
+                logical_prefix: PathBuf::new(),
+                lock_path: lock,
+                maintenance_marker: None,
+                legacy_state: None,
+                epoch_fence: None,
+            },
             store,
             observer,
-        };
-        publisher.with_lock(|this| {
-            this.recover_locked()?;
-            this.recover_generation_locked()
+        )
+    }
+
+    /// 使用彼此分离的用户产物根和私有状态根打开发布器。 /
+    /// Opens a publisher with separate user-artifact and private-state roots.
+    ///
+    /// `logical_prefix` 是公开 locator 中不应在 `artifact_root` 下重复的前缀。例如，
+    /// artifact root 为 `target/xmlsquish` 时，前缀也可设为 `target/xmlsquish`，使 locator
+    /// `target/xmlsquish/app.prompt` 物化为 `artifact_root/app.prompt`。
+    /// `logical_prefix` is the public-locator prefix that must not be repeated below
+    /// `artifact_root`.
+    pub fn open_with_layout(
+        artifact_root: impl AsRef<Path>,
+        state_root: impl AsRef<Path>,
+        logical_prefix: impl AsRef<Path>,
+        store: S,
+    ) -> Result<Self, PublishError<S::Error>> {
+        Self::with_layout_and_observer(
+            artifact_root,
+            state_root,
+            logical_prefix,
+            store,
+            Arc::new(NoopObserver),
+        )
+    }
+
+    /// 使用分离布局和观察者打开发布器并自动恢复。 /
+    /// Opens a separated-layout publisher with an observer and recovers automatically.
+    pub fn with_layout_and_observer(
+        artifact_root: impl AsRef<Path>,
+        state_root: impl AsRef<Path>,
+        logical_prefix: impl AsRef<Path>,
+        store: S,
+        observer: Arc<dyn PublishObserver>,
+    ) -> Result<Self, PublishError<S::Error>> {
+        let artifact_root = artifact_root.as_ref().to_path_buf();
+        let state_root = state_root.as_ref().to_path_buf();
+        // This overload intentionally preserves the historical state-local lock contract.
+        create_directory_tree(&artifact_root, observer.as_ref())?;
+        create_directory_tree(&state_root, observer.as_ref())?;
+        let lock = state_root.join(LOCK);
+        Self::open_layout(
+            ExternalPublisherLayout {
+                artifact_root,
+                state_root,
+                logical_prefix: logical_prefix.as_ref().to_path_buf(),
+                lock_path: lock,
+                maintenance_marker: None,
+                legacy_state: None,
+                epoch_fence: None,
+            },
+            store,
+            observer,
+        )
+    }
+
+    /// 使用显式共享锁路径打开分离布局发布器。 /
+    /// Opens a separated-layout publisher with an explicit shared lock path.
+    pub fn open_with_layout_and_lock(
+        artifact_root: impl AsRef<Path>,
+        state_root: impl AsRef<Path>,
+        logical_prefix: impl AsRef<Path>,
+        lock_path: impl AsRef<Path>,
+        store: S,
+    ) -> Result<Self, PublishError<S::Error>> {
+        Self::with_layout_observer_and_lock(
+            artifact_root,
+            state_root,
+            logical_prefix,
+            lock_path,
+            store,
+            Arc::new(NoopObserver),
+        )
+    }
+
+    /// 使用显式共享锁路径和观察者打开分离布局发布器。 /
+    /// Opens a separated-layout publisher with an explicit shared lock path and observer.
+    pub fn with_layout_observer_and_lock(
+        artifact_root: impl AsRef<Path>,
+        state_root: impl AsRef<Path>,
+        logical_prefix: impl AsRef<Path>,
+        lock_path: impl AsRef<Path>,
+        store: S,
+        observer: Arc<dyn PublishObserver>,
+    ) -> Result<Self, PublishError<S::Error>> {
+        let lock_path = lock_path.as_ref().to_path_buf();
+        let marker = lock_path.with_extension("clean.json");
+        Self::open_layout(
+            ExternalPublisherLayout {
+                artifact_root: artifact_root.as_ref().to_path_buf(),
+                state_root: state_root.as_ref().to_path_buf(),
+                logical_prefix: logical_prefix.as_ref().to_path_buf(),
+                lock_path,
+                maintenance_marker: Some(marker),
+                legacy_state: None,
+                epoch_fence: None,
+            },
+            store,
+            observer,
+        )
+    }
+
+    /// 在同一显式锁临界区内初始化分离布局并迁移 legacy state。 /
+    /// Initializes a separated layout and migrates legacy state in one explicit-lock section.
+    pub fn with_layout_observer_lock_and_legacy(
+        artifact_root: impl AsRef<Path>,
+        state_root: impl AsRef<Path>,
+        logical_prefix: impl AsRef<Path>,
+        lock_path: impl AsRef<Path>,
+        legacy_state: impl AsRef<Path>,
+        store: S,
+        observer: Arc<dyn PublishObserver>,
+    ) -> Result<Self, PublishError<S::Error>> {
+        let lock_path = lock_path.as_ref().to_path_buf();
+        let marker = lock_path.with_extension("clean.json");
+        Self::open_layout(
+            ExternalPublisherLayout {
+                artifact_root: artifact_root.as_ref().to_path_buf(),
+                state_root: state_root.as_ref().to_path_buf(),
+                logical_prefix: logical_prefix.as_ref().to_path_buf(),
+                lock_path,
+                maintenance_marker: Some(marker),
+                legacy_state: Some(legacy_state.as_ref().to_path_buf()),
+                epoch_fence: None,
+            },
+            store,
+            observer,
+        )
+    }
+
+    fn open_layout(
+        layout: ExternalPublisherLayout,
+        store: S,
+        observer: Arc<dyn PublishObserver>,
+    ) -> Result<Self, PublishError<S::Error>> {
+        let logical_prefix = validate_logical_prefix(&layout.logical_prefix)?;
+        let artifact_root = layout.artifact_root;
+        let state_root = layout.state_root;
+        let maintenance_marker = layout.maintenance_marker;
+        let legacy_state = layout.legacy_state;
+        let epoch_fence = layout.epoch_fence;
+        let lock_path = layout.lock_path;
+        let lock_parent = lock_path.parent().ok_or_else(|| {
+            PublishError::InvalidDestination("shared lock path has no parent".into())
         })?;
-        Ok(publisher)
+        let lock_name = lock_path.file_name().ok_or_else(|| {
+            PublishError::InvalidDestination("shared lock path has no file name".into())
+        })?;
+        // 只引导锁本身的 sibling 目录；用户 artifact/state 根必须等拿到项目锁后创建。
+        // Bootstrap only the sibling lock directory. User artifact/state roots are created
+        // only after the project lock is held, so clean cannot race with initialization.
+        create_directory_tree(lock_parent, observer.as_ref())?;
+        let lock = fs::canonicalize(lock_parent)?.join(lock_name);
+        let lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock)?;
+        lock_file.lock_exclusive()?;
+        let result = (|| {
+            validate_fences(&maintenance_marker, &epoch_fence)?;
+            create_directory_tree(&artifact_root, observer.as_ref())?;
+            let root = fs::canonicalize(&artifact_root)?;
+            create_directory_tree(&state_root, observer.as_ref())?;
+            let state = fs::canonicalize(&state_root)?;
+            reject_symlink(&state)?;
+            let publisher = Self {
+                root,
+                state,
+                lock,
+                maintenance_marker,
+                epoch_fence,
+                logical_prefix,
+                store,
+                observer,
+            };
+            publisher.recover_locked()?;
+            publisher.recover_generation_locked()?;
+            if let Some(legacy_state) = legacy_state.as_deref() {
+                publisher.migrate_legacy_state_locked(legacy_state)?;
+            }
+            Ok(publisher)
+        })();
+        let unlock = FileExt::unlock(&lock_file);
+        result.and_then(|publisher| unlock.map(|()| publisher).map_err(PublishError::Io))
     }
 
     /// 返回规范化发布根目录。 / Returns the canonical publication root.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// 返回规范化私有状态根。 / Returns the canonical private-state root.
+    #[must_use]
+    pub fn state_root(&self) -> &Path {
+        &self.state
+    }
+
+    /// 返回用于协调发布和清理的锁文件路径。 /
+    /// Returns the lock-file path coordinating publication and cleanup.
+    #[must_use]
+    pub fn lock_path(&self) -> &Path {
+        &self.lock
+    }
+
+    /// 在共享项目锁下把旧版内嵌状态复制到当前私有状态根。 /
+    /// Copies legacy embedded state into the current private state root under the shared lock.
+    ///
+    /// 仅当新状态根为空时执行首次迁移。文件树先复制到新状态根同卷的临时目录，随后
+    /// 切换、恢复并验证所有 current generation；验证成功前绝不删除 legacy tree。
+    /// Migration starts only with an empty new state root. The tree is copied to a same-volume
+    /// staging directory, switched, recovered, and fully validated before the legacy tree is
+    /// removed.
+    pub fn migrate_legacy_state(
+        &self,
+        legacy_state: impl AsRef<Path>,
+    ) -> Result<bool, PublishError<S::Error>> {
+        let legacy_state = legacy_state.as_ref();
+        self.with_lock(|this| this.migrate_legacy_state_locked(legacy_state))
     }
 
     /// 发布并返回稳定协议产物。 / Publishes and returns the stable protocol artifact.
@@ -254,7 +648,7 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
     ) -> Result<GenerationArtifact, PublishError<S::Error>> {
         self.with_lock(|this| {
             this.recover_locked()?;
-            let relative = PathBuf::from(publication.destination.as_str());
+            let relative = this.artifact_relative(&publication.destination)?;
             let destination = this.root.join(&relative);
             this.prepare_path(&relative)?;
             this.reject_physical_alias(&destination)?;
@@ -589,6 +983,7 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
         })?;
         self.observer
             .observe(&PublishEvent::DurablePoint(DurablePoint::CommitDecision));
+        self.materialize_generation(&key, &manifest)?;
         self.commit_current(&key, &manifest_bytes)?;
         self.observer
             .observe(&PublishEvent::DurablePoint(DurablePoint::CurrentSwitched));
@@ -613,11 +1008,90 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(self.state.join(LOCK))?;
+            .open(&self.lock)?;
         lock.lock_exclusive()?;
-        let result = operation(self);
+        // clean 可以在 publisher 实例仍被缓存时删除 root/state；每次操作都在同一项目
+        // 锁内恢复这些基础目录，既不与 clean 竞态，也不要求上层丢弃运行时对象。
+        // Clean may remove root/state while this publisher remains cached. Re-establish the
+        // base directories under the same project lock so operations neither race clean nor
+        // require the caller to discard its runtime object.
+        let result = validate_fences(&self.maintenance_marker, &self.epoch_fence)
+            .and_then(|()| self.ensure_roots())
+            .and_then(|()| operation(self));
         let unlock = FileExt::unlock(&lock);
         result.and_then(|value| unlock.map(|()| value).map_err(PublishError::Io))
+    }
+
+    fn ensure_roots(&self) -> Result<(), PublishError<S::Error>> {
+        create_directory_tree(&self.root, self.observer.as_ref())?;
+        create_directory_tree(&self.state, self.observer.as_ref())?;
+        reject_symlink(&self.root)?;
+        reject_symlink(&self.state)
+    }
+
+    fn migrate_legacy_state_locked(
+        &self,
+        legacy_state: &Path,
+    ) -> Result<bool, PublishError<S::Error>> {
+        let marker = self.state.join(LEGACY_MIGRATION);
+        if marker.exists() {
+            let validation = (|| {
+                self.recover_locked()?;
+                self.recover_generation_locked()?;
+                self.validate_current_generations()
+            })();
+            if let Err(error) = validation {
+                fs::remove_dir_all(&self.state).ok();
+                create_directory_tree(&self.state, self.observer.as_ref())?;
+                return Err(error);
+            }
+            remove_legacy_tree(legacy_state)?;
+            sync_parent(legacy_state, self.observer.as_ref())?;
+            fs::remove_file(&marker)?;
+            sync_directory(&self.state, self.observer.as_ref())?;
+            return Ok(true);
+        }
+        if !legacy_state.exists() || fs::read_dir(&self.state)?.next().is_some() {
+            return Ok(false);
+        }
+        reject_symlink(legacy_state)?;
+        let parent = self.state.parent().expect("state root has a parent");
+        let staging = tempfile::Builder::new()
+            .prefix(".legacy-state-")
+            .tempdir_in(parent)?;
+        copy_directory_tree(legacy_state, staging.path())?;
+        write_new_synced(&staging.path().join(LEGACY_MIGRATION), b"copied\n")?;
+        sync_tree_directories(staging.path(), self.observer.as_ref())?;
+        let staged = staging.keep();
+        fs::remove_dir(&self.state)?;
+        fs::rename(&staged, &self.state)?;
+        sync_directory(parent, self.observer.as_ref())?;
+        self.migrate_legacy_state_locked(legacy_state)
+    }
+
+    fn validate_current_generations(&self) -> Result<(), PublishError<S::Error>> {
+        let targets = self.state.join(TARGETS);
+        let entries = match fs::read_dir(targets) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                return Err(PublishError::IntegrityMismatch);
+            }
+            let key = entry.file_name().to_string_lossy().into_owned();
+            if !is_key(&key) {
+                return Err(PublishError::IntegrityMismatch);
+            }
+            let bytes = fs::read(entry.path().join("current.json"))?;
+            let manifest: GenerationManifest =
+                serde_json::from_slice(&bytes).map_err(PublishError::Journal)?;
+            self.validate_manifest(&key, None, &manifest)?;
+            self.materialize_generation(&key, &manifest)?;
+        }
+        Ok(())
     }
 
     fn recover_locked(&self) -> Result<(), PublishError<S::Error>> {
@@ -628,8 +1102,9 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
             Err(error) => return Err(error.into()),
         };
         let journal: Journal = serde_json::from_slice(&bytes).map_err(PublishError::Journal)?;
-        let relative =
-            parse_destination(&journal.destination).map_err(PublishError::InvalidDestination)?;
+        let locator = PublicationPath::new(journal.destination.clone())
+            .map_err(|_| PublishError::InvalidDestination(journal.destination.clone()))?;
+        let relative = self.artifact_relative(&locator)?;
         if !is_file_name(&journal.temporary) {
             return Err(PublishError::InvalidDestination(journal.temporary));
         }
@@ -699,6 +1174,7 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
             return Err(PublishError::IntegrityMismatch);
         }
         self.validate_manifest(&journal.target_key, Some(&target), &parsed)?;
+        self.materialize_generation(&journal.target_key, &parsed)?;
         self.commit_current(&journal.target_key, &bytes)?;
         self.finish_generation_journal()
     }
@@ -736,6 +1212,119 @@ impl<S: BlobStore> FileArtifactPublisher<S> {
         temporary.as_file().sync_all()?;
         persist_replace(temporary, &target.join("current.json"))?;
         sync_directory(&target, self.observer.as_ref())
+    }
+
+    /// 将私有 generation 的声明成员投影到稳定用户路径，并移除上一 generation
+    /// 独有的目标。journal 在调用此函数前已经持久化，因此任一逐文件替换中断后都可
+    /// 在下次打开时幂等续作。
+    /// Projects a private generation onto stable user paths and removes destinations owned
+    /// only by the previous generation. The durable journal makes every per-file step
+    /// idempotently recoverable.
+    fn materialize_generation(
+        &self,
+        key: &str,
+        manifest: &GenerationManifest,
+    ) -> Result<(), PublishError<S::Error>> {
+        let generation = GenerationId::from_hex(&manifest.generation_id)
+            .map_err(|_| PublishError::IntegrityMismatch)?;
+        let previous = match fs::read(self.current_manifest_path(key)) {
+            Ok(bytes) => Some(
+                serde_json::from_slice::<GenerationManifest>(&bytes)
+                    .map_err(PublishError::Journal)?,
+            ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+
+        for artifact in manifest
+            .artifacts
+            .iter()
+            .filter(|artifact| is_user_artifact(&artifact.kind))
+        {
+            let locator = PublicationPath::new(artifact.destination.clone())
+                .map_err(|_| PublishError::IntegrityMismatch)?;
+            let relative = self.artifact_relative(&locator)?;
+            let destination = self.root.join(&relative);
+            self.prepare_path(&relative)?;
+            self.reject_physical_alias(&destination)?;
+            if valid_file(&destination, artifact.size, &artifact.digest)? {
+                continue;
+            }
+            let source = self
+                .state
+                .join(GENERATIONS)
+                .join(key)
+                .join(generation.to_hex())
+                .join("artifacts")
+                .join(locator.as_str());
+            let parent = destination
+                .parent()
+                .expect("validated destination has a parent");
+            let mut staged = NamedTempFile::new_in(parent)?;
+            let mut source = File::open(source)?;
+            io::copy(&mut source, staged.as_file_mut())?;
+            staged.as_file_mut().flush()?;
+            staged.as_file().sync_all()?;
+            if !valid_file(staged.path(), artifact.size, &artifact.digest)? {
+                return Err(PublishError::IntegrityMismatch);
+            }
+            persist_replace(staged, &destination)?;
+            sync_parent(&destination, self.observer.as_ref())?;
+        }
+
+        if let Some(previous) = previous {
+            let retained = manifest
+                .artifacts
+                .iter()
+                .filter(|artifact| is_user_artifact(&artifact.kind))
+                .map(|artifact| artifact.destination.as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            for artifact in previous
+                .artifacts
+                .into_iter()
+                .filter(|artifact| is_user_artifact(&artifact.kind))
+            {
+                if retained.contains(artifact.destination.as_str()) {
+                    continue;
+                }
+                let locator = PublicationPath::new(artifact.destination)
+                    .map_err(|_| PublishError::IntegrityMismatch)?;
+                let path = self.root.join(self.artifact_relative(&locator)?);
+                match fs::remove_file(&path) {
+                    Ok(()) => {
+                        sync_parent(&path, self.observer.as_ref())?;
+                        remove_empty_parents(path.parent(), &self.root)?;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn artifact_relative(
+        &self,
+        destination: &PublicationPath,
+    ) -> Result<PathBuf, PublishError<S::Error>> {
+        let path = Path::new(destination.as_str());
+        let relative = if self.logical_prefix.as_os_str().is_empty() {
+            path
+        } else {
+            path.strip_prefix(&self.logical_prefix).map_err(|_| {
+                PublishError::InvalidDestination(format!(
+                    "{} is outside logical prefix {}",
+                    destination.as_str(),
+                    self.logical_prefix.display()
+                ))
+            })?
+        };
+        if relative.as_os_str().is_empty() {
+            return Err(PublishError::InvalidDestination(
+                destination.as_str().to_owned(),
+            ));
+        }
+        Ok(relative.to_owned())
     }
 
     fn prepare_path(&self, relative: &Path) -> Result<(), PublishError<S::Error>> {
@@ -909,6 +1498,15 @@ fn manifest_artifact(artifact: &GenerationArtifact) -> ManifestArtifact {
         size: artifact.descriptor.size,
         digest: artifact.descriptor.digest.clone(),
     }
+}
+
+fn is_user_artifact(kind: &squish_protocol::ArtifactKind) -> bool {
+    matches!(
+        kind,
+        squish_protocol::ArtifactKind::Prompt
+            | squish_protocol::ArtifactKind::BinaryIr
+            | squish_protocol::ArtifactKind::DebugInfo
+    )
 }
 
 fn target_key(target_id: &PublicationTargetId) -> String {
@@ -1108,6 +1706,107 @@ fn parse_destination(value: &str) -> Result<PathBuf, String> {
     }
 }
 
+fn validate_logical_prefix<E>(value: &Path) -> Result<PathBuf, PublishError<E>> {
+    if value.as_os_str().is_empty() {
+        return Ok(PathBuf::new());
+    }
+    let portable = value.to_string_lossy().replace('\\', "/");
+    parse_destination(&portable).map_err(PublishError::InvalidDestination)
+}
+
+fn remove_empty_parents<E>(
+    mut directory: Option<&Path>,
+    root: &Path,
+) -> Result<(), PublishError<E>> {
+    while let Some(path) = directory {
+        if path == root {
+            break;
+        }
+        match fs::remove_dir(path) {
+            Ok(()) => directory = path.parent(),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::DirectoryNotEmpty | io::ErrorKind::NotFound
+                ) =>
+            {
+                break;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn copy_directory_tree<E>(source: &Path, destination: &Path) -> Result<(), PublishError<E>> {
+    let mut pending = vec![(source.to_path_buf(), destination.to_path_buf())];
+    while let Some((source, destination)) = pending.pop() {
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let target = destination.join(entry.file_name());
+            if file_type.is_symlink() {
+                return Err(PublishError::Symlink(entry.path()));
+            }
+            if file_type.is_dir() {
+                fs::create_dir(&target)?;
+                pending.push((entry.path(), target));
+                continue;
+            }
+            if !file_type.is_file() {
+                return Err(PublishError::IntegrityMismatch);
+            }
+            let mut input = File::open(entry.path())?;
+            let mut output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(target)?;
+            io::copy(&mut input, &mut output)?;
+            output.flush()?;
+            output.sync_all()?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_legacy_tree<E>(path: &Path) -> Result<(), PublishError<E>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(PublishError::Symlink(path.to_path_buf()))
+        }
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path).map_err(PublishError::Io),
+        Ok(_) => Err(PublishError::IntegrityMismatch),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn reject_pending_maintenance<E>(marker: &Option<PathBuf>) -> Result<(), PublishError<E>> {
+    let Some(marker) = marker else {
+        return Ok(());
+    };
+    match fs::symlink_metadata(marker) {
+        Ok(_) => Err(PublishError::MaintenancePending(marker.clone())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn validate_fences<E>(
+    marker: &Option<PathBuf>,
+    epoch_fence: &Option<(PathBuf, ProjectEpoch)>,
+) -> Result<(), PublishError<E>> {
+    reject_pending_maintenance(marker)?;
+    let Some((path, expected)) = epoch_fence else {
+        return Ok(());
+    };
+    let observed = read_project_epoch_path(path)?;
+    if &observed != expected {
+        return Err(PublishError::Superseded(path.clone()));
+    }
+    Ok(())
+}
+
 fn portable_component_key(value: &OsStr) -> String {
     value
         .to_string_lossy()
@@ -1256,8 +1955,10 @@ fn create_directory_tree<E>(
     path: &Path,
     observer: &dyn PublishObserver,
 ) -> Result<(), PublishError<E>> {
-    if path.exists() {
-        return Ok(());
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => return validate_directory_component(path, &metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     if let Some(parent) = path
         .parent()
@@ -1276,9 +1977,41 @@ fn create_directory_tree<E>(
             }
             Ok(())
         }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(path)?;
+            validate_directory_component(path, &metadata)
+        }
         Err(error) => Err(error.into()),
     }
+}
+
+fn validate_directory_component<E>(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<(), PublishError<E>> {
+    if metadata.file_type().is_symlink() || is_reparse_point(metadata) {
+        return Err(PublishError::Symlink(path.to_path_buf()));
+    }
+    if !metadata.is_dir() {
+        return Err(PublishError::Io(io::Error::new(
+            io::ErrorKind::NotADirectory,
+            path.display().to_string(),
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 fn sync_parent<E>(path: &Path, observer: &dyn PublishObserver) -> Result<(), PublishError<E>> {

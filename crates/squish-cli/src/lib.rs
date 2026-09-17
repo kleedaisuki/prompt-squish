@@ -39,12 +39,12 @@ use clap::{
     error::ErrorKind,
 };
 use squish_protocol::{
-    AddRequest, ArgumentName, ArtifactId, BuildRequest, DependencyKind, DependencyName,
-    DependencySource, EmitKind, FeatureName, FormatRequest, FormatSelection, GitBranch,
-    GitReference, GitRevision, GitTag, InspectRequest, InspectView, LockMode, NewPackageName,
-    NewRequest, OpaqueSourceId, OperationRequest, PackageName, ProfileName, ProjectDestination,
-    ProjectPath, RegistryName, RemoveRequest, RepositoryUrl, StyleEdition, TargetName, VcsChoice,
-    VersionRequirement, WorkspaceScope,
+    AddRequest, ArgumentName, ArtifactId, BuildRequest, CleanRequest, DependencyKind,
+    DependencyName, DependencySource, EmitKind, FeatureName, FormatRequest, FormatSelection,
+    GitBranch, GitReference, GitRevision, GitTag, InspectRequest, InspectView, LockMode,
+    NewPackageName, NewRequest, OpaqueSourceId, OperationRequest, PackageName, ProfileName,
+    ProjectDestination, ProjectPath, RegistryName, RemoveRequest, RepositoryUrl, StyleEdition,
+    TargetName, VcsChoice, VersionRequirement, WorkspaceScope,
 };
 
 /// 操作消息的外形。 / Shape of operational messages.
@@ -410,6 +410,11 @@ enum Command {
         after_help = "Examples:\n  xmlsquish inspect ir ir:sha256:abcd\n  xmlsquish inspect artifact target/prompts/chat.prompt --format=json"
     )]
     Inspect(InspectArgs),
+    /// Remove project build outputs and provably invalid dependency-cache entries.
+    #[command(
+        after_help = "Examples:\n  xmlsquish clean\n  xmlsquish clean --manifest-path prompts/xmlsquish.toml --message-format=json"
+    )]
+    Clean(CleanArgs),
 }
 
 #[derive(Debug, Args)]
@@ -606,6 +611,13 @@ struct InspectArgs {
     subject: InspectCommand,
 }
 
+#[derive(Debug, Args)]
+struct CleanArgs {
+    /// Use an explicit project manifest (no file is opened during parsing).
+    #[arg(long, value_name = "PATH")]
+    manifest_path: Option<String>,
+}
+
 #[derive(Debug, Subcommand)]
 enum InspectCommand {
     /// Inspect reusable intermediate representation.
@@ -652,6 +664,7 @@ impl Cli {
             Command::Add(args) => add_invocation(args, presentation),
             Command::Remove(args) => remove_invocation(args, presentation),
             Command::Inspect(args) => inspect_invocation(args, presentation),
+            Command::Clean(args) => clean_invocation(args, presentation),
         }?;
         invocation.config_overrides = self.config_overrides;
         Ok(invocation)
@@ -870,6 +883,18 @@ fn inspect_invocation(
         },
         config_overrides: Vec::new(),
     })
+}
+
+fn clean_invocation(
+    args: CleanArgs,
+    presentation: PresentationSettings,
+) -> Result<ParsedInvocation, clap::Error> {
+    Ok(simple_invocation(
+        OperationRequest::Clean(CleanRequest {
+            project: project(args.manifest_path)?,
+        }),
+        presentation,
+    ))
 }
 
 fn simple_invocation(
@@ -1241,6 +1266,26 @@ mod tests {
             panic!("expected build")
         };
         assert_eq!(request.emit, vec![EmitKind::Prompt]);
+    }
+
+    #[test]
+    fn clean_has_no_domain_options_beyond_project_selection() {
+        let parsed = invocation([
+            "xmlsquish",
+            "clean",
+            "--manifest-path",
+            "missing/xmlsquish.toml",
+            "--message-format=short",
+        ]);
+        let OperationRequest::Clean(request) = parsed.request else {
+            panic!("expected clean")
+        };
+        assert_eq!(request.project.as_str(), "missing/xmlsquish.toml");
+        assert_eq!(
+            parsed.presentation.message_format,
+            Some(MessageFormat::Short)
+        );
+        assert!(parsed.execution.excluded_packages.is_empty());
     }
 
     #[test]

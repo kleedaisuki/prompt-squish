@@ -90,14 +90,30 @@ fn new_rejects_malformed_explicit_name_and_non_contract_options_as_usage() {
 }
 
 #[test]
-fn help_exposes_exact_six_manager_commands() {
+fn help_exposes_all_manager_commands() {
     let help = parse_from(["xmlsquish"])
         .unwrap()
         .into_invocation()
         .unwrap_err();
-    for command in ["new", "build", "fmt", "add", "remove", "inspect"] {
+    for command in ["new", "build", "fmt", "add", "remove", "inspect", "clean"] {
         assert!(help.as_str().contains(command), "missing {command}");
     }
+}
+
+#[test]
+fn clean_maps_manifest_path_without_reading_it() {
+    let parsed = invocation([
+        "xmlsquish",
+        "clean",
+        "--manifest-path",
+        "does/not/exist/xmlsquish.toml",
+        "--plain",
+    ]);
+    let OperationRequest::Clean(request) = parsed.request else {
+        panic!("clean must produce CleanRequest")
+    };
+    assert_eq!(request.project.as_str(), "does/not/exist/xmlsquish.toml");
+    assert!(parsed.presentation.plain);
 }
 
 #[cfg(unix)]

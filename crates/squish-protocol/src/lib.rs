@@ -11,7 +11,7 @@ use std::{
 };
 
 /// 当前协议版本。 / Current protocol version.
-pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion::new(3, 0);
+pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion::new(3, 1);
 
 /// 在过渡期内仍可解码的旧事件协议主版本。 / Legacy event-protocol major decoded during the compatibility window.
 pub const LEGACY_EVENT_MAJOR: u16 = 1;
@@ -429,6 +429,8 @@ pub enum OperationKind {
     Remove,
     /// 查询。 / Inspect.
     Inspect,
+    /// 清理项目构建产物和已确认失效的依赖缓存。 / Clean project build outputs and provably invalid dependency-cache entries.
+    Clean,
 }
 
 /// 由内核分派的类型化操作。 / Typed operation dispatched by the kernel.
@@ -447,6 +449,8 @@ pub enum OperationRequest {
     Remove(RemoveRequest),
     /// 查询状态。 / Inspect state.
     Inspect(InspectRequest),
+    /// 清理项目状态。 / Clean project state.
+    Clean(CleanRequest),
 }
 impl OperationRequest {
     /// 返回静态路由类别。 / Returns the static routing kind.
@@ -458,6 +462,7 @@ impl OperationRequest {
             Self::Add(_) => OperationKind::Add,
             Self::Remove(_) => OperationKind::Remove,
             Self::Inspect(_) => OperationKind::Inspect,
+            Self::Clean(_) => OperationKind::Clean,
         }
     }
 
@@ -470,6 +475,7 @@ impl OperationRequest {
             Self::Add(request) => OperationLocation::Existing(&request.project),
             Self::Remove(request) => OperationLocation::Existing(&request.project),
             Self::Inspect(request) => OperationLocation::Existing(&request.project),
+            Self::Clean(request) => OperationLocation::Existing(&request.project),
         }
     }
 }
@@ -712,6 +718,13 @@ pub struct InspectRequest {
     /// 查询视图。 / Inspection view.
     pub view: InspectView,
 }
+
+/// 项目清理请求。 / Project-clean request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CleanRequest {
+    /// 项目路径。 / Project path.
+    pub project: ProjectPath,
+}
 /// 带版本的操作信封。 / Versioned operation envelope.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct OperationEnvelope {
@@ -740,7 +753,14 @@ impl OperationEnvelope {
         )
         .map_err(DecodeError::Malformed)?;
         validate_major(version)?;
-        serde_json::from_value(value).map_err(DecodeError::Malformed)
+        let envelope: Self = serde_json::from_value(value).map_err(DecodeError::Malformed)?;
+        if matches!(envelope.operation, OperationRequest::Clean(_)) && version.minor < 1 {
+            return Err(DecodeError::OperationRequiresProtocolMinor {
+                required: 1,
+                received: version.minor,
+            });
+        }
+        Ok(envelope)
     }
 }
 
@@ -1120,6 +1140,8 @@ pub enum ActionKind {
     Format,
     /// 执行非缓存的查询读取，包括 CAS/文件读取、摘要计算及 IR 或 psdbg 验证。 / Perform a non-cacheable inspection read, including CAS/file reads, hashing, and IR or psdbg validation.
     Inspect,
+    /// 删除项目构建产物并裁剪已确认失效的依赖缓存。 / Remove project build outputs and prune provably invalid dependency-cache entries.
+    Clean,
     /// 仅解码 v1 的旧候选求值占位动作；v2 计划必须使用 [`PlanningStepKind::PrepareCandidate`]。 / Legacy v1 candidate-evaluation placeholder for decoding only; v2 plans must use [`PlanningStepKind::PrepareCandidate`].
     ResolveCandidate,
     /// 项目事务提交。 / Project transaction commit.
@@ -1395,6 +1417,21 @@ pub enum InspectResult {
     Provenance(ProvenanceInspection),
 }
 
+/// 项目清理的类型化统计。 / Typed statistics for a project clean.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CleanResult {
+    /// 删除的项目构建文件数。 / Number of project build files removed.
+    pub build_files: u64,
+    /// 删除的项目构建文件字节数。 / Bytes removed from project build files.
+    pub build_bytes: u64,
+    /// 裁剪的已确认失效或废弃依赖缓存条目数。 / Number of provably invalid or abandoned dependency-cache entries pruned.
+    pub invalid_dependency_entries: u64,
+    /// 裁剪的已确认失效或废弃依赖缓存字节数。 / Bytes pruned from provably invalid or abandoned dependency-cache entries.
+    pub invalid_dependency_bytes: u64,
+    /// 因并发使用而安全跳过的依赖缓存条目数。 / Dependency-cache entries safely skipped because they were in concurrent use.
+    pub busy_dependency_entries: u64,
+}
+
 /// 一次操作的领域结果；退出状态不属于能力结果。 / Domain result of one operation; process exit status is not a capability result.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "type", content = "result")]
@@ -1416,6 +1453,8 @@ pub enum OperationResult {
     Remove(RemoveResult),
     /// 查询结果。 / Inspection result.
     Inspect(InspectResult),
+    /// 清理结果。 / Clean result.
+    Clean(CleanResult),
 }
 impl OperationResult {
     /// 返回与请求路由一致的操作类别。 / Returns the operation kind matching request routing.
@@ -1428,6 +1467,7 @@ impl OperationResult {
             Self::Add(_) => OperationKind::Add,
             Self::Remove(_) => OperationKind::Remove,
             Self::Inspect(_) => OperationKind::Inspect,
+            Self::Clean(_) => OperationKind::Clean,
         }
     }
 
@@ -1455,6 +1495,7 @@ impl OperationResult {
             (Self::Inspect(result), OperationRequest::Inspect(request)) => {
                 result.matches_view(&request.view)
             }
+            (Self::Clean(_), OperationRequest::Clean(_)) => true,
             _ => false,
         }
     }
@@ -1482,7 +1523,8 @@ impl OperationResult {
             | Self::Format(_)
             | Self::Add(_)
             | Self::Remove(_)
-            | Self::Inspect(_) => true,
+            | Self::Inspect(_)
+            | Self::Clean(_) => true,
         }
     }
 }
@@ -1903,6 +1945,29 @@ impl Event {
                 received: self.version.minor,
             });
         }
+        if self.version.major == CURRENT_VERSION.major
+            && self.version.minor < 1
+            && matches!(
+                &self.payload,
+                EventPayload::ActionDeclared {
+                    kind: ActionKind::Clean,
+                    ..
+                } | EventPayload::OperationCompleted {
+                    result: OperationResult::Clean(_),
+                    ..
+                } | EventPayload::OperationCompleted {
+                    result: OperationResult::Unavailable {
+                        kind: OperationKind::Clean
+                    },
+                    ..
+                }
+            )
+        {
+            return Err(EventValidationError::EventRequiresProtocolMinor {
+                required: 1,
+                received: self.version.minor,
+            });
+        }
         validate_payload(&self.payload)
     }
 
@@ -2034,6 +2099,13 @@ pub enum DecodeError {
     MalformedJsonShape,
     /// 事件违反局部规范不变式。 / Event violates a local canonical invariant.
     InvalidEvent(EventValidationError),
+    /// 操作类型晚于信封声明的协议次版本。 / Operation kind was introduced after the envelope's declared protocol minor.
+    OperationRequiresProtocolMinor {
+        /// 该操作所需的最小次版本。 / Minimum minor required by the operation.
+        required: u16,
+        /// 信封声明的次版本。 / Minor declared by the envelope.
+        received: u16,
+    },
     /// 不支持的主版本。 / Unsupported major version.
     UnsupportedMajor {
         /// 收到的主版本。 / Received major version.
@@ -2050,6 +2122,10 @@ impl fmt::Display for DecodeError {
             Self::MissingEventType => f.write_str("event envelope is missing payload type"),
             Self::MalformedJsonShape => f.write_str("malformed protocol envelope shape"),
             Self::InvalidEvent(error) => write!(f, "invalid protocol event: {error}"),
+            Self::OperationRequiresProtocolMinor { required, received } => write!(
+                f,
+                "operation requires protocol minor {required}, but envelope declares {received}"
+            ),
             Self::UnsupportedMajor {
                 received,
                 supported,
@@ -2154,6 +2230,7 @@ fn is_v2_executable_action(kind: ActionKind) -> bool {
             | ActionKind::Publish
             | ActionKind::Format
             | ActionKind::Inspect
+            | ActionKind::Clean
             | ActionKind::CommitTransaction
     )
 }
@@ -2729,6 +2806,50 @@ mod tests {
             vcs: Some(VcsChoice::None),
         });
         assert!(!result.matches_request(&wrong_vcs));
+    }
+
+    #[test]
+    fn clean_is_a_versioned_typed_request_and_result() {
+        let v3_inspect = br#"{"version":{"major":3,"minor":0},"operation":{"type":"inspect","request":{"project":".","view":"project"}}}"#;
+        assert!(OperationEnvelope::decode_json(v3_inspect).is_ok());
+
+        let request = OperationRequest::Clean(CleanRequest {
+            project: ProjectPath::new("workspace/xmlsquish.toml").unwrap(),
+        });
+        assert_eq!(request.kind(), OperationKind::Clean);
+        assert!(matches!(
+            request.location(),
+            OperationLocation::Existing(project) if project.as_str() == "workspace/xmlsquish.toml"
+        ));
+        let envelope = OperationEnvelope::current(request.clone());
+        let encoded = serde_json::to_vec(&envelope).unwrap();
+        assert_eq!(OperationEnvelope::decode_json(&encoded).unwrap(), envelope);
+
+        let result = OperationResult::Clean(CleanResult {
+            build_files: 3,
+            build_bytes: 1_024,
+            invalid_dependency_entries: 2,
+            invalid_dependency_bytes: 4_096,
+            busy_dependency_entries: 1,
+        });
+        assert_eq!(result.kind(), OperationKind::Clean);
+        assert!(result.matches_request(&request));
+        assert!(result.command_succeeded());
+        assert_eq!(
+            serde_json::from_str::<OperationResult>(&serde_json::to_string(&result).unwrap())
+                .unwrap(),
+            result
+        );
+
+        let mut mislabeled = serde_json::to_value(envelope).unwrap();
+        mislabeled["version"]["minor"] = serde_json::json!(0);
+        assert!(matches!(
+            OperationEnvelope::decode_json(&serde_json::to_vec(&mislabeled).unwrap()),
+            Err(DecodeError::OperationRequiresProtocolMinor {
+                required: 1,
+                received: 0
+            })
+        ));
     }
 
     #[cfg(unix)]

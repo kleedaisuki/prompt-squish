@@ -220,7 +220,10 @@ fn runtime_error(code: &'static str, error: impl std::fmt::Display) -> BuildRunt
 fn publication_error(code: &'static str, error: PublishError<CasError>) -> BuildRuntimeError {
     let message = error.to_string();
     match error {
-        PublishError::Store(_) | PublishError::Io(_) => BuildRuntimeError::storage(code, message),
+        PublishError::Store(_)
+        | PublishError::Io(_)
+        | PublishError::MaintenancePending(_)
+        | PublishError::Superseded(_) => BuildRuntimeError::storage(code, message),
         PublishError::InvalidDestination(_)
         | PublishError::AliasConflict(_)
         | PublishError::Symlink(_)

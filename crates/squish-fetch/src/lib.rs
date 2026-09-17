@@ -6,12 +6,14 @@
 
 #![forbid(unsafe_code)]
 
+mod clean;
 mod filesystem;
 mod git;
 mod materialize;
 mod registry;
 mod types;
 
+pub use clean::{DependencyCacheCleanStats, clean_dependency_cache};
 pub use filesystem::FilesystemHost;
 pub use git::{
     GitHost, GitInvocation, GitRunOutput, GitRunner, GitSelector, LockedGitPackage, SystemGitRunner,

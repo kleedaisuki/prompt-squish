@@ -346,6 +346,434 @@ fn publishes_a_complete_multi_artifact_generation() {
 }
 
 #[test]
+fn separated_layout_exposes_only_stable_user_artifacts_and_cleans_stale_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let artifacts = root.path().join("target/xmlsquish");
+    let state = root.path().join("private/publication-state");
+    let store = MemoryStore::default();
+    let mut metadata = publication(
+        store.insert(b"private map"),
+        11,
+        "target/xmlsquish/app.xsmap",
+    );
+    metadata.output.kind = ArtifactKind::Metadata;
+    let publisher =
+        FileArtifactPublisher::open_with_layout(&artifacts, &state, "target/xmlsquish", store)
+            .unwrap();
+    let first = publisher
+        .publish_generation(
+            &target("app"),
+            &[
+                publication(
+                    publisher.store.insert(b"prompt-v1"),
+                    9,
+                    "target/xmlsquish/app.prompt",
+                ),
+                publication(
+                    publisher.store.insert(b"debug-v1"),
+                    8,
+                    "target/xmlsquish/debug/app.psdbg",
+                ),
+                metadata,
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(
+        fs::read(artifacts.join("app.prompt")).unwrap(),
+        b"prompt-v1"
+    );
+    assert_eq!(
+        fs::read(artifacts.join("debug/app.psdbg")).unwrap(),
+        b"debug-v1"
+    );
+    assert!(!artifacts.join("app.xsmap").exists());
+    assert!(!artifacts.join("target").exists());
+    assert!(!artifacts.join(STATE_DIR).exists());
+    assert!(state.join(GENERATIONS).exists());
+    let metadata_index = first
+        .artifacts
+        .iter()
+        .position(|artifact| artifact.path.as_str().ends_with("app.xsmap"))
+        .unwrap();
+    assert_eq!(
+        read_member(&publisher, &first, metadata_index),
+        b"private map"
+    );
+
+    publisher
+        .publish_generation(
+            &target("app"),
+            &[publication(
+                publisher.store.insert(b"prompt-v2"),
+                9,
+                "target/xmlsquish/app.prompt",
+            )],
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read(artifacts.join("app.prompt")).unwrap(),
+        b"prompt-v2"
+    );
+    assert!(!artifacts.join("debug/app.psdbg").exists());
+    assert!(!artifacts.join("debug").exists());
+}
+
+#[test]
+fn separated_layout_recovery_repairs_the_stable_projection() {
+    let root = tempfile::tempdir().unwrap();
+    let artifacts = root.path().join("target/xmlsquish");
+    let state = root.path().join("private/publication-state");
+    let store = MemoryStore::default();
+    let publisher =
+        FileArtifactPublisher::open_with_layout(&artifacts, &state, "target/xmlsquish", store)
+            .unwrap();
+    let generation = publisher
+        .publish_generation(
+            &target("app"),
+            &[publication(
+                publisher.store.insert(b"recover me"),
+                10,
+                "target/xmlsquish/app.prompt",
+            )],
+        )
+        .unwrap();
+    fs::remove_file(artifacts.join("app.prompt")).unwrap();
+    fs::write(
+        state.join(GENERATION_JOURNAL),
+        serde_json::to_vec(&GenerationJournal {
+            target_key: target_key(&generation.identity.target),
+            generation_id: generation.identity.generation.to_hex(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    drop(publisher);
+
+    let recovered = FileArtifactPublisher::open_with_layout(
+        &artifacts,
+        &state,
+        "target/xmlsquish",
+        MemoryStore::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(artifacts.join("app.prompt")).unwrap(),
+        b"recover me"
+    );
+    assert!(!recovered.state_root().join(GENERATION_JOURNAL).exists());
+}
+
+#[test]
+fn separated_publishers_share_an_external_lock_that_does_not_pin_state() {
+    let root = tempfile::tempdir().unwrap();
+    let catalog = root.path().join("catalog");
+    let lock = project_lock_path(&catalog);
+    let first_state = catalog.join("target-state");
+    let second_state = catalog.join("catalog-state");
+    let first = FileArtifactPublisher::open_with_layout_and_lock(
+        root.path().join("artifacts"),
+        &first_state,
+        Path::new(""),
+        &lock,
+        MemoryStore::default(),
+    )
+    .unwrap();
+    let second = FileArtifactPublisher::open_with_layout_and_lock(
+        root.path().join("catalog-artifacts"),
+        &second_state,
+        Path::new(""),
+        &lock,
+        MemoryStore::default(),
+    )
+    .unwrap();
+    assert_eq!(first.lock_path(), second.lock_path());
+    assert!(!first.lock_path().starts_with(&catalog));
+
+    let renamed = catalog.join("target-state-renamed");
+    first
+        .with_lock(|_| {
+            let contender = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(second.lock_path())?;
+            assert!(contender.try_lock_exclusive().is_err());
+            fs::rename(&first_state, &renamed)?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(renamed.exists());
+    assert!(!first_state.exists());
+    assert!(second_state.exists());
+}
+
+#[test]
+fn explicit_lock_constructor_does_not_create_roots_while_clean_holds_lock() {
+    let root = tempfile::tempdir().unwrap();
+    let catalog = root.path().join("catalog");
+    let lock = project_lock_path(&catalog);
+    fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    let held = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock)
+        .unwrap();
+    held.lock_exclusive().unwrap();
+
+    let artifacts = root.path().join("target/xmlsquish");
+    let state = catalog.join("target-state");
+    let thread_artifacts = artifacts.clone();
+    let thread_state = state.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let result = FileArtifactPublisher::open_with_layout_and_lock(
+            thread_artifacts,
+            thread_state,
+            "target/xmlsquish",
+            lock,
+            MemoryStore::default(),
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string());
+        done_tx.send(result).unwrap();
+    });
+    started_rx.recv().unwrap();
+    assert!(
+        done_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err()
+    );
+    assert!(!artifacts.exists());
+    assert!(!state.exists());
+
+    FileExt::unlock(&held).unwrap();
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    handle.join().unwrap();
+    assert!(artifacts.exists());
+    assert!(state.exists());
+}
+
+#[test]
+fn pending_clean_blocks_cached_external_publisher_without_recreating_roots() {
+    let root = tempfile::tempdir().unwrap();
+    let artifacts = root.path().join("target/xmlsquish");
+    let state = root.path().join("catalog/target-state");
+    let lock = project_lock_path(root.path().join("catalog"));
+    let publisher = FileArtifactPublisher::open_with_layout_and_lock(
+        &artifacts,
+        &state,
+        "target/xmlsquish",
+        &lock,
+        MemoryStore::default(),
+    )
+    .unwrap();
+    fs::remove_dir_all(&artifacts).unwrap();
+    fs::remove_dir_all(&state).unwrap();
+    let marker = publisher.lock_path().with_extension("clean.json");
+    fs::write(&marker, b"pending").unwrap();
+    let request = publication(
+        publisher.store.insert(b"after clean"),
+        11,
+        "target/xmlsquish/app.prompt",
+    );
+
+    assert!(matches!(
+        publisher.publish_generation(&target("app"), std::slice::from_ref(&request)),
+        Err(PublishError::MaintenancePending(_))
+    ));
+    assert!(matches!(
+        publisher.current_generation(&target("app")),
+        Err(PublishError::MaintenancePending(_))
+    ));
+    assert!(!artifacts.exists());
+    assert!(!state.exists());
+
+    fs::remove_file(marker).unwrap();
+    publisher
+        .publish_generation(&target("app"), &[request])
+        .unwrap();
+    assert_eq!(
+        fs::read(artifacts.join("app.prompt")).unwrap(),
+        b"after clean"
+    );
+    assert!(state.exists());
+}
+
+#[test]
+fn state_local_compatibility_api_ignores_clean_named_ordinary_file() {
+    let root = tempfile::tempdir().unwrap();
+    let publisher = FileArtifactPublisher::open(root.path(), MemoryStore::default()).unwrap();
+    fs::write(
+        publisher.lock_path().with_extension("clean.json"),
+        b"ordinary",
+    )
+    .unwrap();
+    publisher
+        .publish(&publication(publisher.store.insert(b"ok"), 2, "out.prompt"))
+        .unwrap();
+    assert_eq!(fs::read(root.path().join("out.prompt")).unwrap(), b"ok");
+}
+
+#[test]
+fn changed_epoch_supersedes_cached_publishers_and_a_new_publisher_accepts_it() {
+    let root = tempfile::tempdir().unwrap();
+    let catalog = root.path().join("catalog");
+    let epoch_path = project_epoch_path(&catalog);
+    let initial = read_project_epoch(&catalog).unwrap();
+    let layout = ExternalPublisherLayout::new(
+        root.path().join("artifacts"),
+        catalog.join("state"),
+        "target/xmlsquish",
+        project_lock_path(&catalog),
+    )
+    .with_epoch(&epoch_path, initial);
+    let publisher = FileArtifactPublisher::with_external_layout(
+        layout,
+        MemoryStore::default(),
+        Arc::new(NoopObserver),
+    )
+    .unwrap();
+    let next = initial.checked_next().unwrap();
+    write_project_epoch(&epoch_path, &next).unwrap();
+    fs::remove_dir_all(publisher.root()).unwrap();
+    fs::remove_dir_all(publisher.state_root()).unwrap();
+    let request = publication(
+        publisher.store.insert(b"new epoch"),
+        9,
+        "target/xmlsquish/app.prompt",
+    );
+
+    assert!(matches!(
+        publisher.publish_generation(&target("app"), std::slice::from_ref(&request)),
+        Err(PublishError::Superseded(_))
+    ));
+    assert!(matches!(
+        publisher.current_generation(&target("app")),
+        Err(PublishError::Superseded(_))
+    ));
+    assert!(!publisher.root().exists());
+    assert!(!publisher.state_root().exists());
+
+    let fresh_layout = ExternalPublisherLayout::new(
+        publisher.root(),
+        publisher.state_root(),
+        "target/xmlsquish",
+        publisher.lock_path(),
+    )
+    .with_epoch(&epoch_path, read_project_epoch(&catalog).unwrap());
+    let fresh = FileArtifactPublisher::with_external_layout(
+        fresh_layout,
+        MemoryStore::default(),
+        Arc::new(NoopObserver),
+    )
+    .unwrap();
+    let fresh_request = publication(
+        fresh.store.insert(b"new epoch"),
+        9,
+        "target/xmlsquish/app.prompt",
+    );
+    fresh
+        .publish_generation(&target("app"), &[fresh_request])
+        .unwrap();
+    assert_eq!(
+        fs::read(fresh.root().join("app.prompt")).unwrap(),
+        b"new epoch"
+    );
+}
+
+#[test]
+fn separated_layout_migrates_and_validates_a_legacy_generation() {
+    let root = tempfile::tempdir().unwrap();
+    let artifacts = root.path().join("target/xmlsquish");
+    let store = MemoryStore::default();
+    let legacy = FileArtifactPublisher::open(&artifacts, store).unwrap();
+    let generation = legacy
+        .publish_generation(
+            &target("app"),
+            &[publication(
+                legacy.store.insert(b"legacy"),
+                6,
+                "target/xmlsquish/app.prompt",
+            )],
+        )
+        .unwrap();
+    drop(legacy);
+    // v1.0.1 only retained the private generation; remove the compatibility publisher's
+    // projection so this fixture has the same observable shape.
+    fs::remove_dir_all(artifacts.join("target")).unwrap();
+
+    let private = root.path().join("catalog/target-publication-state");
+    let publisher = FileArtifactPublisher::with_layout_observer_lock_and_legacy(
+        &artifacts,
+        &private,
+        "target/xmlsquish",
+        project_lock_path(root.path().join("catalog")),
+        artifacts.join(STATE_DIR),
+        MemoryStore::default(),
+        Arc::new(NoopObserver),
+    )
+    .unwrap();
+    assert_eq!(
+        publisher.current_generation(&target("app")).unwrap(),
+        Some(generation.clone())
+    );
+    assert_eq!(read_member(&publisher, &generation, 0), b"legacy");
+    assert_eq!(fs::read(artifacts.join("app.prompt")).unwrap(), b"legacy");
+    assert!(!artifacts.join(STATE_DIR).exists());
+}
+
+#[test]
+fn separated_layout_finishes_a_switched_legacy_migration_after_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let artifacts = root.path().join("target/xmlsquish");
+    let legacy = FileArtifactPublisher::open(&artifacts, MemoryStore::default()).unwrap();
+    let generation = legacy
+        .publish_generation(
+            &target("app"),
+            &[publication(
+                legacy.store.insert(b"legacy"),
+                6,
+                "target/xmlsquish/app.prompt",
+            )],
+        )
+        .unwrap();
+    drop(legacy);
+    fs::remove_dir_all(artifacts.join("target")).unwrap();
+
+    // Simulate a crash after the copied state became authoritative but before the legacy
+    // tree was removed. The phase marker must make the next open validate and finish cleanup.
+    let private = root.path().join("catalog/target-publication-state");
+    fs::create_dir_all(&private).unwrap();
+    copy_directory_tree::<Infallible>(&artifacts.join(STATE_DIR), &private).unwrap();
+    write_new_synced::<Infallible>(&private.join(LEGACY_MIGRATION), b"copied\n").unwrap();
+
+    let publisher = FileArtifactPublisher::with_layout_observer_lock_and_legacy(
+        &artifacts,
+        &private,
+        "target/xmlsquish",
+        project_lock_path(root.path().join("catalog")),
+        artifacts.join(STATE_DIR),
+        MemoryStore::default(),
+        Arc::new(NoopObserver),
+    )
+    .unwrap();
+    assert_eq!(
+        publisher.current_generation(&target("app")).unwrap(),
+        Some(generation)
+    );
+    assert_eq!(fs::read(artifacts.join("app.prompt")).unwrap(), b"legacy");
+    assert!(!artifacts.join(STATE_DIR).exists());
+    assert!(!private.join(LEGACY_MIGRATION).exists());
+}
+
+#[test]
 fn generation_identity_is_order_independent_and_reads_are_typed() {
     let root = tempfile::tempdir().unwrap();
     let store = MemoryStore::default();
@@ -535,4 +963,26 @@ fn rejects_symlink_component() {
         publisher.publish(&publication(digest, 1, "linked/x")),
         Err(PublishError::Symlink(_))
     ));
+}
+
+#[cfg(unix)]
+#[test]
+fn constructor_rejects_an_existing_intermediate_symlink() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let linked = root.path().join("linked");
+    symlink(outside.path(), &linked).unwrap();
+
+    assert!(matches!(
+        FileArtifactPublisher::open_with_layout_and_lock(
+            linked.join("artifacts"),
+            root.path().join("state"),
+            Path::new(""),
+            root.path().join("locks/project.lock"),
+            MemoryStore::default(),
+        ),
+        Err(PublishError::Symlink(path)) if path == linked
+    ));
+    assert!(!outside.path().join("artifacts").exists());
 }

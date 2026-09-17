@@ -151,8 +151,17 @@ fn storage_layout_requires_anchored_distinct_normalized_paths() {
         root.join("out"),
         root.join("catalog"),
     )
+    .unwrap()
+    .with_publication_prefix("dist/prompts")
     .unwrap();
     assert_eq!(layout.cas_root(), root.join("cas"));
+    assert_eq!(layout.publication_prefix(), Path::new("dist/prompts"));
+    assert!(
+        layout
+            .clone()
+            .with_publication_prefix("../outside")
+            .is_err()
+    );
 }
 
 #[test]
@@ -199,7 +208,7 @@ impl Services for FakeServices {
 }
 
 #[test]
-fn manager_is_one_capability_for_all_six_operations() {
+fn manager_is_one_capability_for_all_seven_operations() {
     let manager = ManagerCapability::new(FakeServices, InvocationSettings::default());
     let descriptor = manager.descriptor();
     assert_eq!(descriptor.id, "project-manager");
@@ -212,6 +221,7 @@ fn manager_is_one_capability_for_all_six_operations() {
             OperationKind::Add,
             OperationKind::Remove,
             OperationKind::Inspect,
+            OperationKind::Clean,
         ]
     );
 }

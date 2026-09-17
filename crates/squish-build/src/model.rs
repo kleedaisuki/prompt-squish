@@ -196,6 +196,7 @@ fn hash_kind(hash: &mut blake3::Hasher, kind: &ActionKind) {
         ActionKind::Link => b"link",
         ActionKind::Publish => b"publish",
         ActionKind::Format => b"format",
+        ActionKind::Clean => b"clean",
         ActionKind::Inspect => b"inspect",
         ActionKind::ResolveCandidate => b"resolve-candidate",
         ActionKind::CommitTransaction => b"commit-transaction",

@@ -82,7 +82,7 @@ fn bare_help_is_stdout_success_and_lists_only_direct_commands() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    for command in ["new", "build", "fmt", "add", "remove", "inspect"] {
+    for command in ["new", "build", "clean", "fmt", "add", "remove", "inspect"] {
         assert!(stdout.contains(command), "missing direct command {command}");
     }
 }
@@ -417,7 +417,18 @@ fn human_detail_levels_hide_noise_without_erasing_machine_identity() {
         assert!(product_output.contains("cached") || product_output.contains("Cached"));
     }
     assert!(normal.contains("logical artifact locator target/xmlsquish/chat.prompt"));
-    assert!(!project.path().join("target/xmlsquish/chat.prompt").exists());
+    assert!(
+        project
+            .path()
+            .join("target/xmlsquish/chat.prompt")
+            .is_file()
+    );
+    assert!(
+        !project
+            .path()
+            .join("target/xmlsquish/.squish-publish")
+            .exists()
+    );
 
     let verbose_lengths = digest_token_lengths(&verbose);
     assert!(!verbose_lengths.is_empty());
@@ -626,6 +637,104 @@ fn bare_build_defaults_to_a_prompt_artifact() {
 }
 
 #[test]
+fn clean_removes_project_state_prunes_invalid_dependencies_and_rebuilds_offline() {
+    let project = project("root-clean-");
+    let built = binary()
+        .current_dir(project.path())
+        .args(["build", "--emit=prompt", "--emit=ir", "--plain"])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let target = project.path().join("target/xmlsquish");
+    assert!(target.join("chat.prompt").is_file());
+
+    let invalid = project
+        .path()
+        .join(".xmlsquish/cache/sources/v1/quarantine/provably-invalid");
+    fs::create_dir_all(&invalid).unwrap();
+    fs::write(invalid.join("payload"), b"bad").unwrap();
+
+    let cleaned = binary()
+        .current_dir(project.path())
+        .args(["clean", "--message-format=json"])
+        .output()
+        .unwrap();
+    assert!(
+        cleaned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cleaned.stderr)
+    );
+    assert!(cleaned.stderr.is_empty());
+    let events = ndjson_documents(&cleaned.stdout);
+    let result = events
+        .iter()
+        .find_map(|event| {
+            (event["payload"]["type"] == "operation_completed")
+                .then_some(&event["payload"]["data"]["result"]["result"])
+        })
+        .expect("clean completion result");
+    assert!(result["build_files"].as_u64().unwrap() > 0);
+    assert_eq!(result["invalid_dependency_entries"], 1);
+    assert!(!target.exists());
+    assert!(!invalid.exists());
+    assert!(project.path().join(".xmlsquish/cache/state/cas").is_dir());
+    assert!(
+        project
+            .path()
+            .join(".xmlsquish/cache/state/actions.sqlite3")
+            .is_file()
+    );
+
+    let rebuilt = binary()
+        .current_dir(project.path())
+        .args(["build", "--offline", "--plain"])
+        .output()
+        .unwrap();
+    assert!(
+        rebuilt.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rebuilt.stderr)
+    );
+    assert!(target.join("chat.prompt").is_file());
+}
+
+#[test]
+fn custom_workspace_target_dir_is_the_stable_product_root() {
+    let project = project("root-custom-target-");
+    fs::write(
+        project.path().join("xmlsquish.toml"),
+        r#"manifest-version = 1
+[workspace]
+target-dir = "dist/prompts"
+
+[package]
+name = "fixture"
+version = "1.0.0"
+
+[target.chat]
+entry = "src/main.xml"
+"#,
+    )
+    .unwrap();
+    let built = binary()
+        .current_dir(project.path())
+        .args(["build", "--plain"])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    assert!(project.path().join("dist/prompts/chat.prompt").is_file());
+    assert!(!project.path().join("target/xmlsquish").exists());
+}
+
+#[test]
 fn global_storage_isolates_project_catalogs_while_serving_both_projects() {
     let first = globally_stored_project("root-global-first-", "first", "alpha", "Alpha");
     let second = globally_stored_project("root-global-second-", "second", "beta", "Beta");
@@ -670,7 +779,15 @@ fn global_storage_isolates_project_catalogs_while_serving_both_projects() {
     let namespaces = fs::read_dir(home.path().join("state/catalog/projects"))
         .unwrap()
         .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && entry.file_name().to_string_lossy().len() == 64
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
         .count();
     assert_eq!(
         namespaces, 2,

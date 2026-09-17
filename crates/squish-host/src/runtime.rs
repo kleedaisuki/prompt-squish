@@ -20,7 +20,10 @@ use squish_manager::{
     BuildRuntime, BuildRuntimeDescriptor, BuildRuntimeError, GenerationSpace, StorageLayout,
 };
 use squish_protocol::{Digest, DigestAlgorithm};
-use squish_publish::{FileArtifactPublisher, PublishError, PublishObserver};
+use squish_publish::{
+    ExternalPublisherLayout, FileArtifactPublisher, ProjectEpoch, PublishError, PublishObserver,
+    project_epoch_path, project_lock_path, read_project_epoch,
+};
 use squish_source::SourceBlob;
 use squish_store::{ActionKey as StoreActionKey, BlobDigest, Cas, CasError, VerifiedActionIndex};
 use squish_xml_front::{FrontendOutput, FrontendSourceContext};
@@ -34,6 +37,7 @@ pub struct ProductionBuildRuntime {
     catalog_observer: Arc<dyn PublishObserver>,
     cas: Mutex<Option<Arc<Cas>>>,
     index: Mutex<Option<Arc<VerifiedActionIndex>>>,
+    epoch: Mutex<Option<ProjectEpoch>>,
     targets: Mutex<Option<Arc<FileArtifactPublisher<SharedCas>>>>,
     catalog: Mutex<Option<Arc<FileArtifactPublisher<SharedCas>>>>,
 }
@@ -53,6 +57,7 @@ impl ProductionBuildRuntime {
             catalog_observer,
             cas: Mutex::new(None),
             index: Mutex::new(None),
+            epoch: Mutex::new(None),
             targets: Mutex::new(None),
             catalog: Mutex::new(None),
         }
@@ -75,26 +80,53 @@ impl ProductionBuildRuntime {
         &self,
         space: GenerationSpace,
     ) -> Result<Arc<FileArtifactPublisher<SharedCas>>, BuildRuntimeError> {
-        let (slot, root, observer, code, name) = match space {
+        let project_lock = project_lock_path(self.layout.catalog_root());
+        let epoch = self.project_epoch()?;
+        let (slot, root, state, legacy_state, prefix, observer, code, name) = match space {
             GenerationSpace::TargetArtifacts => (
                 &self.targets,
-                self.layout.publication_root(),
+                self.layout.publication_root().to_path_buf(),
+                self.layout.catalog_root().join("target-publication-state"),
+                self.layout.publication_root().join(".squish-publish"),
+                self.layout.publication_prefix().to_path_buf(),
                 self.target_observer.clone(),
                 "host_target_publisher_open",
                 "target publisher",
             ),
             GenerationSpace::BuildCatalog => (
                 &self.catalog,
-                self.layout.catalog_root(),
+                self.layout.catalog_root().join("build-catalog-artifacts"),
+                self.layout.catalog_root().join("build-catalog-state"),
+                self.layout.catalog_root().join(".squish-publish"),
+                std::path::PathBuf::new(),
                 self.catalog_observer.clone(),
                 "host_catalog_publisher_open",
                 "catalog publisher",
             ),
         };
         initialize(slot, name, || {
-            FileArtifactPublisher::with_observer(root, SharedCas(self.cas()?), observer)
+            let layout = ExternalPublisherLayout::new(root, state, prefix, project_lock)
+                .with_legacy_state(legacy_state)
+                .with_epoch(project_epoch_path(self.layout.catalog_root()), epoch);
+            FileArtifactPublisher::with_external_layout(layout, SharedCas(self.cas()?), observer)
                 .map_err(|error| publication_error(code, error))
         })
+    }
+
+    fn project_epoch(&self) -> Result<ProjectEpoch, BuildRuntimeError> {
+        let mut epoch = self.epoch.lock().map_err(|_| {
+            BuildRuntimeError::storage(
+                "host_runtime_coordination",
+                "project epoch initialization mutex is poisoned",
+            )
+        })?;
+        if let Some(value) = epoch.as_ref() {
+            return Ok(*value);
+        }
+        let value = read_project_epoch(self.layout.catalog_root())
+            .map_err(|error| storage_error("host_project_epoch_read", error))?;
+        *epoch = Some(value);
+        Ok(value)
     }
 
     /// 枚举动作索引中仍通过共享 CAS 完整性校验的记录。 /
@@ -334,7 +366,10 @@ fn corrupt_error(code: &'static str, error: impl std::fmt::Display) -> BuildRunt
 fn publication_error(code: &'static str, error: PublishError<CasError>) -> BuildRuntimeError {
     let message = error.to_string();
     match error {
-        PublishError::Store(_) | PublishError::Io(_) => BuildRuntimeError::storage(code, message),
+        PublishError::Store(_)
+        | PublishError::Io(_)
+        | PublishError::MaintenancePending(_)
+        | PublishError::Superseded(_) => BuildRuntimeError::storage(code, message),
         PublishError::InvalidDestination(_)
         | PublishError::AliasConflict(_)
         | PublishError::Symlink(_)
@@ -465,5 +500,78 @@ mod tests {
         runtime.write_blob(b"independent CAS").unwrap();
         std::fs::remove_dir(layout.action_index()).unwrap();
         assert!(runtime.index().is_ok());
+    }
+
+    #[test]
+    fn target_and_catalog_publishers_share_the_project_publication_lock() {
+        let temporary = tempfile::tempdir().unwrap();
+        let layout = layout(temporary.path());
+        let expected = project_lock_path(layout.catalog_root());
+        let runtime = runtime(layout);
+
+        let targets = runtime.publisher(GenerationSpace::TargetArtifacts).unwrap();
+        let catalog = runtime.publisher(GenerationSpace::BuildCatalog).unwrap();
+        assert_eq!(targets.lock_path(), catalog.lock_path());
+        assert_eq!(targets.lock_path().file_name(), expected.file_name());
+        assert!(
+            !targets
+                .lock_path()
+                .starts_with(std::fs::canonicalize(temporary.path().join("catalog")).unwrap())
+        );
+    }
+
+    #[test]
+    fn clean_epoch_supersedes_both_cached_publishers_but_not_a_new_runtime() {
+        let temporary = tempfile::tempdir().unwrap();
+        let layout = layout(temporary.path());
+        let old_runtime = runtime(layout.clone());
+        let target_publisher = old_runtime
+            .publisher(GenerationSpace::TargetArtifacts)
+            .unwrap();
+        let catalog_publisher = old_runtime
+            .publisher(GenerationSpace::BuildCatalog)
+            .unwrap();
+        let target = PublicationTargetId::new("epoch-fixture").unwrap();
+
+        let epoch = read_project_epoch(layout.catalog_root()).unwrap();
+        squish_publish::write_project_epoch(
+            project_epoch_path(layout.catalog_root()),
+            &epoch.checked_next().unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            target_publisher.current_generation(&target),
+            Err(PublishError::Superseded(_))
+        ));
+        assert!(matches!(
+            target_publisher.publish_generation(&target, &[]),
+            Err(PublishError::Superseded(_))
+        ));
+        assert!(matches!(
+            catalog_publisher.current_generation(&target),
+            Err(PublishError::Superseded(_))
+        ));
+        assert!(matches!(
+            catalog_publisher.publish_generation(&target, &[]),
+            Err(PublishError::Superseded(_))
+        ));
+
+        let fresh = runtime(layout);
+        assert!(
+            fresh
+                .publisher(GenerationSpace::TargetArtifacts)
+                .unwrap()
+                .current_generation(&target)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            fresh
+                .publisher(GenerationSpace::BuildCatalog)
+                .unwrap()
+                .current_generation(&target)
+                .unwrap()
+                .is_none()
+        );
     }
 }

@@ -17,6 +17,7 @@ squish-host -[normal]-> squish-ir
 squish-host -[normal]-> squish-kernel
 squish-host -[normal]-> squish-link
 squish-host -[normal]-> squish-manager
+squish-host -[normal]-> squish-platform-fs
 squish-host -[normal]-> squish-project
 squish-host -[normal]-> squish-protocol
 squish-host -[normal]-> squish-publish
@@ -62,6 +63,7 @@ squish-store -[normal]-> squish-protocol
 squish-xml-front -[normal]-> squish-ir
 squish-xml-front -[normal]-> squish-protocol
 squish-xml-front -[normal]-> squish-source
+xmlsquish -[dev]-> squish-publish
 xmlsquish -[normal]-> squish-cli
 xmlsquish -[normal]-> squish-config
 xmlsquish -[normal]-> squish-fetch
@@ -69,6 +71,7 @@ xmlsquish -[normal]-> squish-host
 xmlsquish -[normal]-> squish-kernel
 xmlsquish -[normal]-> squish-manager
 xmlsquish -[normal]-> squish-presentation
+xmlsquish -[normal]-> squish-project
 xmlsquish -[normal]-> squish-protocol
 xmlsquish -[normal]-> squish-publish
 xmlsquish -[normal]-> squish-repository

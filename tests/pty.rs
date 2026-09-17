@@ -90,19 +90,41 @@ impl Fixture {
 
     /// 持有真实发布器恢复锁，使内核停在已呈现的恢复步骤。 /
     /// Holds the real publisher recovery lock so the kernel remains in a rendered recovery step.
-    fn hold_recovery_lock(&self) -> File {
-        let state = self.project.join("target/xmlsquish/.squish-publish");
-        fs::create_dir_all(&state).expect("create publisher state directory");
+    fn hold_recovery_lock(&self, home: &Path) -> File {
+        let project = fs::canonicalize(&self.project).expect("canonical project root");
+        let catalog = home
+            .join("state/catalog/projects")
+            .join(project_namespace(&project));
+        let lock_path = squish_publish::project_lock_path(catalog);
+        fs::create_dir_all(lock_path.parent().unwrap()).expect("create publisher lock directory");
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(state.join("lock"))
+            .open(lock_path)
             .expect("open publisher recovery lock");
         lock.lock_exclusive().expect("hold publisher recovery lock");
         lock
     }
+}
+
+fn project_namespace(root: &Path) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xmlsquish-project-catalog-v1\0");
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        hasher.update(root.as_os_str().as_bytes());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+        for unit in root.as_os_str().encode_wide() {
+            hasher.update(&unit.to_le_bytes());
+        }
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 impl Drop for Fixture {
@@ -300,35 +322,27 @@ impl Drop for PtySession {
     }
 }
 
-/// 真实交互会动态重绘、响应 resize，并将进入同步发布后的中断延后到提交完成。
-/// Real interaction dynamically repaints, responds to resize, and defers an interrupt arriving
-/// after synchronous publication entry until the commit completes.
+/// 真实交互会动态重绘、响应 resize，并在恢复锁释放后协作取消。
+/// Real interaction dynamically repaints, responds to resize, and cooperatively cancels after
+/// the recovery lock is released.
 #[test]
 fn interactive_progress_resize_and_cooperative_interrupt_are_real() {
     let fixture = Fixture::create("cooperative");
-    let recovery_lock = fixture.hold_recovery_lock();
-    let mut session = PtySession::spawn(&fixture.project, &fixture.home("home"));
+    let home = fixture.home("home");
+    let recovery_lock = fixture.hold_recovery_lock(&home);
+    let mut session = PtySession::spawn(&fixture.project, &home);
 
-    let wide = wait_for_blocked_publication(&session, WAIT);
+    let wide = wait_for_blocked_recovery(&session, WAIT);
     assert!(
-        visible_frame_width(&wide) > usize::from(NARROW_SIZE.cols - 1),
-        "wide frame did not require truncation after resize"
-    );
-    assert!(
-        strip_ansi(&wide).matches("...").count() == 1,
-        "wide frame had truncation beyond the action ID's stable abbreviation"
+        strip_ansi(&wide).starts_with("Recovering (build-cli-"),
+        "wide terminal omitted the live recovery phase"
     );
     let before_resize = session.bytes().len();
     session.resize(NARROW_SIZE);
-    let frame = wait_for_publication_frame_after(&session, before_resize, true, WAIT);
+    let frame = wait_for_recovery_frame_after(&session, before_resize, WAIT);
     assert!(
-        visible_frame_width(&frame) <= usize::from(NARROW_SIZE.cols - 1),
-        "dynamic frame exceeded resized width: {:?}",
-        String::from_utf8_lossy(&frame)
-    );
-    assert!(
-        strip_ansi(&frame).contains("...") && frame != wide,
-        "narrow frame did not exercise renderer truncation: {:?}",
+        strip_ansi(&frame).starts_with("Recovering (build-cli-"),
+        "resize lost the live recovery phase: {:?}",
         String::from_utf8_lossy(&frame)
     );
 
@@ -336,21 +350,16 @@ fn interactive_progress_resize_and_cooperative_interrupt_are_real() {
     session.control_c();
     wait_for_notice_after(&session, before_interrupt, WAIT);
     drop(recovery_lock);
-    assert_eq!(session.wait(WAIT), 0);
+    assert_eq!(session.wait(WAIT), 130);
     let raw = session.finish_output();
     assert!(
         raw.windows(2).any(|pair| pair == b"\x1b["),
         "ANSI was absent"
     );
     let plain = strip_ansi(&raw);
-    let terminal_summaries = plain.matches("Cancelled build-cli-").count();
-    assert_eq!(
-        terminal_summaries, 0,
-        "committed publication must not be retroactively reported cancelled: {plain}"
-    );
     assert!(
-        plain.contains(" succeeded,"),
-        "cooperative terminal summary omitted totals: {plain}"
+        plain.contains("Cancelled build-cli-"),
+        "cooperative cancellation omitted its terminal summary: {plain}"
     );
     #[cfg(not(windows))]
     assert!(
@@ -366,10 +375,11 @@ fn interactive_progress_resize_and_cooperative_interrupt_are_real() {
 #[test]
 fn second_interrupt_takes_emergency_exit_and_restores_terminal() {
     let fixture = Fixture::create("emergency");
-    let _recovery_lock = fixture.hold_recovery_lock();
-    let mut session = PtySession::spawn(&fixture.project, &fixture.home("home"));
+    let home = fixture.home("home");
+    let _recovery_lock = fixture.hold_recovery_lock(&home);
+    let mut session = PtySession::spawn(&fixture.project, &home);
 
-    wait_for_blocked_publication(&session, WAIT);
+    wait_for_blocked_recovery(&session, WAIT);
     let before_first = session.bytes().len();
     session.control_c();
     wait_for_notice_after(&session, before_first, WAIT);
@@ -451,18 +461,18 @@ fn wait_for_notice_after(session: &PtySession, offset: usize, timeout: Duration)
     }
 }
 
-/// 等待进入被 publisher lock 阻塞的发布动作。 / Waits for the publication action blocked on the publisher lock.
-fn wait_for_blocked_publication(session: &PtySession, timeout: Duration) -> Vec<u8> {
+/// 等待进入被项目锁阻塞的恢复阶段。 / Waits for recovery blocked on the project lock.
+fn wait_for_blocked_recovery(session: &PtySession, timeout: Duration) -> Vec<u8> {
     let deadline = Instant::now() + timeout;
     let mut bytes = session.output.bytes.lock().expect("PTY output lock");
     loop {
         let plain = strip_ansi(&bytes);
-        if let Some(frame) = publication_frame(&plain, false) {
+        if let Some(frame) = recovery_frame(&plain) {
             return frame.into_bytes();
         }
         assert!(
             Instant::now() < deadline,
-            "no live publication frame; tail: {:?}",
+            "no live recovery frame; tail: {:?}",
             &plain[plain.len().saturating_sub(2_000)..]
         );
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -475,23 +485,16 @@ fn wait_for_blocked_publication(session: &PtySession, timeout: Duration) -> Vec<
     }
 }
 
-fn publication_frame(transcript: &str, truncated: bool) -> Option<String> {
-    let marker = if truncated {
-        "publish "
-    } else {
-        "publish build:publish:"
-    };
-    let start = transcript.rfind(marker)?;
+fn recovery_frame(transcript: &str) -> Option<String> {
+    let start = transcript.rfind("Recovering ")?;
     let relative_end = transcript[start..].find(')')?;
-    let frame = &transcript[start..=start + relative_end];
-    complete_publication_grammar(frame, truncated).then(|| frame.to_owned())
+    Some(transcript[start..=start + relative_end].to_owned())
 }
 
-/// 等待 offset 之后语义完整的发布进度帧。 / Waits for a complete publication progress frame after an offset.
-fn wait_for_publication_frame_after(
+/// 等待 offset 之后语义完整的恢复进度帧。 / Waits for a complete recovery progress frame after an offset.
+fn wait_for_recovery_frame_after(
     session: &PtySession,
     offset: usize,
-    truncated: bool,
     timeout: Duration,
 ) -> Vec<u8> {
     let deadline = Instant::now() + timeout;
@@ -499,12 +502,12 @@ fn wait_for_publication_frame_after(
     loop {
         let suffix = &bytes[offset.min(bytes.len())..];
         let plain = strip_ansi(suffix);
-        if let Some(frame) = publication_frame(&plain, truncated) {
+        if let Some(frame) = recovery_frame(&plain) {
             return frame.into_bytes();
         }
         assert!(
             Instant::now() < deadline,
-            "no complete publication frame followed offset; tail: {:?}",
+            "no complete recovery frame followed offset; tail: {:?}",
             String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(2_000)..])
         );
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -515,62 +518,6 @@ fn wait_for_publication_frame_after(
             .expect("PTY output wait")
             .0;
     }
-}
-
-/// 验证 `publish <action> <percent> (<done>/<total>)` 的完整语法。 / Validates the complete publication progress grammar.
-fn complete_publication_grammar(frame: &str, truncated: bool) -> bool {
-    let Some((prefix, counts)) = frame.trim().rsplit_once(" (") else {
-        return false;
-    };
-    let Some(counts) = counts.strip_suffix(')') else {
-        return false;
-    };
-    let Some((done, total)) = counts.split_once('/') else {
-        return false;
-    };
-    let Some((label, percent)) = prefix.rsplit_once(' ') else {
-        return false;
-    };
-    let label = label.trim_end();
-    let label_ok = if truncated {
-        label
-            .strip_prefix("publish ")
-            .and_then(|action| action.split_once("..."))
-            .is_some_and(|(prefix, suffix)| {
-                !prefix.is_empty()
-                    && prefix
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b':')
-                    && (8..=64).contains(&suffix.len())
-                    && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-    } else {
-        label
-            .strip_prefix("publish build:publish:")
-            .is_some_and(|action| {
-                let Some((prefix, suffix)) = action.split_once("...") else {
-                    return false;
-                };
-                prefix.len() == 8
-                    && prefix.bytes().all(|byte| byte.is_ascii_hexdigit())
-                    && !suffix.is_empty()
-                    && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-    };
-    label_ok
-        && (!truncated || frame.chars().count() <= usize::from(NARROW_SIZE.cols - 1))
-        && percent
-            .strip_suffix('%')
-            .and_then(|value| value.parse::<u8>().ok())
-            .is_some()
-        && done.parse::<usize>().is_ok()
-        && total.parse::<usize>().is_ok()
-}
-
-/// 计算动态帧的可见 ASCII 宽度；产品动作 ID 与计数均为 ASCII。 / Measures the visible
-/// ASCII width of a dynamic frame; product action IDs and counters are ASCII.
-fn visible_frame_width(frame: &[u8]) -> usize {
-    strip_ansi(frame).chars().count()
 }
 
 /// 移除 CSI 序列以检查稳定的人类语义。 / Removes CSI sequences for stable human semantics.

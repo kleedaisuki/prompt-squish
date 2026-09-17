@@ -1069,6 +1069,14 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
             OperationResult::Inspect(result) => {
                 format!("inspection: {}", inspect_result_name(result))
             }
+            OperationResult::Clean(result) => format!(
+                "clean: {} build files ({} bytes), {} invalid dependency entries ({} bytes), {} busy skipped",
+                result.build_files,
+                result.build_bytes,
+                result.invalid_dependency_entries,
+                result.invalid_dependency_bytes,
+                result.busy_dependency_entries
+            ),
         };
         let detail_policy = self.detail();
         self.write_persistent(&format!(
@@ -1940,6 +1948,7 @@ fn action_kind_name(kind: ActionKind) -> &'static str {
         ActionKind::Publish => "publish",
         ActionKind::Format => "format",
         ActionKind::Inspect => "inspect",
+        ActionKind::Clean => "clean",
         ActionKind::ResolveCandidate => "resolve-candidate",
         ActionKind::CommitTransaction => "commit-transaction",
     }
@@ -1968,6 +1977,7 @@ fn operation_kind_name(kind: squish_protocol::OperationKind) -> &'static str {
         squish_protocol::OperationKind::Add => "add",
         squish_protocol::OperationKind::Remove => "remove",
         squish_protocol::OperationKind::Inspect => "inspect",
+        squish_protocol::OperationKind::Clean => "clean",
     }
 }
 fn exit_status_name(status: ExitStatus) -> &'static str {
@@ -2001,6 +2011,14 @@ fn short_operation_result(result: &OperationResult) -> String {
             result.dry_run
         ),
         OperationResult::Inspect(result) => format!("inspect view={}", inspect_result_name(result)),
+        OperationResult::Clean(result) => format!(
+            "clean build-files={} build-bytes={} invalid-dependencies={} invalid-bytes={} busy-skipped={}",
+            result.build_files,
+            result.build_bytes,
+            result.invalid_dependency_entries,
+            result.invalid_dependency_bytes,
+            result.busy_dependency_entries
+        ),
     }
 }
 
@@ -2122,13 +2140,13 @@ mod tests {
 
     use squish_protocol::{
         ActionKeyId, ActionTotals, Artifact, ArtifactId, CacheInspection, CachedAction,
-        CreatedProjectFile, Diagnostic, DiagnosticId, Digest, DigestAlgorithm, Event, EventPayload,
-        ExitStatus, InspectResult, InvocationId, IrInspection, JobId, JobSummary, LinkInspection,
-        NewPackageName, NewResult, OpaqueSourceId, OperationKind, OperationResult, PackageName,
-        PlanDigest, PlanId, PlanInspection, PlanMode, PlannedAction, PlanningAttemptId,
-        PlanningStepId, PlanningStepKind, ProjectDestination, ProjectFilePath, ProjectInspection,
-        ProvenanceInspection, SourceInspection, TargetName, Timing, VcsChoice, VcsDisposition,
-        VcsResult, WorkspacePlacement,
+        CleanResult, CreatedProjectFile, Diagnostic, DiagnosticId, Digest, DigestAlgorithm, Event,
+        EventPayload, ExitStatus, InspectResult, InvocationId, IrInspection, JobId, JobSummary,
+        LinkInspection, NewPackageName, NewResult, OpaqueSourceId, OperationKind, OperationResult,
+        PackageName, PlanDigest, PlanId, PlanInspection, PlanMode, PlannedAction,
+        PlanningAttemptId, PlanningStepId, PlanningStepKind, ProjectDestination, ProjectFilePath,
+        ProjectInspection, ProvenanceInspection, SourceInspection, TargetName, Timing, VcsChoice,
+        VcsDisposition, VcsResult, WorkspacePlacement,
     };
 
     use super::*;
@@ -2286,6 +2304,32 @@ mod tests {
             output,
             "Result: created package demo at /workspace/demo (target prompt; files: .gitignore, src/prompt.xml, xmlsquish.toml; workspace member tools/demo; enclosing Git repository reused)\n"
         );
+    }
+
+    #[test]
+    fn clean_result_has_exact_human_and_short_summaries() {
+        let completed = event(
+            0,
+            EventPayload::OperationCompleted {
+                job: id::<JobId>("clean"),
+                result: OperationResult::Clean(CleanResult {
+                    build_files: 4,
+                    build_bytes: 2_048,
+                    invalid_dependency_entries: 2,
+                    invalid_dependency_bytes: 8_192,
+                    busy_dependency_entries: 1,
+                }),
+            },
+        );
+        assert_eq!(
+            render_plain(std::slice::from_ref(&completed)),
+            "Result: clean: 4 build files (2048 bytes), 2 invalid dependency entries (8192 bytes), 1 busy skipped\n"
+        );
+        assert_eq!(
+            render_with_verbosity(&[completed], Verbosity::Short),
+            "result clean build-files=4 build-bytes=2048 invalid-dependencies=2 invalid-bytes=8192 busy-skipped=1\n"
+        );
+        assert_eq!(operation_kind_name(OperationKind::Clean), "clean");
     }
 
     #[test]
@@ -3474,6 +3518,32 @@ mod tests {
         renderer.finish().unwrap();
         let output = String::from_utf8(renderer.into_inner()).unwrap();
 
+        assert_eq!(output.lines().count(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(output.trim()).unwrap(),
+            serde_json::to_value(value).unwrap()
+        );
+    }
+
+    #[test]
+    fn ndjson_preserves_native_clean_result_event() {
+        let value = event(
+            0,
+            EventPayload::OperationCompleted {
+                job: id::<JobId>("clean"),
+                result: OperationResult::Clean(CleanResult {
+                    build_files: 1,
+                    build_bytes: 32,
+                    invalid_dependency_entries: 0,
+                    invalid_dependency_bytes: 0,
+                    busy_dependency_entries: 0,
+                }),
+            },
+        );
+        let mut renderer = NdjsonRenderer::new(Vec::new());
+        renderer.render(&value).unwrap();
+        renderer.finish().unwrap();
+        let output = String::from_utf8(renderer.into_inner()).unwrap();
         assert_eq!(output.lines().count(), 1);
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(output.trim()).unwrap(),

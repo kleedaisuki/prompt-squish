@@ -40,6 +40,7 @@ use squish_presentation::{
     NdjsonRenderer, PresentationOptions, ProgressMode, Renderer, SystemClock, SystemTerminal,
     TerminalProbe, Verbosity,
 };
+use squish_project::{MANIFEST_FILE_NAME, Manifest, Workspace};
 use squish_protocol::{
     ActionKeyId, Event, EventPayload, ExitStatus, InvocationId, OperationRequest, OperationResult,
     ProjectPath, VcsChoice,
@@ -647,6 +648,7 @@ fn compose_host(
     faults: &FaultPorts,
 ) -> Result<ProductionHost, Box<dyn std::error::Error>> {
     let state = &config.manager.storage_root;
+    let publication_prefix = configured_target_dir(&root)?;
     let catalog = state
         .join("catalog")
         .join("projects")
@@ -654,9 +656,10 @@ fn compose_host(
     let storage = StorageLayout::new(
         state.join("cas"),
         state.join("actions.sqlite3"),
-        root.join("target/xmlsquish"),
+        root.join(&publication_prefix),
         catalog,
-    )?;
+    )?
+    .with_publication_prefix(publication_prefix)?;
     let filesystem = Arc::new(FilesystemHost::new(&root)?);
     let registries = config
         .registries
@@ -694,6 +697,20 @@ fn compose_host(
         filesystem,
     })?;
     Ok(install_build_observers(host, faults))
+}
+
+/// 读取根清单声明的共享产物根，不猜测成员目录。 /
+/// Reads the shared artifact root declared by the root manifest without guessing from members.
+fn configured_target_dir(root: &Path) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let path = root.join(MANIFEST_FILE_NAME);
+    let bytes = std::fs::read(&path)?;
+    let source = std::str::from_utf8(&bytes)
+        .map_err(|_| format!("manifest `{}` is not UTF-8", path.display()))?;
+    let manifest = Manifest::parse(source)?;
+    Ok(manifest.workspace.map_or_else(
+        || Workspace::default().target_dir,
+        |workspace| workspace.target_dir,
+    ))
 }
 
 /// 在测试构建中把发布观察者安装到拥有发布器的宿主。 /
@@ -847,6 +864,7 @@ fn set_project(
     match request {
         OperationRequest::New(_) => {}
         OperationRequest::Build(value) => value.project = project,
+        OperationRequest::Clean(value) => value.project = project,
         OperationRequest::Format(value) => value.project = project,
         OperationRequest::Add(value) => value.project = project,
         OperationRequest::Remove(value) => value.project = project,
@@ -860,6 +878,7 @@ fn requested_project(request: &OperationRequest) -> Option<&Path> {
     Some(Path::new(match request {
         OperationRequest::New(_) => return None,
         OperationRequest::Build(value) => value.project.as_str(),
+        OperationRequest::Clean(value) => value.project.as_str(),
         OperationRequest::Format(value) => value.project.as_str(),
         OperationRequest::Add(value) => value.project.as_str(),
         OperationRequest::Remove(value) => value.project.as_str(),
@@ -1216,6 +1235,31 @@ mod tests {
         });
 
         assert_eq!(requested_project(&request), None);
+    }
+
+    #[test]
+    fn configured_target_dir_preserves_default_and_workspace_override() {
+        let project = tempfile::tempdir().unwrap();
+        let manifest = project.path().join(MANIFEST_FILE_NAME);
+        std::fs::write(
+            &manifest,
+            "manifest-version = 1\n[package]\nname = \"demo\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            configured_target_dir(project.path()).unwrap(),
+            Path::new("target/xmlsquish")
+        );
+
+        std::fs::write(
+            manifest,
+            "manifest-version = 1\n[workspace]\ntarget-dir = \"dist/prompts\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            configured_target_dir(project.path()).unwrap(),
+            Path::new("dist/prompts")
+        );
     }
 
     impl Renderer for OrderingRenderer {

@@ -1,6 +1,6 @@
 [package]
 name = "xmlsquish"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"
@@ -60,6 +60,7 @@ squish-host = { path = "crates/squish-host" }
 squish-kernel = { path = "crates/squish-kernel" }
 squish-manager = { path = "crates/squish-manager" }
 squish-presentation = { path = "crates/squish-presentation" }
+squish-project = { path = "crates/squish-project" }
 squish-protocol = { path = "crates/squish-protocol" }
 squish-publish = { path = "crates/squish-publish", optional = true }
 squish-repository = { path = "crates/squish-repository" }
@@ -69,6 +70,7 @@ url = "2.5"
 [dev-dependencies]
 fs2 = "0.4"
 portable-pty = "=0.9.0"
+squish-publish = { path = "crates/squish-publish" }
 tempfile = "3.23"
 
 [[test]]

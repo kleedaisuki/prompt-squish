@@ -3,8 +3,8 @@
 ## Ownership
 
 `squish-manager` is the single kernel capability for new, build, format, add,
-remove, and inspect operations. `src/lib.rs` owns static routing and invocation-scoped
-settings. `src/new.rs`, `src/build.rs`, `src/fmt.rs`, `src/mutation.rs`, and `src/inspect.rs`
+remove, inspect, and clean operations. `src/lib.rs` owns static routing and invocation-scoped
+settings. `src/new.rs`, `src/build.rs`, `src/fmt.rs`, `src/mutation.rs`, `src/inspect.rs`, and `src/clean.rs`
 own their domain-specific planning and workers. `src/orchestrator.rs` is the only
 place that drives `squish_build::Scheduler` or translates scheduler/worker facts
 into protocol lifecycle events. Workers return data and never print.

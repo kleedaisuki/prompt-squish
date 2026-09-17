@@ -15,6 +15,8 @@ use std::{
     collections::BTreeMap,
     ffi::OsString,
     fmt,
+    fs::{File, OpenOptions},
+    io,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -22,6 +24,8 @@ use std::{
     },
 };
 
+use fs2::FileExt;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use squish_config::AuthScope;
 use url::Url;
@@ -32,15 +36,18 @@ use squish_fetch::{
     Materializer, Observer, RegistryConfig, SourceEvent, SparseRegistry, SystemGitRunner,
 };
 use squish_manager::{
-    ArtifactLocator, BuildRuntime, ProjectCreationLocation, ProjectCreationStatus,
-    ProvenanceNonApplicability, ProvenanceRelation, ResolveRequest, ResolvedDependencies,
-    ServiceError, Services, StorageLayout,
+    ArtifactLocator, BuildRuntime, ProjectCleanStatus, ProjectCreationLocation,
+    ProjectCreationStatus, ProvenanceNonApplicability, ProvenanceRelation, ResolveRequest,
+    ResolvedDependencies, ServiceError, Services, StorageLayout,
 };
 use squish_project::{
     DependencyResolver, LockedSource, Lockfile, Manifest, ResolutionInput, ResolutionMode,
 };
-use squish_protocol::VcsChoice;
-use squish_publish::{NoopObserver as NoopPublishObserver, PublishObserver};
+use squish_protocol::{CleanResult, VcsChoice};
+use squish_publish::{
+    NoopObserver as NoopPublishObserver, ProjectEpoch, PublishObserver, project_epoch_path,
+    project_lock_path, read_project_epoch, write_project_epoch,
+};
 use squish_repository::{
     CreateProjectRequest, FaultInjector, PackageLocation, ProjectVcs, RepositoryError,
     StagePreparer, WorkspaceMembership, create_project,
@@ -519,6 +526,398 @@ struct RegistryEntry {
     registry: SparseRegistry<SharedCredentials>,
 }
 
+const CLEAN_JOURNAL_VERSION: u32 = 1;
+#[cfg(windows)]
+const CLEAN_RENAME_ATTEMPTS: usize = 8;
+
+/// 外置 clean redo journal；它只描述受项目锁保护的权威根。 /
+/// External clean redo journal describing only authoritative roots guarded by the project lock.
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct CleanJournal {
+    version: u32,
+    publication_root: PathBuf,
+    catalog_root: PathBuf,
+    #[serde(default)]
+    next_epoch: Option<ProjectEpoch>,
+}
+
+/// 从 publisher 共享锁身份派生的 journal 与同卷 tombstone。 /
+/// Journal and same-volume tombstones derived from the publisher's shared-lock identity.
+struct CleanPaths {
+    lock: PathBuf,
+    epoch: PathBuf,
+    journal: PathBuf,
+    publication_tombstone: PathBuf,
+    catalog_tombstone: PathBuf,
+}
+
+impl CleanPaths {
+    /// 为一个存储布局构造稳定且不位于删除根中的协调路径。 /
+    /// Builds stable coordination paths which remain outside every deleted root.
+    fn new(storage: &StorageLayout) -> io::Result<Self> {
+        let lock = project_lock_path(storage.catalog_root());
+        let identity = lock.file_stem().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "project lock has no file name")
+        })?;
+        let journal = lock.with_extension("clean.json");
+        Ok(Self {
+            publication_tombstone: clean_tombstone(storage.publication_root(), identity)?,
+            catalog_tombstone: clean_tombstone(storage.catalog_root(), identity)?,
+            epoch: project_epoch_path(storage.catalog_root()),
+            lock,
+            journal,
+        })
+    }
+}
+
+/// 将一个权威根映射到同父目录的独占 tombstone。 /
+/// Maps an authoritative root to an exclusive tombstone in the same parent directory.
+fn clean_tombstone(root: &Path, identity: &std::ffi::OsStr) -> io::Result<PathBuf> {
+    let parent = root.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("clean root `{}` has no parent", root.display()),
+        )
+    })?;
+    let leaf = root.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("clean root `{}` has no file name", root.display()),
+        )
+    })?;
+    let mut name = OsString::from(".");
+    name.push(leaf);
+    name.push(".squish-clean-");
+    name.push(identity);
+    Ok(parent.join(name))
+}
+
+/// 获取与 target/catalog publisher 完全相同的跨进程项目锁。 /
+/// Acquires exactly the same cross-process project lock as target/catalog publishers.
+fn open_project_lock(paths: &CleanPaths) -> io::Result<File> {
+    let lock = open_project_lock_file(paths)?;
+    lock.lock_exclusive()?;
+    Ok(lock)
+}
+
+/// 等待共享项目锁时持续响应取消；返回 `None` 表示尚未删除任何状态。 /
+/// Remains cancellation-responsive while waiting for the shared project lock; `None` means no
+/// state was removed.
+fn open_project_lock_cancellable(
+    paths: &CleanPaths,
+    cancellation: &squish_kernel::CancellationToken,
+) -> io::Result<Option<File>> {
+    let lock = open_project_lock_file(paths)?;
+    loop {
+        if cancellation.is_cancelled() {
+            return Ok(None);
+        }
+        match lock.try_lock_exclusive() {
+            Ok(()) => return Ok(Some(lock)),
+            Err(error) if lock_is_busy(&error) => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn open_project_lock_file(paths: &CleanPaths) -> io::Result<File> {
+    let parent = paths
+        .lock
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "project lock has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&paths.lock)?;
+    Ok(lock)
+}
+
+fn lock_is_busy(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        error.raw_os_error() == Some(33)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn expected_clean_journal(storage: &StorageLayout, next_epoch: ProjectEpoch) -> CleanJournal {
+    CleanJournal {
+        version: CLEAN_JOURNAL_VERSION,
+        publication_root: storage.publication_root().to_path_buf(),
+        catalog_root: storage.catalog_root().to_path_buf(),
+        next_epoch: Some(next_epoch),
+    }
+}
+
+/// 原子持久化 redo journal，确保首次 detach 之前已有恢复依据。 /
+/// Atomically persists the redo journal before the first detach has recovery evidence.
+fn persist_clean_journal(
+    storage: &StorageLayout,
+    paths: &CleanPaths,
+    next_epoch: ProjectEpoch,
+) -> io::Result<()> {
+    persist_clean_journal_value(&expected_clean_journal(storage, next_epoch), paths)
+}
+
+/// 原子写入一个已冻结的 journal 值；用于旧 journal 升级时保留原参与者路径。 /
+/// Atomically writes a frozen journal value, preserving former participant paths during upgrade.
+fn persist_clean_journal_value(journal: &CleanJournal, paths: &CleanPaths) -> io::Result<()> {
+    let bytes = serde_json::to_vec(journal)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let parent = paths.journal.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "clean journal has no parent")
+    })?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    use std::io::Write as _;
+    temporary.write_all(&bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(&paths.journal)
+        .map_err(|error| error.error)?;
+    sync_parent(&paths.journal)
+}
+
+/// 校验 journal 身份；布局变更时只接受仍位于规范项目根内的旧 target。 /
+/// Validates journal identity; after a layout change, only a former target within the canonical
+/// project root is accepted.
+fn validate_clean_journal(
+    storage: &StorageLayout,
+    project_root: &Path,
+    journal: &Path,
+) -> io::Result<CleanJournal> {
+    let metadata = std::fs::symlink_metadata(journal)?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "clean journal `{}` is not a regular file",
+                journal.display()
+            ),
+        ));
+    }
+    let actual: CleanJournal = serde_json::from_slice(&std::fs::read(journal)?)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if actual.version != CLEAN_JOURNAL_VERSION || actual.catalog_root != storage.catalog_root() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "clean journal `{}` does not match this storage layout",
+                journal.display()
+            ),
+        ));
+    }
+    if actual.publication_root != storage.publication_root() {
+        let parent = actual.publication_root.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "former publication root has no parent",
+            )
+        })?;
+        let physical_parent = normalize_from_existing_ancestor(parent)?;
+        if actual.publication_root == project_root || !physical_parent.starts_with(project_root) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "clean journal `{}` has an unsafe former publication root",
+                    journal.display()
+                ),
+            ));
+        }
+    }
+    Ok(actual)
+}
+
+fn journal_exists(path: &Path) -> io::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// 幂等 roll-forward 一个已提交的 clean journal。 /
+/// Idempotently rolls a committed clean journal forward.
+fn recover_clean_journal(
+    storage: &StorageLayout,
+    project_root: &Path,
+    paths: &CleanPaths,
+    result: &mut CleanResult,
+    changed: &mut bool,
+) -> io::Result<()> {
+    if !journal_exists(&paths.journal)? {
+        return Ok(());
+    }
+    let mut journal = validate_clean_journal(storage, project_root, &paths.journal)?;
+    let next_epoch = match journal.next_epoch {
+        Some(epoch) => epoch,
+        None => {
+            let epoch = next_project_epoch(storage)?;
+            journal.next_epoch = Some(epoch);
+            persist_clean_journal_value(&journal, paths)?;
+            epoch
+        }
+    };
+    *changed = true;
+    write_project_epoch(&paths.epoch, &next_epoch)?;
+    let publication_tombstone = clean_tombstone(
+        &journal.publication_root,
+        paths
+            .lock
+            .file_stem()
+            .expect("clean paths require a lock name"),
+    )?;
+    clean_root(
+        &journal.publication_root,
+        &publication_tombstone,
+        result,
+        changed,
+    )?;
+    clean_root(
+        storage.catalog_root(),
+        &paths.catalog_tombstone,
+        result,
+        changed,
+    )?;
+    std::fs::remove_file(&paths.journal)?;
+    sync_parent(&paths.journal)
+}
+
+/// 在项目锁内计算下一 fence；耗尽时拒绝复用旧身份。 /
+/// Computes the next fence while holding the project lock; exhaustion never reuses an identity.
+fn next_project_epoch(storage: &StorageLayout) -> io::Result<ProjectEpoch> {
+    read_project_epoch(storage.catalog_root())?
+        .checked_next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "project epoch exhausted"))
+}
+
+/// 先独占 detach 根，再以不跟随链接的方式删除 tombstone。 /
+/// Exclusively detaches a root, then deletes its tombstone without following links.
+fn clean_root(
+    root: &Path,
+    tombstone: &Path,
+    result: &mut CleanResult,
+    changed: &mut bool,
+) -> io::Result<()> {
+    if journal_exists(tombstone)? {
+        *changed = true;
+        remove_tree_no_follow(tombstone, result)?;
+        sync_parent(tombstone)?;
+    }
+    if !journal_exists(root)? {
+        return Ok(());
+    }
+    rename_with_retry(root, tombstone)?;
+    *changed = true;
+    sync_parent(root)?;
+    remove_tree_no_follow(tombstone, result)?;
+    sync_parent(tombstone)
+}
+
+/// 递归删除并只统计成功删除的普通文件；链接与 reparse point 只删除目录项。 /
+/// Recursively removes entries and counts only successfully removed regular files; links and
+/// reparse points are removed as entries without traversal.
+fn remove_tree_no_follow(path: &Path, result: &mut CleanResult) -> io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata_is_link_or_reparse(&metadata) {
+        return remove_link_or_reparse(path, &metadata);
+    }
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            remove_tree_no_follow(&entry?.path(), result)?;
+        }
+        return std::fs::remove_dir(path);
+    }
+    std::fs::remove_file(path)?;
+    if metadata.is_file() {
+        result.build_files = result.build_files.checked_add(1).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "clean file count overflow")
+        })?;
+        result.build_bytes = result
+            .build_bytes
+            .checked_add(metadata.len())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "clean byte count overflow")
+            })?;
+    }
+    Ok(())
+}
+
+fn metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn remove_link_or_reparse(path: &Path, metadata: &std::fs::Metadata) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        if metadata.file_attributes() & 0x10 != 0 {
+            return std::fs::remove_dir(path);
+        }
+    }
+    let _ = metadata;
+    std::fs::remove_file(path)
+}
+
+/// 以 no-clobber 语义 rename，并对 Windows 暂时共享冲突作有界重试。 /
+/// Renames with no-clobber semantics and bounded retries for transient Windows sharing failures.
+fn rename_with_retry(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    let mut attempts = 0;
+    loop {
+        match squish_platform_fs::rename_exclusive(from, to) {
+            Ok(()) => return Ok(()),
+            #[cfg(windows)]
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    && attempts + 1 < CLEAN_RENAME_ATTEMPTS =>
+            {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> io::Result<()> {
+    File::open(path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "durable path has no parent")
+    })?)?
+    .sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 /// 不读取进程全局状态的 production services 组合。 / Production services composition which reads no process-global state.
 pub struct ProductionHost {
     project_root: PathBuf,
@@ -609,6 +1008,7 @@ impl ProductionHost {
                 }
             }
         }
+        recover_interrupted_clean(&config.storage, &project_root)?;
         let git_runner = git_runner(config.git)?;
         let git = GitHost::with_runner(context.clone(), git_runner.clone());
         let build_runtime = Arc::new(ProductionBuildRuntime::new(
@@ -839,6 +1239,17 @@ impl ProductionHost {
         let packages = self.materialize_lock(&lockfile, mode)?;
         Ok((lockfile, packages))
     }
+}
+
+fn recover_interrupted_clean(storage: &StorageLayout, project_root: &Path) -> io::Result<()> {
+    let paths = CleanPaths::new(storage)?;
+    if !journal_exists(&paths.journal)? {
+        return Ok(());
+    }
+    let _lock = open_project_lock(&paths)?;
+    let mut result = CleanResult::default();
+    let mut changed = false;
+    recover_clean_journal(storage, project_root, &paths, &mut result, &mut changed)
 }
 
 impl StagePreparer for ProductionHost {
@@ -1252,6 +1663,91 @@ impl Services for ProductionHost {
         publish_project(request, self, cancellation, faults)
     }
 
+    fn clean_project(
+        &self,
+        project_root: &Path,
+        cancellation: squish_kernel::CancellationToken,
+    ) -> Result<ProjectCleanStatus, ServiceError> {
+        self.require_project(project_root)?;
+        if cancellation.is_cancelled() {
+            return Ok(ProjectCleanStatus::Cancelled);
+        }
+
+        let paths = CleanPaths::new(&self.storage)
+            .map_err(|error| ServiceError::new("project_clean_failed", error.to_string()))?;
+        let Some(_lock) = open_project_lock_cancellable(&paths, &cancellation)
+            .map_err(|error| ServiceError::new("project_clean_failed", error.to_string()))?
+        else {
+            return Ok(ProjectCleanStatus::Cancelled);
+        };
+        if cancellation.is_cancelled() {
+            return Ok(ProjectCleanStatus::Cancelled);
+        }
+
+        let mut result = CleanResult::default();
+        let mut changed = false;
+        if let Err(error) = recover_clean_journal(
+            &self.storage,
+            &self.project_root,
+            &paths,
+            &mut result,
+            &mut changed,
+        ) {
+            return clean_io_failure(result, changed, error);
+        }
+        if !changed && cancellation.is_cancelled() {
+            return Ok(ProjectCleanStatus::Cancelled);
+        }
+
+        let next_epoch = match next_project_epoch(&self.storage) {
+            Ok(epoch) => epoch,
+            Err(error) => return clean_io_failure(result, changed, error),
+        };
+        if let Err(error) = persist_clean_journal(&self.storage, &paths, next_epoch) {
+            return clean_io_failure(result, changed, error);
+        }
+        changed = true;
+        if let Err(error) = write_project_epoch(&paths.epoch, &next_epoch) {
+            return clean_io_failure(result, changed, error);
+        }
+
+        let project_clean = clean_root(
+            self.storage.publication_root(),
+            &paths.publication_tombstone,
+            &mut result,
+            &mut changed,
+        )
+        .and_then(|()| {
+            clean_root(
+                self.storage.catalog_root(),
+                &paths.catalog_tombstone,
+                &mut result,
+                &mut changed,
+            )
+        })
+        .and_then(|()| std::fs::remove_file(&paths.journal))
+        .and_then(|()| sync_parent(&paths.journal));
+        if let Err(error) = project_clean {
+            if !changed {
+                let _ = std::fs::remove_file(&paths.journal);
+            }
+            return clean_io_failure(result, changed, error);
+        }
+
+        match squish_fetch::clean_dependency_cache(&self.context) {
+            Ok(cache) => {
+                result.invalid_dependency_entries = cache.removed_entries;
+                result.invalid_dependency_bytes = cache.removed_bytes;
+                result.busy_dependency_entries = cache.skipped_busy;
+                Ok(ProjectCleanStatus::Cleaned(result))
+            }
+            Err(error) => Ok(ProjectCleanStatus::CommittedFailure {
+                result,
+                error: ServiceError::new("dependency_cache_clean_failed", error.to_string()),
+            }),
+        }
+    }
+
     fn storage_layout(&self, project_root: &Path) -> Result<StorageLayout, ServiceError> {
         self.require_project(project_root)?;
         Ok(self.storage.clone())
@@ -1374,6 +1870,19 @@ impl Services for ProductionHost {
         Ok(self
             .current_catalog()?
             .map(|catalog| catalog.record.planned_actions().clone()))
+    }
+}
+
+fn clean_io_failure(
+    result: CleanResult,
+    changed: bool,
+    error: io::Error,
+) -> Result<ProjectCleanStatus, ServiceError> {
+    let error = ServiceError::new("project_clean_failed", error.to_string());
+    if changed {
+        Ok(ProjectCleanStatus::CommittedFailure { result, error })
+    } else {
+        Err(error)
     }
 }
 
@@ -1619,10 +2128,15 @@ mod tests {
             temporary.path().join("catalog"),
         )
         .unwrap();
-        let filesystem = Arc::new(squish_fetch::FilesystemHost::new(&root).unwrap());
-        let host = ProductionHost::open(HostConfig {
-            project_root: root,
-            source_cache_root: source_cache,
+        let host = fixture_host(&root, &source_cache, &storage);
+        (temporary, host, storage)
+    }
+
+    fn fixture_host(root: &Path, source_cache: &Path, storage: &StorageLayout) -> ProductionHost {
+        let filesystem = Arc::new(squish_fetch::FilesystemHost::new(root).unwrap());
+        ProductionHost::open(HostConfig {
+            project_root: root.to_path_buf(),
+            source_cache_root: source_cache.to_path_buf(),
             storage: storage.clone(),
             registries: Vec::new(),
             credentials: Arc::new(NoCredentials),
@@ -1632,8 +2146,7 @@ mod tests {
             observer: Arc::new(NoopObserver),
             filesystem,
         })
-        .unwrap();
-        (temporary, host, storage)
+        .unwrap()
     }
 
     #[test]
@@ -2441,5 +2954,323 @@ mod tests {
 
         assert!(matches!(status, ProjectCreationStatus::CommittedFailure(_)));
         assert!(destination.exists());
+    }
+
+    #[test]
+    fn clean_removes_project_state_but_preserves_shared_build_storage() {
+        let (_temporary, host, storage) = fixture();
+        let initial_epoch = read_project_epoch(storage.catalog_root()).unwrap();
+        std::fs::create_dir_all(storage.publication_root().join("nested")).unwrap();
+        std::fs::write(storage.publication_root().join("nested/one"), b"abc").unwrap();
+        std::fs::create_dir_all(storage.catalog_root()).unwrap();
+        std::fs::write(storage.catalog_root().join("two"), b"12345").unwrap();
+        std::fs::create_dir_all(storage.cas_root()).unwrap();
+        std::fs::write(storage.cas_root().join("keep"), b"cas").unwrap();
+        std::fs::write(storage.action_index(), b"index").unwrap();
+
+        let status = Services::clean_project(
+            &host,
+            host.project_root(),
+            squish_kernel::CancellationToken::default(),
+        )
+        .unwrap();
+        let ProjectCleanStatus::Cleaned(result) = status else {
+            panic!("clean should complete")
+        };
+        assert_eq!(result.build_files, 2);
+        assert_eq!(result.build_bytes, 8);
+        assert!(!storage.publication_root().exists());
+        assert!(!storage.catalog_root().exists());
+        assert_eq!(
+            std::fs::read(storage.cas_root().join("keep")).unwrap(),
+            b"cas"
+        );
+        assert_eq!(std::fs::read(storage.action_index()).unwrap(), b"index");
+        let first_epoch = read_project_epoch(storage.catalog_root()).unwrap();
+        assert_ne!(first_epoch, initial_epoch);
+
+        let second = Services::clean_project(
+            &host,
+            host.project_root(),
+            squish_kernel::CancellationToken::default(),
+        )
+        .unwrap();
+        assert_eq!(second, ProjectCleanStatus::Cleaned(CleanResult::default()));
+        let second_epoch = read_project_epoch(storage.catalog_root()).unwrap();
+        assert_ne!(second_epoch, first_epoch);
+    }
+
+    #[test]
+    fn clean_honors_pre_cancellation_without_removing_state() {
+        let (_temporary, host, storage) = fixture();
+        std::fs::create_dir_all(storage.publication_root()).unwrap();
+        std::fs::write(storage.publication_root().join("keep"), b"still here").unwrap();
+        let cancellation = squish_kernel::CancellationToken::default();
+        cancellation.cancel();
+
+        assert_eq!(
+            Services::clean_project(&host, host.project_root(), cancellation).unwrap(),
+            ProjectCleanStatus::Cancelled
+        );
+        assert!(storage.publication_root().join("keep").is_file());
+    }
+
+    #[test]
+    fn clean_honors_cancellation_while_waiting_for_project_lock() {
+        let (_temporary, host, storage) = fixture();
+        std::fs::create_dir_all(storage.publication_root()).unwrap();
+        std::fs::write(storage.publication_root().join("keep"), b"still here").unwrap();
+        let paths = CleanPaths::new(&storage).unwrap();
+        let lock = open_project_lock(&paths).unwrap();
+        let host = Arc::new(host);
+        let cancellation = squish_kernel::CancellationToken::default();
+        let worker_host = host.clone();
+        let worker_cancellation = cancellation.clone();
+        let worker = std::thread::spawn(move || {
+            Services::clean_project(
+                worker_host.as_ref(),
+                worker_host.project_root(),
+                worker_cancellation,
+            )
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        cancellation.cancel();
+
+        assert_eq!(
+            worker.join().unwrap().unwrap(),
+            ProjectCleanStatus::Cancelled
+        );
+        assert!(storage.publication_root().join("keep").is_file());
+        drop(lock);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clean_does_not_follow_or_count_symbolic_links() {
+        let (temporary, host, storage) = fixture();
+        let external = temporary.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("keep"), b"outside").unwrap();
+        std::fs::create_dir_all(storage.publication_root()).unwrap();
+        std::fs::write(storage.publication_root().join("ordinary"), b"one").unwrap();
+        std::os::unix::fs::symlink(&external, storage.publication_root().join("linked")).unwrap();
+
+        let status = Services::clean_project(
+            &host,
+            host.project_root(),
+            squish_kernel::CancellationToken::default(),
+        )
+        .unwrap();
+        let ProjectCleanStatus::Cleaned(result) = status else {
+            panic!("clean should complete")
+        };
+        assert_eq!(result.build_files, 1);
+        assert_eq!(result.build_bytes, 3);
+        assert_eq!(std::fs::read(external.join("keep")).unwrap(), b"outside");
+    }
+
+    #[test]
+    fn clean_prunes_corrupt_dependency_tree() {
+        let (_temporary, host, _storage) = fixture();
+        let digest = "a".repeat(64);
+        let tree = host
+            .source_cache_root()
+            .join("v1/materialized/sha256/aa")
+            .join(&digest);
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::write(tree.join("corrupt"), b"bad").unwrap();
+
+        let status = Services::clean_project(
+            &host,
+            host.project_root(),
+            squish_kernel::CancellationToken::default(),
+        )
+        .unwrap();
+        let ProjectCleanStatus::Cleaned(result) = status else {
+            panic!("clean should complete")
+        };
+        assert_eq!(result.invalid_dependency_entries, 1);
+        assert_eq!(result.invalid_dependency_bytes, 3);
+        assert_eq!(result.busy_dependency_entries, 0);
+        assert!(!tree.exists());
+    }
+
+    #[test]
+    fn open_rolls_forward_leftover_clean_journal_and_tombstone() {
+        let (temporary, host, storage) = fixture();
+        let project_root = host.project_root().to_path_buf();
+        let source_cache = host.source_cache_root().to_path_buf();
+        std::fs::create_dir_all(storage.publication_root()).unwrap();
+        std::fs::write(storage.publication_root().join("target"), b"target").unwrap();
+        std::fs::create_dir_all(storage.catalog_root()).unwrap();
+        std::fs::write(storage.catalog_root().join("catalog"), b"catalog").unwrap();
+        let paths = CleanPaths::new(&storage).unwrap();
+        let lock = open_project_lock(&paths).unwrap();
+        let expected_epoch = next_project_epoch(&storage).unwrap();
+        persist_clean_journal(&storage, &paths, expected_epoch).unwrap();
+        rename_with_retry(storage.publication_root(), &paths.publication_tombstone).unwrap();
+        drop(lock);
+        drop(host);
+
+        let recovered = fixture_host(&project_root, &source_cache, &storage);
+        assert!(!storage.publication_root().exists());
+        assert!(!storage.catalog_root().exists());
+        assert!(!paths.publication_tombstone.exists());
+        assert!(!paths.journal.exists());
+        assert_eq!(
+            read_project_epoch(storage.catalog_root()).unwrap(),
+            expected_epoch
+        );
+        drop(recovered);
+        drop(temporary);
+    }
+
+    #[test]
+    fn open_upgrades_legacy_clean_journal_with_a_recoverable_epoch() {
+        let (temporary, host, storage) = fixture();
+        let project_root = host.project_root().to_path_buf();
+        let source_cache = host.source_cache_root().to_path_buf();
+        std::fs::create_dir_all(storage.publication_root()).unwrap();
+        std::fs::write(storage.publication_root().join("old"), b"old").unwrap();
+        let paths = CleanPaths::new(&storage).unwrap();
+        let expected_epoch = next_project_epoch(&storage).unwrap();
+        let legacy = CleanJournal {
+            version: CLEAN_JOURNAL_VERSION,
+            publication_root: storage.publication_root().to_path_buf(),
+            catalog_root: storage.catalog_root().to_path_buf(),
+            next_epoch: None,
+        };
+        let lock = open_project_lock(&paths).unwrap();
+        persist_clean_journal_value(&legacy, &paths).unwrap();
+        drop(lock);
+        drop(host);
+
+        let recovered = fixture_host(&project_root, &source_cache, &storage);
+        assert_eq!(
+            read_project_epoch(storage.catalog_root()).unwrap(),
+            expected_epoch
+        );
+        assert!(!storage.publication_root().exists());
+        assert!(!paths.journal.exists());
+        drop(recovered);
+        drop(temporary);
+    }
+
+    #[test]
+    fn open_recovers_safe_former_project_target_after_layout_change() {
+        let (temporary, host, storage) = fixture();
+        let project_root = host.project_root().to_path_buf();
+        let source_cache = host.source_cache_root().to_path_buf();
+        let old_target = project_root.join("old-target");
+        let old_storage = StorageLayout::new(
+            storage.cas_root(),
+            storage.action_index(),
+            &old_target,
+            storage.catalog_root(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(&old_target).unwrap();
+        std::fs::write(old_target.join("old"), b"old").unwrap();
+        let old_paths = CleanPaths::new(&old_storage).unwrap();
+        let lock = open_project_lock(&old_paths).unwrap();
+        let expected_epoch = next_project_epoch(&old_storage).unwrap();
+        persist_clean_journal(&old_storage, &old_paths, expected_epoch).unwrap();
+        drop(lock);
+        drop(host);
+
+        let new_storage = StorageLayout::new(
+            storage.cas_root(),
+            storage.action_index(),
+            project_root.join("new-target"),
+            storage.catalog_root(),
+        )
+        .unwrap();
+        let recovered = fixture_host(&project_root, &source_cache, &new_storage);
+        assert!(!old_target.exists());
+        assert!(!old_paths.journal.exists());
+        assert_eq!(
+            read_project_epoch(new_storage.catalog_root()).unwrap(),
+            expected_epoch
+        );
+        drop(recovered);
+        drop(temporary);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn changed_layout_recovery_removes_root_symlink_without_following_it() {
+        let (temporary, host, storage) = fixture();
+        let project_root = host.project_root().to_path_buf();
+        let source_cache = host.source_cache_root().to_path_buf();
+        let external = temporary.path().join("external-target");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("keep"), b"outside").unwrap();
+        let old_target = project_root.join("old-target-link");
+        std::os::unix::fs::symlink(&external, &old_target).unwrap();
+        let old_storage = StorageLayout::new(
+            storage.cas_root(),
+            storage.action_index(),
+            &old_target,
+            storage.catalog_root(),
+        )
+        .unwrap();
+        let old_paths = CleanPaths::new(&old_storage).unwrap();
+        let lock = open_project_lock(&old_paths).unwrap();
+        let expected_epoch = next_project_epoch(&old_storage).unwrap();
+        persist_clean_journal(&old_storage, &old_paths, expected_epoch).unwrap();
+        drop(lock);
+        drop(host);
+
+        let new_storage = StorageLayout::new(
+            storage.cas_root(),
+            storage.action_index(),
+            project_root.join("new-target"),
+            storage.catalog_root(),
+        )
+        .unwrap();
+        let recovered = fixture_host(&project_root, &source_cache, &new_storage);
+        assert!(std::fs::symlink_metadata(&old_target).is_err());
+        assert_eq!(std::fs::read(external.join("keep")).unwrap(), b"outside");
+        assert_eq!(
+            read_project_epoch(new_storage.catalog_root()).unwrap(),
+            expected_epoch
+        );
+        drop(recovered);
+        drop(temporary);
+    }
+
+    #[test]
+    fn publisher_initialization_waits_for_the_clean_project_lock() {
+        let (_temporary, host, storage) = fixture();
+        let paths = CleanPaths::new(&storage).unwrap();
+        let lock = open_project_lock(&paths).unwrap();
+        let runtime = host.build_runtime.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            runtime.current_generation(
+                squish_manager::GenerationSpace::TargetArtifacts,
+                &squish_build::PublicationTargetId::new("fixture").unwrap(),
+            )
+        });
+        started_rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        assert!(!storage.publication_root().exists());
+        assert!(
+            !storage
+                .catalog_root()
+                .join("target-publication-state")
+                .exists()
+        );
+        drop(lock);
+        assert!(worker.join().unwrap().unwrap().is_none());
+        assert!(storage.publication_root().is_dir());
+        assert!(
+            storage
+                .catalog_root()
+                .join("target-publication-state")
+                .is_dir()
+        );
     }
 }

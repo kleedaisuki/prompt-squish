@@ -98,20 +98,31 @@ impl Fixture {
     }
 
     fn artifact_journal(&self) -> PathBuf {
-        self.root
-            .path()
-            .join("target/xmlsquish/.squish-publish/generation-journal.json")
+        self.project_namespace()
+            .join("target-publication-state/generation-journal.json")
     }
 
     fn catalog_journal(&self) -> PathBuf {
+        self.project_namespace()
+            .join("build-catalog-state/generation-journal.json")
+    }
+
+    fn project_namespace(&self) -> PathBuf {
         let catalog = self.home.path().join("state/catalog/projects");
-        let namespace = fs::read_dir(catalog)
+        fs::read_dir(catalog)
             .unwrap()
-            .next()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                entry.file_type().is_ok_and(|kind| kind.is_dir())
+                    && name.len() == 64
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
             .expect("project namespace exists")
-            .unwrap()
-            .path();
-        namespace.join(".squish-publish/generation-journal.json")
+            .path()
     }
 }
 

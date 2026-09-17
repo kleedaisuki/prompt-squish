@@ -1,13 +1,14 @@
 //! prompt-squish 的统一项目管理能力。 / Unified project-management capability for prompt-squish.
 //!
-//! 本 crate 把六种用户操作规划为同一种动作图；外部 I/O 仅通过 [`Services`] 进入。
-//! This crate plans all six user operations into one action graph; external I/O enters only
+//! 本 crate 把七种用户操作规划为同一种动作图；外部 I/O 仅通过 [`Services`] 进入。
+//! This crate plans all seven user operations into one action graph; external I/O enters only
 //! through [`Services`].
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 pub mod build;
+pub mod clean;
 mod error;
 pub mod fmt;
 pub mod inspect;
@@ -28,8 +29,9 @@ pub use runtime::{
     BuildRuntimeProvider, GenerationSpace,
 };
 pub use services::{
-    ProjectCreationLocation, ProjectCreationStatus, ProvenanceNonApplicability, ProvenanceRelation,
-    ResolveRequest, ResolvedDependencies, Services, StorageLayout, StorageLayoutError,
+    ProjectCleanStatus, ProjectCreationLocation, ProjectCreationStatus, ProvenanceNonApplicability,
+    ProvenanceRelation, ResolveRequest, ResolvedDependencies, Services, StorageLayout,
+    StorageLayoutError,
 };
 
 use squish_kernel::{Capability, CapabilityDescriptor, InvocationContext, OperationOutcome};
@@ -92,7 +94,7 @@ impl Default for InvocationSettings {
     }
 }
 
-/// 同时拥有六种项目操作的唯一静态能力。 / Sole static capability owning all six project operations.
+/// 同时拥有七种项目操作的唯一静态能力。 / Sole static capability owning all seven project operations.
 pub struct ManagerCapability<S> {
     services: S,
     settings: InvocationSettings,
@@ -150,12 +152,13 @@ static OPERATIONS: &[OperationKind] = &[
     OperationKind::Add,
     OperationKind::Remove,
     OperationKind::Inspect,
+    OperationKind::Clean,
 ];
 
 static DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
     id: "project-manager",
     operations: OPERATIONS,
-    summary: "Create, build, format, mutate, and inspect prompt-squish projects",
+    summary: "Create, build, format, mutate, inspect, and clean prompt-squish projects",
 };
 
 impl<S: Services> Capability for ManagerCapability<S> {
@@ -210,6 +213,9 @@ impl<S: Services> Capability for ManagerCapability<S> {
             ),
             OperationRequest::Inspect(request) => {
                 inspect::execute(request, &self.services, &self.settings, context)
+            }
+            OperationRequest::Clean(request) => {
+                clean::execute(request, &self.services, &self.settings, context)
             }
         }
     }

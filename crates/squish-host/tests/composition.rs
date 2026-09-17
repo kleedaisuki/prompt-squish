@@ -2,7 +2,10 @@
 
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
-use squish_build::PublicationTargetId;
+use squish_build::{
+    LogicalArtifactName, OutputName, ProducedOutput, Publication, PublicationPath,
+    PublicationTargetId,
+};
 use squish_fetch::{
     FetchError, GitInvocation, GitRunOutput, GitRunner, HttpRequest, HttpResponse, HttpTransport,
     Limits, NoCredentials, NoopObserver,
@@ -10,6 +13,7 @@ use squish_fetch::{
 use squish_host::{GitExecution, HostConfig, ProductionHost};
 use squish_manager::{GenerationSpace, ResolveRequest, Services, StorageLayout};
 use squish_project::{Manifest, ResolutionMode};
+use squish_protocol::ArtifactKind;
 
 struct NoHttp;
 impl HttpTransport for NoHttp {
@@ -96,7 +100,7 @@ fn public_services_preserve_exact_locked_and_frozen_resolution() {
 
 #[test]
 fn production_runtime_uses_one_cas_and_isolated_generation_spaces() {
-    let (_temporary, host) = fixture();
+    let (temporary, host) = fixture();
     let runtime = Services::open_build_runtime(&host, host.project_root()).unwrap();
     let reopened = Services::open_build_runtime(&host, host.project_root()).unwrap();
     assert!(Arc::ptr_eq(&runtime, &reopened));
@@ -130,5 +134,35 @@ fn production_runtime_uses_one_cas_and_isolated_generation_spaces() {
             .current_generation(GenerationSpace::BuildCatalog, &target)
             .unwrap(),
         Some(catalog_generation)
+    );
+
+    let prompt = runtime.write_blob(b"stable prompt").unwrap();
+    runtime
+        .publish_generation(
+            GenerationSpace::TargetArtifacts,
+            &target,
+            &[Publication {
+                output: ProducedOutput {
+                    name: OutputName::new("prompt.prompt").unwrap(),
+                    kind: ArtifactKind::Prompt,
+                    digest: prompt,
+                    size: 13,
+                },
+                name: LogicalArtifactName::new("prompt.prompt").unwrap(),
+                destination: PublicationPath::new("target/xmlsquish/prompt.prompt").unwrap(),
+            }],
+        )
+        .unwrap();
+    assert_eq!(
+        std::fs::read(temporary.path().join("publish/prompt.prompt")).unwrap(),
+        b"stable prompt"
+    );
+    assert!(!temporary.path().join("publish/target").exists());
+    assert!(!temporary.path().join("publish/.squish-publish").exists());
+    assert!(
+        temporary
+            .path()
+            .join("catalog/target-publication-state/generations")
+            .exists()
     );
 }
