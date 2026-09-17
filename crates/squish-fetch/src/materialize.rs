@@ -410,6 +410,7 @@ impl Materializer {
                     bytes: tree.files.iter().map(|f| f.bytes.len() as u64).sum(),
                     cache_status: "hit".into(),
                 });
+            FileExt::unlock(&lock)?;
             return Ok(package);
         }
         if base.exists() {
@@ -507,6 +508,7 @@ impl Materializer {
                 bytes: total,
                 cache_status: "committed".into(),
             });
+        FileExt::unlock(&lock)?;
         Ok(MaterializedPackage {
             content_digest: tree.content_digest.clone(),
             manifest_digest,

@@ -886,13 +886,17 @@ fn remove_link_or_reparse(path: &Path, metadata: &std::fs::Metadata) -> io::Resu
 
 /// 以 no-clobber 语义 rename，并对 Windows 暂时共享冲突作有界重试。 /
 /// Renames with no-clobber semantics and bounded retries for transient Windows sharing failures.
+#[cfg(not(windows))]
 fn rename_with_retry(from: &Path, to: &Path) -> io::Result<()> {
-    #[cfg(windows)]
+    squish_platform_fs::rename_exclusive(from, to)
+}
+
+#[cfg(windows)]
+fn rename_with_retry(from: &Path, to: &Path) -> io::Result<()> {
     let mut attempts = 0;
     loop {
         match squish_platform_fs::rename_exclusive(from, to) {
             Ok(()) => return Ok(()),
-            #[cfg(windows)]
             Err(error)
                 if error.kind() == io::ErrorKind::PermissionDenied
                     && attempts + 1 < CLEAN_RENAME_ATTEMPTS =>
