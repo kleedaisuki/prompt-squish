@@ -60,12 +60,13 @@ pub fn clean_dependency_cache(
 ) -> Result<DependencyCacheCleanStats, FetchError> {
     let mut stats = DependencyCacheCleanStats::default();
     fs::create_dir_all(context.cache.join("v1"))?;
-    let Some(_clean_lock) = try_lock(&context.cache.join("v1/clean.lock"), &mut stats)? else {
+    let Some(clean_lock) = try_lock(&context.cache.join("v1/clean.lock"), &mut stats)? else {
         return Ok(stats);
     };
     clean_quarantine(context, &mut stats)?;
     clean_materialized(context, &mut stats)?;
     clean_registry_mappings(context, &mut stats)?;
+    FileExt::unlock(&clean_lock)?;
     Ok(stats)
 }
 
@@ -98,12 +99,13 @@ fn clean_materialized(
             if !is_hex(digest, 64) || !digest.starts_with(prefix) {
                 continue;
             }
-            let Some(_lock) = try_digest_lock(context, digest, stats)? else {
+            let Some(lock) = try_digest_lock(context, digest, stats)? else {
                 continue;
             };
             if tree_has_reparse_point(&tree)? || !is_complete(context, digest) {
                 stats.removed(&tree)?;
             }
+            FileExt::unlock(&lock)?;
         }
     }
     Ok(())
@@ -121,22 +123,26 @@ fn clean_registry_mappings(
         if !is_hex(name, 64) {
             continue;
         }
-        let Some(_mapping_lock) = try_lock(&mapping.with_extension("update.lock"), stats)? else {
+        let Some(mapping_lock) = try_lock(&mapping.with_extension("update.lock"), stats)? else {
             continue;
         };
         let content = read_mapping(&mapping);
         let valid = match content {
             Some(ref digest) => {
-                let Some(_digest_lock) = try_digest_lock(context, digest, stats)? else {
+                let Some(digest_lock) = try_digest_lock(context, digest, stats)? else {
+                    FileExt::unlock(&mapping_lock)?;
                     continue;
                 };
-                is_complete(context, digest)
+                let valid = is_complete(context, digest);
+                FileExt::unlock(&digest_lock)?;
+                valid
             }
             None => false,
         };
         if !valid {
             stats.removed(&mapping)?;
         }
+        FileExt::unlock(&mapping_lock)?;
     }
     Ok(())
 }
