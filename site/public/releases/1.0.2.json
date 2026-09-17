@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "product": {
+    "name": "xmlsquish",
+    "description": "A local-first, deterministic project manager and compiler for XML prompt projects.",
+    "license": "GPL-3.0-or-later",
+    "homepage": "https://xmlsquish.moesegfault.dev/",
+    "repository": "https://github.com/kleedaisuki/prompt-squish",
+    "cratesIoPublished": false
+  },
+  "release": {
+    "version": "1.0.2",
+    "tag": "v1.0.2",
+    "date": "2026-09-17",
+    "releaseStatus": "published",
+    "pages": {
+      "zh-CN": "https://xmlsquish.moesegfault.dev/releases/",
+      "en": "https://xmlsquish.moesegfault.dev/en/releases/"
+    },
+    "githubRelease": "https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.2",
+    "checksums": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.0.2/SHA256SUMS"
+  },
+  "cli": {
+    "commands": [
+      "new",
+      "fmt",
+      "build",
+      "clean",
+      "add",
+      "remove",
+      "inspect"
+    ],
+    "sourceInstall": "cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v1.0.2 --locked",
+    "sourceInstallRequirement": "Rust 1.88 or newer",
+    "machineProtocol": "3.1",
+    "automationMigration": "Additive from protocol 3.0: typed clean requests, actions, and result statistics."
+  },
+  "artifacts": [
+    {
+      "target": "x86_64-unknown-linux-gnu",
+      "system": "Linux",
+      "architecture": "x86_64",
+      "minimum": "glibc 2.35",
+      "format": "tar.gz",
+      "url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.0.2/xmlsquish-1.0.2-x86_64-unknown-linux-gnu.tar.gz"
+    },
+    {
+      "target": "aarch64-unknown-linux-gnu",
+      "system": "Linux",
+      "architecture": "aarch64",
+      "minimum": "glibc 2.35",
+      "format": "tar.gz",
+      "url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.0.2/xmlsquish-1.0.2-aarch64-unknown-linux-gnu.tar.gz"
+    },
+    {
+      "target": "x86_64-pc-windows-msvc",
+      "system": "Windows",
+      "architecture": "x86_64",
+      "minimum": "MSVC desktop target",
+      "format": "zip",
+      "url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.0.2/xmlsquish-1.0.2-x86_64-pc-windows-msvc.zip"
+    },
+    {
+      "target": "aarch64-pc-windows-msvc",
+      "system": "Windows",
+      "architecture": "aarch64",
+      "minimum": "MSVC desktop target",
+      "format": "zip",
+      "url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.0.2/xmlsquish-1.0.2-aarch64-pc-windows-msvc.zip"
+    },
+    {
+      "target": "x86_64-apple-darwin",
+      "system": "macOS",
+      "architecture": "x86_64",
+      "minimum": "macOS 11.0",
+      "format": "tar.gz",
+      "url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.0.2/xmlsquish-1.0.2-x86_64-apple-darwin.tar.gz"
+    },
+    {
+      "target": "aarch64-apple-darwin",
+      "system": "macOS",
+      "architecture": "aarch64",
+      "minimum": "macOS 11.0",
+      "format": "tar.gz",
+      "url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.0.2/xmlsquish-1.0.2-aarch64-apple-darwin.tar.gz"
+    }
+  ],
+  "integrity": {
+    "algorithm": "SHA-256",
+    "signed": false,
+    "notarized": false,
+    "note": "SHA256SUMS verifies downloaded bytes, not publisher identity. Binaries are unsigned and not Apple-notarized."
+  },
+  "highlights": [
+    "Stable manifest-derived product paths without public generation or content hashes.",
+    "Typed crash-recoverable clean for project outputs and provably invalid dependency cache entries.",
+    "Legacy v1.0.1 publication migration guarded by the shared project lock and durable phase marker.",
+    "Root SKILL.md plus Linux, Windows, and macOS layout/clean/rebuild release gates."
+  ]
+}

@@ -91,11 +91,24 @@ const en: ReleaseUiCopy = {
     allReleases: "All releases",
   },
   versions: {
+    "1.0.2": {
+      title: "Readable outputs and recoverable cleanup",
+      description: "xmlsquish 1.0.2 exposes stable artifact paths, adds a typed clean operation, and advances the additive machine protocol to 3.1.",
+      date: "September 17, 2026",
+      status: "Current stable release",
+      summary: "Build products now appear directly at their declared target paths while hashes, generations, and journals remain private. The new clean command removes project build state and only dependency-cache entries proven invalid.",
+      changes: [
+        { id: "target-layout", title: "Readable target layout", items: ["Prompt, IR, and debug products materialize at stable manifest-derived paths.", "Publication generations, content hashes, journals, and build records live in project-private manager state.", "Existing target/xmlsquish locators and custom workspace target directories remain compatible."] },
+        { id: "clean", title: "Typed, recoverable clean", items: ["xmlsquish clean removes the complete project output root and private catalog through the normal manager lifecycle.", "A redo journal, shared project lock, and publication epoch make build/clean races and interrupted cleanup recoverable.", "Healthy shared dependencies, the global CAS, and the action index are retained; only provably invalid cache entries are pruned."] },
+        { id: "agents-and-release", title: "Agent and release workflow", items: ["The root SKILL.md provides a compact DSL, manifest, configuration, and command reference.", "Linux, Windows, and macOS CI verifies exact output layout, clean, and offline rebuild behavior.", "Six native archives and SHA256SUMS are published only after the complete release matrix succeeds."] },
+      ],
+      compatibility: ["Manifest version, DSL namespace, artifact locators, locked/offline modes, and exit codes remain unchanged.", "Machine protocol 3.1 adds typed clean requests and results without changing existing 3.0 result shapes.", "Legacy v1.0.1 publication state is migrated and validated under the project lock before removal."],
+    },
     "1.0.1": {
       title: "Publication boundaries become product contracts",
       description: "xmlsquish 1.0.1 introduces typed artifact locators, verified raw inspection, capability-lazy runtime services, and machine protocol 3.0.",
       date: "September 16, 2026",
-      status: "Current stable release",
+      status: "Historical stable release",
       summary: "Build outputs now carry typed, project-relative locators instead of exposing publisher storage paths. Raw artifact inspection validates digest and size before any bytes reach stdout.",
       changes: [
         { id: "publication-catalog", title: "Typed publication catalog", items: ["Published targets expose target and generation identities plus typed artifact records.", "Every artifact carries an immutable id, kind, stable locator, size, and digest.", "Manager code no longer constructs or scans private generation directories."] },
@@ -184,11 +197,24 @@ const zh: ReleaseUiCopy = {
     allReleases: "全部发布",
   },
   versions: {
+    "1.0.2": {
+      title: "可读产物与可恢复清理",
+      description: "xmlsquish 1.0.2 提供稳定直观的产物路径，新增有类型 clean 操作，并将可加性机器协议提升到 3.1。",
+      date: "2026 年 9 月 17 日",
+      status: "当前稳定版本",
+      summary: "构建产品现在直接出现在清单声明的 target 路径；hash、generation 与 journal 留在私有状态。新的 clean 命令删除项目构建状态，并且只清理可证明失效的依赖缓存。",
+      changes: [
+        { id: "target-layout", title: "可读的 target 布局", items: ["Prompt、IR 与调试产品物化到由清单确定的稳定路径。", "发布 generation、内容 hash、journal 与 build record 迁入 manager 的项目私有状态。", "现有 target/xmlsquish locator 与自定义工作区 target-dir 保持兼容。"] },
+        { id: "clean", title: "有类型、可恢复的 clean", items: ["xmlsquish clean 通过正常 manager 生命周期删除完整项目输出根与私有目录。", "redo journal、共享项目锁和 publication epoch 使 build/clean 竞态及中断清理都能恢复。", "健康共享依赖、全局 CAS 与 action index 保留；只裁剪可证明失效的缓存条目。"] },
+        { id: "agents-and-release", title: "Agent 与发布工作流", items: ["根目录 SKILL.md 提供精简的 DSL、清单、配置与命令速查。", "Linux、Windows 与 macOS CI 验证精确输出布局、clean 和离线重建。", "只有完整发布矩阵通过后才发布六个原生归档及 SHA256SUMS。"] },
+      ],
+      compatibility: ["清单版本、DSL 命名空间、产物 locator、locked/offline 模式及退出码保持不变。", "机器协议 3.1 增加有类型 clean 请求和结果，不改变既有 3.0 结果结构。", "v1.0.1 的旧发布状态会在项目锁内迁移并验证，成功后才移除。"],
+    },
     "1.0.1": {
       title: "发布边界成为产品契约",
       description: "xmlsquish 1.0.1 引入有类型产物定位符、经验证的原始检查、按能力延迟初始化的运行时，以及机器协议 3.0。",
       date: "2026 年 9 月 16 日",
-      status: "当前稳定版本",
+      status: "历史稳定版本",
       summary: "构建输出改用有类型、项目相对的定位符，不再暴露发布器存储路径。原始产物检查会在任何字节进入 stdout 前验证摘要与大小。",
       changes: [
         { id: "publication-catalog", title: "有类型的发布目录", items: ["已发布目标公开目标与 generation 身份，以及有类型产物记录。", "每个产物携带不可变 id、kind、稳定 locator、size 与 digest。", "manager 不再构造或扫描私有 generation 目录。"] },

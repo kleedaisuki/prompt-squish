@@ -14,9 +14,10 @@ This experimental `llms.txt` file is an additive navigation aid for language-mod
 
 - [English release index](https://xmlsquish.moesegfault.dev/en/releases/): Reverse-chronological catalog of every product release.
 - [中文发布记录目录](https://xmlsquish.moesegfault.dev/releases/): 按时间倒序排列的全部产品版本目录。
-- [English v1.0.1 release detail](https://xmlsquish.moesegfault.dev/en/releases/1.0.1/): Exact changes, downloads, compatibility, and protocol 3.0 migration for the current release.
-- [中文 v1.0.1 发布详情](https://xmlsquish.moesegfault.dev/releases/1.0.1/): 当前版本的精确变更、下载、兼容边界与协议 3.0 迁移。
-- [Machine-readable v1.0.1 metadata](https://xmlsquish.moesegfault.dev/releases/1.0.1.json): Stable JSON metadata for six published native archives.
+- [English v1.0.2 release detail](https://xmlsquish.moesegfault.dev/en/releases/1.0.2/): Stable output paths, recoverable clean, downloads, compatibility, and protocol 3.1.
+- [中文 v1.0.2 发布详情](https://xmlsquish.moesegfault.dev/releases/1.0.2/): 稳定产物路径、可恢复 clean、下载、兼容边界与协议 3.1。
+- [Machine-readable v1.0.2 metadata](https://xmlsquish.moesegfault.dev/releases/1.0.2.json): Stable JSON metadata for six published native archives.
+- [Historical v1.0.1 metadata](https://xmlsquish.moesegfault.dev/releases/1.0.1.json): Immutable metadata retained for the previous patch release.
 - [Historical v1.0.0 metadata](https://xmlsquish.moesegfault.dev/releases/1.0.0.json): Immutable metadata retained for the previous stable release.
 
 ## DSL user manual
@@ -37,7 +38,7 @@ This experimental `llms.txt` file is an additive navigation aid for language-mod
 ## Operational facts
 
 - The stable namespace identity is exactly `https://xmlsquish.moesegfault.dev/ns`; it is unversioned and never localized.
-- CLI commands are `new`, `fmt`, `build`, `add`, `remove`, and `inspect`.
+- CLI commands are `new`, `fmt`, `build`, `clean`, `add`, `remove`, and `inspect`.
 - Source installation requires Rust 1.88 or newer and a locked Cargo workspace. xmlsquish is not published on crates.io.
-- v1.0.1 is published from immutable tag `v1.0.1`; its six native archives and `SHA256SUMS` are available from GitHub Releases.
-- Machine-event consumers must migrate from protocol 2.1 to protocol 3.0 together with v1.0.1.
+- v1.0.2 is published from immutable tag `v1.0.2`; its six native archives and `SHA256SUMS` are available from GitHub Releases.
+- Machine protocol 3.1 adds typed clean requests and results while retaining existing protocol 3.0 result shapes.
