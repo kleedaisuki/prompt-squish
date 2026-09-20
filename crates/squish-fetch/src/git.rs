@@ -442,7 +442,7 @@ impl GitHost {
         init_lock.lock_exclusive()?;
         if !db.join("HEAD").exists() {
             let format_arg = format!("--object-format={}", object_format_name(format));
-            let db_arg = db.as_os_str().to_owned();
+            let db_arg = git_command_path(db).into_os_string();
             let out = self.global_run(
                 None,
                 vec!["init".into(), "--bare".into(), format_arg.into(), db_arg],
@@ -546,6 +546,7 @@ impl GitHost {
             .map_err(|_| FetchError::Git("Git produced non-UTF-8 plumbing output".into()))
     }
     fn run(&self, db: &Path, args: &[&str]) -> Result<GitRunOutput, FetchError> {
+        let db = git_command_path(db);
         let mut invocation = vec![format!("--git-dir={}", db.display()).into()];
         invocation.extend(args.iter().map(OsString::from));
         let out = self.global_run(None, invocation, false)?;
@@ -594,6 +595,22 @@ impl GitHost {
             .join(hex::encode(Sha256::digest(repo)))
             .join(format!("{}.json", hex::encode(Sha256::digest(value))))
     }
+}
+
+/// 将内部规范路径转换为外部 Git 可接受的本机拼写。
+/// Converts an internal canonical path to a spelling accepted by external Git.
+fn git_command_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let value = path.to_string_lossy();
+        if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = value.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_path_buf()
 }
 
 impl squish_resolver::GitPort for GitHost {

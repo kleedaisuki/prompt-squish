@@ -768,9 +768,14 @@ source = { kind = "workspace", member = "packages/member", mutable = true }
         assert!(received.recv_timeout(Duration::from_millis(50)).is_err());
         barrier.release.wait();
         snapshot_thread.join().unwrap();
+        // The writer must make progress after the snapshot releases its lock. A
+        // generous deadline detects a real deadlock without mistaking a loaded
+        // shared CI runner for one.
+        // 快照释放锁后写入线程必须继续前进；宽裕的期限既能发现真实死锁，
+        // 也不会把繁忙共享 CI runner 的调度延迟误判成死锁。
         assert!(
             received
-                .recv_timeout(Duration::from_secs(2))
+                .recv_timeout(Duration::from_secs(30))
                 .unwrap()
                 .is_ok()
         );

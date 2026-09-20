@@ -944,7 +944,11 @@ impl ProductionHost {
     pub fn open(config: HostConfig) -> Result<Self, HostError> {
         let project_root = std::fs::canonicalize(&config.project_root)?;
         let context = HostContext {
-            cache: native_host_path(config.storage.source_cache_root().to_path_buf()),
+            // Keep the canonical Windows verbatim prefix for project-local cache paths:
+            // registry keys add two SHA-256 components and routinely exceed MAX_PATH.
+            // 为项目本地缓存保留 Windows 规范逐字路径前缀：Registry 键会追加两个
+            // SHA-256 分量，通常会超过 MAX_PATH。
+            cache: config.storage.source_cache_root().to_path_buf(),
             limits: config.limits,
             observer: config.observer,
         };
@@ -2460,7 +2464,14 @@ mod tests {
             .prefix("squish-host-registry-")
             .tempdir_in(std::fs::canonicalize(scratch).unwrap())
             .unwrap();
+        #[cfg(not(windows))]
         let root = temporary.path().join("project");
+        // Exercise a cache path beyond legacy MAX_PATH even in a short local checkout.
+        // 即使本地 checkout 很短，也要覆盖超过旧式 MAX_PATH 的缓存路径。
+        #[cfg(windows)]
+        let root = temporary
+            .path()
+            .join("project-with-a-deliberately-long-registry-cache-path-0123456789");
         std::fs::create_dir_all(&root).unwrap();
         let manifest = b"manifest-version = 1\n[package]\nname = \"demo\"\nversion = \"1.0.0\"\ndialect = \"xmlsquish/1\"\nsource-root = \"src\"\n";
         let tree = squish_fetch::LogicalTree::build(
