@@ -60,7 +60,7 @@ xmlsquish fmt --manifest-path examples/semantic/xmlsquish.toml --check
 xmlsquish build --manifest-path examples/semantic/xmlsquish.toml --emit prompt --emit ir --emit debug
 ```
 
-该示例的稳定逻辑产品定位符和真实文件路径都是 `target/xmlsquish/prompt.prompt`，可原样传给 `xmlsquish inspect artifact`；加 `--format=raw` 可将摘要验证后的真实产物字节写到 stdout。发布器以完整目标为单位提交并验证 generation；其 journal、hash、current pointer、`.xsmap` 与 build record 均保存在 manager 的项目私有状态，不会出现在 target 产品目录、构建结果路径或普通终端输出中。重复 `--emit` 可物化：
+该示例的稳定逻辑产品定位符和真实文件路径都是 `target/xmlsquish/artifacts/prompt.prompt`，可原样传给 `xmlsquish inspect artifact`；加 `--format=raw` 可将摘要验证后的真实产物字节写到 stdout。发布器以完整目标为单位提交并验证 generation；其 journal、hash、current pointer、`.xsmap` 与 build record 位于同一项目构建根的 `metadata/` 与 `cache/` 内，不会混入 `artifacts/`、构建结果路径或普通终端输出。重复 `--emit` 可物化：
 
 | 后缀 / Suffix | 含义 / Meaning |
 | --- | --- |
@@ -104,7 +104,7 @@ name = "Klee"
 | `xmlsquish add SPEC` | 新增或更新有类型依赖，并协调清单与锁文件 | `--path`, `--git`, `--rev/--tag/--branch`, `--registry`, `--rename`, `--dry-run` |
 | `xmlsquish remove ALIAS` | 按别名移除直接依赖 | `-p/--package`, `--dev`, `--build`, `--dry-run` |
 | `xmlsquish inspect …` | 只读检查 IR、链接、源码来源、缓存键或产物 | `ir`, `link`, `source`, `cache`, `artifact`; `--format human|json|raw` |
-| `xmlsquish clean` | 删除当前项目/工作区产物并裁剪可证明失效的依赖缓存 | `--manifest-path` |
+| `xmlsquish clean` | 原子分离并删除当前项目/工作区的完整本地构建根 | `--manifest-path` |
 
 除 `new` 外，项目命令从当前目录向上发现 `xmlsquish.toml`；`--manifest-path PATH` 显式选择清单。`new` 接受待创建的目标路径，并在适用时把项目加入外围工作区。不存在松散文件编译语法：路径必须通过清单目标或 `fmt --path` 等有类型选项表达。
 
@@ -130,13 +130,40 @@ xmlsquish build --frozen
 
 These modes apply to `build`, `add`, and `remove`. A dependency edit is planned and validated before commit; `--dry-run` writes neither manifest nor lock state. Adding or removing a dependency never rewrites `xs:import` automatically.
 
-`clean` 不改写清单或锁文件，也不会仅因当前项目未引用就删除健康的共享依赖。它保留
-全局内容寻址存储（Content-Addressed Store, CAS）与 action index；清理后仍可通过
-`build --offline` 复用有效缓存。
+### 项目本地构建根 / Project-local build root
 
-`clean` rewrites neither manifests nor the lockfile and never removes a healthy shared dependency
-merely because this project does not reference it. The global content-addressed store (CAS) and
-action index remain available, so valid cached work can be reused by `build --offline`.
+默认 `target/xmlsquish` 是项目或工作区拥有的唯一派生状态根，不是 Cargo 的机器级缓存：
+
+```text
+target/xmlsquish/
+├── artifacts/                 # 稳定的 .prompt / .xsir / .psdbg 产品
+├── cache/
+│   ├── cas/                   # 内容寻址存储 / Content-Addressed Store (CAS)
+│   ├── actions.sqlite3        # 可重建动作索引及其 WAL sidecars
+│   └── sources/               # 锁定依赖源码
+├── metadata/
+│   ├── layout.json            # 布局格式判别，不含绝对路径
+│   ├── publications/          # 发布 generations 与 current pointers
+│   └── catalog/               # 构建记录和 inspect 证据
+└── work/                      # 同文件系统暂存；永不作为权威状态
+```
+
+The default `target/xmlsquish` is the sole derived-state root owned by the project or workspace,
+not a Cargo-style machine cache. Stable products live under `artifacts/`; disposable CAS, action,
+and dependency-source caches live under `cache/`; rebuildable compilation and publication evidence
+lives under `metadata/`; and non-authoritative same-filesystem staging lives under `work/`.
+
+`clean` 不改写清单或锁文件。它取得独占维护锁，原子分离并删除整个构建根，所以产品、
+项目缓存和编译元数据一起消失；下一次构建从项目输入重建。1.0.4 不读取或迁移旧的全局
+缓存、`.xmlsquish/cache` 或分离的 manager storage。构建根同父目录可能短暂存在维护锁、
+clean journal 与 trash，它们只用于并发和崩溃恢复，不是缓存。
+
+`clean` rewrites neither manifests nor the lockfile. It takes the exclusive maintenance lock,
+atomically detaches, and deletes the entire build root, so products, project caches, and compilation
+metadata disappear together; the next build reconstructs them from project inputs. Version 1.0.4
+neither reads nor migrates legacy global caches, `.xmlsquish/cache`, or separate manager storage.
+The build-root parent may briefly contain a maintenance lock, clean journal, and trash entry used
+only for concurrency and crash recovery.
 
 ## 配置与输出 / Configuration and output
 
@@ -156,7 +183,7 @@ defaults
 | 工作区配置 | 项目根 `.xmlsquish/config.toml` |
 | CLI 覆盖 | `--config 'term.message-format="json"'`；值使用 TOML 语法，可重复 |
 
-相对路径按声明它的配置文件目录解析；CLI 覆盖中的相对路径按当前工作目录解析。支持的配置表是 `source`、`manager`、`build`、`term` 与 `registries.<alias>`。
+相对路径按声明它的配置文件目录解析；CLI 覆盖中的相对路径按当前工作目录解析。支持的配置表是 `build`、`new`、`term` 与 `registries.<alias>`。构建布局只由项目清单的 `workspace.target-dir` 决定；旧 `source.cache-root`、`manager.storage-root`、`XMLSQUISH_SOURCE_CACHE_ROOT` 与 `XMLSQUISH_STORAGE_ROOT` 已移除。
 
 操作消息支持 `--message-format human|short|json`。`json` 是换行分隔 JSON（Newline-Delimited JSON, NDJSON），每行一个协议 3.1 事件，写入 stdout；human/short 状态与诊断写入 stderr，stdout 留给查询数据。`inspect` 使用 `--format human|json|raw` 返回一个查询结果；`raw` 仅适用于 `inspect artifact`，且只向 stdout 写入经摘要验证的产物字节。`--plain` 禁用颜色和动态进度；`--quiet` 抑制成功状态。
 
@@ -169,6 +196,14 @@ xmlsquish 1.0.2 将协议可加性提升到 `3.1`，为 `clean` 增加有类型�
 
 xmlsquish 1.0.2 advances the additive protocol minor to `3.1` for typed `clean` requests, actions,
 and statistics; existing 3.0 build, format, dependency, and inspection result shapes are unchanged.
+
+xmlsquish 1.0.4 继续使用协议 `3.1`，但产品 locator 有意迁移到
+`<target-dir>/artifacts/...`。磁盘布局不是机器协议；解析 locator 的消费者应把它当作完整的
+不透明项目相对路径，而不是自行拼接 `target-dir`。
+
+xmlsquish 1.0.4 retains protocol `3.1`, but intentionally moves product locators to
+`<target-dir>/artifacts/...`. The disk layout is not the machine protocol; consumers should treat a
+locator as one complete opaque project-relative path rather than prepend `target-dir` themselves.
 
 ## 退出与自动化 / Process exits and automation
 
@@ -207,7 +242,7 @@ and statistics; existing 3.0 build, format, dependency, and inspection result sh
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-features --locked
+cargo test --workspace --all-targets --all-features --locked
 ```
 
 许可 / License: [`GPL-3.0-or-later`](LICENSE).

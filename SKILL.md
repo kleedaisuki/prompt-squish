@@ -15,11 +15,11 @@ cd my-prompts
 xmlsquish fmt --check                 # use `fmt` without --check to rewrite
 xmlsquish build --offline             # local verified cache only
 xmlsquish build -t chat --arg chat.name=Klee
-xmlsquish inspect artifact target/xmlsquish/chat.prompt
-xmlsquish clean                       # remove build products and provably invalid dependency data
+xmlsquish inspect artifact target/xmlsquish/artifacts/chat.prompt
+xmlsquish clean                       # remove all project-local products, cache, and build metadata
 ```
 
-Project commands discover `xmlsquish.toml` upward; use `--manifest-path PATH` to select one. `clean` removes the current project/workspace products, private build directory, and dependency-cache entries proven stale or abandoned; it does not delete valid shared dependencies merely because this project does not reference them. Use `--locked` to forbid lockfile changes, `--offline` to forbid network access, or `--frozen` for both. In automation prefer exit codes and `--message-format=json` (NDJSON), not human text. Run `xmlsquish <command> --help` before using less common/version-specific flags.
+Project commands discover `xmlsquish.toml` upward; use `--manifest-path PATH` to select one. `clean` atomically detaches and deletes the complete project/workspace build root, including products, project-local caches, and compilation metadata; a later build reconstructs it from project inputs. Use `--locked` to forbid lockfile changes, `--offline` to forbid network access, or `--frozen` for both. In automation prefer exit codes and `--message-format=json` (NDJSON), not human text. Run `xmlsquish <command> --help` before using less common/version-specific flags.
 
 Dependency edits are transactional and never rewrite XML imports:
 
@@ -38,14 +38,14 @@ manifest-version = 1
 [workspace]                         # optional; may be a virtual root
 members = ["packages/*"]
 exclude = ["packages/old"]
-target-dir = "target/xmlsquish"     # shared output root; this is the default
+target-dir = "target/xmlsquish"     # shared build-state root; this is the default
 
 [workspace.dependencies]
 common = { path = "packages/common" }
 
 [package]
 name = "agent-prompts"
-version = "1.0.2"
+version = "1.0.4"
 dialect = "xmlsquish/1"             # optional default
 source-root = "src"                 # optional default
 
@@ -90,15 +90,13 @@ Unknown keys are errors. Names use ASCII letters, digits, `-`, or `_`. Paths are
 <xs:import src="pkg:common/macros"/>
 ```
 
-Published locators are stable, readable paths below `workspace.target-dir` (for example `target/xmlsquish/chat.prompt`). Never depend on manager-private hashes, generations, journals, or storage paths.
+Published locators are stable, readable paths below `workspace.target-dir/artifacts` (for example `target/xmlsquish/artifacts/chat.prompt`). Treat the returned locator as one complete project-relative path. Never depend on manager-private hashes, generations, journals, or storage paths.
+
+The complete project-local derived layout is `<target-dir>/{artifacts,cache,metadata,work}`. `cache` contains CAS, the action index, and dependency sources; `metadata` contains rebuildable publication/catalog evidence; `work` is non-authoritative staging. There is no machine-global build cache and v1.0.4 does not import the old layout.
 
 Operational configuration is separate from the package manifest. Put it in `$XMLSQUISH_HOME/config.toml` or workspace `.xmlsquish/config.toml`; environment and repeated `--config KEY=TOML_VALUE` override files.
 
 ```toml
-[source]
-cache-root = "cache/sources"
-[manager]
-storage-root = "state"
 [build]
 jobs = 0
 keep-going = true

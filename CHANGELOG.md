@@ -8,6 +8,26 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 
 尚无已记录的面向用户变化。 / No user-facing changes recorded yet.
 
+## [1.0.4] — 2026-09-20
+
+完整发布说明与安装方法 / Full release notes and installation: [1.0.4](docs/releases/1.0.4.md).
+
+### 项目拥有构建状态 / Project-owned build state
+
+- 缓存、编译元数据、恢复状态与产品现在共同位于项目的 `target/xmlsquish` 构建根；构建不再依赖 Cargo 风格的机器全局缓存或用户级状态目录。
+  Caches, compilation metadata, recovery state, and products now share the project's `target/xmlsquish` build root; builds no longer depend on a Cargo-style machine-global cache or user-level state directory.
+- 稳定产品移入 `target/xmlsquish/artifacts/`；locator 同步采用这一无歧义前缀，使清单输出不可能与 `cache`、`metadata` 或 `work` 内部目录冲突。
+  Stable products move below `target/xmlsquish/artifacts/`, and locators adopt that unambiguous prefix so manifest outputs cannot collide with the internal `cache`, `metadata`, or `work` directories.
+- `clean` 删除整个项目本地构建根；后续构建从源码和锁文件重建所需状态。旧全局缓存和旧项目私有状态不提供兼容迁移。
+  `clean` removes the complete project-local build root; a later build reconstructs required state from sources and the lockfile. Legacy global caches and old project-private state are not migrated.
+
+### 发布工程 / Release engineering
+
+- GitHub Actions 在 Linux、Windows 与 macOS 上执行锁定的完整 workspace 目标测试；发布前还校验 `Cargo.toml`、`Cargo.lock`、标签、更新日志与版本发布说明的一致性。
+  GitHub Actions runs the locked, complete workspace target suite on Linux, Windows, and macOS, and gates publication on consistent `Cargo.toml`, `Cargo.lock`, tag, changelog, and versioned release notes.
+- 六个平台归档仍从不可变标签分别原生构建并经过 CLI 冒烟测试，只有完整矩阵成功后才由唯一聚合作业发布草稿 Release 及 `SHA256SUMS`。
+  The six platform archives remain native builds from an immutable tag with CLI smoke tests; only a complete matrix allows the sole aggregation job to publish the draft Release and `SHA256SUMS`.
+
 ## [1.0.2] — 2026-09-17
 
 完整发布说明与安装方法 / Full release notes and installation: [1.0.2](docs/releases/1.0.2.md).
@@ -97,7 +117,8 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 - 引入命名空间感知模块、不可变命名宏、显式字符串参数与 XML slot。
   Introduced namespace-aware modules, immutable named macros, explicit scalar parameters, and XML slots.
 
-[Unreleased]: https://github.com/kleedaisuki/prompt-squish/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/kleedaisuki/prompt-squish/compare/v1.0.4...HEAD
+[1.0.4]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.4
 [1.0.2]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.2
 [1.0.1]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.1
 [1.0.0]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.0

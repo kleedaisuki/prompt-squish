@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing stable tag to publish, for example v1.0.2'
+        description: 'Existing stable tag to publish, for example v1.0.4'
         required: true
         type: string
 
@@ -30,9 +30,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          path: automation
           persist-credentials: false
       - name: Resolve immutable source commit
         id: tag
+        working-directory: automation
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         shell: bash
@@ -42,6 +44,18 @@ jobs:
           sha=$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.tag.outputs.sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Verify version and release metadata
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: python automation/.github/scripts/release.py verify source "$RELEASE_TAG"
 
   build:
     needs: resolve
@@ -100,7 +114,7 @@ jobs:
       - name: Run native release tests
         if: runner.os != 'macOS'
         working-directory: source
-        run: cargo +1.88.0 test --release --all-features --locked --target ${{ matrix.target }}
+        run: cargo +1.88.0 test --release --workspace --all-targets --all-features --locked --target ${{ matrix.target }}
       - name: Run native macOS tests with case-sensitive temporary files
         if: runner.os == 'macOS'
         working-directory: source
@@ -118,7 +132,7 @@ jobs:
           mkdir "$mount/tmp"
           touch "$mount/tmp/case-probe"
           test ! -e "$mount/tmp/CASE-PROBE"
-          TMPDIR="$mount/tmp" cargo +1.88.0 test --release --all-features --locked --target ${{ matrix.target }}
+          TMPDIR="$mount/tmp" cargo +1.88.0 test --release --workspace --all-targets --all-features --locked --target ${{ matrix.target }}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.13'

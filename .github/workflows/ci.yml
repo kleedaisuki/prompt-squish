@@ -43,11 +43,19 @@ jobs:
           python -m unittest discover -s scripts/tests -p "test_*.py"
           python scripts/check_architecture.py
 
+      - name: Check release automation and version metadata
+        run: |
+          python -m unittest discover -s .github/scripts -p "test_*.py"
+          python .github/scripts/release.py verify .
+
       - name: Check formatting
         run: cargo +1.88.0 fmt --all -- --check
 
       - name: Run Clippy
         run: cargo +1.88.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Test documentation examples
+        run: cargo +1.88.0 test --workspace --doc --all-features --locked
 
   rust-test:
     name: Rust test (${{ matrix.name }}, MSRV 1.88)
@@ -79,7 +87,7 @@ jobs:
         run: cargo +1.88.0 build --workspace --all-targets --all-features --locked
 
       - name: Run tests
-        run: cargo +1.88.0 test --workspace --all-features --locked
+        run: cargo +1.88.0 test --workspace --all-targets --all-features --locked
 
       # Exercise the composed binary, not only the crates behind it.
       # 验证组合后的根二进制，而不只是其内部 crate。

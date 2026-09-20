@@ -71,13 +71,6 @@ def smoke(binary: Path, scratch: Path) -> None:
         if (project / "xmlsquish.lock").exists():
             raise RuntimeError("new unexpectedly created a lockfile")
 
-        # Keep smoke-test caches inside the disposable project. / 将冒烟测试缓存限制在一次性项目内。
-        (project / ".xmlsquish").mkdir(exist_ok=True)
-        (project / ".xmlsquish" / "config.toml").write_text(
-            '[source]\ncache-root = "cache/sources"\n'
-            '[manager]\nstorage-root = "cache/state"\n',
-            encoding="utf-8",
-        )
         run(binary, "fmt", "--check", "--plain", cwd=project)
         source = project / "src" / "prompt.xml"
         source.write_text(
@@ -92,27 +85,32 @@ def smoke(binary: Path, scratch: Path) -> None:
         run(binary, "fmt", "--plain", cwd=project)
         run(binary, "build", "--offline", "--plain", cwd=project)
         target = project / "target" / "xmlsquish"
-        prompt = target / "prompt.prompt"
+        artifacts = target / "artifacts"
+        prompt = artifacts / "prompt.prompt"
         if not prompt.is_file():
-            raise RuntimeError("bare build did not publish target/xmlsquish/prompt.prompt")
+            raise RuntimeError("bare build did not publish target/xmlsquish/artifacts/prompt.prompt")
+        if not (target / "cache" / "cas").is_dir() or not (target / "cache" / "actions.sqlite3").is_file():
+            raise RuntimeError("build did not place reusable cache state below target/xmlsquish/cache")
+        if not (target / "metadata" / "layout.json").is_file():
+            raise RuntimeError("build did not write the project-local layout discriminator")
         run(binary, "build", "--emit=ir", "--offline", "--plain", cwd=project)
-        ir = list((target / "ir").rglob("*.xsir"))
+        ir = list((artifacts / "ir").rglob("*.xsir"))
         if len(ir) != 1:
             raise RuntimeError("explicit IR build did not publish exactly one stable IR artifact")
         exposed_private = [
-            path for path in target.rglob("*")
+            path for path in artifacts.rglob("*")
             if path.name == ".squish-publish"
             or re.fullmatch(r"[0-9a-f]{32,}", path.name)
             or path.name.endswith((".xsmap", ".build.json"))
         ]
-        if exposed_private or (target / "artifacts" / "target" / "xmlsquish").exists():
-            raise RuntimeError("target directory exposes private publication state")
+        if exposed_private or (artifacts / "target" / "xmlsquish").exists():
+            raise RuntimeError("artifact directory exposes private publication state")
         inspected = run(binary, "inspect", "link", "prompt", "--format=json", cwd=project)
         if json.loads(inspected).get("view") != "link":
             raise RuntimeError("inspect did not return the requested link view")
         run(binary, "clean", "--plain", cwd=project)
         if target.exists():
-            raise RuntimeError("clean retained project build artifacts or private build state")
+            raise RuntimeError("clean retained the project-local build root")
         run(binary, "build", "--offline", "--plain", cwd=project)
         if not prompt.is_file():
             raise RuntimeError("project did not rebuild after clean")

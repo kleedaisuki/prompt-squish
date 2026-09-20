@@ -1,8 +1,11 @@
 """Package native binaries and publish a complete matrix. / 原生二进制打包及完整矩阵发布。
 
 Run from the checkout parent: / 从检出目录的父目录运行：
-    RELEASE_TAG=v1.0.2 RELEASE_TARGET=x86_64-unknown-linux-gnu \
+    RELEASE_TAG=v1.0.4 RELEASE_TARGET=x86_64-unknown-linux-gnu \
       python automation/.github/scripts/release.py package source dist
+
+Version-contract check: / 版本契约检查：
+    python .github/scripts/release.py verify . v1.0.4
 """
 
 import hashlib
@@ -17,6 +20,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import tomllib
 import zipfile
 
 
@@ -27,6 +31,7 @@ TARGETS = (
     "x86_64-apple-darwin", "aarch64-apple-darwin",
 )
 COMMANDS = ("new", "build", "clean", "fmt", "add", "remove", "inspect")
+STABLE_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 
 
 def run(*args, cwd=None):
@@ -43,6 +48,42 @@ def archive_name(version, target):
 def digest(path):
     """Hash the exact published bytes. / 对发布字节计算摘要。"""
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def verify_repository(source, tag=None):
+    """Keep release metadata mutually consistent. / 保持发布元数据彼此一致。"""
+    manifest = tomllib.loads((source / "Cargo.toml").read_text(encoding="utf-8"))
+    version = manifest["package"]["version"]
+    expected_tag = tag or f"v{version}"
+    if not STABLE_TAG.fullmatch(expected_tag):
+        raise ValueError("expected a stable vMAJOR.MINOR.PATCH tag")
+    if expected_tag != f"v{version}":
+        raise ValueError("Cargo package version does not match release tag")
+
+    lock = tomllib.loads((source / "Cargo.lock").read_text(encoding="utf-8"))
+    roots = [
+        package for package in lock.get("package", [])
+        if package.get("name") == manifest["package"]["name"] and "source" not in package
+    ]
+    if len(roots) != 1 or roots[0].get("version") != version:
+        raise ValueError("Cargo.lock root package version does not match Cargo.toml")
+
+    changelog = (source / "CHANGELOG.md").read_text(encoding="utf-8")
+    release_path = source / "docs" / "releases" / f"{version}.md"
+    required_changelog_fragments = (
+        f"## [{version}]",
+        f"(docs/releases/{version}.md)",
+        f"[{version}]: https://github.com/kleedaisuki/prompt-squish/releases/tag/{expected_tag}",
+    )
+    if any(fragment not in changelog for fragment in required_changelog_fragments):
+        raise ValueError("CHANGELOG.md does not contain the current release contract")
+    if not release_path.is_file():
+        raise ValueError(f"missing release notes: {release_path.relative_to(source)}")
+    notes = release_path.read_text(encoding="utf-8")
+    if f"# xmlsquish {version}" not in notes or f"`{expected_tag}`" not in notes:
+        raise ValueError("release notes do not match the current package version and tag")
+    print(f"Verified release metadata for {expected_tag}")
+    return version
 
 
 def third_party_licenses(root, metadata):
@@ -86,7 +127,7 @@ def package(source, dist, tag):
     target = os.environ["RELEASE_TARGET"]
     if target not in TARGETS:
         raise ValueError(f"unsupported target: {target}")
-    version = tag[1:]
+    version = verify_repository(source, tag)
     metadata = json.loads(run("cargo", "+1.88.0", "metadata", "--locked", "--filter-platform", target, "--format-version=1", cwd=source))
     package_info = next(p for p in metadata["packages"] if p["name"] == "xmlsquish")
     if package_info["version"] != version:
@@ -112,11 +153,6 @@ def package(source, dist, tag):
             raise ValueError("native new --vcs=none smoke test created Git state")
         if (project / "xmlsquish.lock").exists():
             raise ValueError("native new smoke test unexpectedly created a lockfile")
-        (project / ".xmlsquish").mkdir(exist_ok=True)
-        (project / ".xmlsquish" / "config.toml").write_text(
-            '[source]\ncache-root = "cache/sources"\n[manager]\nstorage-root = "cache/state"\n',
-            encoding="utf-8",
-        )
         run(str(binary), "fmt", "--check", "--plain", cwd=project)
         source_file = project / "src" / "prompt.xml"
         source_file.write_text(
@@ -127,27 +163,32 @@ def package(source, dist, tag):
         run(str(binary), "fmt", "--plain", cwd=project)
         run(str(binary), "build", "--offline", "--plain", cwd=project)
         target_root = project / "target" / "xmlsquish"
-        prompt = target_root / "prompt.prompt"
+        artifacts = target_root / "artifacts"
+        prompt = artifacts / "prompt.prompt"
         if not prompt.is_file():
-            raise ValueError("native bare build smoke test did not publish target/xmlsquish/prompt.prompt")
+            raise ValueError("native build did not publish target/xmlsquish/artifacts/prompt.prompt")
+        if not (target_root / "cache" / "cas").is_dir() or not (target_root / "cache" / "actions.sqlite3").is_file():
+            raise ValueError("native build did not create its project-local cache")
+        if not (target_root / "metadata" / "layout.json").is_file():
+            raise ValueError("native build did not create its layout discriminator")
         run(str(binary), "build", "--emit=ir", "--offline", "--plain", cwd=project)
-        ir = list((target_root / "ir").rglob("*.xsir"))
+        ir = list((artifacts / "ir").rglob("*.xsir"))
         if len(ir) != 1:
             raise ValueError("native explicit IR build smoke test did not publish exactly one stable IR artifact")
         exposed_private = [
-            path for path in target_root.rglob("*")
+            path for path in artifacts.rglob("*")
             if path.name == ".squish-publish"
             or re.fullmatch(r"[0-9a-f]{32,}", path.name)
             or path.name.endswith((".xsmap", ".build.json"))
         ]
-        if exposed_private or (target_root / "artifacts" / "target" / "xmlsquish").exists():
-            raise ValueError("native build exposes private publication state below target/xmlsquish")
+        if exposed_private or (artifacts / "target" / "xmlsquish").exists():
+            raise ValueError("native build exposes private publication state below artifacts")
         inspected = json.loads(run(str(binary), "inspect", "link", "prompt", "--format=json", cwd=project))
         if inspected.get("view") != "link":
             raise ValueError("native inspect smoke test returned the wrong view")
         run(str(binary), "clean", "--plain", cwd=project)
         if target_root.exists():
-            raise ValueError("native clean smoke test retained project build artifacts or private build state")
+            raise ValueError("native clean smoke test retained the project-local build root")
         run(str(binary), "build", "--offline", "--plain", cwd=project)
         if not prompt.is_file():
             raise ValueError("native project did not rebuild after clean")
@@ -234,10 +275,15 @@ def publish(source, dist, tag):
 
 def main():
     """Validate CLI and environment before filesystem writes. / 写入前验证命令与环境。"""
+    if len(sys.argv) in (3, 4) and sys.argv[1] == "verify":
+        source = Path(sys.argv[2]).resolve()
+        tag = sys.argv[3] if len(sys.argv) == 4 else None
+        verify_repository(source, tag)
+        return
     if len(sys.argv) != 4 or sys.argv[1] not in ("package", "publish"):
-        raise SystemExit("usage: release.py {package|publish} SOURCE DIST")
+        raise SystemExit("usage: release.py verify SOURCE [TAG] | {package|publish} SOURCE DIST")
     tag = os.environ["RELEASE_TAG"]
-    if not re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag):
+    if not STABLE_TAG.fullmatch(tag):
         raise ValueError("expected a stable vMAJOR.MINOR.PATCH tag")
     if tuple(map(int, tag[1:].split("."))) < (0, 3, 0):
         raise ValueError("binary automation supports v0.3.0 and later")
