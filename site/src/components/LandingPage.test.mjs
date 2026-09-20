@@ -301,8 +301,13 @@ test("manual reference search, URI copy, fragments, and clipboard denial remain 
   await page.locator("[data-search]").fill("look-around");
   assert.equal(await page.locator("[data-directive]:visible").count(), 1);
   assert.equal(await page.locator("[data-directive]:visible code").first().textContent(), "xs:ifr");
+  assert.equal(await page.locator('.manual-toc a[hidden]').count(), 10);
+  assert.equal(await page.locator('.manual-toc a:not([hidden])').getAttribute("href"), "#ifr");
+  assert.equal(await page.locator('.mobile-toc a[hidden]').count(), 10);
+  assert.equal(await page.locator('.mobile-toc a:not([hidden])').getAttribute("href"), "#ifr");
   await page.locator("[data-search]").press("Escape");
   assert.equal(await page.locator("[data-directive]:visible").count(), 11);
+  assert.equal(await page.locator('.manual-toc a[hidden], .mobile-toc a[hidden]').count(), 0);
   await page.locator('.directive-list [href="#ifr"]').click();
   assert.equal(new URL(page.url()).hash, "#ifr");
   await page.goto(base + "/en/ns/", { waitUntil: "domcontentloaded" });

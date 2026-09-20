@@ -154,7 +154,45 @@ xmlsquish inspect artifact target/xmlsquish/artifacts/prompt.prompt --format=raw
   /** Enhance URI copying while preserving a selectable static value. / 增强 URI 复制，同时保留可选择的静态值。 */
   class NamespaceIdentity extends HTMLElement { connectedCallback() { const button=this.querySelector("[data-copy]");const value=this.querySelector("[data-namespace-uri]");const status=this.querySelector("[data-copy-status]");if(!(button instanceof HTMLButtonElement)||!value||!status||!navigator.clipboard)return;button.hidden=false;button.addEventListener("click",async()=>{try{await navigator.clipboard.writeText(value.textContent||"");status.textContent=button.dataset.copied||""}catch{const selection=window.getSelection();const range=document.createRange();range.selectNodeContents(value);selection?.removeAllRanges();selection?.addRange(range);status.textContent=button.dataset.denied||""}})}}
   /** Filter the complete server-rendered reference. / 筛选服务端完整渲染的参考表。 */
-  class NamespaceExplorer extends HTMLElement { connectedCallback(){const ui=this.querySelector("[data-search-ui]");const input=this.querySelector("[data-search]");const count=this.querySelector("[data-count]");const empty=this.querySelector("[data-empty]");const cards=[...this.querySelectorAll("[data-directive]")];if(!(ui instanceof HTMLElement)||!(input instanceof HTMLInputElement)||!(count instanceof HTMLOutputElement))return;ui.hidden=false;const update=()=>{const query=input.value.trim().toLocaleLowerCase();let visible=0;cards.forEach(card=>{const match=!query||(card.getAttribute("data-search-text")||"").toLocaleLowerCase().includes(query);card.toggleAttribute("hidden",!match);if(match)visible+=1});count.textContent=`${visible} / ${cards.length}`;empty?.toggleAttribute("hidden",visible!==0)};input.addEventListener("input",update);input.addEventListener("keydown",event=>{if(event.key==="Escape"&&input.value){input.value="";update()}});update()}}
+  class NamespaceExplorer extends HTMLElement {
+    connectedCallback() {
+      const ui = this.querySelector("[data-search-ui]");
+      const input = this.querySelector("[data-search]");
+      const count = this.querySelector("[data-count]");
+      const empty = this.querySelector("[data-empty]");
+      const cards = [...this.querySelectorAll("[data-directive]")];
+      const outlineLinks = [...document.querySelectorAll('.manual-toc a[href^="#"], .mobile-toc a[href^="#"]')];
+      if (!(ui instanceof HTMLElement) || !(input instanceof HTMLInputElement) || !(count instanceof HTMLOutputElement)) return;
+      ui.hidden = false;
+
+      /** Keep the article and both responsive outlines as one filtered view.
+       * 让文章与两套响应式页内目录共享同一个筛选视图。
+       */
+      const update = () => {
+        const query = input.value.trim().toLocaleLowerCase();
+        const visibleIds = new Set();
+        cards.forEach((card) => {
+          const match = !query || (card.getAttribute("data-search-text") || "").toLocaleLowerCase().includes(query);
+          card.toggleAttribute("hidden", !match);
+          if (match && card.id) visibleIds.add(card.id);
+        });
+        outlineLinks.forEach((link) => {
+          if (!(link instanceof HTMLAnchorElement)) return;
+          link.toggleAttribute("hidden", !visibleIds.has(decodeURIComponent(link.hash.slice(1))));
+        });
+        count.textContent = `${visibleIds.size} / ${cards.length}`;
+        empty?.toggleAttribute("hidden", visibleIds.size !== 0);
+      };
+      input.addEventListener("input", update);
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && input.value) {
+          input.value = "";
+          update();
+        }
+      });
+      update();
+    }
+  }
   if(!customElements.get("namespace-identity"))customElements.define("namespace-identity",NamespaceIdentity);if(!customElements.get("namespace-explorer"))customElements.define("namespace-explorer",NamespaceExplorer);
 </script>
 
