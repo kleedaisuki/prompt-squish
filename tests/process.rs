@@ -768,6 +768,65 @@ entry = "src/main.xml"
     assert!(!project.path().join("target/xmlsquish").exists());
 }
 
+/// Windows 路径大小写差异不构成目录别名；构建与清理必须复用磁盘上的真实目录。
+/// / Windows path casing differences are not directory aliases; build and clean must
+/// reuse the real directory already present on disk.
+#[cfg(windows)]
+#[test]
+fn existing_target_with_different_case_is_reused_and_cleaned() {
+    let project = project("root-target-case-");
+    let target_parent = project.path().join("TARGET");
+    let target = target_parent.join("xmlsquish");
+    fs::create_dir_all(&target).unwrap();
+
+    let built = binary()
+        .current_dir(project.path())
+        .args(["build", "--plain"])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "build rejected an ordinary case-insensitive path: stdout={} stderr={}",
+        String::from_utf8_lossy(&built.stdout),
+        String::from_utf8_lossy(&built.stderr)
+    );
+    assert!(target.join("artifacts/chat.prompt").is_file());
+    assert!(target.join("cache/actions.sqlite3").is_file());
+    assert!(target.join("metadata/catalog").is_dir());
+    let target_entries = fs::read_dir(project.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case("target")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(target_entries.len(), 1);
+    assert_eq!(target_entries[0].file_name(), "TARGET");
+
+    let cleaned = binary()
+        .current_dir(project.path())
+        .args(["clean", "--plain"])
+        .output()
+        .unwrap();
+    assert!(
+        cleaned.status.success(),
+        "clean rejected an ordinary case-insensitive path: stdout={} stderr={}",
+        String::from_utf8_lossy(&cleaned.stdout),
+        String::from_utf8_lossy(&cleaned.stderr)
+    );
+    assert!(
+        !target.exists(),
+        "clean must remove the project-owned build root"
+    );
+    assert!(
+        target_parent.is_dir(),
+        "clean must preserve the target parent"
+    );
+}
+
 #[test]
 fn build_and_clean_reject_target_dir_alias_without_mutating_project_sources() {
     let project = project("root-target-alias-");

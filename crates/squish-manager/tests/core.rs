@@ -196,6 +196,58 @@ fn project_build_layout_rejects_target_dir_junction_within_project() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn project_build_layout_accepts_real_target_directory_with_mixed_case_spelling() {
+    let project = tempfile::tempdir().unwrap();
+    let canonical = std::fs::canonicalize(project.path()).unwrap();
+    std::fs::create_dir_all(canonical.join("TARGET/xmlsquish")).unwrap();
+
+    let layout = ProjectBuildLayout::new(&canonical, "target/xmlsquish").unwrap();
+
+    assert_eq!(layout.ownership_root(), canonical.join("target/xmlsquish"));
+    layout.validate_existing_aliases().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn project_build_layout_revalidation_rejects_new_target_alias() {
+    let project = tempfile::tempdir().unwrap();
+    let canonical = std::fs::canonicalize(project.path()).unwrap();
+    let layout = ProjectBuildLayout::new(&canonical, "target/xmlsquish").unwrap();
+    let destination = canonical.join("real-target");
+    std::fs::create_dir(&destination).unwrap();
+    create_directory_symlink(&destination, &canonical.join("target"));
+
+    assert_eq!(
+        layout.validate_existing_aliases().unwrap_err(),
+        squish_manager::ProjectBuildLayoutError::TargetDirAlias
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn project_build_layout_revalidation_rejects_new_target_junction() {
+    let project = tempfile::tempdir().unwrap();
+    let canonical = std::fs::canonicalize(project.path()).unwrap();
+    let layout = ProjectBuildLayout::new(&canonical, "target/xmlsquish").unwrap();
+    let destination = canonical.join("real-target");
+    std::fs::create_dir(&destination).unwrap();
+    let junction = canonical.join("target");
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&destination)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert_eq!(
+        layout.validate_existing_aliases().unwrap_err(),
+        squish_manager::ProjectBuildLayoutError::TargetDirAlias
+    );
+}
+
 #[test]
 fn project_build_layout_rejects_dangling_target_dir_symlink() {
     let project = tempfile::tempdir().unwrap();

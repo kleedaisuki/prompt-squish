@@ -540,6 +540,7 @@ struct CleanJournal {
 /// 从唯一项目构建根派生的根外协调路径。 /
 /// Out-of-root coordination paths derived from the sole project build root.
 struct CleanPaths {
+    storage: ProjectBuildLayout,
     root: PathBuf,
     lock: PathBuf,
     journal: PathBuf,
@@ -563,6 +564,7 @@ impl CleanPaths {
             )
         })?;
         let paths = Self {
+            storage: storage.clone(),
             root,
             lock: storage.coordination_lock().to_path_buf(),
             journal: storage.clean_journal().to_path_buf(),
@@ -574,14 +576,9 @@ impl CleanPaths {
     /// 确保构造后引入的文件系统别名不能改变所有权根身份。 /
     /// Ensures a filesystem alias introduced after construction cannot change root identity.
     fn validate_root_identity(&self) -> io::Result<()> {
-        let physical_root = normalize_from_existing_ancestor(&self.root)?;
-        if physical_root == self.root {
-            return Ok(());
-        }
-        Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "project build root acquired a filesystem alias after layout validation",
-        ))
+        self.storage
+            .validate_existing_aliases()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
     }
 }
 
@@ -3213,6 +3210,39 @@ mod tests {
         assert_eq!(error.code(), "host_maintenance_cancelled");
         assert!(!storage.ownership_root().exists());
         drop(lock);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ordinary_mixed_case_target_directory_supports_build_and_clean() {
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.temp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let scratch = std::fs::canonicalize(scratch).unwrap();
+        let temporary = tempfile::Builder::new()
+            .prefix("squish-host-mixed-case-")
+            .tempdir_in(scratch)
+            .unwrap();
+        let root = temporary.path().join("project");
+        std::fs::create_dir_all(root.join("TARGET")).unwrap();
+        let storage = ProjectBuildLayout::new(&root, "target/xmlsquish").unwrap();
+
+        {
+            let host = fixture_host(&root, &storage);
+            host.build_runtime
+                .write_blob(b"ordinary-directory")
+                .unwrap();
+            assert!(storage.layout_marker().is_file());
+        }
+
+        let host = fixture_host(&root, &storage);
+        let status = Services::clean_project(
+            &host,
+            host.project_root(),
+            squish_kernel::CancellationToken::default(),
+        )
+        .unwrap();
+        assert!(matches!(status, ProjectCleanStatus::Cleaned(_)));
+        assert!(!storage.ownership_root().exists());
     }
 
     #[cfg(unix)]

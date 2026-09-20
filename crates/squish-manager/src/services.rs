@@ -111,6 +111,8 @@ impl std::error::Error for ProjectBuildLayoutError {}
 /// unrepresentable.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectBuildLayout {
+    project_root: PathBuf,
+    target_dir: PathBuf,
     ownership_root: PathBuf,
     artifacts_root: PathBuf,
     source_cache_root: PathBuf,
@@ -158,6 +160,8 @@ impl ProjectBuildLayout {
             .parent()
             .ok_or(ProjectBuildLayoutError::MissingBuildRootName)?;
         Ok(Self {
+            project_root,
+            target_dir: target_dir.clone(),
             source_cache_root: cache_root.join("sources"),
             cas_root: cache_root.join("cas"),
             action_index: cache_root.join("actions.sqlite3"),
@@ -175,6 +179,18 @@ impl ProjectBuildLayout {
             artifacts_root,
             metadata_root,
         })
+    }
+
+    /// 重新验证布局的现有路径分量未变成文件系统别名。 / Revalidates that existing layout-path components have not become filesystem aliases.
+    ///
+    /// 宿主应在使用已构造布局执行构建或清理前调用此方法。验证逐分量使用
+    /// `symlink_metadata`，在 Windows 上同时检查 reparse-point 属性；它不通过字符串大小写
+    /// 判定对象身份。 / Hosts should call this before a build or clean that uses an already
+    /// constructed layout. Validation uses `symlink_metadata` component by component and also
+    /// checks the Windows reparse-point attribute; object identity never depends on path-string
+    /// casing.
+    pub fn validate_existing_aliases(&self) -> Result<(), ProjectBuildLayoutError> {
+        reject_existing_target_aliases(&self.project_root, &self.target_dir)
     }
 
     /// 仅供测试适配器使用的默认项目布局。 / Default project layout intended only for test adapters.
