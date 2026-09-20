@@ -19,7 +19,7 @@ use squish_link::{
     Budgets, InstantiateOutput, Instantiator, LinkOutput, LinkedProgram, StaticLinker, UnitClosure,
 };
 use squish_manager::{
-    BuildRuntime, BuildRuntimeDescriptor, BuildRuntimeError, GenerationSpace, StorageLayout,
+    BuildRuntime, BuildRuntimeDescriptor, BuildRuntimeError, GenerationSpace, ProjectBuildLayout,
 };
 use squish_protocol::{ArtifactId, Digest, DigestAlgorithm};
 use squish_publish::{FileArtifactPublisher, NoopObserver, PublishError, PublishObserver};
@@ -38,13 +38,13 @@ pub struct TestBuildRuntime {
 
 impl TestBuildRuntime {
     /// 用无操作发布观察者打开运行时。 / Opens a runtime with no-op publication observers.
-    pub fn open(layout: &StorageLayout) -> Result<Self, BuildRuntimeError> {
+    pub fn open(layout: &ProjectBuildLayout) -> Result<Self, BuildRuntimeError> {
         Self::with_observers(layout, Arc::new(NoopObserver), Arc::new(NoopObserver))
     }
 
     /// 用显式 target/catalog 观察者打开运行时。 / Opens a runtime with explicit target/catalog observers.
     pub fn with_observers(
-        layout: &StorageLayout,
+        layout: &ProjectBuildLayout,
         target_observer: Arc<dyn PublishObserver>,
         catalog_observer: Arc<dyn PublishObserver>,
     ) -> Result<Self, BuildRuntimeError> {
@@ -54,7 +54,7 @@ impl TestBuildRuntime {
         let index = VerifiedActionIndex::open(layout.action_index(), cas.clone())
             .map_err(|error| runtime_error("test_action_index_open", error))?;
         let targets = FileArtifactPublisher::with_observer(
-            layout.publication_root(),
+            layout.artifacts_root(),
             Cas::open(layout.cas_root()).map_err(|error| runtime_error("test_cas_open", error))?,
             target_observer,
         )

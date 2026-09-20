@@ -13,8 +13,8 @@ use squish_build::{ArtifactRead, PublicationTargetId};
 use squish_kernel::{CancellationToken, EventSink, InvocationContext, Kernel, SinkError};
 use squish_manager::{
     ArtifactLocator, Effect, InvocationSettings, ManagerCapability, PlannedWork,
-    ProvenanceRelation, ResolveRequest, ResolvedDependencies, ServiceError, Services,
-    StorageLayout, build,
+    ProjectBuildLayout, ProvenanceRelation, ResolveRequest, ResolvedDependencies, ServiceError,
+    Services, build,
 };
 use squish_project::{LockedPackage, LockedSource, Lockfile, ResolutionMode};
 use squish_protocol::{
@@ -125,7 +125,7 @@ impl Services for FaultingServices {
         &self,
         project: &Path,
     ) -> Result<Arc<dyn squish_manager::BuildRuntime>, ServiceError> {
-        let layout = StorageLayout::project_local_for_tests(project);
+        let layout = ProjectBuildLayout::project_local_for_tests(project);
         let observer = Arc::new(BreakCatalogOnTargetCommit {
             catalog_root: layout.catalog_root().to_path_buf(),
             broken: std::sync::atomic::AtomicBool::new(false),
@@ -135,7 +135,7 @@ impl Services for FaultingServices {
             .map_err(|error| ServiceError::new(error.code(), error.message()))
     }
 
-    fn storage_layout(&self, project: &Path) -> Result<StorageLayout, ServiceError> {
+    fn storage_layout(&self, project: &Path) -> Result<ProjectBuildLayout, ServiceError> {
         LocalServices.storage_layout(project)
     }
 
@@ -167,14 +167,14 @@ impl Services for LocalServices {
         &self,
         project: &Path,
     ) -> Result<Arc<dyn squish_manager::BuildRuntime>, ServiceError> {
-        let layout = StorageLayout::project_local_for_tests(project);
+        let layout = ProjectBuildLayout::project_local_for_tests(project);
         TestBuildRuntime::open(&layout)
             .map(|runtime| Arc::new(runtime) as Arc<dyn squish_manager::BuildRuntime>)
             .map_err(|error| ServiceError::new(error.code(), error.message()))
     }
 
-    fn storage_layout(&self, project: &Path) -> Result<StorageLayout, ServiceError> {
-        Ok(StorageLayout::project_local_for_tests(project))
+    fn storage_layout(&self, project: &Path) -> Result<ProjectBuildLayout, ServiceError> {
+        Ok(ProjectBuildLayout::project_local_for_tests(project))
     }
 
     fn materialize_locked(
@@ -217,7 +217,7 @@ impl Services for LocalServices {
     }
 }
 
-fn runtime(layout: &StorageLayout) -> TestBuildRuntime {
+fn runtime(layout: &ProjectBuildLayout) -> TestBuildRuntime {
     TestBuildRuntime::open(layout).expect("test runtime opens")
 }
 
@@ -271,7 +271,7 @@ impl Services for MemoryServices {
         Ok(Arc::new(self.runtime.clone()))
     }
 
-    fn storage_layout(&self, project: &Path) -> Result<StorageLayout, ServiceError> {
+    fn storage_layout(&self, project: &Path) -> Result<ProjectBuildLayout, ServiceError> {
         LocalServices.storage_layout(project)
     }
 
@@ -552,7 +552,7 @@ fn complete_build_publishes_prompt_debug_and_ir_from_cas() {
         result.build_record.is_some(),
         "successful builds persist their build record"
     );
-    let layout = StorageLayout::project_local_for_tests(temp.path());
+    let layout = ProjectBuildLayout::project_local_for_tests(temp.path());
     let catalog = build::read_current_build_catalog(&runtime(&layout))
         .unwrap()
         .expect("successful build publishes its current catalog record");
@@ -578,10 +578,10 @@ fn complete_build_publishes_prompt_debug_and_ir_from_cas() {
             .iter()
             .any(|artifact| matches!(artifact.kind, squish_protocol::ArtifactKind::BinaryIr))
     );
-    let publication_root = temp.path().join("target/xmlsquish");
+    let layout = ProjectBuildLayout::project_local_for_tests(temp.path());
     let publisher = FileArtifactPublisher::open(
-        &publication_root,
-        Cas::open(temp.path().join(".cache/xmlsquish/cas")).unwrap(),
+        layout.artifacts_root(),
+        Cas::open(layout.cas_root()).unwrap(),
     )
     .unwrap();
     let generation = publisher
@@ -661,7 +661,7 @@ fn complete_build_publishes_prompt_debug_and_ir_from_cas() {
 #[test]
 fn build_catalog_distinguishes_absence_from_corruption_and_rejects_traversal() {
     let (temp, request) = fixture();
-    let layout = StorageLayout::project_local_for_tests(temp.path());
+    let layout = ProjectBuildLayout::project_local_for_tests(temp.path());
     assert!(
         build::read_current_build_catalog(&runtime(&layout))
             .unwrap()
@@ -726,9 +726,10 @@ fn successful_execute_returns_the_persisted_build_record() {
         panic!("expected build result")
     };
     assert!(result.build_record.is_some());
+    let layout = ProjectBuildLayout::project_local_for_tests(temp.path());
     let publisher = FileArtifactPublisher::open(
-        temp.path().join("target/xmlsquish"),
-        Cas::open(temp.path().join(".cache/xmlsquish/cas")).unwrap(),
+        layout.artifacts_root(),
+        Cas::open(layout.cas_root()).unwrap(),
     )
     .unwrap();
     let cold_generation = publisher
@@ -829,7 +830,7 @@ fn compile_failure_persists_terminal_action_facts() {
         .build_record
         .expect("a sealed failed plan persists its aggregate record");
     let catalog = build::read_current_build_catalog(&runtime(
-        &StorageLayout::project_local_for_tests(temp.path()),
+        &ProjectBuildLayout::project_local_for_tests(temp.path()),
     ))
     .unwrap()
     .unwrap();
@@ -867,7 +868,7 @@ fn cancellation_after_plan_seal_persists_cancelled_action_facts() {
     assert_eq!(outcome.summary.status.code(), 130);
     assert!(result.build_record.is_some());
     let record = build::read_current_build_record(&runtime(
-        &StorageLayout::project_local_for_tests(temp.path()),
+        &ProjectBuildLayout::project_local_for_tests(temp.path()),
     ))
     .unwrap()
     .unwrap();
@@ -888,7 +889,7 @@ fn cancellation_after_plan_seal_persists_cancelled_action_facts() {
 #[test]
 fn catalog_finalization_failure_is_typed_and_counted() {
     let (temp, request) = fixture();
-    let layout = StorageLayout::project_local_for_tests(temp.path());
+    let layout = ProjectBuildLayout::project_local_for_tests(temp.path());
     let events = Arc::new(RestoreCatalogOnFailure {
         catalog_root: layout.catalog_root().to_path_buf(),
         events: Mutex::new(Vec::new()),
@@ -932,7 +933,7 @@ fn catalog_finalization_failure_is_typed_and_counted() {
 #[test]
 fn planning_recovery_adopts_a_verified_newer_typed_generation() {
     let (temp, request) = fixture();
-    let layout = StorageLayout::project_local_for_tests(temp.path());
+    let layout = ProjectBuildLayout::project_local_for_tests(temp.path());
     let run = |invocation: &str, sink: Arc<dyn EventSink>| {
         let manager = ManagerCapability::new(LocalServices, InvocationSettings::default());
         let capabilities: [&dyn squish_kernel::Capability; 1] = [&manager];
@@ -977,7 +978,7 @@ fn planning_recovery_adopts_a_verified_newer_typed_generation() {
     assert_eq!(failed.summary.root_failures, 1);
 
     let publisher = FileArtifactPublisher::open(
-        layout.publication_root(),
+        layout.artifacts_root(),
         Cas::open(layout.cas_root()).unwrap(),
     )
     .unwrap();
@@ -1029,7 +1030,7 @@ fn planning_recovery_adopts_a_verified_newer_typed_generation() {
 #[test]
 fn failed_and_cancelled_attempts_retain_the_previous_target_generation() {
     let (temp, request) = fixture();
-    let layout = StorageLayout::project_local_for_tests(temp.path());
+    let layout = ProjectBuildLayout::project_local_for_tests(temp.path());
     let target = squish_protocol::TargetName::new("chat").unwrap();
 
     let manager = ManagerCapability::new(LocalServices, InvocationSettings::default());
@@ -1132,7 +1133,7 @@ fn same_semantic_targets_restore_single_flight_results_for_each_owner() {
         panic!("expected build result")
     };
     let record = build::read_current_build_record(&runtime(
-        &StorageLayout::project_local_for_tests(temp.path()),
+        &ProjectBuildLayout::project_local_for_tests(temp.path()),
     ))
     .unwrap()
     .unwrap();
@@ -1207,7 +1208,7 @@ output = "c.prompt"
     kernel
         .dispatch(&OperationRequest::Build(request), &context)
         .unwrap();
-    let layout = StorageLayout::project_local_for_tests(temp.path());
+    let layout = ProjectBuildLayout::project_local_for_tests(temp.path());
     let catalog = build::read_current_build_catalog(&runtime(&layout))
         .unwrap()
         .unwrap();
@@ -1218,7 +1219,7 @@ output = "c.prompt"
         catalog.record.actions
     );
     let publisher = FileArtifactPublisher::open(
-        layout.publication_root(),
+        layout.artifacts_root(),
         Cas::open(layout.cas_root()).unwrap(),
     )
     .unwrap();
@@ -1296,7 +1297,7 @@ fn semantic_example_publishes_fully_traceable_debug_bundle() {
     let OperationResult::Build(result) = outcome.result else {
         panic!("semantic example returns a typed build result")
     };
-    let layout = StorageLayout::project_local_for_tests(temp.path());
+    let layout = ProjectBuildLayout::project_local_for_tests(temp.path());
     let record = build::read_current_build_record(&runtime(&layout))
         .unwrap()
         .unwrap();
@@ -1312,7 +1313,7 @@ fn semantic_example_publishes_fully_traceable_debug_bundle() {
         .find(|artifact| matches!(artifact.kind, squish_protocol::ArtifactKind::DebugInfo))
         .unwrap();
     let publisher = FileArtifactPublisher::open(
-        layout.publication_root(),
+        layout.artifacts_root(),
         Cas::open(layout.cas_root()).unwrap(),
     )
     .unwrap();
@@ -1454,7 +1455,7 @@ fn same_named_workspace_targets_keep_distinct_internal_owners() {
         .dispatch(&OperationRequest::Build(request), &context)
         .unwrap();
     let catalog = build::read_current_build_catalog(&runtime(
-        &StorageLayout::project_local_for_tests(temp.path()),
+        &ProjectBuildLayout::project_local_for_tests(temp.path()),
     ))
     .unwrap()
     .unwrap();
@@ -1503,14 +1504,14 @@ impl Services for WorkspaceServices {
         &self,
         project: &Path,
     ) -> Result<Arc<dyn squish_manager::BuildRuntime>, ServiceError> {
-        let layout = StorageLayout::project_local_for_tests(project);
+        let layout = ProjectBuildLayout::project_local_for_tests(project);
         TestBuildRuntime::open(&layout)
             .map(|runtime| Arc::new(runtime) as Arc<dyn squish_manager::BuildRuntime>)
             .map_err(|error| ServiceError::new(error.code(), error.message()))
     }
 
-    fn storage_layout(&self, project: &Path) -> Result<StorageLayout, ServiceError> {
-        Ok(StorageLayout::project_local_for_tests(project))
+    fn storage_layout(&self, project: &Path) -> Result<ProjectBuildLayout, ServiceError> {
+        Ok(ProjectBuildLayout::project_local_for_tests(project))
     }
 
     fn materialize_locked(

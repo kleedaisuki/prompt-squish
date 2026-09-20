@@ -9,8 +9,8 @@ use std::{
 
 use squish_kernel::{CancellationToken, Capability, EventSink, InvocationContext, SinkError};
 use squish_manager::{
-    InvocationSettings, ManagerCapability, ResolveRequest, ResolvedDependencies, ServiceError,
-    Services, StorageLayout,
+    InvocationSettings, ManagerCapability, ProjectBuildLayout, ResolveRequest,
+    ResolvedDependencies, ServiceError, Services,
 };
 use squish_project::{LOCK_VERSION, Lockfile, ResolutionMode};
 use squish_protocol::{
@@ -34,8 +34,8 @@ impl EventSink for Events {
 struct Resolver;
 
 impl Services for Resolver {
-    fn storage_layout(&self, project: &Path) -> Result<StorageLayout, ServiceError> {
-        Ok(StorageLayout::project_local_for_tests(project))
+    fn storage_layout(&self, project: &Path) -> Result<ProjectBuildLayout, ServiceError> {
+        Ok(ProjectBuildLayout::project_local_for_tests(project))
     }
 
     fn materialize_locked(
@@ -63,8 +63,8 @@ impl Services for Resolver {
 struct FailingResolver;
 
 impl Services for FailingResolver {
-    fn storage_layout(&self, project: &Path) -> Result<StorageLayout, ServiceError> {
-        Ok(StorageLayout::project_local_for_tests(project))
+    fn storage_layout(&self, project: &Path) -> Result<ProjectBuildLayout, ServiceError> {
+        Ok(ProjectBuildLayout::project_local_for_tests(project))
     }
 
     fn materialize_locked(
@@ -90,8 +90,8 @@ struct RacingResolver {
 }
 
 impl Services for RacingResolver {
-    fn storage_layout(&self, project: &Path) -> Result<StorageLayout, ServiceError> {
-        Ok(StorageLayout::project_local_for_tests(project))
+    fn storage_layout(&self, project: &Path) -> Result<ProjectBuildLayout, ServiceError> {
+        Ok(ProjectBuildLayout::project_local_for_tests(project))
     }
 
     fn materialize_locked(

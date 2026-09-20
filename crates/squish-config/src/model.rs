@@ -131,18 +131,6 @@ pub struct Registry {
     pub auth_scope: AuthScope,
 }
 
-/// 源缓存设置。 / Source cache settings.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SourceConfig {
-    /// 源对象缓存根目录。 / Source-object cache root.
-    pub cache_root: PathBuf,
-}
-/// 管理器持久状态设置。 / Manager persistent-state settings.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ManagerConfig {
-    /// 管理器状态根目录。 / Manager state root.
-    pub storage_root: PathBuf,
-}
 /// 构建调度设置。 / Build scheduling settings.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuildConfig {
@@ -174,10 +162,6 @@ pub struct TermConfig {
 pub struct Config {
     /// 按别名排序的注册表。 / Registries sorted by alias.
     pub registries: BTreeMap<String, Registry>,
-    /// 源设置。 / Source settings.
-    pub source: SourceConfig,
-    /// 管理器设置。 / Manager settings.
-    pub manager: ManagerConfig,
     /// 构建设置。 / Build settings.
     pub build: BuildConfig,
     /// 新项目设置。 / New-project settings.
@@ -228,28 +212,20 @@ impl EffectiveConfig {
 pub struct ConfigLoader {
     home: ConfigHome,
     workspace_root: Option<PathBuf>,
-    cli_base: PathBuf,
     overrides: Vec<String>,
 }
 impl ConfigLoader {
     /// 创建加载器；宿主应在此之前解析 `XMLSQUISH_HOME` 或平台目录。 / Creates a loader; the host resolves `XMLSQUISH_HOME` or a platform directory first.
     pub fn new(home: ConfigHome) -> Self {
-        let cli_base = home.0.clone();
         Self {
             home,
             workspace_root: None,
-            cli_base,
             overrides: Vec::new(),
         }
     }
     /// 选择工作区根；仅加载其 `.xmlsquish/config.toml`。 / Selects a workspace root; only its `.xmlsquish/config.toml` is loaded.
     pub fn workspace_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.workspace_root = Some(root.into());
-        self
-    }
-    /// 设置 CLI 相对路径的显式基准目录。 / Sets the explicit base for relative paths in CLI overrides.
-    pub fn cli_base(mut self, base: impl Into<PathBuf>) -> Self {
-        self.cli_base = base.into();
         self
     }
     /// 设置按给定顺序合并的 `KEY=VALUE` 覆盖项。 / Sets `KEY=VALUE` overrides merged in the supplied order.
@@ -263,7 +239,7 @@ impl ConfigLoader {
     }
     /// 加载已明确选择的层。不存在的文件视为空层。 / Loads explicitly selected layers; missing files are empty layers.
     pub fn load(self) -> Result<EffectiveConfig, ConfigError> {
-        let mut state = State::defaults(&self.home);
+        let mut state = State::defaults();
         let user = self.home.0.join("config.toml");
         apply_file(&mut state, user.clone(), ConfigLayer::User(user))?;
         if let Some(root) = self.workspace_root {
@@ -271,7 +247,7 @@ impl ConfigLoader {
             apply_file(&mut state, path.clone(), ConfigLayer::Workspace(path))?;
         }
         for (index, value) in self.overrides.iter().enumerate() {
-            apply_override(&mut state, index, value, &self.cli_base)?;
+            apply_override(&mut state, index, value)?;
         }
         state.finish()
     }
@@ -282,8 +258,6 @@ impl ConfigLoader {
 struct PartialConfig {
     #[serde(default)]
     registries: BTreeMap<String, RawRegistry>,
-    source: Option<RawSource>,
-    manager: Option<RawManager>,
     build: Option<RawBuild>,
     new: Option<RawNew>,
     term: Option<RawTerm>,
@@ -294,16 +268,6 @@ struct RawRegistry {
     id: Option<String>,
     index: Option<String>,
     auth_scope: Option<String>,
-}
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-struct RawSource {
-    cache_root: Option<PathBuf>,
-}
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-struct RawManager {
-    storage_root: Option<PathBuf>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -338,17 +302,10 @@ struct State {
     registries: BTreeMap<String, RegistryState>,
 }
 impl State {
-    fn defaults(home: &ConfigHome) -> Self {
+    fn defaults() -> Self {
         let mut provenance = Provenance::default();
-        let base = home.0.clone();
         let config = Config {
             registries: BTreeMap::new(),
-            source: SourceConfig {
-                cache_root: base.join("cache").join("sources"),
-            },
-            manager: ManagerConfig {
-                storage_root: base.join("state"),
-            },
             build: BuildConfig {
                 jobs: 0,
                 keep_going: true,
@@ -362,11 +319,6 @@ impl State {
             },
         };
         for (key, value) in [
-            ("source.cache-root", display_path(&config.source.cache_root)),
-            (
-                "manager.storage-root",
-                display_path(&config.manager.storage_root),
-            ),
             ("build.jobs", "0".into()),
             ("build.keep-going", "true".into()),
             ("new.vcs", "git".into()),
@@ -526,14 +478,9 @@ fn apply_file(state: &mut State, path: PathBuf, layer: ConfigLayer) -> Result<()
             });
         }
     };
-    apply_text(state, &text, layer, path.parent().unwrap_or(Path::new(".")))
+    apply_text(state, &text, layer)
 }
-fn apply_override(
-    state: &mut State,
-    index: usize,
-    raw: &str,
-    base: &Path,
-) -> Result<(), ConfigError> {
+fn apply_override(state: &mut State, index: usize, raw: &str) -> Result<(), ConfigError> {
     let Some((key, value)) = raw.split_once('=') else {
         return Err(ConfigError::Parse {
             location: SourceLocation {
@@ -553,14 +500,9 @@ fn apply_override(
         });
     }
     // Parse the original argument verbatim so all spans index the argv value.
-    apply_text(state, raw, ConfigLayer::Cli { index }, base)
+    apply_text(state, raw, ConfigLayer::Cli { index })
 }
-fn apply_text(
-    state: &mut State,
-    text: &str,
-    layer: ConfigLayer,
-    base: &Path,
-) -> Result<(), ConfigError> {
+fn apply_text(state: &mut State, text: &str, layer: ConfigLayer) -> Result<(), ConfigError> {
     let doc = Document::parse(text.to_owned()).map_err(|e| ConfigError::Parse {
         location: SourceLocation {
             layer: layer.clone(),
@@ -576,13 +518,11 @@ fn apply_text(
         },
         message: e.message().into(),
     })?;
-    merge(state, partial, layer, base, &doc)
+    merge(state, partial, layer, &doc)
 }
 
 fn validate_keys(doc: &Document<String>, layer: &ConfigLayer) -> Result<(), ConfigError> {
-    const ROOT: &[&str] = &["registries", "source", "manager", "build", "new", "term"];
-    const SOURCE: &[&str] = &["cache-root"];
-    const MANAGER: &[&str] = &["storage-root"];
+    const ROOT: &[&str] = &["registries", "build", "new", "term"];
     const BUILD: &[&str] = &["jobs", "keep-going"];
     const NEW: &[&str] = &["vcs"];
     const TERM: &[&str] = &["color", "progress", "message-format", "verbosity"];
@@ -612,8 +552,6 @@ fn validate_keys(doc: &Document<String>, layer: &ConfigLayer) -> Result<(), Conf
             }
         } else {
             let allowed = match key {
-                "source" => SOURCE,
-                "manager" => MANAGER,
                 "build" => BUILD,
                 "new" => NEW,
                 _ => TERM,
@@ -667,7 +605,6 @@ fn merge(
     state: &mut State,
     p: PartialConfig,
     layer: ConfigLayer,
-    base: &Path,
     doc: &Document<String>,
 ) -> Result<(), ConfigError> {
     for (alias, raw) in p.registries {
@@ -715,26 +652,6 @@ fn merge(
                 doc,
             );
         }
-    }
-    if let Some(v) = p.source.and_then(|v| v.cache_root) {
-        state.config.source.cache_root = resolve(base, v);
-        record(
-            state,
-            "source.cache-root".into(),
-            display_path(&state.config.source.cache_root),
-            &layer,
-            doc,
-        );
-    }
-    if let Some(v) = p.manager.and_then(|v| v.storage_root) {
-        state.config.manager.storage_root = resolve(base, v);
-        record(
-            state,
-            "manager.storage-root".into(),
-            display_path(&state.config.manager.storage_root),
-            &layer,
-            doc,
-        );
     }
     if let Some(build) = p.build {
         if let Some(v) = build.jobs {
@@ -864,16 +781,6 @@ fn record(
             value,
             span: loc.span,
         });
-}
-fn resolve(base: &Path, path: PathBuf) -> PathBuf {
-    if path.is_absolute() {
-        path
-    } else {
-        base.join(path)
-    }
-}
-fn display_path(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
 }
 fn enum_text<T: std::fmt::Debug>(v: T) -> String {
     format!("{v:?}").to_ascii_lowercase()

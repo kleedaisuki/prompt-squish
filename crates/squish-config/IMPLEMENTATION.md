@@ -23,11 +23,17 @@ to invocation assembly, avoiding separate stringly-typed defaults.
 `PartialConfig` is the deserialization boundary. `validate_keys` first walks the
 span-preserving immutable `toml_edit::Document` so key and value byte ranges refer
 to the exact original source. `merge` validates and normalizes domain values,
-resolves file-relative paths, updates `Config`, and
-appends an `ExplainEntry`. `State::finish` validates cross-registry alias and
-stable-ID uniqueness. `Provenance` therefore contains a weak-to-strong chain for
-every effective scalar value, including defaults and dynamically named registry
-leaves.
+updates `Config`, and appends an `ExplainEntry`. `State::finish` validates
+cross-registry alias and stable-ID uniqueness. `Provenance` therefore contains a
+weak-to-strong chain for every effective scalar value, including defaults and
+dynamically named registry leaves.
+
+Project build storage is intentionally absent from this schema. The former
+`source.cache-root` and `manager.storage-root` keys are rejected rather than
+ignored: cache, content-addressed storage, action metadata, and catalogs are
+derived from the canonical project root and its manifest target directory by
+the manager. This keeps build state project-owned instead of making machine-wide
+paths a user configuration concern.
 
 Registry configuration stores only logical IDs, sparse index locators, and an
 opaque non-secret credential lookup scope. Token/password fields are outside the
@@ -164,5 +170,3 @@ cross-origin values so merely retaining the first header cannot pass.
 The schema is deliberately closed: misspellings cannot silently become inert.
 Adding a key is consequently an explicit schema evolution. Registry aliases are
 case-folded for collision detection while their declared spelling is preserved.
-Paths from CLI overrides use the caller's current-base marker (`.`); callers that
-need another base should make paths absolute before injection.

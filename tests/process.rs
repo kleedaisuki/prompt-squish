@@ -19,12 +19,6 @@ fn project(name: &str) -> tempfile::TempDir {
         .tempdir_in(scratch)
         .unwrap();
     fs::create_dir_all(project.path().join("src")).unwrap();
-    fs::create_dir_all(project.path().join(".xmlsquish")).unwrap();
-    fs::write(
-        project.path().join(".xmlsquish/config.toml"),
-        "[source]\ncache-root = \"cache/sources\"\n[manager]\nstorage-root = \"cache/state\"\n",
-    )
-    .unwrap();
     fs::write(
         project.path().join("xmlsquish.toml"),
         r#"manifest-version = 1
@@ -45,13 +39,9 @@ entry = "src/main.xml"
     project
 }
 
-/// 创建不覆盖全局存储的项目。 / Creates a project that does not override global storage.
-fn globally_stored_project(
-    name: &str,
-    package: &str,
-    target: &str,
-    message: &str,
-) -> tempfile::TempDir {
+/// 创建用于验证项目本地状态隔离的项目。 / Creates a project used to verify
+/// project-local state isolation.
+fn isolated_project(name: &str, package: &str, target: &str, message: &str) -> tempfile::TempDir {
     let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join(".temp");
     fs::create_dir_all(&scratch).unwrap();
     let project = tempfile::Builder::new()
@@ -137,10 +127,10 @@ fn json_parse_failures_are_diagnostic_plus_one_terminal_record() {
 #[test]
 fn invalid_registry_environment_credential_is_redacted_in_machine_output() {
     let project = project("invalid-registry-credential");
+    fs::create_dir_all(project.path().join(".xmlsquish")).unwrap();
     fs::write(
         project.path().join(".xmlsquish/config.toml"),
-        "[source]\ncache-root = 'cache/sources'\n[manager]\nstorage-root = 'cache/state'\n\
-         [registries.corp]\nid = 'https://registry.example/v1'\nindex = 'sparse+https://index.example/'\nauth-scope = 'corp-read'\n",
+        "[registries.corp]\nid = 'https://registry.example/v1'\nindex = 'sparse+https://index.example/'\nauth-scope = 'corp-read'\n",
     )
     .unwrap();
     let secret = "Bearer distinctive-secret\nInjected: yes";
@@ -196,6 +186,7 @@ fn json_pre_dispatch_failures_are_diagnostic_plus_terminal_on_stdout() {
     assert_bootstrap_failure(discovery, "discover");
 
     let invalid_config = project("root-invalid-config-");
+    fs::create_dir_all(invalid_config.path().join(".xmlsquish")).unwrap();
     fs::write(
         invalid_config.path().join(".xmlsquish/config.toml"),
         "unknown-key = true\n",
@@ -207,19 +198,6 @@ fn json_pre_dispatch_failures_are_diagnostic_plus_terminal_on_stdout() {
         .output()
         .unwrap();
     assert_bootstrap_failure(config, "config");
-
-    let invalid_host = project("root-invalid-host-");
-    fs::write(
-        invalid_host.path().join(".xmlsquish/config.toml"),
-        "[source]\ncache-root = \"shared\"\n[manager]\nstorage-root = \"shared\"\n",
-    )
-    .unwrap();
-    let host = binary()
-        .current_dir(invalid_host.path())
-        .args(["build", "--message-format=json"])
-        .output()
-        .unwrap();
-    assert_bootstrap_failure(host, "host");
 }
 
 fn assert_bootstrap_failure(output: std::process::Output, phase: &str) {
@@ -416,11 +394,11 @@ fn human_detail_levels_hide_noise_without_erasing_machine_identity() {
         assert_no_internal_identity(product_output);
         assert!(product_output.contains("cached") || product_output.contains("Cached"));
     }
-    assert!(normal.contains("logical artifact locator target/xmlsquish/chat.prompt"));
+    assert!(normal.contains("logical artifact locator target/xmlsquish/artifacts/chat.prompt"));
     assert!(
         project
             .path()
-            .join("target/xmlsquish/chat.prompt")
+            .join("target/xmlsquish/artifacts/chat.prompt")
             .is_file()
     );
     assert!(
@@ -474,7 +452,7 @@ fn human_detail_levels_hide_noise_without_erasing_machine_identity() {
 }
 
 #[test]
-fn layered_config_drives_registry_storage_and_presentation_with_cli_precedence() {
+fn layered_config_drives_registry_and_presentation_with_cli_precedence() {
     let project = project("root-config-");
     let home = project.path().join("user-home");
     fs::create_dir_all(&home).unwrap();
@@ -489,12 +467,6 @@ fn layered_config_drives_registry_storage_and_presentation_with_cli_precedence()
         workspace.join("config.toml"),
         r#"[term]
 message-format = "human"
-
-[source]
-cache-root = "source-cache"
-
-[manager]
-storage-root = "manager-state"
 
 [registries.community]
 id = "https://registry.example.test/identity"
@@ -516,8 +488,15 @@ auth-scope = "community"
         String::from_utf8_lossy(&workspace_wins.stderr)
     );
     assert!(workspace_wins.stdout.is_empty());
-    assert!(workspace.join("source-cache").is_dir());
-    assert!(workspace.join("manager-state").is_dir());
+    let target = project.path().join("target/xmlsquish");
+    assert!(target.join("artifacts/chat.prompt").is_file());
+    assert!(target.join("cache/cas").is_dir());
+    assert!(target.join("cache/actions.sqlite3").is_file());
+    assert!(target.join("metadata/layout.json").is_file());
+    assert!(target.join("metadata/publications").is_dir());
+    assert!(target.join("metadata/catalog").is_dir());
+    assert!(!home.join("cache").exists());
+    assert!(!home.join("state").exists());
 
     let environment_wins = binary()
         .current_dir(project.path())
@@ -587,7 +566,7 @@ fn build_warms_cache_and_publishes_all_selected_artifact_kinds() {
     );
     assert!(cold.stdout.is_empty());
     let publication = project.path().join("target/xmlsquish");
-    let files: Vec<_> = walk(&publication);
+    let files: Vec<_> = walk(&publication.join("artifacts"));
     for extension in ["prompt", "xsir", "psdbg"] {
         assert!(
             files
@@ -597,6 +576,11 @@ fn build_warms_cache_and_publishes_all_selected_artifact_kinds() {
             publication.display()
         );
     }
+    assert!(publication.join("cache/cas").is_dir());
+    assert!(publication.join("cache/actions.sqlite3").is_file());
+    assert!(publication.join("metadata/layout.json").is_file());
+    assert!(publication.join("metadata/publications").is_dir());
+    assert!(publication.join("metadata/catalog").is_dir());
     let warm = binary()
         .current_dir(project.path())
         .args(args)
@@ -630,14 +614,14 @@ fn bare_build_defaults_to_a_prompt_artifact() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        walk(&project.path().join("target/xmlsquish"))
+        walk(&project.path().join("target/xmlsquish/artifacts"))
             .iter()
             .any(|path| path.extension().and_then(|value| value.to_str()) == Some("prompt"))
     );
 }
 
 #[test]
-fn clean_removes_project_state_prunes_invalid_dependencies_and_rebuilds_offline() {
+fn clean_removes_all_project_owned_artifacts_cache_and_metadata() {
     let project = project("root-clean-");
     let built = binary()
         .current_dir(project.path())
@@ -650,13 +634,10 @@ fn clean_removes_project_state_prunes_invalid_dependencies_and_rebuilds_offline(
         String::from_utf8_lossy(&built.stderr)
     );
     let target = project.path().join("target/xmlsquish");
-    assert!(target.join("chat.prompt").is_file());
-
-    let invalid = project
-        .path()
-        .join(".xmlsquish/cache/sources/v1/quarantine/provably-invalid");
-    fs::create_dir_all(&invalid).unwrap();
-    fs::write(invalid.join("payload"), b"bad").unwrap();
+    assert!(target.join("artifacts/chat.prompt").is_file());
+    for child in ["artifacts", "cache", "metadata"] {
+        assert!(target.join(child).is_dir(), "missing local {child} state");
+    }
 
     let cleaned = binary()
         .current_dir(project.path())
@@ -678,15 +659,29 @@ fn clean_removes_project_state_prunes_invalid_dependencies_and_rebuilds_offline(
         })
         .expect("clean completion result");
     assert!(result["build_files"].as_u64().unwrap() > 0);
-    assert_eq!(result["invalid_dependency_entries"], 1);
     assert!(!target.exists());
-    assert!(!invalid.exists());
-    assert!(project.path().join(".xmlsquish/cache/state/cas").is_dir());
     assert!(
-        project
+        !project
             .path()
-            .join(".xmlsquish/cache/state/actions.sqlite3")
-            .is_file()
+            .join("target/.xmlsquish.xmlsquish.clean.json")
+            .exists()
+    );
+
+    let repeated = binary()
+        .current_dir(project.path())
+        .args(["clean", "--quiet"])
+        .output()
+        .unwrap();
+    assert!(
+        repeated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    assert!(repeated.stdout.is_empty());
+    assert!(repeated.stderr.is_empty());
+    assert!(
+        !target.exists(),
+        "an empty clean must not recreate local state"
     );
 
     let rebuilt = binary()
@@ -699,7 +694,10 @@ fn clean_removes_project_state_prunes_invalid_dependencies_and_rebuilds_offline(
         "{}",
         String::from_utf8_lossy(&rebuilt.stderr)
     );
-    assert!(target.join("chat.prompt").is_file());
+    assert!(target.join("artifacts/chat.prompt").is_file());
+    assert!(target.join("cache/actions.sqlite3").is_file());
+    assert!(target.join("metadata/layout.json").is_file());
+    assert!(target.join("metadata/catalog").is_dir());
 }
 
 #[test]
@@ -730,14 +728,19 @@ entry = "src/main.xml"
         "{}",
         String::from_utf8_lossy(&built.stderr)
     );
-    assert!(project.path().join("dist/prompts/chat.prompt").is_file());
+    let target = project.path().join("dist/prompts");
+    assert!(target.join("artifacts/chat.prompt").is_file());
+    assert!(target.join("cache/actions.sqlite3").is_file());
+    assert!(target.join("metadata/layout.json").is_file());
+    assert!(target.join("metadata/publications").is_dir());
+    assert!(target.join("metadata/catalog").is_dir());
     assert!(!project.path().join("target/xmlsquish").exists());
 }
 
 #[test]
-fn global_storage_isolates_project_catalogs_while_serving_both_projects() {
-    let first = globally_stored_project("root-global-first-", "first", "alpha", "Alpha");
-    let second = globally_stored_project("root-global-second-", "second", "beta", "Beta");
+fn project_local_storage_isolates_catalogs_and_caches() {
+    let first = isolated_project("root-local-first-", "first", "alpha", "Alpha");
+    let second = isolated_project("root-local-second-", "second", "beta", "Beta");
     let home = tempfile::Builder::new()
         .prefix("root-global-catalog-home-")
         .tempdir_in(Path::new(env!("CARGO_MANIFEST_DIR")).join(".temp"))
@@ -774,25 +777,16 @@ fn global_storage_isolates_project_catalogs_while_serving_both_projects() {
         assert_eq!(document["value"]["target"], target);
     }
 
-    assert!(home.path().join("state/cas").is_dir());
-    assert!(home.path().join("state/actions.sqlite3").is_file());
-    let namespaces = fs::read_dir(home.path().join("state/catalog/projects"))
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry.file_type().is_ok_and(|kind| kind.is_dir())
-                && entry.file_name().to_string_lossy().len() == 64
-                && entry
-                    .file_name()
-                    .to_string_lossy()
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        })
-        .count();
-    assert_eq!(
-        namespaces, 2,
-        "each canonical project needs its own catalog"
-    );
+    for project in [&first, &second] {
+        let target = project.path().join("target/xmlsquish");
+        assert!(target.join("cache/cas").is_dir());
+        assert!(target.join("cache/actions.sqlite3").is_file());
+        assert!(target.join("metadata/layout.json").is_file());
+        assert!(target.join("metadata/publications").is_dir());
+        assert!(target.join("metadata/catalog").is_dir());
+    }
+    assert!(!home.path().join("cache").exists());
+    assert!(!home.path().join("state").exists());
 }
 
 #[test]
@@ -1222,7 +1216,7 @@ fn inspect_failures_are_read_only_and_never_emit_partial_query_documents() {
     let missing = inspect(
         &fixture,
         "artifact",
-        "target/xmlsquish/missing.prompt",
+        "target/xmlsquish/artifacts/missing.prompt",
         "--format=json",
     );
     assert_inspect_failure(missing, "XS3420");
@@ -1290,7 +1284,7 @@ fn absolute_manifest_path_builds_and_inspects_the_same_project_from_outside() {
         String::from_utf8_lossy(&built.stderr)
     );
     assert!(
-        walk(&project.path().join("target/xmlsquish"))
+        walk(&project.path().join("target/xmlsquish/artifacts"))
             .iter()
             .any(|path| path.extension().and_then(|value| value.to_str()) == Some("prompt"))
     );
@@ -1317,7 +1311,7 @@ fn absolute_manifest_path_builds_and_inspects_the_same_project_from_outside() {
             "--manifest-path",
             manifest.to_str().unwrap(),
             "artifact",
-            "target/xmlsquish/chat.prompt",
+            "target/xmlsquish/artifacts/chat.prompt",
             "--format=json",
         ])
         .output()

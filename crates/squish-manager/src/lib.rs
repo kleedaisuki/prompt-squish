@@ -29,9 +29,9 @@ pub use runtime::{
     BuildRuntimeProvider, GenerationSpace,
 };
 pub use services::{
-    ProjectCleanStatus, ProjectCreationLocation, ProjectCreationStatus, ProvenanceNonApplicability,
-    ProvenanceRelation, ResolveRequest, ResolvedDependencies, Services, StorageLayout,
-    StorageLayoutError,
+    ProjectBuildLayout, ProjectBuildLayoutError, ProjectCleanStatus, ProjectCreationLocation,
+    ProjectCreationStatus, ProvenanceNonApplicability, ProvenanceRelation, ResolveRequest,
+    ResolvedDependencies, Services,
 };
 
 use squish_kernel::{Capability, CapabilityDescriptor, InvocationContext, OperationOutcome};

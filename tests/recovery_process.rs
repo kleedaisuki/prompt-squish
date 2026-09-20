@@ -17,7 +17,6 @@ fn binary() -> Command {
 
 struct Fixture {
     root: tempfile::TempDir,
-    home: tempfile::TempDir,
 }
 
 impl Fixture {
@@ -28,10 +27,6 @@ impl Fixture {
             .prefix(&format!("recovery-{name}-project-"))
             .tempdir_in(&scratch)
             .unwrap();
-        let home = tempfile::Builder::new()
-            .prefix(&format!("recovery-{name}-home-"))
-            .tempdir_in(&scratch)
-            .unwrap();
         fs::create_dir_all(root.path().join("src")).unwrap();
         fs::write(
             root.path().join("xmlsquish.toml"),
@@ -39,14 +34,12 @@ impl Fixture {
         )
         .unwrap();
         fs::write(root.path().join("src/main.xml"), source("A")).unwrap();
-        Self { root, home }
+        Self { root }
     }
 
     fn command(&self) -> Command {
         let mut command = binary();
-        command
-            .current_dir(self.root.path())
-            .env("XMLSQUISH_HOME", self.home.path());
+        command.current_dir(self.root.path());
         command
     }
 
@@ -68,7 +61,7 @@ impl Fixture {
             .args([
                 "inspect",
                 "artifact",
-                "target/xmlsquish/chat.prompt",
+                "target/xmlsquish/artifacts/chat.prompt",
                 "--format=json",
             ])
             .output()
@@ -98,31 +91,15 @@ impl Fixture {
     }
 
     fn artifact_journal(&self) -> PathBuf {
-        self.project_namespace()
-            .join("target-publication-state/generation-journal.json")
+        self.root
+            .path()
+            .join("target/xmlsquish/metadata/publications/generation-journal.json")
     }
 
     fn catalog_journal(&self) -> PathBuf {
-        self.project_namespace()
-            .join("build-catalog-state/generation-journal.json")
-    }
-
-    fn project_namespace(&self) -> PathBuf {
-        let catalog = self.home.path().join("state/catalog/projects");
-        fs::read_dir(catalog)
-            .unwrap()
-            .filter_map(Result::ok)
-            .find(|entry| {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                entry.file_type().is_ok_and(|kind| kind.is_dir())
-                    && name.len() == 64
-                    && name
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-            })
-            .expect("project namespace exists")
+        self.root
             .path()
+            .join("target/xmlsquish/metadata/catalog/state/generation-journal.json")
     }
 }
 
@@ -177,7 +154,6 @@ fn assert_transactions_empty(path: &Path) {
 /// 用于 `new` 发布真实进程死亡测试的工作区夹具。
 struct NewRecoveryFixture {
     root: tempfile::TempDir,
-    home: tempfile::TempDir,
     destination: PathBuf,
 }
 
@@ -189,28 +165,18 @@ impl NewRecoveryFixture {
             .prefix(&format!("recovery-new-{name}-workspace-"))
             .tempdir_in(&scratch)
             .unwrap();
-        let home = tempfile::Builder::new()
-            .prefix(&format!("recovery-new-{name}-home-"))
-            .tempdir_in(&scratch)
-            .unwrap();
         fs::write(
             root.path().join("xmlsquish.toml"),
             "manifest-version = 1\n[workspace]\nmembers = []\n",
         )
         .unwrap();
         let destination = root.path().join("packages/new-member");
-        Self {
-            root,
-            home,
-            destination,
-        }
+        Self { root, destination }
     }
 
     fn command(&self) -> Command {
         let mut command = binary();
-        command
-            .current_dir(self.root.path())
-            .env("XMLSQUISH_HOME", self.home.path());
+        command.current_dir(self.root.path());
         command
     }
 

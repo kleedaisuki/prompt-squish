@@ -12,6 +12,6 @@ mod model;
 pub use error::{ConfigError, ConfigLayer, SourceLocation};
 pub use model::{
     AuthScope, BuildConfig, ColorPolicy, Config, ConfigHome, ConfigLoader, EffectiveConfig,
-    ExplainEntry, ManagerConfig, MessageFormat, NewConfig, NewVcs, ProgressPolicy, Provenance,
-    Registry, RegistryId, RegistryIndex, SourceConfig, TermConfig, Verbosity,
+    ExplainEntry, MessageFormat, NewConfig, NewVcs, ProgressPolicy, Provenance, Registry,
+    RegistryId, RegistryIndex, TermConfig, Verbosity,
 };

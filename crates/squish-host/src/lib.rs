@@ -36,18 +36,15 @@ use squish_fetch::{
     Materializer, Observer, RegistryConfig, SourceEvent, SparseRegistry, SystemGitRunner,
 };
 use squish_manager::{
-    ArtifactLocator, BuildRuntime, ProjectCleanStatus, ProjectCreationLocation,
+    ArtifactLocator, BuildRuntime, ProjectBuildLayout, ProjectCleanStatus, ProjectCreationLocation,
     ProjectCreationStatus, ProvenanceNonApplicability, ProvenanceRelation, ResolveRequest,
-    ResolvedDependencies, ServiceError, Services, StorageLayout,
+    ResolvedDependencies, ServiceError, Services,
 };
 use squish_project::{
     DependencyResolver, LockedSource, Lockfile, Manifest, ResolutionInput, ResolutionMode,
 };
 use squish_protocol::{CleanResult, VcsChoice};
-use squish_publish::{
-    NoopObserver as NoopPublishObserver, ProjectEpoch, PublishObserver, project_epoch_path,
-    project_lock_path, read_project_epoch, write_project_epoch,
-};
+use squish_publish::{NoopObserver as NoopPublishObserver, PublishObserver};
 use squish_repository::{
     CreateProjectRequest, FaultInjector, PackageLocation, ProjectVcs, RepositoryError,
     StagePreparer, WorkspaceMembership, create_project,
@@ -425,10 +422,9 @@ fn git_runner(git: GitExecution) -> Result<Arc<dyn GitRunner>, HostError> {
 pub struct HostConfig {
     /// 唯一允许的项目根。 / Sole permitted project root.
     pub project_root: PathBuf,
-    /// Registry/Git 获取缓存；不是构建产物 CAS。 / Registry/Git acquisition cache; not the build artifact CAS.
-    pub source_cache_root: PathBuf,
-    /// 构建 CAS、动作索引、发布及 catalog 的唯一权威布局。 / Sole authoritative layout for build CAS, action index, publication, and catalog.
-    pub storage: StorageLayout,
+    /// 从规范项目根和 manifest target 目录派生的唯一项目构建布局。 /
+    /// Sole project-build layout derived from the canonical project root and manifest target.
+    pub storage: ProjectBuildLayout,
     /// 名称唯一的 registry 集。 / Registries with unique names.
     pub registries: Vec<RegistryEndpoint>,
     /// Registry credential 来源。 / Registry credential source.
@@ -450,7 +446,7 @@ impl fmt::Debug for HostConfig {
         formatter
             .debug_struct("HostConfig")
             .field("project_root", &self.project_root)
-            .field("source_cache_root", &self.source_cache_root)
+            .field("ownership_root", &self.storage.ownership_root())
             .field("registries", &self.registries)
             .finish_non_exhaustive()
     }
@@ -526,70 +522,82 @@ struct RegistryEntry {
     registry: SparseRegistry<SharedCredentials>,
 }
 
-const CLEAN_JOURNAL_VERSION: u32 = 1;
+const CLEAN_JOURNAL_VERSION: u32 = 2;
 #[cfg(windows)]
 const CLEAN_RENAME_ATTEMPTS: usize = 8;
 
-/// 外置 clean redo journal；它只描述受项目锁保护的权威根。 /
-/// External clean redo journal describing only authoritative roots guarded by the project lock.
+/// 外置 clean redo journal；只保存同父目录的受控叶名。 /
+/// External clean redo journal containing only controlled sibling leaf names.
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct CleanJournal {
     version: u32,
-    publication_root: PathBuf,
-    catalog_root: PathBuf,
-    #[serde(default)]
-    next_epoch: Option<ProjectEpoch>,
+    root_leaf: PathBuf,
+    trash_leaf: PathBuf,
 }
 
-/// 从 publisher 共享锁身份派生的 journal 与同卷 tombstone。 /
-/// Journal and same-volume tombstones derived from the publisher's shared-lock identity.
+/// 从唯一项目构建根派生的根外协调路径。 /
+/// Out-of-root coordination paths derived from the sole project build root.
 struct CleanPaths {
+    root: PathBuf,
     lock: PathBuf,
-    epoch: PathBuf,
     journal: PathBuf,
-    publication_tombstone: PathBuf,
-    catalog_tombstone: PathBuf,
 }
 
 impl CleanPaths {
-    /// 为一个存储布局构造稳定且不位于删除根中的协调路径。 /
-    /// Builds stable coordination paths which remain outside every deleted root.
-    fn new(storage: &StorageLayout) -> io::Result<Self> {
-        let lock = project_lock_path(storage.catalog_root());
-        let identity = lock.file_stem().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "project lock has no file name")
+    /// 构造 ADR 规定的同级 lock/journal 路径。 /
+    /// Builds the sibling lock/journal paths required by the project-layout ADR.
+    fn new(storage: &ProjectBuildLayout) -> io::Result<Self> {
+        let root = storage.ownership_root().to_path_buf();
+        root.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "project build root has no parent",
+            )
         })?;
-        let journal = lock.with_extension("clean.json");
+        root.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "project build root has no leaf",
+            )
+        })?;
         Ok(Self {
-            publication_tombstone: clean_tombstone(storage.publication_root(), identity)?,
-            catalog_tombstone: clean_tombstone(storage.catalog_root(), identity)?,
-            epoch: project_epoch_path(storage.catalog_root()),
-            lock,
-            journal,
+            root,
+            lock: storage.coordination_lock().to_path_buf(),
+            journal: storage.clean_journal().to_path_buf(),
         })
     }
 }
 
-/// 将一个权威根映射到同父目录的独占 tombstone。 /
-/// Maps an authoritative root to an exclusive tombstone in the same parent directory.
-fn clean_tombstone(root: &Path, identity: &std::ffi::OsStr) -> io::Result<PathBuf> {
-    let parent = root.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("clean root `{}` has no parent", root.display()),
-        )
-    })?;
-    let leaf = root.file_name().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("clean root `{}` has no file name", root.display()),
-        )
-    })?;
-    let mut name = OsString::from(".");
-    name.push(leaf);
-    name.push(".squish-clean-");
-    name.push(identity);
-    Ok(parent.join(name))
+fn next_trash_leaf(paths: &CleanPaths) -> io::Result<PathBuf> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let leaf = paths
+        .root
+        .file_name()
+        .expect("validated build root leaf")
+        .to_string_lossy();
+    for attempt in 0_u32..1024 {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let candidate = PathBuf::from(format!(
+            ".{leaf}.xmlsquish-trash-{}-{nonce:x}-{attempt:x}",
+            std::process::id()
+        ));
+        if !paths
+            .root
+            .parent()
+            .expect("validated build root parent")
+            .join(&candidate)
+            .exists()
+        {
+            return Ok(candidate);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate clean trash name",
+    ))
 }
 
 /// 获取与 target/catalog publisher 完全相同的跨进程项目锁。 /
@@ -651,27 +659,21 @@ fn lock_is_busy(error: &io::Error) -> bool {
     }
 }
 
-fn expected_clean_journal(storage: &StorageLayout, next_epoch: ProjectEpoch) -> CleanJournal {
+fn expected_clean_journal(paths: &CleanPaths, trash_leaf: PathBuf) -> CleanJournal {
     CleanJournal {
         version: CLEAN_JOURNAL_VERSION,
-        publication_root: storage.publication_root().to_path_buf(),
-        catalog_root: storage.catalog_root().to_path_buf(),
-        next_epoch: Some(next_epoch),
+        root_leaf: PathBuf::from(paths.root.file_name().expect("validated build root leaf")),
+        trash_leaf,
     }
 }
 
 /// 原子持久化 redo journal，确保首次 detach 之前已有恢复依据。 /
 /// Atomically persists the redo journal before the first detach has recovery evidence.
-fn persist_clean_journal(
-    storage: &StorageLayout,
-    paths: &CleanPaths,
-    next_epoch: ProjectEpoch,
-) -> io::Result<()> {
-    persist_clean_journal_value(&expected_clean_journal(storage, next_epoch), paths)
+fn persist_clean_journal(paths: &CleanPaths, trash_leaf: PathBuf) -> io::Result<()> {
+    persist_clean_journal_value(&expected_clean_journal(paths, trash_leaf), paths)
 }
 
-/// 原子写入一个已冻结的 journal 值；用于旧 journal 升级时保留原参与者路径。 /
-/// Atomically writes a frozen journal value, preserving former participant paths during upgrade.
+/// 原子写入已冻结的 journal 值。 / Atomically writes a frozen journal value.
 fn persist_clean_journal_value(journal: &CleanJournal, paths: &CleanPaths) -> io::Result<()> {
     let bytes = serde_json::to_vec(journal)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -688,14 +690,9 @@ fn persist_clean_journal_value(journal: &CleanJournal, paths: &CleanPaths) -> io
     sync_parent(&paths.journal)
 }
 
-/// 校验 journal 身份；布局变更时只接受仍位于规范项目根内的旧 target。 /
-/// Validates journal identity; after a layout change, only a former target within the canonical
-/// project root is accepted.
-fn validate_clean_journal(
-    storage: &StorageLayout,
-    project_root: &Path,
-    journal: &Path,
-) -> io::Result<CleanJournal> {
+/// 校验 journal 中的两个同级叶名。 / Validates the two sibling leaf names in a journal.
+fn validate_clean_journal(paths: &CleanPaths) -> io::Result<CleanJournal> {
+    let journal = &paths.journal;
     let metadata = std::fs::symlink_metadata(journal)?;
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
         return Err(io::Error::new(
@@ -708,7 +705,14 @@ fn validate_clean_journal(
     }
     let actual: CleanJournal = serde_json::from_slice(&std::fs::read(journal)?)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    if actual.version != CLEAN_JOURNAL_VERSION || actual.catalog_root != storage.catalog_root() {
+    let expected_root = Path::new(paths.root.file_name().expect("validated build root leaf"));
+    let trash = actual.trash_leaf.to_string_lossy();
+    let expected_prefix = format!(".{}.xmlsquish-trash-", expected_root.to_string_lossy());
+    if actual.version != CLEAN_JOURNAL_VERSION
+        || actual.root_leaf != expected_root
+        || actual.trash_leaf.components().count() != 1
+        || !trash.starts_with(&expected_prefix)
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
@@ -716,24 +720,6 @@ fn validate_clean_journal(
                 journal.display()
             ),
         ));
-    }
-    if actual.publication_root != storage.publication_root() {
-        let parent = actual.publication_root.parent().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "former publication root has no parent",
-            )
-        })?;
-        let physical_parent = normalize_from_existing_ancestor(parent)?;
-        if actual.publication_root == project_root || !physical_parent.starts_with(project_root) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "clean journal `{}` has an unsafe former publication root",
-                    journal.display()
-                ),
-            ));
-        }
     }
     Ok(actual)
 }
@@ -749,8 +735,6 @@ fn journal_exists(path: &Path) -> io::Result<bool> {
 /// 幂等 roll-forward 一个已提交的 clean journal。 /
 /// Idempotently rolls a committed clean journal forward.
 fn recover_clean_journal(
-    storage: &StorageLayout,
-    project_root: &Path,
     paths: &CleanPaths,
     result: &mut CleanResult,
     changed: &mut bool,
@@ -758,47 +742,26 @@ fn recover_clean_journal(
     if !journal_exists(&paths.journal)? {
         return Ok(());
     }
-    let mut journal = validate_clean_journal(storage, project_root, &paths.journal)?;
-    let next_epoch = match journal.next_epoch {
-        Some(epoch) => epoch,
-        None => {
-            let epoch = next_project_epoch(storage)?;
-            journal.next_epoch = Some(epoch);
-            persist_clean_journal_value(&journal, paths)?;
-            epoch
-        }
-    };
+    let journal = validate_clean_journal(paths)?;
     *changed = true;
-    write_project_epoch(&paths.epoch, &next_epoch)?;
-    let publication_tombstone = clean_tombstone(
-        &journal.publication_root,
-        paths
-            .lock
-            .file_stem()
-            .expect("clean paths require a lock name"),
-    )?;
-    clean_root(
-        &journal.publication_root,
-        &publication_tombstone,
-        result,
-        changed,
-    )?;
-    clean_root(
-        storage.catalog_root(),
-        &paths.catalog_tombstone,
-        result,
-        changed,
-    )?;
+    let trash = paths
+        .root
+        .parent()
+        .expect("validated build root parent")
+        .join(journal.trash_leaf);
+    if journal_exists(&paths.root)? && journal_exists(&trash)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "clean recovery is ambiguous: both `{}` and `{}` exist",
+                paths.root.display(),
+                trash.display()
+            ),
+        ));
+    }
+    clean_root(&paths.root, &trash, result, changed)?;
     std::fs::remove_file(&paths.journal)?;
     sync_parent(&paths.journal)
-}
-
-/// 在项目锁内计算下一 fence；耗尽时拒绝复用旧身份。 /
-/// Computes the next fence while holding the project lock; exhaustion never reuses an identity.
-fn next_project_epoch(storage: &StorageLayout) -> io::Result<ProjectEpoch> {
-    read_project_epoch(storage.catalog_root())?
-        .checked_next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "project epoch exhausted"))
 }
 
 /// 先独占 detach 根，再以不跟随链接的方式删除 tombstone。 /
@@ -925,8 +888,7 @@ fn sync_parent(_path: &Path) -> io::Result<()> {
 /// 不读取进程全局状态的 production services 组合。 / Production services composition which reads no process-global state.
 pub struct ProductionHost {
     project_root: PathBuf,
-    source_cache_root: PathBuf,
-    storage: StorageLayout,
+    storage: ProjectBuildLayout,
     context: HostContext,
     registries: Vec<RegistryEntry>,
     git: GitHost,
@@ -944,14 +906,13 @@ impl ProductionHost {
     /// use std::{path::PathBuf, sync::Arc};
     /// use squish_fetch::{FilesystemHost, Limits, NoCredentials, NoopObserver, ReqwestTransport};
     /// use squish_host::{GitExecution, HostConfig, ProductionHost};
-    /// use squish_manager::StorageLayout;
+    /// use squish_manager::ProjectBuildLayout;
     ///
-    /// # fn compose(project: PathBuf, source_cache: PathBuf, storage: StorageLayout)
+    /// # fn compose(project: PathBuf, storage: ProjectBuildLayout)
     /// # -> Result<ProductionHost, Box<dyn std::error::Error>> {
     /// let filesystem = Arc::new(FilesystemHost::new(&project)?);
     /// let host = ProductionHost::open(HostConfig {
     ///     project_root: project,
-    ///     source_cache_root: source_cache,
     ///     storage,
     ///     registries: Vec::new(),
     ///     credentials: Arc::new(NoCredentials),
@@ -965,11 +926,11 @@ impl ProductionHost {
     /// ```
     pub fn open(config: HostConfig) -> Result<Self, HostError> {
         let project_root = std::fs::canonicalize(&config.project_root)?;
-        std::fs::create_dir_all(&config.source_cache_root)?;
-        let source_cache_root = native_host_path(std::fs::canonicalize(&config.source_cache_root)?);
-        let mut context = HostContext::new(source_cache_root.clone())?;
-        context.limits = config.limits;
-        context.observer = config.observer;
+        let context = HostContext {
+            cache: native_host_path(config.storage.source_cache_root().to_path_buf()),
+            limits: config.limits,
+            observer: config.observer,
+        };
         validate_registry_routes(&config.registries)?;
         let mut registries = Vec::with_capacity(config.registries.len());
         for endpoint in config.registries {
@@ -986,33 +947,13 @@ impl ProductionHost {
                 registry,
             });
         }
-        let storage_paths = [
-            ("build CAS", config.storage.cas_root()),
-            ("action index", config.storage.action_index()),
-            ("publication root", config.storage.publication_root()),
-            ("catalog root", config.storage.catalog_root()),
-        ]
-        .map(|(name, path)| Ok((name, normalize_from_existing_ancestor(path)?)))
-        .into_iter()
-        .collect::<Result<Vec<_>, std::io::Error>>()?;
-        for (name, physical) in &storage_paths {
-            if paths_overlap(&source_cache_root, physical) {
-                return Err(HostError::Config(format!(
-                    "source cache overlaps the {name} responsibility"
-                )));
-            }
+        let physical_root = normalize_from_existing_ancestor(config.storage.ownership_root())?;
+        if physical_root == project_root || !physical_root.starts_with(&project_root) {
+            return Err(HostError::Config(
+                "project build root must remain strictly below the canonical project root".into(),
+            ));
         }
-        for left in 0..storage_paths.len() {
-            for right in left + 1..storage_paths.len() {
-                if paths_overlap(&storage_paths[left].1, &storage_paths[right].1) {
-                    return Err(HostError::Config(format!(
-                        "{} physically overlaps the {} responsibility",
-                        storage_paths[left].0, storage_paths[right].0
-                    )));
-                }
-            }
-        }
-        recover_interrupted_clean(&config.storage, &project_root)?;
+        recover_interrupted_clean(&config.storage)?;
         let git_runner = git_runner(config.git)?;
         let git = GitHost::with_runner(context.clone(), git_runner.clone());
         let build_runtime = Arc::new(ProductionBuildRuntime::new(
@@ -1022,7 +963,6 @@ impl ProductionHost {
         ));
         Ok(Self {
             project_root,
-            source_cache_root,
             storage: config.storage,
             context,
             registries,
@@ -1058,9 +998,9 @@ impl ProductionHost {
         &self.project_root
     }
 
-    /// 返回仅供来源获取使用的规范化缓存根。 / Returns the canonical source-acquisition cache root.
+    /// 返回项目内来源获取缓存根。 / Returns the project-local source-acquisition cache root.
     pub fn source_cache_root(&self) -> &Path {
-        &self.source_cache_root
+        self.storage.source_cache_root()
     }
 
     fn registry(&self, name: &str) -> Result<&RegistryEntry, SourceUnavailable> {
@@ -1078,6 +1018,18 @@ impl ProductionHost {
         lock: &Lockfile,
         mode: ResolutionMode,
     ) -> Result<Vec<PackageLocation>, SourceUnavailable> {
+        self.build_runtime
+            .acquire_maintenance()
+            .map_err(|error| SourceUnavailable {
+                identity: self.project_root.display().to_string(),
+                detail: error.to_string(),
+            })?;
+        std::fs::create_dir_all(self.context.cache.join("v1/stage")).map_err(|error| {
+            SourceUnavailable {
+                identity: self.project_root.display().to_string(),
+                detail: error.to_string(),
+            }
+        })?;
         lock.validate().map_err(|error| SourceUnavailable {
             identity: self.project_root.display().to_string(),
             detail: format!("invalid exact lock: {error}"),
@@ -1227,6 +1179,18 @@ impl ProductionHost {
         prior_lock: Option<&Lockfile>,
         mode: ResolutionMode,
     ) -> Result<(Lockfile, Vec<PackageLocation>), SourceUnavailable> {
+        self.build_runtime
+            .acquire_maintenance()
+            .map_err(|error| SourceUnavailable {
+                identity: self.project_root.display().to_string(),
+                detail: error.to_string(),
+            })?;
+        std::fs::create_dir_all(self.context.cache.join("v1/stage")).map_err(|error| {
+            SourceUnavailable {
+                identity: self.project_root.display().to_string(),
+                detail: error.to_string(),
+            }
+        })?;
         let resolver = Resolver::new(RegistryView(self), GitView(&self.git))
             .with_filesystem(FilesystemView(self.filesystem.as_ref()));
         let lockfile = resolver
@@ -1245,7 +1209,7 @@ impl ProductionHost {
     }
 }
 
-fn recover_interrupted_clean(storage: &StorageLayout, project_root: &Path) -> io::Result<()> {
+fn recover_interrupted_clean(storage: &ProjectBuildLayout) -> io::Result<()> {
     let paths = CleanPaths::new(storage)?;
     if !journal_exists(&paths.journal)? {
         return Ok(());
@@ -1253,7 +1217,87 @@ fn recover_interrupted_clean(storage: &StorageLayout, project_root: &Path) -> io
     let _lock = open_project_lock(&paths)?;
     let mut result = CleanResult::default();
     let mut changed = false;
-    recover_clean_journal(storage, project_root, &paths, &mut result, &mut changed)
+    recover_clean_journal(&paths, &mut result, &mut changed)
+}
+
+#[derive(Deserialize, Serialize)]
+struct LayoutMarker {
+    schema: u32,
+    format_epoch: u32,
+}
+
+const LAYOUT_SCHEMA: u32 = 1;
+const LAYOUT_FORMAT_EPOCH: u32 = 1;
+
+/// 恢复 clean，校验/初始化布局标记，再以重校验循环安全交接给共享租约。 /
+/// Recovers clean, validates/initializes the marker, then safely hands off to a shared lease with
+/// a revalidation loop covering the portable unlock/relock gap.
+fn acquire_build_lease(storage: &ProjectBuildLayout) -> io::Result<File> {
+    let paths = CleanPaths::new(storage)?;
+    let lock = open_project_lock(&paths)?;
+    loop {
+        let mut result = CleanResult::default();
+        let mut changed = false;
+        recover_clean_journal(&paths, &mut result, &mut changed)?;
+        ensure_layout_marker(storage, &paths, &mut result)?;
+        FileExt::unlock(&lock)?;
+        FileExt::lock_shared(&lock)?;
+        if !journal_exists(&paths.journal)? && layout_marker_is_current(storage)? {
+            return Ok(lock);
+        }
+        FileExt::unlock(&lock)?;
+        FileExt::lock_exclusive(&lock)?;
+    }
+}
+
+fn layout_marker_is_current(storage: &ProjectBuildLayout) -> io::Result<bool> {
+    match std::fs::read(storage.layout_marker()) {
+        Ok(bytes) => Ok(
+            serde_json::from_slice::<LayoutMarker>(&bytes).is_ok_and(|value| {
+                value.schema == LAYOUT_SCHEMA && value.format_epoch == LAYOUT_FORMAT_EPOCH
+            }),
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn ensure_layout_marker(
+    storage: &ProjectBuildLayout,
+    paths: &CleanPaths,
+    result: &mut CleanResult,
+) -> io::Result<()> {
+    let marker = storage.layout_marker();
+    let current = LayoutMarker {
+        schema: LAYOUT_SCHEMA,
+        format_epoch: LAYOUT_FORMAT_EPOCH,
+    };
+    let valid = layout_marker_is_current(storage)?;
+    if valid {
+        return Ok(());
+    }
+
+    let root_nonempty = match std::fs::read_dir(storage.ownership_root()) {
+        Ok(mut entries) => entries.next().transpose()?.is_some(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    if root_nonempty {
+        let trash_leaf = next_trash_leaf(paths)?;
+        persist_clean_journal(paths, trash_leaf)?;
+        let mut changed = false;
+        recover_clean_journal(paths, result, &mut changed)?;
+    }
+
+    std::fs::create_dir_all(storage.metadata_root())?;
+    let bytes = serde_json::to_vec(&current)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(storage.metadata_root())?;
+    use std::io::Write as _;
+    temporary.write_all(&bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(marker).map_err(|error| error.error)?;
+    sync_parent(marker)
 }
 
 impl StagePreparer for ProductionHost {
@@ -1352,22 +1396,6 @@ fn validate_registry_routes(endpoints: &[RegistryEndpoint]) -> Result<(), HostEr
     Ok(())
 }
 
-fn paths_overlap(left: &Path, right: &Path) -> bool {
-    if cfg!(windows) {
-        let left = windows_path_key(left);
-        let right = windows_path_key(right);
-        left == right
-            || left
-                .strip_prefix(&right)
-                .is_some_and(|tail| tail.starts_with(['\\', '/']))
-            || right
-                .strip_prefix(&left)
-                .is_some_and(|tail| tail.starts_with(['\\', '/']))
-    } else {
-        left == right || left.starts_with(right) || right.starts_with(left)
-    }
-}
-
 fn native_host_path(path: PathBuf) -> PathBuf {
     #[cfg(windows)]
     {
@@ -1380,18 +1408,6 @@ fn native_host_path(path: PathBuf) -> PathBuf {
         }
     }
     path
-}
-
-fn windows_path_key(path: &Path) -> String {
-    let value = path.to_string_lossy();
-    let normalized = if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{rest}")
-    } else if let Some(rest) = value.strip_prefix(r"\\?\") {
-        rest.to_owned()
-    } else {
-        value.into_owned()
-    };
-    normalized.replace('/', "\\").to_lowercase()
 }
 
 impl Services for ProjectCreationHost {
@@ -1423,7 +1439,7 @@ impl Services for ProjectCreationHost {
         publish_project(request, self, cancellation, faults)
     }
 
-    fn storage_layout(&self, _project_root: &Path) -> Result<StorageLayout, ServiceError> {
+    fn storage_layout(&self, _project_root: &Path) -> Result<ProjectBuildLayout, ServiceError> {
         Err(creation_only_service("storage layout"))
     }
 
@@ -1676,6 +1692,16 @@ impl Services for ProductionHost {
         if cancellation.is_cancelled() {
             return Ok(ProjectCleanStatus::Cancelled);
         }
+        if self
+            .build_runtime
+            .has_maintenance_lease()
+            .map_err(|error| ServiceError::new(error.code(), error.message()))?
+        {
+            return Err(ServiceError::new(
+                "project_clean_busy",
+                "this host already opened project build storage; clean requires a fresh invocation",
+            ));
+        }
 
         let paths = CleanPaths::new(&self.storage)
             .map_err(|error| ServiceError::new("project_clean_failed", error.to_string()))?;
@@ -1690,47 +1716,34 @@ impl Services for ProductionHost {
 
         let mut result = CleanResult::default();
         let mut changed = false;
-        if let Err(error) = recover_clean_journal(
-            &self.storage,
-            &self.project_root,
-            &paths,
-            &mut result,
-            &mut changed,
-        ) {
+        if let Err(error) = recover_clean_journal(&paths, &mut result, &mut changed) {
             return clean_io_failure(result, changed, error);
         }
         if !changed && cancellation.is_cancelled() {
             return Ok(ProjectCleanStatus::Cancelled);
         }
 
-        let next_epoch = match next_project_epoch(&self.storage) {
-            Ok(epoch) => epoch,
+        if !journal_exists(&paths.root)
+            .map_err(|error| ServiceError::new("project_clean_failed", error.to_string()))?
+        {
+            return Ok(ProjectCleanStatus::Cleaned(result));
+        }
+        let trash_leaf = match next_trash_leaf(&paths) {
+            Ok(leaf) => leaf,
             Err(error) => return clean_io_failure(result, changed, error),
         };
-        if let Err(error) = persist_clean_journal(&self.storage, &paths, next_epoch) {
+        if let Err(error) = persist_clean_journal(&paths, trash_leaf.clone()) {
             return clean_io_failure(result, changed, error);
         }
         changed = true;
-        if let Err(error) = write_project_epoch(&paths.epoch, &next_epoch) {
-            return clean_io_failure(result, changed, error);
-        }
-
-        let project_clean = clean_root(
-            self.storage.publication_root(),
-            &paths.publication_tombstone,
-            &mut result,
-            &mut changed,
-        )
-        .and_then(|()| {
-            clean_root(
-                self.storage.catalog_root(),
-                &paths.catalog_tombstone,
-                &mut result,
-                &mut changed,
-            )
-        })
-        .and_then(|()| std::fs::remove_file(&paths.journal))
-        .and_then(|()| sync_parent(&paths.journal));
+        let trash = paths
+            .root
+            .parent()
+            .expect("validated build root parent")
+            .join(trash_leaf);
+        let project_clean = clean_root(&paths.root, &trash, &mut result, &mut changed)
+            .and_then(|()| std::fs::remove_file(&paths.journal))
+            .and_then(|()| sync_parent(&paths.journal));
         if let Err(error) = project_clean {
             if !changed {
                 let _ = std::fs::remove_file(&paths.journal);
@@ -1738,21 +1751,10 @@ impl Services for ProductionHost {
             return clean_io_failure(result, changed, error);
         }
 
-        match squish_fetch::clean_dependency_cache(&self.context) {
-            Ok(cache) => {
-                result.invalid_dependency_entries = cache.removed_entries;
-                result.invalid_dependency_bytes = cache.removed_bytes;
-                result.busy_dependency_entries = cache.skipped_busy;
-                Ok(ProjectCleanStatus::Cleaned(result))
-            }
-            Err(error) => Ok(ProjectCleanStatus::CommittedFailure {
-                result,
-                error: ServiceError::new("dependency_cache_clean_failed", error.to_string()),
-            }),
-        }
+        Ok(ProjectCleanStatus::Cleaned(result))
     }
 
-    fn storage_layout(&self, project_root: &Path) -> Result<StorageLayout, ServiceError> {
+    fn storage_layout(&self, project_root: &Path) -> Result<ProjectBuildLayout, ServiceError> {
         self.require_project(project_root)?;
         Ok(self.storage.clone())
     }
@@ -2114,7 +2116,7 @@ mod tests {
         }
     }
 
-    fn fixture() -> (tempfile::TempDir, ProductionHost, StorageLayout) {
+    fn fixture() -> (tempfile::TempDir, ProductionHost, ProjectBuildLayout) {
         let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.temp");
         std::fs::create_dir_all(&scratch).unwrap();
         let scratch = std::fs::canonicalize(scratch).unwrap();
@@ -2123,24 +2125,16 @@ mod tests {
             .tempdir_in(scratch)
             .unwrap();
         let root = temporary.path().join("project");
-        let source_cache = temporary.path().join("source-cache");
         std::fs::create_dir_all(&root).unwrap();
-        let storage = StorageLayout::new(
-            temporary.path().join("cas"),
-            temporary.path().join("actions.sqlite"),
-            temporary.path().join("publish"),
-            temporary.path().join("catalog"),
-        )
-        .unwrap();
-        let host = fixture_host(&root, &source_cache, &storage);
+        let storage = ProjectBuildLayout::new(&root, "target/xmlsquish").unwrap();
+        let host = fixture_host(&root, &storage);
         (temporary, host, storage)
     }
 
-    fn fixture_host(root: &Path, source_cache: &Path, storage: &StorageLayout) -> ProductionHost {
+    fn fixture_host(root: &Path, storage: &ProjectBuildLayout) -> ProductionHost {
         let filesystem = Arc::new(squish_fetch::FilesystemHost::new(root).unwrap());
         ProductionHost::open(HostConfig {
             project_root: root.to_path_buf(),
-            source_cache_root: source_cache.to_path_buf(),
             storage: storage.clone(),
             registries: Vec::new(),
             credentials: Arc::new(NoCredentials),
@@ -2188,6 +2182,7 @@ mod tests {
     #[test]
     fn cache_catalog_materializes_result_record_in_the_authoritative_cas() {
         let (_temporary, host, storage) = fixture();
+        host.build_runtime.acquire_maintenance().unwrap();
         let cas = Arc::new(Cas::open(storage.cas_root()).unwrap());
         let bytes = b"cached output";
         let digest = cas.put(bytes).unwrap();
@@ -2359,37 +2354,10 @@ mod tests {
     }
 
     #[test]
-    fn nonexistent_storage_descendant_cannot_alias_source_cache() {
-        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.temp");
-        std::fs::create_dir_all(&scratch).unwrap();
-        let temporary = tempfile::Builder::new()
-            .prefix("squish-host-overlap-")
-            .tempdir_in(std::fs::canonicalize(scratch).unwrap())
-            .unwrap();
-        let root = temporary.path().join("project");
-        let shared = temporary.path().join("shared");
-        std::fs::create_dir_all(&root).unwrap();
-        let filesystem = Arc::new(squish_fetch::FilesystemHost::new(&root).unwrap());
-        let storage = StorageLayout::new(
-            shared.join("not-yet/cas"),
-            temporary.path().join("actions.sqlite"),
-            temporary.path().join("publish"),
-            temporary.path().join("catalog"),
-        )
-        .unwrap();
-        let result = ProductionHost::open(HostConfig {
-            project_root: root,
-            source_cache_root: shared,
-            storage,
-            registries: Vec::new(),
-            credentials: Arc::new(NoCredentials),
-            http: Arc::new(NoHttp),
-            git: GitExecution::Runner(Arc::new(NoGit)),
-            limits: Limits::default(),
-            observer: Arc::new(NoopObserver),
-            filesystem,
-        });
-        assert!(matches!(result, Err(HostError::Config(_))));
+    fn host_derives_source_cache_from_project_layout() {
+        let (_temporary, host, storage) = fixture();
+        assert_eq!(host.source_cache_root(), storage.source_cache_root());
+        assert!(host.source_cache_root().starts_with(host.project_root()));
     }
 
     #[test]
@@ -2440,16 +2408,9 @@ mod tests {
                 (download, bytes),
             ])),
         });
-        let storage = StorageLayout::new(
-            temporary.path().join("cas"),
-            temporary.path().join("actions.sqlite"),
-            temporary.path().join("publish"),
-            temporary.path().join("catalog"),
-        )
-        .unwrap();
+        let storage = ProjectBuildLayout::new(&root, "target/xmlsquish").unwrap();
         let host = ProductionHost::open(HostConfig {
             project_root: root.clone(),
-            source_cache_root: temporary.path().join("sources"),
             storage,
             registries: vec![RegistryEndpoint {
                 name: "default".into(),
@@ -2559,16 +2520,10 @@ mod tests {
 
         let project = temporary.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
-        let storage = StorageLayout::new(
-            temporary.path().join("cas"),
-            temporary.path().join("actions.sqlite"),
-            temporary.path().join("publish"),
-            temporary.path().join("catalog"),
-        )
-        .unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        let storage = ProjectBuildLayout::new(&project, "target/xmlsquish").unwrap();
         let host = ProductionHost::open(HostConfig {
             project_root: project.clone(),
-            source_cache_root: temporary.path().join("exact-cache"),
             storage,
             registries: Vec::new(),
             credentials: Arc::new(NoCredentials),
@@ -2628,6 +2583,7 @@ mod tests {
     #[test]
     fn corrupt_cache_output_is_omitted_and_its_rebuildable_row_is_repaired() {
         let (_temporary, host, storage) = fixture();
+        host.build_runtime.acquire_maintenance().unwrap();
         let cas = Arc::new(Cas::open(storage.cas_root()).unwrap());
         let digest = cas.put(b"expected").unwrap();
         let index = VerifiedActionIndex::open(storage.action_index(), cas.clone()).unwrap();
@@ -2961,16 +2917,16 @@ mod tests {
     }
 
     #[test]
-    fn clean_removes_project_state_but_preserves_shared_build_storage() {
+    fn clean_removes_the_entire_project_owned_tree() {
         let (_temporary, host, storage) = fixture();
-        let initial_epoch = read_project_epoch(storage.catalog_root()).unwrap();
-        std::fs::create_dir_all(storage.publication_root().join("nested")).unwrap();
-        std::fs::write(storage.publication_root().join("nested/one"), b"abc").unwrap();
-        std::fs::create_dir_all(storage.catalog_root()).unwrap();
-        std::fs::write(storage.catalog_root().join("two"), b"12345").unwrap();
+        std::fs::create_dir_all(storage.artifacts_root()).unwrap();
         std::fs::create_dir_all(storage.cas_root()).unwrap();
-        std::fs::write(storage.cas_root().join("keep"), b"cas").unwrap();
-        std::fs::write(storage.action_index(), b"index").unwrap();
+        std::fs::create_dir_all(storage.catalog_root()).unwrap();
+        std::fs::create_dir_all(storage.source_cache_root()).unwrap();
+        std::fs::write(storage.artifacts_root().join("one"), b"abc").unwrap();
+        std::fs::write(storage.cas_root().join("two"), b"12").unwrap();
+        std::fs::write(storage.catalog_root().join("three"), b"1234").unwrap();
+        std::fs::write(storage.source_cache_root().join("four"), b"1").unwrap();
 
         let status = Services::clean_project(
             &host,
@@ -2981,34 +2937,26 @@ mod tests {
         let ProjectCleanStatus::Cleaned(result) = status else {
             panic!("clean should complete")
         };
-        assert_eq!(result.build_files, 2);
-        assert_eq!(result.build_bytes, 8);
-        assert!(!storage.publication_root().exists());
-        assert!(!storage.catalog_root().exists());
-        assert_eq!(
-            std::fs::read(storage.cas_root().join("keep")).unwrap(),
-            b"cas"
-        );
-        assert_eq!(std::fs::read(storage.action_index()).unwrap(), b"index");
-        let first_epoch = read_project_epoch(storage.catalog_root()).unwrap();
-        assert_ne!(first_epoch, initial_epoch);
+        assert_eq!(result.build_files, 4);
+        assert_eq!(result.build_bytes, 10);
+        assert!(!storage.ownership_root().exists());
 
-        let second = Services::clean_project(
-            &host,
-            host.project_root(),
-            squish_kernel::CancellationToken::default(),
-        )
-        .unwrap();
-        assert_eq!(second, ProjectCleanStatus::Cleaned(CleanResult::default()));
-        let second_epoch = read_project_epoch(storage.catalog_root()).unwrap();
-        assert_ne!(second_epoch, first_epoch);
+        assert_eq!(
+            Services::clean_project(
+                &host,
+                host.project_root(),
+                squish_kernel::CancellationToken::default(),
+            )
+            .unwrap(),
+            ProjectCleanStatus::Cleaned(CleanResult::default())
+        );
     }
 
     #[test]
     fn clean_honors_pre_cancellation_without_removing_state() {
         let (_temporary, host, storage) = fixture();
-        std::fs::create_dir_all(storage.publication_root()).unwrap();
-        std::fs::write(storage.publication_root().join("keep"), b"still here").unwrap();
+        std::fs::create_dir_all(storage.ownership_root()).unwrap();
+        std::fs::write(storage.ownership_root().join("keep"), b"still here").unwrap();
         let cancellation = squish_kernel::CancellationToken::default();
         cancellation.cancel();
 
@@ -3016,14 +2964,14 @@ mod tests {
             Services::clean_project(&host, host.project_root(), cancellation).unwrap(),
             ProjectCleanStatus::Cancelled
         );
-        assert!(storage.publication_root().join("keep").is_file());
+        assert!(storage.ownership_root().join("keep").is_file());
     }
 
     #[test]
-    fn clean_honors_cancellation_while_waiting_for_project_lock() {
+    fn clean_honors_cancellation_while_waiting_for_maintenance_lock() {
         let (_temporary, host, storage) = fixture();
-        std::fs::create_dir_all(storage.publication_root()).unwrap();
-        std::fs::write(storage.publication_root().join("keep"), b"still here").unwrap();
+        std::fs::create_dir_all(storage.ownership_root()).unwrap();
+        std::fs::write(storage.ownership_root().join("keep"), b"still here").unwrap();
         let paths = CleanPaths::new(&storage).unwrap();
         let lock = open_project_lock(&paths).unwrap();
         let host = Arc::new(host);
@@ -3044,7 +2992,7 @@ mod tests {
             worker.join().unwrap().unwrap(),
             ProjectCleanStatus::Cancelled
         );
-        assert!(storage.publication_root().join("keep").is_file());
+        assert!(storage.ownership_root().join("keep").is_file());
         drop(lock);
     }
 
@@ -3055,9 +3003,9 @@ mod tests {
         let external = temporary.path().join("external");
         std::fs::create_dir_all(&external).unwrap();
         std::fs::write(external.join("keep"), b"outside").unwrap();
-        std::fs::create_dir_all(storage.publication_root()).unwrap();
-        std::fs::write(storage.publication_root().join("ordinary"), b"one").unwrap();
-        std::os::unix::fs::symlink(&external, storage.publication_root().join("linked")).unwrap();
+        std::fs::create_dir_all(storage.ownership_root()).unwrap();
+        std::fs::write(storage.ownership_root().join("ordinary"), b"one").unwrap();
+        std::os::unix::fs::symlink(&external, storage.ownership_root().join("linked")).unwrap();
 
         let status = Services::clean_project(
             &host,
@@ -3069,212 +3017,79 @@ mod tests {
             panic!("clean should complete")
         };
         assert_eq!(result.build_files, 1);
-        assert_eq!(result.build_bytes, 3);
         assert_eq!(std::fs::read(external.join("keep")).unwrap(), b"outside");
     }
 
     #[test]
-    fn clean_prunes_corrupt_dependency_tree() {
-        let (_temporary, host, _storage) = fixture();
-        let digest = "a".repeat(64);
-        let tree = host
-            .source_cache_root()
-            .join("v1/materialized/sha256/aa")
-            .join(&digest);
-        std::fs::create_dir_all(&tree).unwrap();
-        std::fs::write(tree.join("corrupt"), b"bad").unwrap();
-
-        let status = Services::clean_project(
-            &host,
-            host.project_root(),
-            squish_kernel::CancellationToken::default(),
-        )
-        .unwrap();
-        let ProjectCleanStatus::Cleaned(result) = status else {
-            panic!("clean should complete")
-        };
-        assert_eq!(result.invalid_dependency_entries, 1);
-        assert_eq!(result.invalid_dependency_bytes, 3);
-        assert_eq!(result.busy_dependency_entries, 0);
-        assert!(!tree.exists());
-    }
-
-    #[test]
-    fn open_rolls_forward_leftover_clean_journal_and_tombstone() {
+    fn open_rolls_forward_journaled_detached_root() {
         let (temporary, host, storage) = fixture();
         let project_root = host.project_root().to_path_buf();
-        let source_cache = host.source_cache_root().to_path_buf();
-        std::fs::create_dir_all(storage.publication_root()).unwrap();
-        std::fs::write(storage.publication_root().join("target"), b"target").unwrap();
-        std::fs::create_dir_all(storage.catalog_root()).unwrap();
-        std::fs::write(storage.catalog_root().join("catalog"), b"catalog").unwrap();
+        std::fs::create_dir_all(storage.ownership_root()).unwrap();
+        std::fs::write(storage.ownership_root().join("old"), b"old").unwrap();
         let paths = CleanPaths::new(&storage).unwrap();
+        let trash_leaf = next_trash_leaf(&paths).unwrap();
+        let trash = paths.root.parent().unwrap().join(&trash_leaf);
         let lock = open_project_lock(&paths).unwrap();
-        let expected_epoch = next_project_epoch(&storage).unwrap();
-        persist_clean_journal(&storage, &paths, expected_epoch).unwrap();
-        rename_with_retry(storage.publication_root(), &paths.publication_tombstone).unwrap();
+        persist_clean_journal(&paths, trash_leaf).unwrap();
+        rename_with_retry(storage.ownership_root(), &trash).unwrap();
         drop(lock);
         drop(host);
 
-        let recovered = fixture_host(&project_root, &source_cache, &storage);
-        assert!(!storage.publication_root().exists());
-        assert!(!storage.catalog_root().exists());
-        assert!(!paths.publication_tombstone.exists());
-        assert!(!paths.journal.exists());
-        assert_eq!(
-            read_project_epoch(storage.catalog_root()).unwrap(),
-            expected_epoch
-        );
-        drop(recovered);
-        drop(temporary);
-    }
-
-    #[test]
-    fn open_upgrades_legacy_clean_journal_with_a_recoverable_epoch() {
-        let (temporary, host, storage) = fixture();
-        let project_root = host.project_root().to_path_buf();
-        let source_cache = host.source_cache_root().to_path_buf();
-        std::fs::create_dir_all(storage.publication_root()).unwrap();
-        std::fs::write(storage.publication_root().join("old"), b"old").unwrap();
-        let paths = CleanPaths::new(&storage).unwrap();
-        let expected_epoch = next_project_epoch(&storage).unwrap();
-        let legacy = CleanJournal {
-            version: CLEAN_JOURNAL_VERSION,
-            publication_root: storage.publication_root().to_path_buf(),
-            catalog_root: storage.catalog_root().to_path_buf(),
-            next_epoch: None,
-        };
-        let lock = open_project_lock(&paths).unwrap();
-        persist_clean_journal_value(&legacy, &paths).unwrap();
-        drop(lock);
-        drop(host);
-
-        let recovered = fixture_host(&project_root, &source_cache, &storage);
-        assert_eq!(
-            read_project_epoch(storage.catalog_root()).unwrap(),
-            expected_epoch
-        );
-        assert!(!storage.publication_root().exists());
+        let recovered = fixture_host(&project_root, &storage);
+        assert!(!storage.ownership_root().exists());
+        assert!(!trash.exists());
         assert!(!paths.journal.exists());
         drop(recovered);
         drop(temporary);
     }
 
     #[test]
-    fn open_recovers_safe_former_project_target_after_layout_change() {
-        let (temporary, host, storage) = fixture();
-        let project_root = host.project_root().to_path_buf();
-        let source_cache = host.source_cache_root().to_path_buf();
-        let old_target = project_root.join("old-target");
-        let old_storage = StorageLayout::new(
-            storage.cas_root(),
-            storage.action_index(),
-            &old_target,
-            storage.catalog_root(),
-        )
-        .unwrap();
-        std::fs::create_dir_all(&old_target).unwrap();
-        std::fs::write(old_target.join("old"), b"old").unwrap();
-        let old_paths = CleanPaths::new(&old_storage).unwrap();
-        let lock = open_project_lock(&old_paths).unwrap();
-        let expected_epoch = next_project_epoch(&old_storage).unwrap();
-        persist_clean_journal(&old_storage, &old_paths, expected_epoch).unwrap();
-        drop(lock);
-        drop(host);
+    fn first_storage_use_writes_relative_layout_marker_lazily() {
+        let (_temporary, host, storage) = fixture();
+        assert!(!storage.ownership_root().exists());
 
-        let new_storage = StorageLayout::new(
-            storage.cas_root(),
-            storage.action_index(),
-            project_root.join("new-target"),
-            storage.catalog_root(),
-        )
-        .unwrap();
-        let recovered = fixture_host(&project_root, &source_cache, &new_storage);
-        assert!(!old_target.exists());
-        assert!(!old_paths.journal.exists());
-        assert_eq!(
-            read_project_epoch(new_storage.catalog_root()).unwrap(),
-            expected_epoch
+        host.build_runtime.write_blob(b"fixture").unwrap();
+
+        let marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(storage.layout_marker()).unwrap()).unwrap();
+        assert_eq!(marker, serde_json::json!({"schema": 1, "format_epoch": 1}));
+        assert!(
+            !std::fs::read_to_string(storage.layout_marker())
+                .unwrap()
+                .contains(host.project_root().to_string_lossy().as_ref())
         );
-        drop(recovered);
-        drop(temporary);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn changed_layout_recovery_removes_root_symlink_without_following_it() {
-        let (temporary, host, storage) = fixture();
-        let project_root = host.project_root().to_path_buf();
-        let source_cache = host.source_cache_root().to_path_buf();
-        let external = temporary.path().join("external-target");
-        std::fs::create_dir_all(&external).unwrap();
-        std::fs::write(external.join("keep"), b"outside").unwrap();
-        let old_target = project_root.join("old-target-link");
-        std::os::unix::fs::symlink(&external, &old_target).unwrap();
-        let old_storage = StorageLayout::new(
-            storage.cas_root(),
-            storage.action_index(),
-            &old_target,
-            storage.catalog_root(),
-        )
-        .unwrap();
-        let old_paths = CleanPaths::new(&old_storage).unwrap();
-        let lock = open_project_lock(&old_paths).unwrap();
-        let expected_epoch = next_project_epoch(&old_storage).unwrap();
-        persist_clean_journal(&old_storage, &old_paths, expected_epoch).unwrap();
-        drop(lock);
-        drop(host);
-
-        let new_storage = StorageLayout::new(
-            storage.cas_root(),
-            storage.action_index(),
-            project_root.join("new-target"),
-            storage.catalog_root(),
-        )
-        .unwrap();
-        let recovered = fixture_host(&project_root, &source_cache, &new_storage);
-        assert!(std::fs::symlink_metadata(&old_target).is_err());
-        assert_eq!(std::fs::read(external.join("keep")).unwrap(), b"outside");
-        assert_eq!(
-            read_project_epoch(new_storage.catalog_root()).unwrap(),
-            expected_epoch
-        );
-        drop(recovered);
-        drop(temporary);
     }
 
     #[test]
-    fn publisher_initialization_waits_for_the_clean_project_lock() {
+    fn incompatible_nonempty_layout_is_reset_under_maintenance_lock() {
+        let (_temporary, host, storage) = fixture();
+        std::fs::create_dir_all(storage.metadata_root()).unwrap();
+        std::fs::write(
+            storage.layout_marker(),
+            br#"{"schema":99,"format_epoch":1}"#,
+        )
+        .unwrap();
+        std::fs::write(storage.ownership_root().join("stale"), b"old").unwrap();
+
+        host.build_runtime.write_blob(b"fresh").unwrap();
+
+        assert!(!storage.ownership_root().join("stale").exists());
+        let marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(storage.layout_marker()).unwrap()).unwrap();
+        assert_eq!(marker["schema"], 1);
+    }
+
+    #[test]
+    fn runtime_waits_for_exclusive_maintenance_lock_before_opening_storage() {
         let (_temporary, host, storage) = fixture();
         let paths = CleanPaths::new(&storage).unwrap();
         let lock = open_project_lock(&paths).unwrap();
         let runtime = host.build_runtime.clone();
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            runtime.current_generation(
-                squish_manager::GenerationSpace::TargetArtifacts,
-                &squish_build::PublicationTargetId::new("fixture").unwrap(),
-            )
-        });
-        started_rx.recv().unwrap();
+        let worker = std::thread::spawn(move || runtime.write_blob(b"waited"));
         std::thread::sleep(std::time::Duration::from_millis(100));
-
-        assert!(!storage.publication_root().exists());
-        assert!(
-            !storage
-                .catalog_root()
-                .join("target-publication-state")
-                .exists()
-        );
+        assert!(!storage.ownership_root().exists());
         drop(lock);
-        assert!(worker.join().unwrap().unwrap().is_none());
-        assert!(storage.publication_root().is_dir());
-        assert!(
-            storage
-                .catalog_root()
-                .join("target-publication-state")
-                .is_dir()
-        );
+        assert!(worker.join().unwrap().is_ok());
+        assert!(storage.layout_marker().is_file());
     }
 }

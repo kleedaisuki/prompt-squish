@@ -88,43 +88,26 @@ impl Fixture {
         self.root.join(name)
     }
 
-    /// 持有真实发布器恢复锁，使内核停在已呈现的恢复步骤。 /
-    /// Holds the real publisher recovery lock so the kernel remains in a rendered recovery step.
-    fn hold_recovery_lock(&self, home: &Path) -> File {
-        let project = fs::canonicalize(&self.project).expect("canonical project root");
-        let catalog = home
-            .join("state/catalog/projects")
-            .join(project_namespace(&project));
-        let lock_path = squish_publish::project_lock_path(catalog);
-        fs::create_dir_all(lock_path.parent().unwrap()).expect("create publisher lock directory");
+    /// 持有项目构建根的真实维护锁，使内核停在已呈现的恢复步骤。 /
+    /// Holds the project build root's real maintenance lock so the kernel remains in a
+    /// rendered recovery step.
+    fn hold_maintenance_lock(&self) -> File {
+        // The default build root is `<project>/target/xmlsquish`; coordination survives root
+        // replacement in a sibling named from the root leaf. 默认构建根是
+        // `<project>/target/xmlsquish`；协调锁使用根叶名命名的兄弟文件，以便在整体替换根后仍然存活。
+        let lock_path = self.project.join("target/.xmlsquish.xmlsquish.lock");
+        fs::create_dir_all(lock_path.parent().unwrap()).expect("create maintenance lock directory");
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(lock_path)
-            .expect("open publisher recovery lock");
-        lock.lock_exclusive().expect("hold publisher recovery lock");
+            .expect("open project maintenance lock");
+        lock.lock_exclusive()
+            .expect("hold project maintenance lock");
         lock
     }
-}
-
-fn project_namespace(root: &Path) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"xmlsquish-project-catalog-v1\0");
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt as _;
-        hasher.update(root.as_os_str().as_bytes());
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt as _;
-        for unit in root.as_os_str().encode_wide() {
-            hasher.update(&unit.to_le_bytes());
-        }
-    }
-    hasher.finalize().to_hex().to_string()
 }
 
 impl Drop for Fixture {
@@ -329,7 +312,7 @@ impl Drop for PtySession {
 fn interactive_progress_resize_and_cooperative_interrupt_are_real() {
     let fixture = Fixture::create("cooperative");
     let home = fixture.home("home");
-    let recovery_lock = fixture.hold_recovery_lock(&home);
+    let recovery_lock = fixture.hold_maintenance_lock();
     let mut session = PtySession::spawn(&fixture.project, &home);
 
     let wide = wait_for_blocked_recovery(&session, WAIT);
@@ -383,7 +366,7 @@ fn interactive_progress_resize_and_cooperative_interrupt_are_real() {
 fn second_interrupt_takes_emergency_exit_and_restores_terminal() {
     let fixture = Fixture::create("emergency");
     let home = fixture.home("home");
-    let _recovery_lock = fixture.hold_recovery_lock(&home);
+    let _recovery_lock = fixture.hold_maintenance_lock();
     let mut session = PtySession::spawn(&fixture.project, &home);
 
     wait_for_blocked_recovery(&session, WAIT);

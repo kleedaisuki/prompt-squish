@@ -14,9 +14,9 @@ use squish_manager::build::{
     RecordedGeneration, encode_build_record,
 };
 use squish_manager::{
-    ArtifactLocator, InspectSubject, InvocationSettings, ManagerCapability,
+    ArtifactLocator, InspectSubject, InvocationSettings, ManagerCapability, ProjectBuildLayout,
     ProvenanceNonApplicability, ProvenanceRelation, ResolveRequest, ResolvedDependencies,
-    ServiceError, Services, StorageLayout,
+    ServiceError, Services,
     inspect::{inspect_value, prepare, project_plan},
 };
 use squish_project::{Lockfile, ResolutionMode};
@@ -52,7 +52,7 @@ impl squish_kernel::EventSink for Events {
 }
 
 impl Services for FakeServices {
-    fn storage_layout(&self, project: &Path) -> Result<StorageLayout, ServiceError> {
+    fn storage_layout(&self, project: &Path) -> Result<ProjectBuildLayout, ServiceError> {
         if self
             .allowed_root
             .lock()
@@ -65,7 +65,7 @@ impl Services for FakeServices {
                 "storage layout does not authorize this project",
             ));
         }
-        Ok(StorageLayout::project_local_for_tests(project))
+        Ok(ProjectBuildLayout::project_local_for_tests(project))
     }
 
     fn materialize_locked(

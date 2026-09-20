@@ -73,30 +73,40 @@ fn precedence_is_defaults_user_workspace_then_ordered_cli() {
 }
 
 #[test]
-fn relative_paths_use_their_declaring_file_and_explicit_cli_base() {
+fn removed_global_storage_settings_are_rejected_in_every_layer() {
     let tmp = TestDir::new();
     let home = tmp.path().join("home");
     let workspace = tmp.path().join("work");
-    let cli = tmp.path().join("invocation");
     write(
         &home.join("config.toml"),
         "[source]\ncache-root='user-cache'\n",
     );
+    assert!(matches!(
+        ConfigLoader::new(ConfigHome::new(&home)).load(),
+        Err(ConfigError::UnknownKey { key, location })
+            if key == "source" && matches!(location.layer, ConfigLayer::User(_))
+    ));
+
+    write(&home.join("config.toml"), "");
     write(
         &workspace.join(".xmlsquish/config.toml"),
         "[manager]\nstorage-root='manager-state'\n",
     );
-    let loaded = ConfigLoader::new(ConfigHome::new(&home))
-        .workspace_root(&workspace)
-        .cli_base(&cli)
-        .cli_overrides(["source.cache-root='cli-cache'"])
-        .load()
-        .unwrap();
-    assert_eq!(loaded.config.source.cache_root, cli.join("cli-cache"));
-    assert_eq!(
-        loaded.config.manager.storage_root,
-        workspace.join(".xmlsquish").join("manager-state")
-    );
+    assert!(matches!(
+        ConfigLoader::new(ConfigHome::new(&home))
+            .workspace_root(&workspace)
+            .load(),
+        Err(ConfigError::UnknownKey { key, location })
+            if key == "manager" && matches!(location.layer, ConfigLayer::Workspace(_))
+    ));
+
+    assert!(matches!(
+        ConfigLoader::new(ConfigHome::new(home.join("absent")))
+            .cli_overrides(["source.cache-root='cli-cache'"])
+            .load(),
+        Err(ConfigError::UnknownKey { key, location })
+            if key == "source" && matches!(location.layer, ConfigLayer::Cli { index: 0 })
+    ));
 }
 
 #[test]
@@ -350,8 +360,7 @@ fn absent_and_empty_files_produce_complete_defaults() {
     assert_eq!(loaded.config.build.jobs, 0);
     assert!(loaded.config.build.keep_going);
     assert_eq!(loaded.config.new.vcs, NewVcs::Git);
-    assert_eq!(loaded.config.source.cache_root, home.join("cache/sources"));
-    assert_eq!(loaded.provenance.iter().count(), 9);
+    assert_eq!(loaded.provenance.iter().count(), 7);
 }
 
 #[test]

@@ -5,8 +5,8 @@ use std::{
 
 use squish_kernel::{CancellationToken, EventSink, InvocationContext, Kernel, SinkError};
 use squish_manager::{
-    InvocationSettings, ManagerCapability, ProjectCreationLocation, ProjectCreationStatus,
-    ResolveRequest, ResolvedDependencies, ServiceError, Services, StorageLayout,
+    InvocationSettings, ManagerCapability, ProjectBuildLayout, ProjectCreationLocation,
+    ProjectCreationStatus, ResolveRequest, ResolvedDependencies, ServiceError, Services,
 };
 use squish_project::{Lockfile, ResolutionMode};
 use squish_protocol::{
@@ -115,7 +115,7 @@ impl Services for CreationServices {
         }
     }
 
-    fn storage_layout(&self, _: &Path) -> Result<StorageLayout, ServiceError> {
+    fn storage_layout(&self, _: &Path) -> Result<ProjectBuildLayout, ServiceError> {
         Err(ServiceError::new(
             "unused",
             "new must not request project storage",
@@ -183,7 +183,7 @@ fn run_at(
         ) -> Result<ProjectCreationStatus, ServiceError> {
             self.0.create_project(request, cancellation, faults)
         }
-        fn storage_layout(&self, project: &Path) -> Result<StorageLayout, ServiceError> {
+        fn storage_layout(&self, project: &Path) -> Result<ProjectBuildLayout, ServiceError> {
             self.0.storage_layout(project)
         }
         fn materialize_locked(

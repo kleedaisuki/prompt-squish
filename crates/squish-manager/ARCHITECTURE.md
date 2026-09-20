@@ -139,10 +139,12 @@ A production host must implement every raw port and validate its adapter inputs:
 - `open_build_runtime`: open or return one coherent invocation runtime whose
   descriptor and adapters remain stable through planning, execution, and
   finalization.
-- `storage_layout`: return four absolute, normalized, non-overlapping paths for
-  CAS blobs, the action-index database, generation publication, and durable
-  catalogs. This path contract remains for repository mutation and inspection;
-  build and format workers must not use it to construct storage adapters.
+- `storage_layout`: return one `ProjectBuildLayout` derived from the canonical
+  project root and manifest `workspace.target-dir`. The type derives artifacts,
+  dependency sources, CAS, action index, publication/catalog metadata, work, and
+  sibling recovery-coordination paths; callers cannot inject independent roots.
+  This contract remains for repository mutation and inspection; build and format
+  workers must not construct storage adapters themselves.
 - `materialize_locked`: materialize registry/Git packages pinned by an existing
   lock before the repository freezes the full candidate snapshot.
 - `resolve`: resolve the complete manifest snapshot, canonical digest, prior
@@ -158,10 +160,27 @@ A production host must implement every raw port and validate its adapter inputs:
 - `planned_actions`: return the persisted build-record plan projection for
   manager-side graph validation.
 
-Hard-coded storage paths exist only in
-`StorageLayout::project_local_for_tests`. `ProductionHost` validates and
-authorizes the layout before composing the runtime; no manager worker opens an
-adapter or independently derives a project-local fallback.
+The default target path exists only in
+`ProjectBuildLayout::project_local_for_tests`. Production construction uses
+`ProjectBuildLayout::new(canonical_project_root, workspace_target_dir)` and
+validates the nearest existing ancestor so a symlink cannot redirect state out
+of the project. No manager worker opens an adapter or independently derives a
+fallback, and no machine-global cache participates in the layout.
+
+The ownership tree is deliberately closed:
+
+```text
+<workspace.target-dir>/
+├── artifacts/
+├── cache/{sources,cas,actions.sqlite3}
+├── metadata/{layout.json,publications,catalog}
+└── work/
+```
+
+Clean coordination uses siblings of the ownership root
+(`.<leaf>.xmlsquish.lock`, `.<leaf>.xmlsquish.clean.json`, and uniquely suffixed
+`.<leaf>.xmlsquish-trash-*` directories). Thus the root can be atomically renamed
+without moving the lock or recovery journal that coordinates the rename.
 
 ## External artifact contracts
 

@@ -81,7 +81,11 @@ pub struct ProjectSnapshot {
     pub(crate) lockfile: Option<Lockfile>,
     pub(crate) read_set: BTreeMap<PathBuf, String>,
     pub(crate) manifest_digest: String,
+    /// 工作区拥有的完整派生状态根；也用于源码扫描排除。 / Complete workspace-owned
+    /// derived-state root; also used to exclude derived files from source scans.
     pub(crate) target_dir: PathBuf,
+    /// 仅容纳稳定用户产物的根。 / Root containing only stable user-facing artifacts.
+    pub(crate) artifact_dir: PathBuf,
     pub(crate) package_manifests: Vec<LockedManifestSnapshot>,
 }
 
@@ -285,7 +289,7 @@ impl ProjectSnapshot {
             target_name,
             target,
             profile.as_ref(),
-            &self.target_dir,
+            &self.artifact_dir,
         ))
     }
 
@@ -411,7 +415,7 @@ fn resolve(
     name: &str,
     target: &Target,
     profile: Option<&Profile>,
-    target_dir: &Path,
+    artifact_dir: &Path,
 ) -> ResolvedTarget {
     let mut args = target.args.clone();
     let mut limits = target.limits.clone();
@@ -429,7 +433,7 @@ fn resolve(
         target_name: name.into(),
         entry: item.package_dir.join(&target.entry),
         backend: target.backend.clone(),
-        output: target_dir.join(target.output_path(name)),
+        output: artifact_dir.join(target.output_path(name)),
         args,
         limits,
         features,

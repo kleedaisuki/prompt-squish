@@ -19,8 +19,8 @@ use squish_kernel::{
 };
 use squish_manager::{
     ArtifactLocator, Effect, InvocationSettings, ManagerCapability, ManagerError, PlannedWork,
-    PreparedPlan, PreparedPlanError, ResolveRequest, ResolvedDependencies, ServiceError, Services,
-    StorageLayout,
+    PreparedPlan, PreparedPlanError, ProjectBuildLayout, ResolveRequest, ResolvedDependencies,
+    ServiceError, Services,
     orchestrator::{
         ExecutionState, PlanningRecorder, ResolvedInputs, SealedPlan, WorkDisposition,
         WorkExecutor, finalize, run,
@@ -107,61 +107,75 @@ fn artifact_locator_rejects_an_empty_path() {
 }
 
 #[test]
-fn storage_layout_requires_anchored_distinct_normalized_paths() {
-    let root = std::env::current_dir().unwrap().join(".temp/layout");
-    assert!(
-        StorageLayout::new(
-            "relative/cas",
-            root.join("index"),
-            root.join("out"),
-            root.join("catalog")
-        )
-        .is_err()
+fn project_build_layout_derives_every_owned_path_from_one_root() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = std::fs::canonicalize(temporary.path()).unwrap();
+    assert!(ProjectBuildLayout::new("relative/project", "target/xmlsquish").is_err());
+    assert!(ProjectBuildLayout::new(&project, "../outside").is_err());
+    assert!(ProjectBuildLayout::new(&project, "./target/xmlsquish").is_err());
+    assert!(ProjectBuildLayout::new(&project, "").is_err());
+
+    let layout = ProjectBuildLayout::new(&project, "dist/prompts").unwrap();
+    let root = project.join("dist/prompts");
+    assert_eq!(layout.ownership_root(), root);
+    assert_eq!(layout.artifacts_root(), root.join("artifacts"));
+    assert_eq!(layout.source_cache_root(), root.join("cache/sources"));
+    assert_eq!(layout.cas_root(), root.join("cache/cas"));
+    assert_eq!(layout.action_index(), root.join("cache/actions.sqlite3"));
+    assert_eq!(layout.metadata_root(), root.join("metadata"));
+    assert_eq!(layout.layout_marker(), root.join("metadata/layout.json"));
+    assert_eq!(
+        layout.publications_root(),
+        root.join("metadata/publications")
     );
-    assert!(
-        StorageLayout::new(
-            root.join("x/../cas"),
-            root.join("index"),
-            root.join("out"),
-            root.join("catalog")
-        )
-        .is_err()
+    assert_eq!(layout.catalog_root(), root.join("metadata/catalog"));
+    assert_eq!(layout.work_root(), root.join("work"));
+    assert_eq!(
+        layout.publication_prefix(),
+        Path::new("dist/prompts/artifacts")
     );
-    assert!(
-        StorageLayout::new(
-            root.join("cas"),
-            root.join("cas"),
-            root.join("out"),
-            root.join("catalog")
-        )
-        .is_err()
+    assert_eq!(
+        layout.coordination_lock(),
+        project.join("dist/.prompts.xmlsquish.lock")
     );
-    assert!(
-        StorageLayout::new(
-            root.join("cas"),
-            root.join("cas/index.sqlite3"),
-            root.join("out"),
-            root.join("catalog")
-        )
-        .is_err()
+    assert_eq!(
+        layout.clean_journal(),
+        project.join("dist/.prompts.xmlsquish.clean.json")
     );
-    let layout = StorageLayout::new(
-        root.join("cas"),
-        root.join("index"),
-        root.join("out"),
-        root.join("catalog"),
-    )
-    .unwrap()
-    .with_publication_prefix("dist/prompts")
-    .unwrap();
-    assert_eq!(layout.cas_root(), root.join("cas"));
-    assert_eq!(layout.publication_prefix(), Path::new("dist/prompts"));
-    assert!(
-        layout
-            .clone()
-            .with_publication_prefix("../outside")
-            .is_err()
+    assert_eq!(
+        layout.trash_prefix(),
+        project.join("dist/.prompts.xmlsquish-trash-")
     );
+}
+
+#[test]
+fn project_build_layout_rejects_target_dir_symlink_escape() {
+    let project = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let link = project.path().join("linked-target");
+    create_directory_symlink(outside.path(), &link);
+    let project = std::fs::canonicalize(project.path()).unwrap();
+    assert!(ProjectBuildLayout::new(project, "linked-target/xmlsquish").is_err());
+}
+
+#[test]
+fn project_build_layout_rejects_dangling_target_dir_symlink() {
+    let project = tempfile::tempdir().unwrap();
+    let missing = project.path().join("missing-destination");
+    let link = project.path().join("dangling-target");
+    create_directory_symlink(&missing, &link);
+    let project = std::fs::canonicalize(project.path()).unwrap();
+    assert!(ProjectBuildLayout::new(project, "dangling-target/xmlsquish").is_err());
+}
+
+#[cfg(unix)]
+fn create_directory_symlink(target: &Path, link: &Path) {
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+#[cfg(windows)]
+fn create_directory_symlink(target: &Path, link: &Path) {
+    std::os::windows::fs::symlink_dir(target, link).unwrap();
 }
 
 #[test]
@@ -189,8 +203,8 @@ fn prepared_plan_requires_exact_ids_and_kinds() {
 struct FakeServices;
 
 impl Services for FakeServices {
-    fn storage_layout(&self, project_root: &Path) -> Result<StorageLayout, ServiceError> {
-        Ok(StorageLayout::project_local_for_tests(project_root))
+    fn storage_layout(&self, project_root: &Path) -> Result<ProjectBuildLayout, ServiceError> {
+        Ok(ProjectBuildLayout::project_local_for_tests(project_root))
     }
 
     fn materialize_locked(

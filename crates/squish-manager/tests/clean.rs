@@ -7,8 +7,8 @@ use std::{
 
 use squish_kernel::{CancellationToken, Capability, EventSink, InvocationContext, SinkError};
 use squish_manager::{
-    InvocationSettings, ManagerCapability, ProjectCleanStatus, ResolveRequest,
-    ResolvedDependencies, ServiceError, Services, StorageLayout,
+    InvocationSettings, ManagerCapability, ProjectBuildLayout, ProjectCleanStatus, ResolveRequest,
+    ResolvedDependencies, ServiceError, Services,
 };
 use squish_project::{Lockfile, ResolutionMode};
 use squish_protocol::{
@@ -60,8 +60,8 @@ impl Services for Cleaner {
         self.result.clone()
     }
 
-    fn storage_layout(&self, project: &Path) -> Result<StorageLayout, ServiceError> {
-        Ok(StorageLayout::project_local_for_tests(project))
+    fn storage_layout(&self, project: &Path) -> Result<ProjectBuildLayout, ServiceError> {
+        Ok(ProjectBuildLayout::project_local_for_tests(project))
     }
 
     fn materialize_locked(

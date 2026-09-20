@@ -33,7 +33,7 @@ use squish_kernel::{
     CancellationToken, EventSink, InvocationContext, Kernel, KernelError, SinkError,
 };
 use squish_manager::{
-    DurabilityPorts, InspectSubject, InvocationSettings, ManagerCapability, StorageLayout,
+    DurabilityPorts, InspectSubject, InvocationSettings, ManagerCapability, ProjectBuildLayout,
 };
 use squish_presentation::{
     ColorMode, DEFAULT_PROGRESS_REFRESH, Environment, HumanRenderer, InspectHumanRenderer,
@@ -635,31 +635,21 @@ fn fault_ports(
     Ok(FaultPorts::default())
 }
 
-/// 用互不重叠的持久责任组合生产服务。 / Composes production services with non-overlapping persistence responsibilities.
+/// 用一个项目私有布局组合生产服务。 / Composes production services from one project-private layout.
 ///
-/// CAS 与内容键动作索引在多项目间共享，但 build catalog 记录的是项目相对
-/// locator，因而必须按规范项目身份分区。 / CAS and the content-keyed action index are
-/// shared across projects, while the build catalog contains project-relative locators and is
-/// therefore partitioned by canonical project identity.
+/// 源码缓存、内容寻址存储（Content-Addressed Storage, CAS）、动作索引、编译元数据与产物都
+/// 由规范项目根及清单 `workspace.target-dir` 派生；调用方不能注入任意的独立路径。 /
+/// The dependency cache, CAS, action index, compilation metadata, and artifacts all derive from
+/// the canonical project root and manifest `workspace.target-dir`; callers cannot inject
+/// unrelated paths.
 fn compose_host(
     root: std::path::PathBuf,
     config: &Config,
     environment: Vec<(OsString, OsString)>,
     faults: &FaultPorts,
 ) -> Result<ProductionHost, Box<dyn std::error::Error>> {
-    let state = &config.manager.storage_root;
-    let publication_prefix = configured_target_dir(&root)?;
-    let catalog = state
-        .join("catalog")
-        .join("projects")
-        .join(project_namespace(&root));
-    let storage = StorageLayout::new(
-        state.join("cas"),
-        state.join("actions.sqlite3"),
-        root.join(&publication_prefix),
-        catalog,
-    )?
-    .with_publication_prefix(publication_prefix)?;
+    let target_dir = configured_target_dir(&root)?;
+    let storage = ProjectBuildLayout::new(root.clone(), target_dir)?;
     let filesystem = Arc::new(FilesystemHost::new(&root)?);
     let registries = config
         .registries
@@ -686,8 +676,7 @@ fn compose_host(
     let credentials = EnvironmentCredentials::from_snapshot(credential_routes, environment)?;
     let host = ProductionHost::open(HostConfig {
         project_root: root,
-        source_cache_root: config.source.cache_root.clone(),
-        storage: storage.clone(),
+        storage,
         registries,
         credentials: Arc::new(credentials),
         http: Arc::new(ReqwestTransport::new()?),
@@ -738,32 +727,6 @@ fn registry_primary_origin(index: &str) -> Result<String, Box<dyn std::error::Er
             .ok_or("missing sparse+ prefix")?,
     )?;
     Ok(url.origin().ascii_serialization())
-}
-
-/// 从规范项目路径派生稳定且不泄露路径的 catalog 命名空间。 /
-/// Derives a stable, path-opaque catalog namespace from the canonical project path.
-///
-/// 领域分隔防止未来将普通内容摘要误当作项目身份。路径已由项目发现层规范化；
-/// Unix 原始字节与 Windows UTF-16LE 令持久身份不依赖有损的 Unicode 转换。 /
-/// Domain separation prevents a regular content digest from being confused with a project
-/// identity. Project discovery has already canonicalized the path; Unix raw bytes and Windows
-/// UTF-16LE make the persistent identity independent of lossy Unicode conversion.
-fn project_namespace(root: &Path) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"xmlsquish-project-catalog-v1\0");
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        hasher.update(root.as_os_str().as_bytes());
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        for unit in root.as_os_str().encode_wide() {
-            hasher.update(&unit.to_le_bytes());
-        }
-    }
-    hasher.finalize().to_hex().to_string()
 }
 
 /// 构造符合 stdout/stderr 边界的呈现目的地。 / Builds a renderer honoring the stdout/stderr boundary.
@@ -1007,9 +970,7 @@ fn load_config(
             invocation.execution.keep_going
         ));
     }
-    let mut loader = ConfigLoader::new(ConfigHome::new(config_home()?))
-        .cli_base(std::env::current_dir()?)
-        .cli_overrides(overrides);
+    let mut loader = ConfigLoader::new(ConfigHome::new(config_home()?)).cli_overrides(overrides);
     if let Some(root) = workspace_root {
         loader = loader.workspace_root(root);
     }
@@ -1019,8 +980,6 @@ fn load_config(
 /// 将支持的进程环境值转为显式的强类型覆盖。 / Converts supported process environment values into explicit typed overrides.
 fn environment_overrides() -> Vec<String> {
     const VALUES: &[(&str, &str, bool)] = &[
-        ("XMLSQUISH_SOURCE_CACHE_ROOT", "source.cache-root", true),
-        ("XMLSQUISH_STORAGE_ROOT", "manager.storage-root", true),
         ("XMLSQUISH_JOBS", "build.jobs", false),
         ("XMLSQUISH_KEEP_GOING", "build.keep-going", false),
         ("XMLSQUISH_VCS", "new.vcs", true),

@@ -7,7 +7,7 @@ filesystem representation.
 ## Required configuration
 
 The host is constructed from one immutable configuration value. The value must explicitly
-contain the canonical project root, source-cache root, registry identities and endpoints, a
+contain the canonical project root, one typed project build layout, registry identities and endpoints, a
 credential port, an HTTP client policy/client, the Git executable, and the workspace filesystem
 port. No constructor is permitted to consult the current directory, environment variables,
 home-directory conventions, a process-global client, or an implicit executable search path.
@@ -22,7 +22,8 @@ domains and must never depend on a shared occurrence counter.
 
 `ProductionHost` cheaply constructs and retains one invocation-scoped `ProductionBuildRuntime`
 after validating configuration; `Services::open_build_runtime` only clones its `Arc`. The runtime
-records layout and observers without touching persistence. CAS, action index, target publisher,
+records layout and observers without touching persistence. The acquisition cache is the layout's
+fixed `cache/sources` child rather than an independently injectable root. CAS, action index, target publisher,
 and catalog publisher each have an independent retryable single-flight initialization cell. The
 index and both publishers reuse the one CAS, while a blob-only operation never opens SQLite or a
 publisher. A failed component initialization is not cached and may succeed after an operational
@@ -31,7 +32,7 @@ create no storage paths.
 
 This per-capability laziness keeps storage failures inside the exact manager action that first
 needs that capability. Inspection calls reuse initialized components. Target and catalog
-`FileArtifactPublisher` values remain rooted in distinct directories and receive their respective
+`FileArtifactPublisher` values remain rooted in `artifacts` and `metadata/catalog` and receive their respective
 observers. The runtime also selects the production XML frontend, static linker, evaluator, and
 squish backend.
 
@@ -73,9 +74,18 @@ state may safely be replaced.
 | `provenance_evidence` | manager-owned artifact/provenance catalog | Complete committed companions (debug bundle/build evidence), retaining typed artifact identities. |
 | `planned_actions` | manager-owned build-record catalog/codec | Public lossless `PlanInspection` projection containing job, plan, plan digest, mode, topological dependencies, and optional materialized action keys. |
 
-The manager owns the production layout through its public `StorageLayout` contract. The host
-returns the exact configured value and opens those same stores. A separately configured source
-cache is only for registry/Git acquisition; it never becomes a second artifact truth.
+The manager owns the production layout through its public `ProjectBuildLayout` contract. The host
+returns the exact configured value and opens only its fixed children. Registry/Git acquisition,
+CAS, the action index, products, compilation metadata, and work state share one project-owned
+clean boundary.
+
+The first persistent operation takes the external maintenance lock exclusively, rolls forward a
+journaled clean, and validates `metadata/layout.json`. A missing or incompatible non-empty layout
+is reset as one owned tree before the current marker is written. The lock is then handed off to a
+shared lease; the portable unlock/relock gap is covered by revalidating both marker and journal and
+retrying the exclusive protocol if a cleaner won the race. Build/inspect retain that lease for the
+runtime lifetime. Clean takes the same lock exclusively, journals only sibling leaf names, atomically
+detaches the complete ownership root, and removes the detached tree without following links.
 
 ## Resolution-mode truth table
 
@@ -102,7 +112,7 @@ representations:
 3. `VerifiedActionIndex::manifest_page` enumerates validated typed records and lazily
    materializes each canonical action-result record into the same bound CAS. The returned
    `result_digest` therefore satisfies manager blob inspection without inventing a second format.
-4. `StorageLayout` is the single manager contract for CAS, action index, publication, and catalog
+4. `ProjectBuildLayout` is the single manager contract for CAS, action index, publication, and catalog
    locations. The host returns exactly its configured instance after canonical project-root
    matching.
 5. `read_current_build_catalog` verifies the current publisher generation, BuildRecord v2 codec,

@@ -11,7 +11,7 @@ use squish_fetch::{
     Limits, NoCredentials, NoopObserver,
 };
 use squish_host::{GitExecution, HostConfig, ProductionHost};
-use squish_manager::{GenerationSpace, ResolveRequest, Services, StorageLayout};
+use squish_manager::{GenerationSpace, ProjectBuildLayout, ResolveRequest, Services};
 use squish_project::{Manifest, ResolutionMode};
 use squish_protocol::ArtifactKind;
 
@@ -40,16 +40,9 @@ fn fixture() -> (tempfile::TempDir, ProductionHost) {
     let root = temporary.path().join("project");
     std::fs::create_dir_all(&root).unwrap();
     let filesystem = Arc::new(squish_fetch::FilesystemHost::new(&root).unwrap());
-    let storage = StorageLayout::new(
-        temporary.path().join("cas"),
-        temporary.path().join("actions.sqlite"),
-        temporary.path().join("publish"),
-        temporary.path().join("catalog"),
-    )
-    .unwrap();
+    let storage = ProjectBuildLayout::new(&root, "target/xmlsquish").unwrap();
     let host = ProductionHost::open(HostConfig {
         project_root: root,
-        source_cache_root: temporary.path().join("sources"),
         storage,
         registries: Vec::new(),
         credentials: Arc::new(NoCredentials),
@@ -149,20 +142,30 @@ fn production_runtime_uses_one_cas_and_isolated_generation_spaces() {
                     size: 13,
                 },
                 name: LogicalArtifactName::new("prompt.prompt").unwrap(),
-                destination: PublicationPath::new("target/xmlsquish/prompt.prompt").unwrap(),
+                destination: PublicationPath::new("target/xmlsquish/artifacts/prompt.prompt")
+                    .unwrap(),
             }],
         )
         .unwrap();
     assert_eq!(
-        std::fs::read(temporary.path().join("publish/prompt.prompt")).unwrap(),
+        std::fs::read(
+            temporary
+                .path()
+                .join("project/target/xmlsquish/artifacts/prompt.prompt")
+        )
+        .unwrap(),
         b"stable prompt"
     );
-    assert!(!temporary.path().join("publish/target").exists());
-    assert!(!temporary.path().join("publish/.squish-publish").exists());
+    assert!(
+        !temporary
+            .path()
+            .join("project/target/xmlsquish/artifacts/target")
+            .exists()
+    );
     assert!(
         temporary
             .path()
-            .join("catalog/target-publication-state/generations")
+            .join("project/target/xmlsquish/metadata/publications/generations")
             .exists()
     );
 }

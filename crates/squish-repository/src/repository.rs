@@ -18,6 +18,10 @@ use crate::{
     },
 };
 
+/// 用户可见构建产品在完整工具所有根下的固定命名空间。 / Fixed namespace for
+/// user-visible build products below the complete tool-owned root.
+const ARTIFACTS_DIR: &str = "artifacts";
+
 /// 项目发现方式。 / Project discovery mode.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Discovery {
@@ -179,7 +183,12 @@ impl ProjectRepository {
                 || PathBuf::from("target/xmlsquish"),
                 |w| w.target_dir.clone(),
             ));
-        validate_output_collisions(&manifests, &target_dir)?;
+        // `target_dir` owns all derived state. Resolve the public-output seam once so callers
+        // cannot accidentally publish beside cache, metadata, or staging state.
+        // `target_dir` 拥有全部派生状态。在此唯一一次解析公开产物边界，避免调用者误将
+        // 产物发布到 cache、metadata 或临时工作状态旁边。
+        let artifact_dir = target_dir.join(ARTIFACTS_DIR);
+        validate_output_collisions(&manifests, &artifact_dir)?;
         let package_manifests = freeze_locked_manifests(
             &self.root,
             lockfile.as_ref(),
@@ -196,6 +205,7 @@ impl ProjectRepository {
             read_set,
             manifest_digest,
             target_dir,
+            artifact_dir,
             package_manifests,
         })
     }
@@ -613,8 +623,57 @@ target-dir = "build-output"
             temp.path()
                 .canonicalize()
                 .unwrap()
-                .join("build-output/main.prompt")
+                .join("build-output/artifacts/main.prompt")
         );
+    }
+
+    #[test]
+    fn default_and_declared_outputs_are_confined_to_the_artifacts_namespace() {
+        let temp = TempDir::new().unwrap();
+        write(
+            temp.path().join(MANIFEST_FILE_NAME),
+            r#"manifest-version = 1
+[package]
+name = "root"
+version = "1.0.0"
+source-root = "src"
+
+[target.default]
+entry = "src/default.xml"
+
+[target.cache]
+entry = "src/cache.xml"
+output = "cache/cache.prompt"
+
+[target.metadata]
+entry = "src/metadata.xml"
+output = "metadata/metadata.prompt"
+
+[target.work]
+entry = "src/work.xml"
+output = "work/work.prompt"
+"#,
+        );
+        let repo = ProjectRepository::discover(Discovery::Explicit(temp.path().into())).unwrap();
+        let snapshot = repo.snapshot().unwrap();
+        let root = temp.path().canonicalize().unwrap().join("target/xmlsquish");
+
+        assert_eq!(
+            snapshot
+                .resolve_target("root", "default", None)
+                .unwrap()
+                .output,
+            root.join("artifacts/default.prompt")
+        );
+        for (name, relative) in [
+            ("cache", "cache/cache.prompt"),
+            ("metadata", "metadata/metadata.prompt"),
+            ("work", "work/work.prompt"),
+        ] {
+            let output = snapshot.resolve_target("root", name, None).unwrap().output;
+            assert_eq!(output, root.join("artifacts").join(relative));
+            assert!(!output.starts_with(root.join(name)));
+        }
     }
 
     #[test]
@@ -765,9 +824,15 @@ source = { kind = "workspace", member = "packages/member", mutable = true }
         let repo = ProjectRepository::discover(Discovery::Explicit(temp.path().into())).unwrap();
 
         let error = repo.snapshot().unwrap_err().to_string();
+        let coordinate = temp
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("target/xmlsquish/artifacts/main.prompt");
 
         assert!(error.contains("a:main"));
         assert!(error.contains("b:main"));
+        assert!(error.contains(&coordinate.display().to_string()));
     }
 
     #[test]

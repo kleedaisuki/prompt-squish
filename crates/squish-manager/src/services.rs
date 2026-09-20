@@ -60,25 +60,28 @@ pub enum ProjectCleanStatus {
     Cancelled,
 }
 
-/// 存储职责路径无效。 / Invalid storage-responsibility paths.
+/// 项目构建布局无效。 / Invalid project build layout.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum StorageLayoutError {
+pub enum ProjectBuildLayoutError {
     /// 必需路径为空。 / A required path is empty.
     Empty(&'static str),
     /// 路径不是锚定绝对路径。 / A path is not anchored and absolute.
     Relative(&'static str),
     /// 路径含 `.` 或 `..`，未结构化规范。 / A path contains `.` or `..` and is not structurally normalized.
     NonNormalized(&'static str),
-    /// 两种不同职责错误地共享同一路径。 / Two distinct responsibilities incorrectly share one path.
-    Aliased {
-        /// 第一项职责。 / First responsibility.
-        left: &'static str,
-        /// 第二项职责。 / Second responsibility.
-        right: &'static str,
-    },
+    /// 项目根不存在，无法验证其规范身份。 / The project root does not exist, so its canonical identity cannot be verified.
+    MissingProjectRoot,
+    /// 调用者传入的项目根不是文件系统规范路径。 / The supplied project root is not the canonical filesystem path.
+    NonCanonicalProjectRoot,
+    /// 构建根没有可用于协调文件的末级名称。 / The build root has no final name for coordination files.
+    MissingBuildRootName,
+    /// `target-dir` 经现有符号链接解析后逃逸项目根。 / The `target-dir` escapes the project root through an existing symbolic link.
+    TargetDirEscapesProject,
+    /// `target-dir` 的现有祖先无法解析（例如悬空链接）。 / An existing `target-dir` ancestor cannot be resolved (for example, a dangling link).
+    UnresolvableTargetDir,
 }
 
-impl fmt::Display for StorageLayoutError {
+impl fmt::Display for ProjectBuildLayoutError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty(name) => write!(formatter, "storage path `{name}` is empty"),
@@ -86,178 +89,238 @@ impl fmt::Display for StorageLayoutError {
             Self::NonNormalized(name) => {
                 write!(formatter, "storage path `{name}` is not normalized")
             }
-            Self::Aliased { left, right } => {
-                write!(formatter, "storage paths `{left}` and `{right}` alias")
+            Self::MissingProjectRoot => write!(formatter, "project root does not exist"),
+            Self::NonCanonicalProjectRoot => write!(formatter, "project root is not canonical"),
+            Self::MissingBuildRootName => {
+                write!(formatter, "build root has no final path component")
             }
+            Self::TargetDirEscapesProject => write!(formatter, "target-dir escapes project root"),
+            Self::UnresolvableTargetDir => write!(formatter, "target-dir cannot be resolved"),
         }
     }
 }
 
-impl std::error::Error for StorageLayoutError {}
+impl std::error::Error for ProjectBuildLayoutError {}
 
-/// 明确分离持久存储职责的布局。 / Layout explicitly separating persistent-storage responsibilities.
+/// 项目私有构建状态的唯一类型化布局。 / Sole typed layout for project-private build state.
+///
+/// 调用者只提供规范项目根与清单中的相对 `workspace.target-dir`。所有缓存、工作文件、恢复
+/// 元数据和产物均由同一拥有根派生，机器共享存储因而无法被表达。 / Callers provide only
+/// the canonical project root and manifest-relative `workspace.target-dir`. Products, caches,
+/// work files, and recovery metadata derive from one ownership root, making machine-shared state
+/// unrepresentable.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StorageLayout {
+pub struct ProjectBuildLayout {
+    ownership_root: PathBuf,
+    artifacts_root: PathBuf,
+    source_cache_root: PathBuf,
     cas_root: PathBuf,
     action_index: PathBuf,
-    publication_root: PathBuf,
-    publication_prefix: PathBuf,
+    metadata_root: PathBuf,
+    publications_root: PathBuf,
     catalog_root: PathBuf,
+    layout_marker: PathBuf,
+    work_root: PathBuf,
+    publication_prefix: PathBuf,
+    coordination_lock: PathBuf,
+    clean_journal: PathBuf,
+    trash_prefix: PathBuf,
 }
 
-impl StorageLayout {
-    /// 验证四条非空、互不别名的职责路径后创建布局。 / Creates a layout after validating four non-empty, non-aliasing responsibility paths.
+impl ProjectBuildLayout {
+    /// 从规范项目根与清单 `target-dir` 创建完整布局。 / Creates the complete layout from a canonical project root and manifest `target-dir`.
+    ///
+    /// `project_root` 必须存在且已规范化；`target_dir` 必须是非空且不含 `.`、`..` 的项目
+    /// 相对路径。构造不会创建目录。 / `project_root` must exist and already be canonical.
+    /// `target_dir` must be a non-empty project-relative path without `.` or `..`. Construction
+    /// performs no filesystem writes.
     pub fn new(
-        cas_root: impl Into<PathBuf>,
-        action_index: impl Into<PathBuf>,
-        publication_root: impl Into<PathBuf>,
-        catalog_root: impl Into<PathBuf>,
-    ) -> Result<Self, StorageLayoutError> {
-        let values = [
-            (
-                "cas_root",
-                normalize_layout_path("cas_root", cas_root.into())?,
-            ),
-            (
-                "action_index",
-                normalize_layout_path("action_index", action_index.into())?,
-            ),
-            (
-                "publication_root",
-                normalize_layout_path("publication_root", publication_root.into())?,
-            ),
-            (
-                "catalog_root",
-                normalize_layout_path("catalog_root", catalog_root.into())?,
-            ),
-        ];
-        validate_layout(&values)?;
-        let [
-            (_, cas_root),
-            (_, action_index),
-            (_, publication_root),
-            (_, catalog_root),
-        ] = values;
+        project_root: impl Into<PathBuf>,
+        target_dir: impl Into<PathBuf>,
+    ) -> Result<Self, ProjectBuildLayoutError> {
+        let project_root = normalize_layout_path("project_root", project_root.into())?;
+        let canonical = std::fs::canonicalize(&project_root)
+            .map_err(|_| ProjectBuildLayoutError::MissingProjectRoot)?;
+        if canonical != project_root {
+            return Err(ProjectBuildLayoutError::NonCanonicalProjectRoot);
+        }
+        let target_dir = normalize_relative_path("target_dir", target_dir.into())?;
+        let ownership_root = resolve_existing_ancestor(&project_root.join(&target_dir))?;
+        if !ownership_root.starts_with(&project_root) {
+            return Err(ProjectBuildLayoutError::TargetDirEscapesProject);
+        }
+        let artifacts_root = ownership_root.join("artifacts");
+        let cache_root = ownership_root.join("cache");
+        let metadata_root = ownership_root.join("metadata");
+        let leaf = ownership_root
+            .file_name()
+            .ok_or(ProjectBuildLayoutError::MissingBuildRootName)?
+            .to_os_string();
+        let coordination_parent = ownership_root
+            .parent()
+            .ok_or(ProjectBuildLayoutError::MissingBuildRootName)?;
         Ok(Self {
-            cas_root,
-            action_index,
-            publication_root,
-            publication_prefix: PathBuf::from("target/xmlsquish"),
-            catalog_root,
+            source_cache_root: cache_root.join("sources"),
+            cas_root: cache_root.join("cas"),
+            action_index: cache_root.join("actions.sqlite3"),
+            publications_root: metadata_root.join("publications"),
+            catalog_root: metadata_root.join("catalog"),
+            layout_marker: metadata_root.join("layout.json"),
+            work_root: ownership_root.join("work"),
+            publication_prefix: target_dir.join("artifacts"),
+            coordination_lock: coordination_parent
+                .join(coordination_name(&leaf, ".xmlsquish.lock")),
+            clean_journal: coordination_parent
+                .join(coordination_name(&leaf, ".xmlsquish.clean.json")),
+            trash_prefix: coordination_parent.join(coordination_name(&leaf, ".xmlsquish-trash-")),
+            ownership_root,
+            artifacts_root,
+            metadata_root,
         })
     }
 
-    /// 设置项目相对的公开产物定位符前缀。 / Sets the project-relative public artifact-locator prefix.
-    ///
-    /// 前缀表达清单中的 `workspace.target-dir`，与绝对的 [`Self::publication_root`]
-    /// 分离，从类型上避免把 `target/xmlsquish` 拼接两次。 / The prefix represents the
-    /// manifest's `workspace.target-dir` separately from the absolute
-    /// [`Self::publication_root`], preventing a duplicated `target/xmlsquish` join by construction.
-    pub fn with_publication_prefix(
-        mut self,
-        prefix: impl Into<PathBuf>,
-    ) -> Result<Self, StorageLayoutError> {
-        self.publication_prefix = normalize_layout_prefix(prefix.into())?;
-        Ok(self)
-    }
-
-    /// 仅供测试适配器使用的项目内布局。 / Project-local layout intended only for test adapters.
+    /// 仅供测试适配器使用的默认项目布局。 / Default project layout intended only for test adapters.
     pub fn project_local_for_tests(project: &Path) -> Self {
         let project = std::fs::canonicalize(project)
             .expect("test project root must exist and be canonicalizable");
-        Self::new(
-            project.join(".cache/xmlsquish/cas"),
-            project.join(".cache/xmlsquish/actions.sqlite3"),
-            project.join("target/xmlsquish"),
-            project.join(".cache/xmlsquish/catalog"),
-        )
-        .expect("test layout paths are distinct")
+        Self::new(project, "target/xmlsquish").expect("default test target-dir is valid")
     }
 
-    /// 返回 CAS 根目录。 / Returns the CAS root directory.
+    /// 返回完整项目私有拥有根。 / Returns the complete project-private ownership root.
+    pub fn ownership_root(&self) -> &Path {
+        &self.ownership_root
+    }
+    /// 返回用户产物 generation 根目录。 / Returns the user-artifact generation root.
+    pub fn artifacts_root(&self) -> &Path {
+        &self.artifacts_root
+    }
+    /// 返回 Registry/Git 依赖源码缓存根目录。 / Returns the registry/Git dependency-source cache root.
+    pub fn source_cache_root(&self) -> &Path {
+        &self.source_cache_root
+    }
+    /// 返回内容寻址存储根目录。 / Returns the content-addressed store root.
     pub fn cas_root(&self) -> &Path {
         &self.cas_root
     }
-    /// 返回动作索引文件路径。 / Returns the action-index file path.
+    /// 返回动作索引数据库路径。 / Returns the action-index database path.
     pub fn action_index(&self) -> &Path {
         &self.action_index
-    }
-    /// 返回 generation 发布根目录。 / Returns the generation-publication root.
-    pub fn publication_root(&self) -> &Path {
-        &self.publication_root
     }
     /// 返回项目相对的公开产物定位符前缀。 / Returns the project-relative public artifact-locator prefix.
     pub fn publication_prefix(&self) -> &Path {
         &self.publication_prefix
     }
+    /// 返回恢复与目录元数据根。 / Returns the recovery-and-catalog metadata root.
+    pub fn metadata_root(&self) -> &Path {
+        &self.metadata_root
+    }
+    /// 返回 publication 恢复元数据根。 / Returns the publication-recovery metadata root.
+    pub fn publications_root(&self) -> &Path {
+        &self.publications_root
+    }
     /// 返回查询目录根路径。 / Returns the inspection-catalog root.
     pub fn catalog_root(&self) -> &Path {
         &self.catalog_root
     }
+    /// 返回布局版本标记。 / Returns the layout-version marker path.
+    pub fn layout_marker(&self) -> &Path {
+        &self.layout_marker
+    }
+    /// 返回临时工作根。 / Returns the temporary-work root.
+    pub fn work_root(&self) -> &Path {
+        &self.work_root
+    }
+    /// 返回拥有根旁的互斥锁路径。 / Returns the ownership-root sibling lock path.
+    pub fn coordination_lock(&self) -> &Path {
+        &self.coordination_lock
+    }
+    /// 返回拥有根旁的清理恢复 journal。 / Returns the ownership-root sibling clean-recovery journal.
+    pub fn clean_journal(&self) -> &Path {
+        &self.clean_journal
+    }
+    /// 返回唯一垃圾目录名称前缀。 / Returns the prefix used for unique trash-directory names.
+    pub fn trash_prefix(&self) -> &Path {
+        &self.trash_prefix
+    }
 }
 
-fn normalize_layout_prefix(path: PathBuf) -> Result<PathBuf, StorageLayoutError> {
+/// 保留非 Unicode 路径字节并生成同级协调名称。 / Builds a sibling coordination name while preserving non-Unicode path units.
+fn coordination_name(leaf: &std::ffi::OsStr, suffix: &str) -> std::ffi::OsString {
+    let mut name = std::ffi::OsString::from(".");
+    name.push(leaf);
+    name.push(suffix);
+    name
+}
+
+/// 验证并重建纯普通分量组成的相对路径。 / Validates and rebuilds a relative path made solely of normal components.
+fn normalize_relative_path(
+    name: &'static str,
+    path: PathBuf,
+) -> Result<PathBuf, ProjectBuildLayoutError> {
     if path.as_os_str().is_empty() {
-        return Err(StorageLayoutError::Empty("publication_prefix"));
+        return Err(ProjectBuildLayoutError::Empty(name));
     }
     if path.is_absolute() {
-        return Err(StorageLayoutError::NonNormalized("publication_prefix"));
+        return Err(ProjectBuildLayoutError::NonNormalized(name));
     }
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
             Component::Normal(value) => normalized.push(value),
-            _ => return Err(StorageLayoutError::NonNormalized("publication_prefix")),
+            _ => return Err(ProjectBuildLayoutError::NonNormalized(name)),
         }
     }
     Ok(normalized)
 }
 
-fn validate_layout(values: &[(&'static str, PathBuf); 4]) -> Result<(), StorageLayoutError> {
-    for left in 0..values.len() {
-        for right in left + 1..values.len() {
-            if paths_overlap(&values[left].1, &values[right].1) {
-                return Err(StorageLayoutError::Aliased {
-                    left: values[left].0,
-                    right: values[right].0,
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-fn paths_overlap(left: &Path, right: &Path) -> bool {
-    if cfg!(windows) {
-        let left = left.to_string_lossy().to_lowercase();
-        let right = right.to_string_lossy().to_lowercase();
-        return left == right
-            || left
-                .strip_prefix(&right)
-                .is_some_and(|tail| tail.starts_with(['\\', '/']))
-            || right
-                .strip_prefix(&left)
-                .is_some_and(|tail| tail.starts_with(['\\', '/']));
-    }
-    left == right || left.starts_with(right) || right.starts_with(left)
-}
-
-fn normalize_layout_path(name: &'static str, path: PathBuf) -> Result<PathBuf, StorageLayoutError> {
+/// 对绝对路径执行不访问文件系统的结构规范化。 / Structurally normalizes an absolute path without filesystem access.
+fn normalize_layout_path(
+    name: &'static str,
+    path: PathBuf,
+) -> Result<PathBuf, ProjectBuildLayoutError> {
     if path.as_os_str().is_empty() {
-        return Err(StorageLayoutError::Empty(name));
+        return Err(ProjectBuildLayoutError::Empty(name));
     }
     if !path.is_absolute() {
-        return Err(StorageLayoutError::Relative(name));
+        return Err(ProjectBuildLayoutError::Relative(name));
     }
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
-            Component::ParentDir => return Err(StorageLayoutError::NonNormalized(name)),
-            Component::CurDir => {}
+            Component::ParentDir | Component::CurDir => {
+                return Err(ProjectBuildLayoutError::NonNormalized(name));
+            }
             other => normalized.push(other.as_os_str()),
         }
     }
     Ok(normalized)
+}
+
+/// 规范化最近的现有祖先，再接回尚不存在的后缀。 / Canonicalizes the nearest existing ancestor and reattaches the nonexistent suffix.
+fn resolve_existing_ancestor(path: &Path) -> Result<PathBuf, ProjectBuildLayoutError> {
+    let mut existing = path;
+    let mut suffix = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = existing
+                    .file_name()
+                    .ok_or(ProjectBuildLayoutError::MissingBuildRootName)?;
+                suffix.push(name.to_os_string());
+                existing = existing
+                    .parent()
+                    .ok_or(ProjectBuildLayoutError::MissingBuildRootName)?;
+            }
+            Err(_) => return Err(ProjectBuildLayoutError::UnresolvableTargetDir),
+        }
+    }
+    let mut resolved = std::fs::canonicalize(existing)
+        .map_err(|_| ProjectBuildLayoutError::UnresolvableTargetDir)?;
+    for component in suffix.iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
 }
 
 /// 一次完整且可复现的依赖解析输入。 / Complete reproducible dependency-resolution input.
@@ -345,15 +408,15 @@ pub trait Services: Send + Sync {
         unavailable("project creation publisher")
     }
 
-    /// 删除项目私有构建状态，并只裁剪可证明失效或废弃的依赖缓存。 / Removes project-private build state and prunes only provably invalid or abandoned dependency-cache entries.
+    /// 删除完整的项目私有构建拥有根。 / Removes the complete project-private build ownership root.
     ///
-    /// 健康的共享依赖、全局内容寻址存储（CAS）和全局动作索引不属于此端口的删除范围。
+    /// 依赖源码、内容寻址存储（CAS）、动作索引、产物与恢复元数据同属此边界。
     /// [`ProjectCleanStatus::Cancelled`] 仅允许在尚未删除任何状态时返回；一旦开始删除，
-    /// 适配器必须完成可恢复清理并返回 [`ProjectCleanStatus::Cleaned`]。 / Healthy shared
-    /// dependencies, the global content-addressed store (CAS), and the global action index are
-    /// outside this port's deletion scope. [`ProjectCleanStatus::Cancelled`] is valid only before
-    /// any state is removed; after removal begins the adapter must finish recoverably and return
-    /// [`ProjectCleanStatus::Cleaned`] or [`ProjectCleanStatus::CommittedFailure`].
+    /// 适配器必须完成可恢复清理。 / Dependency sources, the content-addressed store (CAS),
+    /// action index, products, and recovery metadata all belong to this boundary.
+    /// [`ProjectCleanStatus::Cancelled`] is valid only before any state is removed; after removal
+    /// begins the adapter must finish recoverably and return [`ProjectCleanStatus::Cleaned`] or
+    /// [`ProjectCleanStatus::CommittedFailure`].
     fn clean_project(
         &self,
         _project_root: &Path,
@@ -362,8 +425,8 @@ pub trait Services: Send + Sync {
         unavailable("project cleaner")
     }
 
-    /// 返回生产适配器使用的显式持久存储布局。 / Returns the explicit persistent-storage layout used by production adapters.
-    fn storage_layout(&self, project_root: &Path) -> Result<StorageLayout, ServiceError>;
+    /// 返回由项目 `target-dir` 唯一派生的私有构建布局。 / Returns the private build layout uniquely derived from the project's `target-dir`.
+    fn storage_layout(&self, project_root: &Path) -> Result<ProjectBuildLayout, ServiceError>;
 
     /// 按已有锁物化 Registry/Git 包，供仓库冻结完整候选快照。 / Materializes Registry/Git packages from an existing lock so the repository can freeze a complete candidate snapshot.
     fn materialize_locked(

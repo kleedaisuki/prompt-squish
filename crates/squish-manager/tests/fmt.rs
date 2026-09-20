@@ -10,8 +10,8 @@ use std::{
 
 use squish_kernel::{CancellationToken, EventSink, InvocationContext, Kernel, SinkError};
 use squish_manager::{
-    InvocationSettings, ManagerCapability, ResolveRequest, ResolvedDependencies, ServiceError,
-    Services, StorageLayout, fmt,
+    InvocationSettings, ManagerCapability, ProjectBuildLayout, ResolveRequest,
+    ResolvedDependencies, ServiceError, Services, fmt,
 };
 use squish_project::{Lockfile, ResolutionMode};
 use squish_protocol::{
@@ -78,14 +78,14 @@ impl Services for UnusedServices {
         &self,
         project: &Path,
     ) -> Result<Arc<dyn squish_manager::BuildRuntime>, ServiceError> {
-        let layout = StorageLayout::project_local_for_tests(project);
+        let layout = ProjectBuildLayout::project_local_for_tests(project);
         TestBuildRuntime::open(&layout)
             .map(|runtime| Arc::new(runtime) as Arc<dyn squish_manager::BuildRuntime>)
             .map_err(|error| ServiceError::new(error.code(), error.message()))
     }
 
-    fn storage_layout(&self, project: &Path) -> Result<StorageLayout, ServiceError> {
-        Ok(StorageLayout::project_local_for_tests(project))
+    fn storage_layout(&self, project: &Path) -> Result<ProjectBuildLayout, ServiceError> {
+        Ok(ProjectBuildLayout::project_local_for_tests(project))
     }
 
     fn materialize_locked(
@@ -219,7 +219,8 @@ source = { kind = "registry", registry = "test", checksum = "sha256:cccccccccccc
         squish_protocol::ArtifactKind::Other("text/x-diff".into())
     );
     let raw: [u8; 32] = result.diffs[0].digest.bytes().try_into().unwrap();
-    let diff = Cas::open(directory.path().join(".cache/xmlsquish/cas"))
+    let layout = ProjectBuildLayout::project_local_for_tests(directory.path());
+    let diff = Cas::open(layout.cas_root())
         .unwrap()
         .get(BlobDigest::from_bytes(raw))
         .unwrap()
@@ -370,7 +371,7 @@ fn graph_digest(project: &Path, check: bool, diff: bool) -> squish_build::Semant
     let repository =
         ProjectRepository::discover(Discovery::Explicit(project.to_path_buf())).unwrap();
     let snapshot = repository.snapshot_workspace().unwrap();
-    let storage = StorageLayout::project_local_for_tests(repository.root());
+    let storage = ProjectBuildLayout::project_local_for_tests(repository.root());
     let runtime = Arc::new(TestBuildRuntime::open(&storage).unwrap());
     fmt::prepare(&request, &snapshot, &[], runtime)
         .unwrap()
@@ -405,7 +406,8 @@ fn checked_diff(project: &Path, invocation: &str) -> Vec<u8> {
     };
     let artifact = result.diffs.first().expect("changed source has a diff");
     let raw: [u8; 32] = artifact.digest.bytes().try_into().unwrap();
-    Cas::open(project.join(".cache/xmlsquish/cas"))
+    let layout = ProjectBuildLayout::project_local_for_tests(project);
+    Cas::open(layout.cas_root())
         .unwrap()
         .get(BlobDigest::from_bytes(raw))
         .unwrap()
