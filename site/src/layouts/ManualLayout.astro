@@ -1,0 +1,91 @@
+---
+import ProductShell from "./ProductShell.astro";
+import type { Locale } from "../i18n/messages";
+import type { LocalizedPaths } from "../i18n/routes";
+
+/** One stable destination in the manual chapter tree. / 手册章节树中的一个稳定目标。 */
+export interface ManualNavItem { href: string; label: string; index?: string; current?: boolean; }
+/** One in-page heading shown in the optional reading outline. / 可选阅读提纲中的一个页内标题。 */
+export interface ManualTocItem { href: `#${string}`; label: string; }
+/** A neighbouring chapter used by the bottom pager. / 底部翻页器使用的相邻章节。 */
+export interface ManualNeighbour { href: string; label: string; }
+
+interface Props {
+  locale: Locale;
+  title: string;
+  description: string;
+  canonicalPath: string;
+  alternatePaths: Partial<LocalizedPaths>;
+  languageSwitchHref: string;
+  eyebrow: string;
+  heading: string;
+  lead: string;
+  treeLabel: string;
+  mobileLabel: string;
+  overviewLabel: string;
+  specificationLabel: string;
+  specificationHref: string;
+  chapters: ReadonlyArray<ManualNavItem>;
+  toc?: ReadonlyArray<ManualTocItem>;
+  tocLabel?: string;
+  previous?: ManualNeighbour;
+  next?: ManualNeighbour;
+  previousLabel: string;
+  nextLabel: string;
+  paginationLabel: string;
+  richIdentity?: boolean;
+}
+
+const { locale, title, description, canonicalPath, alternatePaths, languageSwitchHref, eyebrow,
+  heading, lead, treeLabel, mobileLabel, overviewLabel, specificationLabel, specificationHref,
+  chapters, toc = [], tocLabel = treeLabel, previous, next, previousLabel, nextLabel,
+  paginationLabel, richIdentity = false } = Astro.props;
+const allChapters = [{ href: chapters[0]?.href.replace(/\/[^/]+\/$/, "/") ?? canonicalPath, label: overviewLabel, current: !chapters.some((item) => item.current) }, ...chapters];
+---
+
+<ProductShell locale={locale} page="namespace" {title} {description} {canonicalPath} {alternatePaths} {languageSwitchHref}>
+  <Fragment slot="head"><link rel="describedby" href={specificationHref} type="text/markdown" /></Fragment>
+  <main id="main" class="manual-page">
+    <header class:list={["manual-masthead", { compact: !richIdentity }]}>
+      <div class:list={["manual-width", "masthead-grid", { "has-identity": richIdentity }]}>
+        <div><p class="manual-eyebrow">{eyebrow}</p><h1>{heading}</h1><p class="manual-lead">{lead}</p></div>
+        <slot name="identity" />
+      </div>
+    </header>
+
+    <details class="mobile-jump manual-width">
+      <summary>{mobileLabel}</summary>
+      <nav aria-label={treeLabel}>{allChapters.map((item) => <a href={item.href} aria-current={item.current ? "page" : undefined}>{item.label}</a>)}</nav>
+    </details>
+    {toc.length > 0 && <details class="mobile-toc manual-width">
+      <summary>{tocLabel}</summary>
+      <nav aria-label={tocLabel}>{toc.map((item) => <a href={item.href}>{item.label}</a>)}</nav>
+    </details>}
+
+    <div class:list={["manual-layout", "manual-width", { "has-toc": toc.length > 0 }]}>
+      <aside class="chapter-rail">
+        <p>{treeLabel}</p>
+        <nav aria-label={treeLabel}>{allChapters.map((item) => <a href={item.href} aria-current={item.current ? "page" : undefined}>{item.index && <span>{item.index}</span>}{item.label}</a>)}</nav>
+        <a class="raw-link" href={specificationHref}>{specificationLabel}</a>
+      </aside>
+
+      <article class="manual-article"><slot /></article>
+
+      {toc.length > 0 && <aside class="manual-toc"><p>{tocLabel}</p><nav aria-label={tocLabel}>{toc.map((item) => <a href={item.href}>{item.label}</a>)}</nav></aside>}
+    </div>
+
+    {(previous || next) && <nav class="chapter-pagination manual-width" aria-label={paginationLabel}>
+      <div>{previous && <a rel="prev" href={previous.href}><span>← {previousLabel}</span><strong>{previous.label}</strong></a>}</div>
+      <div>{next && <a rel="next" href={next.href}><span>{nextLabel} →</span><strong>{next.label}</strong></a>}</div>
+    </nav>}
+  </main>
+</ProductShell>
+
+<style is:global>
+  .manual-width{width:min(100% - 3rem,82rem);margin-inline:auto}.manual-masthead{border-bottom:1px solid var(--xs-line);background:linear-gradient(135deg,color-mix(in srgb,var(--moe-surface) 76%,transparent),color-mix(in srgb,var(--moe-accent-wash) 45%,transparent))}.masthead-grid{display:grid;grid-template-columns:minmax(0,1fr);align-items:center;gap:clamp(2rem,6vw,6rem);padding-block:clamp(2.4rem,5vw,4.2rem)}.manual-eyebrow{margin:0;color:var(--moe-accent-strong);font:800 .68rem var(--moe-font-family-mono,monospace);letter-spacing:.11em;text-transform:uppercase}.masthead-grid.has-identity{grid-template-columns:minmax(0,1.2fr) minmax(19rem,.8fr)}.manual-masthead.compact .masthead-grid{padding-block:1.8rem 2rem}.manual-masthead.compact .masthead-grid h1{font-size:clamp(2rem,4vw,3.2rem)}.masthead-grid h1{max-width:48rem;margin:.6rem 0 1rem;font-size:clamp(2.35rem,4.7vw,4.25rem);line-height:1;letter-spacing:-.055em}.manual-lead{max-width:47rem;margin:0;color:var(--moe-text-soft);font-size:clamp(1rem,1.7vw,1.12rem);line-height:1.72}
+  .manual-layout{display:grid;grid-template-columns:13.5rem minmax(0,47rem);justify-content:space-between;gap:clamp(2rem,5vw,5rem);padding-block:clamp(2.5rem,6vw,5rem)}.manual-layout.has-toc{grid-template-columns:13rem minmax(0,47rem) 10.5rem}.chapter-rail,.manual-toc{position:sticky;top:5.2rem;align-self:start}.chapter-rail>p,.manual-toc>p{margin:0 0 .7rem;color:var(--moe-text-soft);font:800 .67rem var(--moe-font-family-mono,monospace);text-transform:uppercase}.chapter-rail nav,.manual-toc nav{display:grid;border-left:1px solid var(--xs-line)}.chapter-rail nav a,.manual-toc a{display:flex;gap:.65rem;padding:.48rem .75rem;border-left:2px solid transparent;margin-left:-1px;color:var(--moe-text-soft);font-size:.76rem;line-height:1.35}.chapter-rail nav a span{color:var(--moe-accent-strong);font:700 .62rem var(--moe-font-family-mono,monospace)}.chapter-rail nav a:hover,.chapter-rail nav a[aria-current="page"],.manual-toc a:hover{color:var(--moe-accent-strong);background:var(--moe-accent-wash)}.chapter-rail nav a[aria-current="page"]{border-left-color:var(--moe-accent-strong);font-weight:800}.raw-link{display:block;margin-top:1rem;padding:.5rem .75rem;color:var(--moe-accent-strong);font-size:.75rem;font-weight:800}.mobile-jump,.mobile-toc{display:none}.manual-article{min-width:0;overflow-wrap:anywhere}.manual-article :is(h2,h3)[id],[data-directive]{scroll-margin-top:5.5rem}
+  .chapter-pagination{display:grid;grid-template-columns:1fr 1fr;gap:.75rem;padding-block:1.5rem 4rem;border-top:1px solid var(--xs-line)}.chapter-pagination>div:last-child{text-align:right}.chapter-pagination a{display:inline-grid;gap:.3rem;min-width:min(100%,18rem);padding:1rem;border:1px solid var(--xs-line);border-radius:.65rem;color:var(--moe-heading);text-align:left}.chapter-pagination a[rel="next"]{text-align:right}.chapter-pagination a:hover{border-color:var(--moe-accent);background:var(--moe-accent-wash)}.chapter-pagination span{color:var(--moe-text-soft);font-size:.7rem}
+  @media(max-width:1080px){.manual-layout.has-toc{grid-template-columns:13.5rem minmax(0,47rem)}.manual-toc{display:none}}
+  @media(max-width:850px){.manual-width{width:min(100% - 2rem,76rem)}.masthead-grid,.masthead-grid.has-identity{grid-template-columns:1fr}.manual-layout,.manual-layout.has-toc{display:block;padding-top:2rem}.chapter-rail{display:none}.mobile-jump,.mobile-toc{display:block;margin-top:1rem;border:1px solid var(--xs-line);border-radius:.6rem}.mobile-toc{margin-top:.55rem}.mobile-jump summary,.mobile-toc summary{padding:.8rem 1rem;color:var(--moe-accent-strong);font-weight:800}.mobile-jump nav,.mobile-toc nav{display:grid;grid-template-columns:1fr 1fr;padding:.4rem .7rem .8rem}.mobile-jump a,.mobile-toc a{padding:.55rem;border-radius:.4rem;color:var(--moe-text-soft);font-size:.78rem}.mobile-jump a:hover,.mobile-jump a[aria-current="page"],.mobile-toc a:hover{color:var(--moe-accent-strong);background:var(--moe-accent-wash)}}
+  @media(max-width:560px){.manual-width{width:calc(100% - 1.25rem)}.masthead-grid h1{font-size:2.25rem}.mobile-jump nav,.mobile-toc nav,.chapter-pagination{grid-template-columns:1fr}.chapter-pagination>div,.chapter-pagination>div:last-child{text-align:initial}.chapter-pagination a{width:100%}}
+</style>

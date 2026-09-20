@@ -91,6 +91,20 @@ const en: ReleaseUiCopy = {
     allReleases: "All releases",
   },
   versions: {
+    "1.0.4": {
+      title: "Project-owned build state",
+      description: "xmlsquish 1.0.4 puts products, compiler metadata, dependency sources, and rebuild caches inside the configured project target directory.",
+      date: "September 20, 2026",
+      status: "Current stable release",
+      summary: "The project now owns the complete build boundary. Products live under artifacts/, disposable caches stay under cache/, and recovery and catalog records stay under metadata/—with no hidden machine-global cache.",
+      changes: [
+        { id: "why-project-owned", title: "Why project-owned state", items: ["Prompt dependencies are small and do not justify a Cargo-like machine-global cache.", "A project can now be understood and removed without leaving xmlsquish cache state in a user directory.", "This is an ownership simplification, not a claim that cache bytes are portable between machines."] },
+        { id: "target-anatomy", title: "One explicit target anatomy", items: ["Stable products use target/xmlsquish/artifacts/*.prompt and optional IR or debug companions.", "cache/sources, cache/cas, and cache/actions.sqlite3 contain rebuildable dependency and action data.", "metadata/layout.json, metadata/publications, and metadata/catalog contain tool-managed schema, publication, recovery, and build records; work/ is disposable staging."] },
+        { id: "upgrade-impact", title: "Upgrade and clean", items: ["Version 1.0.4 does not read or migrate the former user-level cache, .xmlsquish/cache, or split manager storage.", "xmlsquish clean removes the complete configured project target; the next build reconstructs it from sources, the manifest, and lockfile.", "Offline rebuild succeeds only when the required project-local source cache is still available."] },
+        { id: "release-gates", title: "Release gates", items: ["GitHub Actions tests the locked workspace on Linux, Windows, and macOS.", "The release workflow validates version, tag, changelog, and release notes before building six native archives.", "The aggregation job publishes only after the full platform matrix and installed-CLI smoke tests succeed."] },
+      ],
+      compatibility: ["Machine protocol 3.1, the XML DSL namespace, manifest and product formats, exit codes, and the Rust 1.88 minimum remain unchanged.", "Artifact locators move to target/xmlsquish/artifacts/*.prompt; cache and metadata internals are not public APIs.", "Legacy global cache settings and on-disk state are intentionally incompatible and are not migrated."],
+    },
     "1.0.2": {
       title: "Readable outputs and recoverable cleanup",
       description: "xmlsquish 1.0.2 exposes stable artifact paths, adds a typed clean operation, and advances the additive machine protocol to 3.1.",
@@ -197,6 +211,20 @@ const zh: ReleaseUiCopy = {
     allReleases: "全部发布",
   },
   versions: {
+    "1.0.4": {
+      title: "构建状态归项目所有",
+      description: "xmlsquish 1.0.4 将产品、编译元数据、依赖源码与重建缓存统一放入配置的项目 target 目录。",
+      date: "2026 年 9 月 20 日",
+      status: "当前稳定版本",
+      summary: "项目现在拥有完整的构建边界：产品进入 artifacts/，可删除缓存进入 cache/，恢复与目录记录进入 metadata/；不再暗藏机器全局缓存。",
+      changes: [
+        { id: "why-project-owned", title: "为什么归项目所有", items: ["提示词依赖很小，不值得沿用 Cargo 式的机器全局缓存。", "项目现在可独立理解和删除，不会在用户目录遗留 xmlsquish 缓存状态。", "这是所有权模型的简化，并不声称缓存字节可以跨机器移植。"] },
+        { id: "target-anatomy", title: "一套明确的 target 解剖", items: ["稳定产品使用 target/xmlsquish/artifacts/*.prompt，以及可选 IR 或调试伴随文件。", "cache/sources、cache/cas 与 cache/actions.sqlite3 保存可重建的依赖及动作数据。", "metadata/layout.json、metadata/publications 与 metadata/catalog 保存工具管理的 schema、发布、恢复及构建记录；work/ 是可删除的暂存区。"] },
+        { id: "upgrade-impact", title: "升级与清理", items: ["1.0.4 不读取或迁移旧用户级缓存、.xmlsquish/cache 或分离的 manager storage。", "xmlsquish clean 删除完整的项目 target；下次构建从源码、清单与锁文件重建。", "离线重建仅在所需的项目本地源码缓存仍存在时成功。"] },
+        { id: "release-gates", title: "发布门禁", items: ["GitHub Actions 在 Linux、Windows 与 macOS 上测试锁定的完整 workspace。", "发布工作流在构建六个原生归档前核对版本、标签、更新日志与发布说明。", "只有完整平台矩阵与安装后 CLI 冒烟测试成功，聚合作业才会发布。"] },
+      ],
+      compatibility: ["机器协议 3.1、XML DSL 命名空间、清单与产品格式、退出码及 Rust 1.88 最低版本保持不变。", "产物定位符迁移为 target/xmlsquish/artifacts/*.prompt；cache 与 metadata 内部结构不是公共 API。", "旧全局缓存配置和磁盘状态有意不兼容，也不会迁移。"],
+    },
     "1.0.2": {
       title: "可读产物与可恢复清理",
       description: "xmlsquish 1.0.2 提供稳定直观的产物路径，新增有类型 clean 操作，并将可加性机器协议提升到 3.1。",

@@ -79,6 +79,23 @@ const pipelineArtifacts = demo.artifacts.filter((item) => item.kind !== "source"
     </ol>
   </section>
 
+  <section id="project-state" class="state-story" aria-labelledby="state-title">
+    <div class="page-width state-grid">
+      <div><p class="eyebrow">v1.0.4 · PROJECT-OWNED STATE</p><h2 id="state-title">{locale === "zh-CN" ? "缓存属于项目，不属于机器。" : "The cache belongs to the project—not the machine."}</h2><p>{locale === "zh-CN" ? "默认构建根 target/xmlsquish 现在同时容纳稳定产品、可重建缓存与编译元数据。复制或删除项目时，xmlsquish 状态不会隐身在用户级全局目录。" : "The default build root, target/xmlsquish, now contains stable products, rebuildable caches, and compiler metadata together. Copying or deleting a project no longer leaves xmlsquish state hidden in a user-level global directory."}</p><a class="text-link" href={`${paths[locale].releases}${latestRelease.version}/`}>{locale === "zh-CN" ? "阅读 1.0.4 升级边界" : "Read the 1.0.4 upgrade boundary"}<span aria-hidden="true"> →</span></a></div>
+      <pre aria-label={locale === "zh-CN" ? "项目构建目录" : "Project build directory"}><code>{`target/xmlsquish/
+├── artifacts/          *.prompt · IR · debug
+├── cache/
+│   ├── sources/
+│   ├── cas/
+│   └── actions.sqlite3
+├── metadata/
+│   ├── layout.json
+│   ├── publications/
+│   └── catalog/
+└── work/`}</code></pre>
+    </div>
+  </section>
+
   <section id="build" class="section page-width" aria-labelledby="build-title">
     <div id="principles-title" class="section-heading"><p class="eyebrow">{m.build.eyebrow}</p><h2 id="build-title">{m.build.title}</h2><p>{m.build.intro}</p></div>
     <BuildExplorer locale={locale} />
@@ -484,6 +501,9 @@ const pipelineArtifacts = demo.artifacts.filter((item) => item.kind !== "source"
     display: inline-block;
     margin-top: 1.3rem;
   }
+  .state-story{border-block:1px solid var(--xs-line);background:color-mix(in srgb,var(--moe-accent-wash) 42%,transparent)}
+  .state-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(20rem,.72fr);align-items:center;gap:clamp(2rem,7vw,6rem);padding-block:clamp(3.5rem,7vw,6rem)}
+  .state-grid h2{margin:.6rem 0 1rem;font-size:clamp(2rem,4vw,3.25rem);line-height:1.1;letter-spacing:-.045em}.state-grid p:not(.eyebrow){color:var(--moe-text-soft);line-height:1.8}.state-grid pre{margin:0;padding:1.3rem;overflow:auto;border-radius:.75rem;color:var(--xs-code-text);background:var(--xs-code);font-size:.76rem;line-height:1.75}
   .model-section {
     background: color-mix(in srgb, var(--moe-surface-muted) 50%, transparent);
     border-block: 1px solid var(--xs-line);
@@ -950,6 +970,7 @@ const pipelineArtifacts = demo.artifacts.filter((item) => item.kind !== "source"
     .journey p {
       font-size: 0.77rem;
     }
+    .state-grid,
     .inheritance-map {
       grid-template-columns: 1fr;
       max-width: 35rem;
