@@ -248,6 +248,48 @@ fn project_build_layout_revalidation_rejects_new_target_junction() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn project_build_layout_revalidation_rejects_replaced_project_root() {
+    let container = tempfile::tempdir().unwrap();
+    let project = container.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let project = std::fs::canonicalize(project).unwrap();
+    let layout = ProjectBuildLayout::new(&project, "target/xmlsquish").unwrap();
+    let moved = container.path().join("moved-project");
+    std::fs::rename(&project, &moved).unwrap();
+    create_directory_symlink(&moved, &project);
+
+    assert_eq!(
+        layout.validate_existing_aliases().unwrap_err(),
+        squish_manager::ProjectBuildLayoutError::ProjectRootChanged
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn project_build_layout_revalidation_rejects_replaced_project_root() {
+    let container = tempfile::tempdir().unwrap();
+    let project = container.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let project = std::fs::canonicalize(project).unwrap();
+    let layout = ProjectBuildLayout::new(&project, "target/xmlsquish").unwrap();
+    let moved = container.path().join("moved-project");
+    std::fs::rename(&project, &moved).unwrap();
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&project)
+        .arg(&moved)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert_eq!(
+        layout.validate_existing_aliases().unwrap_err(),
+        squish_manager::ProjectBuildLayoutError::ProjectRootChanged
+    );
+}
+
 #[test]
 fn project_build_layout_rejects_dangling_target_dir_symlink() {
     let project = tempfile::tempdir().unwrap();

@@ -77,6 +77,8 @@ pub enum ProjectBuildLayoutError {
     MissingBuildRootName,
     /// `target-dir` 路径链含现有文件系统别名。 / The `target-dir` path chain contains an existing filesystem alias.
     TargetDirAlias,
+    /// 构造后项目根不再解析为原来的规范目录。 / The project root no longer resolves to its original canonical directory.
+    ProjectRootChanged,
     /// `target-dir` 的现有分量无法检查。 / An existing `target-dir` component cannot be inspected.
     UnresolvableTargetDir,
 }
@@ -95,6 +97,12 @@ impl fmt::Display for ProjectBuildLayoutError {
                 write!(formatter, "build root has no final path component")
             }
             Self::TargetDirAlias => write!(formatter, "target-dir contains a filesystem alias"),
+            Self::ProjectRootChanged => {
+                write!(
+                    formatter,
+                    "project root identity changed after layout validation"
+                )
+            }
             Self::UnresolvableTargetDir => write!(formatter, "target-dir cannot be resolved"),
         }
     }
@@ -190,6 +198,11 @@ impl ProjectBuildLayout {
     /// checks the Windows reparse-point attribute; object identity never depends on path-string
     /// casing.
     pub fn validate_existing_aliases(&self) -> Result<(), ProjectBuildLayoutError> {
+        let current = std::fs::canonicalize(&self.project_root)
+            .map_err(|_| ProjectBuildLayoutError::ProjectRootChanged)?;
+        if current != self.project_root {
+            return Err(ProjectBuildLayoutError::ProjectRootChanged);
+        }
         reject_existing_target_aliases(&self.project_root, &self.target_dir)
     }
 

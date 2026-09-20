@@ -2223,6 +2223,22 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
+    fn create_test_directory_alias(target: &Path, alias: &Path) {
+        std::os::unix::fs::symlink(target, alias).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn create_test_directory_alias(target: &Path, alias: &Path) {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(alias)
+            .arg(target)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
     #[test]
     fn path_only_resolution_never_calls_external_transports() {
         let (_temporary, host, _) = fixture();
@@ -3243,6 +3259,83 @@ mod tests {
         .unwrap();
         assert!(matches!(status, ProjectCleanStatus::Cleaned(_)));
         assert!(!storage.ownership_root().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_root_replacement_while_clean_waits_never_redirects_deletion() {
+        let (temporary, host, storage) = fixture();
+        std::fs::create_dir_all(storage.ownership_root()).unwrap();
+        let paths = CleanPaths::new(&storage).unwrap();
+        let lock = open_project_lock(&paths).unwrap();
+        let root = host.project_root().to_path_buf();
+        let host = Arc::new(host);
+        let worker_host = Arc::clone(&host);
+        let worker_root = root.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            Services::clean_project(
+                worker_host.as_ref(),
+                &worker_root,
+                squish_kernel::CancellationToken::default(),
+            )
+        });
+        started_rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(75));
+
+        let moved = temporary.path().join("moved-project");
+        std::fs::rename(&root, &moved).unwrap();
+        let replacement = temporary.path().join("replacement-project");
+        let replacement_build = replacement.join("target/xmlsquish");
+        std::fs::create_dir_all(&replacement_build).unwrap();
+        let sentinel = replacement_build.join("authoritative.txt");
+        std::fs::write(&sentinel, b"must survive redirected clean").unwrap();
+        create_test_directory_alias(&replacement, &root);
+        drop(lock);
+
+        let clean_error = worker.join().unwrap().unwrap_err();
+        assert_eq!(clean_error.code(), "project_clean_failed");
+        let build_error = host
+            .build_runtime
+            .write_blob(b"must-not-enter-replacement")
+            .unwrap_err();
+        assert_eq!(build_error.code(), "host_maintenance_lock");
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"must survive redirected clean"
+        );
+        assert!(!replacement_build.join("cache").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn project_root_junction_replacement_never_redirects_build_or_clean() {
+        let (temporary, host, _storage) = fixture();
+        let root = host.project_root().to_path_buf();
+        let moved = temporary.path().join("moved-project");
+        std::fs::rename(&root, &moved).unwrap();
+        let replacement = temporary.path().join("replacement-project");
+        let replacement_build = replacement.join("target/xmlsquish");
+        std::fs::create_dir_all(&replacement_build).unwrap();
+        let sentinel = replacement_build.join("authoritative.txt");
+        std::fs::write(&sentinel, b"must survive redirected operations").unwrap();
+        create_test_directory_alias(&replacement, &root);
+
+        let clean_error =
+            Services::clean_project(&host, &root, squish_kernel::CancellationToken::default())
+                .unwrap_err();
+        assert_eq!(clean_error.code(), "project_root_mismatch");
+        let build_error = host
+            .build_runtime
+            .write_blob(b"must-not-enter-replacement")
+            .unwrap_err();
+        assert_eq!(build_error.code(), "host_maintenance_lock");
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"must survive redirected operations"
+        );
+        assert!(!replacement_build.join("cache").exists());
     }
 
     #[cfg(unix)]
