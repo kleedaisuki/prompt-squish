@@ -27,7 +27,7 @@ interface Props {
   specificationHref: string;
   chapters: ReadonlyArray<ManualNavItem>;
   toc?: ReadonlyArray<ManualTocItem>;
-  tocLabel?: string;
+  tocLabel: string;
   previous?: ManualNeighbour;
   next?: ManualNeighbour;
   previousLabel: string;
@@ -38,7 +38,7 @@ interface Props {
 
 const { locale, title, description, canonicalPath, alternatePaths, languageSwitchHref, eyebrow,
   heading, lead, treeLabel, mobileLabel, overviewLabel, specificationLabel, specificationHref,
-  chapters, toc = [], tocLabel = treeLabel, previous, next, previousLabel, nextLabel,
+  chapters, toc = [], tocLabel, previous, next, previousLabel, nextLabel,
   paginationLabel, richIdentity = false } = Astro.props;
 const allChapters = [{ href: chapters[0]?.href.replace(/\/[^/]+\/$/, "/") ?? canonicalPath, label: overviewLabel, current: !chapters.some((item) => item.current) }, ...chapters];
 ---

@@ -209,6 +209,13 @@ test("manual overview and all seven chapters expose desktop and mobile local nav
       assert.equal(await page.locator('.chapter-rail nav a[aria-current="page"]').count(), 1, path);
       assert.equal(await page.locator(".mobile-jump nav a").count(), 8, path);
       assert.equal(await page.locator('.mobile-jump nav a[aria-current="page"]').count(), 1, path);
+      assert.equal(await page.locator(".chapter-rail nav").getAttribute("aria-label"), prefix === "" ? "手册章节" : "Manual chapters", path);
+      if (slug !== null) {
+        const localLabel = prefix === "" ? "本页目录" : "On this page";
+        assert.equal(await page.locator(".manual-toc nav").getAttribute("aria-label"), localLabel, path);
+        assert.equal(await page.locator(".mobile-toc nav").getAttribute("aria-label"), localLabel, path);
+        assert.notEqual(await page.locator(".manual-toc nav").getAttribute("aria-label"), await page.locator(".chapter-rail nav").getAttribute("aria-label"), path);
+      }
       assert.equal(await page.locator(".chapter-cards a").count(), slug === null ? 7 : 0, path);
       assert.equal(await page.locator("[data-directive]").count(), slug === "reference" ? 11 : 0, path);
     }
