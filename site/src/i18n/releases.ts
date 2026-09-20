@@ -7,7 +7,6 @@ export interface ReleaseDetailCopy {
   title: string;
   description: string;
   date: string;
-  status: string;
   summary: string;
   changes: ReadonlyArray<{ id: string; title: string; items: ReadonlyArray<string> }>;
   compatibility: ReadonlyArray<string>;
@@ -95,7 +94,6 @@ const en: ReleaseUiCopy = {
       title: "Project-owned build state",
       description: "xmlsquish 1.0.4 puts products, compiler metadata, dependency sources, and rebuild caches inside the configured project target directory.",
       date: "September 20, 2026",
-      status: "Current stable release",
       summary: "The project now owns the complete build boundary. Products live under artifacts/, disposable caches stay under cache/, and recovery and catalog records stay under metadata/—with no hidden machine-global cache.",
       changes: [
         { id: "why-project-owned", title: "Why project-owned state", items: ["Prompt dependencies are small and do not justify a Cargo-like machine-global cache.", "A project can now be understood and removed without leaving xmlsquish cache state in a user directory.", "This is an ownership simplification, not a claim that cache bytes are portable between machines."] },
@@ -109,7 +107,6 @@ const en: ReleaseUiCopy = {
       title: "Readable outputs and recoverable cleanup",
       description: "xmlsquish 1.0.2 exposes stable artifact paths, adds a typed clean operation, and advances the additive machine protocol to 3.1.",
       date: "September 17, 2026",
-      status: "Current stable release",
       summary: "Build products now appear directly at their declared target paths while hashes, generations, and journals remain private. The new clean command removes project build state and only dependency-cache entries proven invalid.",
       changes: [
         { id: "target-layout", title: "Readable target layout", items: ["Prompt, IR, and debug products materialize at stable manifest-derived paths.", "Publication generations, content hashes, journals, and build records live in project-private manager state.", "Existing target/xmlsquish locators and custom workspace target directories remain compatible."] },
@@ -122,7 +119,6 @@ const en: ReleaseUiCopy = {
       title: "Publication boundaries become product contracts",
       description: "xmlsquish 1.0.1 introduces typed artifact locators, verified raw inspection, capability-lazy runtime services, and machine protocol 3.0.",
       date: "September 16, 2026",
-      status: "Historical stable release",
       summary: "Build outputs now carry typed, project-relative locators instead of exposing publisher storage paths. Raw artifact inspection validates digest and size before any bytes reach stdout.",
       changes: [
         { id: "publication-catalog", title: "Typed publication catalog", items: ["Published targets expose target and generation identities plus typed artifact records.", "Every artifact carries an immutable id, kind, stable locator, size, and digest.", "Manager code no longer constructs or scans private generation directories."] },
@@ -135,7 +131,6 @@ const en: ReleaseUiCopy = {
       title: "A project manager for reproducible prompt builds",
       description: "xmlsquish 1.0.0 introduces manifests, lockfiles, workspaces, inspectable artifacts, and a stable automation contract.",
       date: "September 15, 2026",
-      status: "Historical stable release",
       summary: "The first stable release turns loose XML compilation into a Cargo-style project workflow with reproducible dependency resolution, atomic publication, and inspectable build evidence.",
       changes: [
         { id: "projects", title: "Projects and workspaces", items: ["xmlsquish.toml declares packages, targets, dependencies, and workspace membership.", "A deterministic lockfile and locked/offline modes make dependency resolution inspectable.", "new, add, remove, fmt, build, and inspect form the stable command surface."] },
@@ -148,7 +143,6 @@ const en: ReleaseUiCopy = {
       title: "Libraries provide reuse; entries build the product",
       description: "xmlsquish 0.3.0 separates build entries from macro libraries and unifies recursive expansion.",
       date: "September 11, 2026",
-      status: "Historical release",
       summary: "Explicit xs:entry build roots are separated from reusable xs:module libraries. xs:expand becomes the single composition operation over prepared, reusable compilation snapshots.",
       changes: [
         { id: "language-model", title: "One composition model", items: ["xs:entry builds a product; xs:module contains imports and named macros only.", "xs:import loads definitions and xs:expand is the sole recursive expansion operation.", "Inputs evaluate in the caller and pass by value into isolated macro scopes."] },
@@ -161,7 +155,6 @@ const en: ReleaseUiCopy = {
       title: "A namespace-aware XML macro language",
       description: "xmlsquish 0.2.0 introduces immutable macros, explicit scalar arguments and XML slots in a single CLI binary.",
       date: "September 11, 2026",
-      status: "Historical source release",
       summary: "The language moves to URI-identified builtins, namespace-qualified immutable macros, explicit value passing, and bounded expansion in a single command-line program.",
       changes: [
         { id: "language", title: "Explicit language contracts", items: ["Builtins are recognized by namespace identity and macros use namespace-qualified names.", "Parameters do not inherit; xs:arg and xs:fill pass scalar values and XML sequences explicitly.", "xs:insert emits escaped scalar text rather than parsing markup."] },
@@ -215,7 +208,6 @@ const zh: ReleaseUiCopy = {
       title: "构建状态归项目所有",
       description: "xmlsquish 1.0.4 将产品、编译元数据、依赖源码与重建缓存统一放入配置的项目 target 目录。",
       date: "2026 年 9 月 20 日",
-      status: "当前稳定版本",
       summary: "项目现在拥有完整的构建边界：产品进入 artifacts/，可删除缓存进入 cache/，恢复与目录记录进入 metadata/；不再暗藏机器全局缓存。",
       changes: [
         { id: "why-project-owned", title: "为什么归项目所有", items: ["提示词依赖很小，不值得沿用 Cargo 式的机器全局缓存。", "项目现在可独立理解和删除，不会在用户目录遗留 xmlsquish 缓存状态。", "这是所有权模型的简化，并不声称缓存字节可以跨机器移植。"] },
@@ -229,7 +221,6 @@ const zh: ReleaseUiCopy = {
       title: "可读产物与可恢复清理",
       description: "xmlsquish 1.0.2 提供稳定直观的产物路径，新增有类型 clean 操作，并将可加性机器协议提升到 3.1。",
       date: "2026 年 9 月 17 日",
-      status: "当前稳定版本",
       summary: "构建产品现在直接出现在清单声明的 target 路径；hash、generation 与 journal 留在私有状态。新的 clean 命令删除项目构建状态，并且只清理可证明失效的依赖缓存。",
       changes: [
         { id: "target-layout", title: "可读的 target 布局", items: ["Prompt、IR 与调试产品物化到由清单确定的稳定路径。", "发布 generation、内容 hash、journal 与 build record 迁入 manager 的项目私有状态。", "现有 target/xmlsquish locator 与自定义工作区 target-dir 保持兼容。"] },
@@ -242,7 +233,6 @@ const zh: ReleaseUiCopy = {
       title: "发布边界成为产品契约",
       description: "xmlsquish 1.0.1 引入有类型产物定位符、经验证的原始检查、按能力延迟初始化的运行时，以及机器协议 3.0。",
       date: "2026 年 9 月 16 日",
-      status: "历史稳定版本",
       summary: "构建输出改用有类型、项目相对的定位符，不再暴露发布器存储路径。原始产物检查会在任何字节进入 stdout 前验证摘要与大小。",
       changes: [
         { id: "publication-catalog", title: "有类型的发布目录", items: ["已发布目标公开目标与 generation 身份，以及有类型产物记录。", "每个产物携带不可变 id、kind、稳定 locator、size 与 digest。", "manager 不再构造或扫描私有 generation 目录。"] },
@@ -255,7 +245,6 @@ const zh: ReleaseUiCopy = {
       title: "面向可复现 Prompt 构建的项目管理器",
       description: "xmlsquish 1.0.0 引入清单、锁文件、工作区、可检查产物与稳定自动化契约。",
       date: "2026 年 9 月 15 日",
-      status: "历史稳定版本",
       summary: "首个稳定版本把松散 XML 编译升级为 Cargo 式项目工作流，提供可复现依赖解析、原子发布与可检查的构建证据。",
       changes: [
         { id: "projects", title: "项目与工作区", items: ["xmlsquish.toml 声明包、目标、依赖和工作区成员。", "确定性锁文件及 locked/offline 模式让依赖解析可以检查。", "new、add、remove、fmt、build 与 inspect 构成稳定命令面。"] },
@@ -268,7 +257,6 @@ const zh: ReleaseUiCopy = {
       title: "宏库负责复用，入口负责产品",
       description: "xmlsquish 0.3.0 分离构建入口与宏库，并统一递归展开。",
       date: "2026 年 9 月 11 日",
-      status: "历史版本",
       summary: "显式 xs:entry 构建根与可复用 xs:module 宏库分离；xs:expand 成为基于可复用编译快照的唯一组合操作。",
       changes: [
         { id: "language-model", title: "一套组合模型", items: ["xs:entry 构建产品；xs:module 只包含 import 与具名宏。", "xs:import 装载定义，xs:expand 是唯一递归展开操作。", "输入在调用方求值，再按值传入隔离的宏作用域。"] },
@@ -281,7 +269,6 @@ const zh: ReleaseUiCopy = {
       title: "命名空间感知的 XML 宏语言",
       description: "xmlsquish 0.2.0 在单一 CLI 二进制中引入不可变宏、显式标量参数与 XML slot。",
       date: "2026 年 9 月 11 日",
-      status: "历史源码版本",
       summary: "语言转向以 URI 识别的内建操作、命名空间限定的不可变宏、显式值传递，以及单一命令行程序中的有界展开。",
       changes: [
         { id: "language", title: "显式语言契约", items: ["内建操作按命名空间身份识别，宏使用命名空间限定名。", "参数不继承；xs:arg 与 xs:fill 显式传递标量值和 XML 序列。", "xs:insert 输出转义后的标量文本，而不会解析标记。"] },

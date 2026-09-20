@@ -133,11 +133,15 @@ test("release indexes list six entries and every entry opens a same-locale detai
     const page = await browser.newPage();
     await page.goto(`${base}${prefix}/releases/`, { waitUntil: "domcontentloaded" });
     assert.equal(await page.locator(".log-entry").count(), 6);
+    assert.equal(await page.locator(".log-entry.current").count(), 1, "exactly the latest release is current");
+    assert.equal(await page.locator(".log-entry.current .version-line code").textContent(), "v1.0.4");
     const links = await page.locator(".entry-body h2 a").evaluateAll((items) => items.map((item) => item.getAttribute("href")));
     assert.deepEqual(links, versions.map((version) => `${prefix}/releases/${version}/`));
     for (let index = 0; index < links.length; index += 1) {
       await page.goto(base + links[index], { waitUntil: "domcontentloaded" });
-      assert.match(await page.locator(".release-eyebrow").textContent(), new RegExp(`^v${versions[index].replaceAll(".", "\\.")}`));
+      const eyebrow = await page.locator(".release-eyebrow").textContent();
+      assert.match(eyebrow, new RegExp(`^v${versions[index].replaceAll(".", "\\.")}`));
+      assert(eyebrow.includes(index === 0 ? (prefix ? "Current" : "当前") : (prefix ? "Historical" : "历史")), `${links[index]} has the wrong release channel`);
       assert.equal(await page.locator('.product-nav a[aria-current="page"]').getAttribute("href"), `${prefix}/releases/`);
     }
     await page.close();
@@ -225,6 +229,11 @@ test("manual overview and all seven chapters expose desktop and mobile local nav
     assert(await page.locator(".mobile-toc").isVisible());
     assert((await page.locator(".mobile-toc nav a").count()) > 0);
     assert.equal(await page.locator(".chapter-rail").isVisible(), false);
+    await page.setViewportSize({ width: 960, height: 900 });
+    await page.goto(base + `${prefix}/ns/reference/`, { waitUntil: "domcontentloaded" });
+    assert(await page.locator(".mobile-toc").isVisible(), "the local outline must remain available between 851px and 1080px");
+    assert.equal(await page.locator(".manual-toc").isVisible(), false);
+    assert(await page.locator(".chapter-rail").isVisible());
     await page.close();
   }
 });

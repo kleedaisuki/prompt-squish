@@ -50,7 +50,7 @@ const structuredData = JSON.stringify({
   languageSwitchHref={alternatePaths[locale === "en" ? "zh-CN" : "en"]}
   releaseMetadataPath={release.metadataPath ?? null}
   releaseVersion={release.version}
-  eyebrow={`${release.tag} · ${copy.status}`}
+  eyebrow={`${release.tag} · ${release.status === "current" ? m.index.current : m.index.historical}`}
   heading={copy.title}
   dek={copy.summary}
   backHref={indexPath}
