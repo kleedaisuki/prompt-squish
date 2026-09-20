@@ -231,7 +231,7 @@ impl PtySession {
     }
 
     /// 向终端输入一个控制字符并立即刷新。 / Writes and flushes one terminal control character.
-    fn control_c(&mut self) {
+    fn control_c(&self) {
         let mut writer = self
             .writer
             .as_ref()
@@ -372,9 +372,7 @@ fn second_interrupt_takes_emergency_exit_and_restores_terminal() {
     wait_for_blocked_recovery(&session, WAIT);
     let before_first = session.bytes().len();
     session.control_c();
-    wait_for_notice_after(&session, before_first, WAIT);
-    let before_interrupts = session.bytes().len();
-    session.control_c();
+    let before_interrupts = send_second_interrupt_after_notice(&session, before_first, WAIT);
     assert_eq!(session.wait(WAIT), 130);
     let raw = session.finish_output();
     assert_emergency_exit_observed(&raw, before_interrupts);
@@ -408,10 +406,15 @@ fn assert_emergency_exit_observed(raw: &[u8], before_interrupts: usize) {
     );
 }
 
-/// 在发送偏移后等待呈现器拥有的完整取消提示行。 /
-/// Waits after the send offset for the renderer-owned complete cancellation notice line.
+/// 在输出快照锁内确认首次提示并发送第二次中断。 /
+/// Confirms the first notice and sends the second interrupt while holding the output-snapshot
+/// lock, so the reader cannot append a cooperative terminal summary between those observations.
 #[cfg(windows)]
-fn wait_for_notice_after(session: &PtySession, offset: usize, timeout: Duration) {
+fn send_second_interrupt_after_notice(
+    session: &PtySession,
+    offset: usize,
+    timeout: Duration,
+) -> usize {
     let deadline = Instant::now() + timeout;
     let mut bytes = session.output.bytes.lock().expect("PTY output lock");
     loop {
@@ -420,7 +423,9 @@ fn wait_for_notice_after(session: &PtySession, offset: usize, timeout: Duration)
             .split_inclusive(['\r', '\n'])
             .any(|line| line.trim() == CANCELLATION_NOTICE)
         {
-            return;
+            let before_second_interrupt = bytes.len();
+            session.control_c();
+            return before_second_interrupt;
         }
         assert!(
             Instant::now() < deadline,
