@@ -425,6 +425,8 @@ pub struct HostConfig {
     /// 从规范项目根和 manifest target 目录派生的唯一项目构建布局。 /
     /// Sole project-build layout derived from the canonical project root and manifest target.
     pub storage: ProjectBuildLayout,
+    /// 此次调用的协作式取消令牌。 / Cooperative cancellation token for this invocation.
+    pub cancellation: squish_kernel::CancellationToken,
     /// 名称唯一的 registry 集。 / Registries with unique names.
     pub registries: Vec<RegistryEndpoint>,
     /// Registry credential 来源。 / Registry credential source.
@@ -560,11 +562,26 @@ impl CleanPaths {
                 "project build root has no leaf",
             )
         })?;
-        Ok(Self {
+        let paths = Self {
             root,
             lock: storage.coordination_lock().to_path_buf(),
             journal: storage.clean_journal().to_path_buf(),
-        })
+        };
+        paths.validate_root_identity()?;
+        Ok(paths)
+    }
+
+    /// 确保构造后引入的文件系统别名不能改变所有权根身份。 /
+    /// Ensures a filesystem alias introduced after construction cannot change root identity.
+    fn validate_root_identity(&self) -> io::Result<()> {
+        let physical_root = normalize_from_existing_ancestor(&self.root)?;
+        if physical_root == self.root {
+            return Ok(());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "project build root acquired a filesystem alias after layout validation",
+        ))
     }
 }
 
@@ -602,6 +619,7 @@ fn next_trash_leaf(paths: &CleanPaths) -> io::Result<PathBuf> {
 
 /// 获取与 target/catalog publisher 完全相同的跨进程项目锁。 /
 /// Acquires exactly the same cross-process project lock as target/catalog publishers.
+#[cfg(test)]
 fn open_project_lock(paths: &CleanPaths) -> io::Result<File> {
     let lock = open_project_lock_file(paths)?;
     lock.lock_exclusive()?;
@@ -894,6 +912,7 @@ pub struct ProductionHost {
     git: GitHost,
     git_runner: Arc<dyn GitRunner>,
     filesystem: Arc<dyn FilesystemPort + Send + Sync>,
+    cancellation: squish_kernel::CancellationToken,
     build_runtime: Arc<ProductionBuildRuntime>,
 }
 
@@ -914,6 +933,7 @@ impl ProductionHost {
     /// let host = ProductionHost::open(HostConfig {
     ///     project_root: project,
     ///     storage,
+    ///     cancellation: Default::default(),
     ///     registries: Vec::new(),
     ///     credentials: Arc::new(NoCredentials),
     ///     http: Arc::new(ReqwestTransport::new()?),
@@ -953,11 +973,11 @@ impl ProductionHost {
                 "project build root must remain strictly below the canonical project root".into(),
             ));
         }
-        recover_interrupted_clean(&config.storage)?;
         let git_runner = git_runner(config.git)?;
         let git = GitHost::with_runner(context.clone(), git_runner.clone());
         let build_runtime = Arc::new(ProductionBuildRuntime::new(
             config.storage.clone(),
+            config.cancellation.clone(),
             Arc::new(NoopPublishObserver),
             Arc::new(NoopPublishObserver),
         ));
@@ -969,6 +989,7 @@ impl ProductionHost {
             git,
             git_runner,
             filesystem: config.filesystem,
+            cancellation: config.cancellation,
             build_runtime,
         })
     }
@@ -987,6 +1008,7 @@ impl ProductionHost {
     ) -> Self {
         self.build_runtime = Arc::new(ProductionBuildRuntime::new(
             self.storage.clone(),
+            self.cancellation.clone(),
             target,
             catalog,
         ));
@@ -1209,17 +1231,6 @@ impl ProductionHost {
     }
 }
 
-fn recover_interrupted_clean(storage: &ProjectBuildLayout) -> io::Result<()> {
-    let paths = CleanPaths::new(storage)?;
-    if !journal_exists(&paths.journal)? {
-        return Ok(());
-    }
-    let _lock = open_project_lock(&paths)?;
-    let mut result = CleanResult::default();
-    let mut changed = false;
-    recover_clean_journal(&paths, &mut result, &mut changed)
-}
-
 #[derive(Deserialize, Serialize)]
 struct LayoutMarker {
     schema: u32,
@@ -1232,21 +1243,74 @@ const LAYOUT_FORMAT_EPOCH: u32 = 1;
 /// 恢复 clean，校验/初始化布局标记，再以重校验循环安全交接给共享租约。 /
 /// Recovers clean, validates/initializes the marker, then safely hands off to a shared lease with
 /// a revalidation loop covering the portable unlock/relock gap.
-fn acquire_build_lease(storage: &ProjectBuildLayout) -> io::Result<File> {
+fn acquire_build_lease(
+    storage: &ProjectBuildLayout,
+    cancellation: &squish_kernel::CancellationToken,
+) -> io::Result<File> {
+    check_cancellation(cancellation)?;
     let paths = CleanPaths::new(storage)?;
-    let lock = open_project_lock(&paths)?;
+    let lock = open_project_lock_file(&paths)?;
     loop {
+        lock_cancellable(&lock, LockMode::Shared, cancellation)?;
+        paths.validate_root_identity()?;
+        if !journal_exists(&paths.journal)? && layout_marker_is_current(storage)? {
+            return Ok(lock);
+        }
+        FileExt::unlock(&lock)?;
+
+        lock_cancellable(&lock, LockMode::Exclusive, cancellation)?;
+        paths.validate_root_identity()?;
         let mut result = CleanResult::default();
         let mut changed = false;
         recover_clean_journal(&paths, &mut result, &mut changed)?;
         ensure_layout_marker(storage, &paths, &mut result)?;
         FileExt::unlock(&lock)?;
-        FileExt::lock_shared(&lock)?;
-        if !journal_exists(&paths.journal)? && layout_marker_is_current(storage)? {
-            return Ok(lock);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LockMode {
+    Shared,
+    Exclusive,
+}
+
+/// 轮询获取维护锁，使等待不会掩盖调用取消。 / Polls for a maintenance lock so waiting never
+/// masks invocation cancellation.
+fn lock_cancellable(
+    lock: &File,
+    mode: LockMode,
+    cancellation: &squish_kernel::CancellationToken,
+) -> io::Result<()> {
+    loop {
+        check_cancellation(cancellation)?;
+        let acquired = match mode {
+            LockMode::Shared => FileExt::try_lock_shared(lock),
+            LockMode::Exclusive => FileExt::try_lock_exclusive(lock),
+        };
+        match acquired {
+            Ok(()) => {
+                if let Err(error) = check_cancellation(cancellation) {
+                    FileExt::unlock(lock)?;
+                    return Err(error);
+                }
+                return Ok(());
+            }
+            Err(error) if lock_is_busy(&error) => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(error) => return Err(error),
         }
-        FileExt::unlock(&lock)?;
-        FileExt::lock_exclusive(&lock)?;
+    }
+}
+
+fn check_cancellation(cancellation: &squish_kernel::CancellationToken) -> io::Result<()> {
+    if cancellation.is_cancelled() {
+        Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "build maintenance acquisition cancelled",
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -1713,6 +1777,9 @@ impl Services for ProductionHost {
         if cancellation.is_cancelled() {
             return Ok(ProjectCleanStatus::Cancelled);
         }
+        paths
+            .validate_root_identity()
+            .map_err(|error| ServiceError::new("project_clean_failed", error.to_string()))?;
 
         let mut result = CleanResult::default();
         let mut changed = false;
@@ -1732,6 +1799,9 @@ impl Services for ProductionHost {
             Ok(leaf) => leaf,
             Err(error) => return clean_io_failure(result, changed, error),
         };
+        if let Err(error) = paths.validate_root_identity() {
+            return clean_io_failure(result, changed, error);
+        }
         if let Err(error) = persist_clean_journal(&paths, trash_leaf.clone()) {
             return clean_io_failure(result, changed, error);
         }
@@ -2132,10 +2202,19 @@ mod tests {
     }
 
     fn fixture_host(root: &Path, storage: &ProjectBuildLayout) -> ProductionHost {
+        fixture_host_with_cancellation(root, storage, squish_kernel::CancellationToken::default())
+    }
+
+    fn fixture_host_with_cancellation(
+        root: &Path,
+        storage: &ProjectBuildLayout,
+        cancellation: squish_kernel::CancellationToken,
+    ) -> ProductionHost {
         let filesystem = Arc::new(squish_fetch::FilesystemHost::new(root).unwrap());
         ProductionHost::open(HostConfig {
             project_root: root.to_path_buf(),
             storage: storage.clone(),
+            cancellation,
             registries: Vec::new(),
             credentials: Arc::new(NoCredentials),
             http: Arc::new(NoHttp),
@@ -2412,6 +2491,7 @@ mod tests {
         let host = ProductionHost::open(HostConfig {
             project_root: root.clone(),
             storage,
+            cancellation: squish_kernel::CancellationToken::default(),
             registries: vec![RegistryEndpoint {
                 name: "default".into(),
                 config: RegistryConfig {
@@ -2525,6 +2605,7 @@ mod tests {
         let host = ProductionHost::open(HostConfig {
             project_root: project.clone(),
             storage,
+            cancellation: squish_kernel::CancellationToken::default(),
             registries: Vec::new(),
             credentials: Arc::new(NoCredentials),
             http: Arc::new(NoHttp),
@@ -3021,7 +3102,7 @@ mod tests {
     }
 
     #[test]
-    fn open_rolls_forward_journaled_detached_root() {
+    fn first_storage_use_rolls_forward_journaled_detached_root() {
         let (temporary, host, storage) = fixture();
         let project_root = host.project_root().to_path_buf();
         std::fs::create_dir_all(storage.ownership_root()).unwrap();
@@ -3036,7 +3117,9 @@ mod tests {
         drop(host);
 
         let recovered = fixture_host(&project_root, &storage);
-        assert!(!storage.ownership_root().exists());
+        recovered.build_runtime.write_blob(b"new").unwrap();
+        assert!(!storage.ownership_root().join("old").exists());
+        assert!(storage.layout_marker().is_file());
         assert!(!trash.exists());
         assert!(!paths.journal.exists());
         drop(recovered);
@@ -3091,5 +3174,61 @@ mod tests {
         drop(lock);
         assert!(worker.join().unwrap().is_ok());
         assert!(storage.layout_marker().is_file());
+    }
+
+    #[test]
+    fn valid_layout_runtimes_acquire_shared_maintenance_leases_concurrently() {
+        let (_temporary, first, storage) = fixture();
+        first.build_runtime.write_blob(b"initialize").unwrap();
+        let second = fixture_host(first.project_root(), &storage);
+        let runtime = second.build_runtime.clone();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sent.send(runtime.acquire_maintenance()).unwrap();
+        });
+
+        received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("a valid layout must not wait for an exclusive maintenance lease")
+            .unwrap();
+        worker.join().unwrap();
+        assert!(first.build_runtime.has_maintenance_lease().unwrap());
+        assert!(second.build_runtime.has_maintenance_lease().unwrap());
+    }
+
+    #[test]
+    fn runtime_cancels_while_waiting_behind_exclusive_maintenance_lock() {
+        let (temporary, _unused, storage) = fixture();
+        let root = temporary.path().join("project");
+        let cancellation = squish_kernel::CancellationToken::default();
+        let host = fixture_host_with_cancellation(&root, &storage, cancellation.clone());
+        let paths = CleanPaths::new(&storage).unwrap();
+        let lock = open_project_lock(&paths).unwrap();
+        let runtime = host.build_runtime.clone();
+        let worker = std::thread::spawn(move || runtime.write_blob(b"must-not-open-storage"));
+
+        std::thread::sleep(std::time::Duration::from_millis(75));
+        cancellation.cancel();
+        let error = worker.join().unwrap().unwrap_err();
+        assert_eq!(error.code(), "host_maintenance_cancelled");
+        assert!(!storage.ownership_root().exists());
+        drop(lock);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_rejects_alias_introduced_after_layout_construction() {
+        let (temporary, host, storage) = fixture();
+        let redirected = temporary.path().join("redirected-target");
+        std::fs::create_dir_all(&redirected).unwrap();
+        std::os::unix::fs::symlink(&redirected, host.project_root().join("target")).unwrap();
+
+        let error = host
+            .build_runtime
+            .write_blob(b"must-not-escape")
+            .unwrap_err();
+        assert_eq!(error.code(), "host_maintenance_lock");
+        assert!(std::fs::read_dir(&redirected).unwrap().next().is_none());
+        assert!(!storage.layout_marker().exists());
     }
 }

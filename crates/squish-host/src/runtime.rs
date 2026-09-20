@@ -33,6 +33,7 @@ use squish_xml_front::{FrontendOutput, FrontendSourceContext};
 /// invocation.
 pub struct ProductionBuildRuntime {
     layout: ProjectBuildLayout,
+    cancellation: squish_kernel::CancellationToken,
     target_observer: Arc<dyn PublishObserver>,
     catalog_observer: Arc<dyn PublishObserver>,
     cas: Mutex<Option<Arc<Cas>>>,
@@ -48,11 +49,13 @@ impl ProductionBuildRuntime {
     #[must_use]
     pub fn new(
         layout: ProjectBuildLayout,
+        cancellation: squish_kernel::CancellationToken,
         target_observer: Arc<dyn PublishObserver>,
         catalog_observer: Arc<dyn PublishObserver>,
     ) -> Self {
         Self {
             layout,
+            cancellation,
             target_observer,
             catalog_observer,
             cas: Mutex::new(None),
@@ -112,8 +115,14 @@ impl ProductionBuildRuntime {
 
     fn maintenance(&self) -> Result<Arc<File>, BuildRuntimeError> {
         initialize(&self.maintenance, "maintenance lease", || {
-            super::acquire_build_lease(&self.layout)
-                .map_err(|error| storage_error("host_maintenance_lock", error))
+            super::acquire_build_lease(&self.layout, &self.cancellation).map_err(|error| {
+                let code = if error.kind() == std::io::ErrorKind::Interrupted {
+                    "host_maintenance_cancelled"
+                } else {
+                    "host_maintenance_lock"
+                };
+                storage_error(code, error)
+            })
         })
     }
 
@@ -424,6 +433,7 @@ mod tests {
     fn runtime(layout: ProjectBuildLayout) -> ProductionBuildRuntime {
         ProductionBuildRuntime::new(
             layout,
+            squish_kernel::CancellationToken::default(),
             Arc::new(squish_publish::NoopObserver),
             Arc::new(squish_publish::NoopObserver),
         )

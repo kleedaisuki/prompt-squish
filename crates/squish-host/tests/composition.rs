@@ -44,6 +44,7 @@ fn fixture() -> (tempfile::TempDir, ProductionHost) {
     let host = ProductionHost::open(HostConfig {
         project_root: root,
         storage,
+        cancellation: squish_kernel::CancellationToken::default(),
         registries: Vec::new(),
         credentials: Arc::new(NoCredentials),
         http: Arc::new(NoHttp),

@@ -79,13 +79,17 @@ returns the exact configured value and opens only its fixed children. Registry/G
 CAS, the action index, products, compilation metadata, and work state share one project-owned
 clean boundary.
 
-The first persistent operation takes the external maintenance lock exclusively, rolls forward a
-journaled clean, and validates `metadata/layout.json`. A missing or incompatible non-empty layout
-is reset as one owned tree before the current marker is written. The lock is then handed off to a
-shared lease; the portable unlock/relock gap is covered by revalidating both marker and journal and
-retrying the exclusive protocol if a cleaner won the race. Build/inspect retain that lease for the
-runtime lifetime. Clean takes the same lock exclusively, journals only sibling leaf names, atomically
-detaches the complete ownership root, and removes the detached tree without following links.
+The first persistent operation polls for the external maintenance lock in shared mode and validates
+both the clean journal and `metadata/layout.json` while holding that lease. A current layout stays on
+this fast path, so independent build/inspect runtimes overlap. Only a missing journal recovery or an
+invalid layout releases shared ownership and polls for exclusive ownership. Under exclusive
+ownership, a journaled clean is rolled forward and a missing or incompatible non-empty layout is
+reset as one owned tree before the current marker is written. The runtime then releases exclusive
+ownership and retries the shared validation protocol, covering the portable unlock/relock gap.
+Every polling wait observes the invocation cancellation token before any project storage is opened.
+Build/inspect retain the shared lease for the runtime lifetime. Clean takes the same lock
+exclusively, journals only sibling leaf names, atomically detaches the complete ownership root, and
+removes the detached tree without following links.
 
 ## Resolution-mode truth table
 

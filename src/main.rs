@@ -145,6 +145,7 @@ struct PumpStop {
 struct RenderingSink {
     state: Arc<Mutex<RenderingState>>,
     omit_inspect_result: bool,
+    coordinator: Option<Arc<InterruptCoordinator>>,
     stop: Option<Arc<PumpStop>>,
     pump: Mutex<Option<JoinHandle<()>>>,
 }
@@ -168,9 +169,10 @@ impl RenderingSink {
             let stop = Arc::new(PumpStop::default());
             let pump_state = Arc::clone(&state);
             let pump_stop = Arc::clone(&stop);
+            let pump_coordinator = coordinator.clone();
             let handle = thread::Builder::new()
                 .name("xmlsquish-renderer".into())
-                .spawn(move || renderer_pump(&pump_state, &pump_stop, coordinator))?;
+                .spawn(move || renderer_pump(&pump_state, &pump_stop, pump_coordinator))?;
             (Some(stop), Some(handle))
         } else {
             (None, None)
@@ -178,6 +180,7 @@ impl RenderingSink {
         Ok(Self {
             state,
             omit_inspect_result,
+            coordinator,
             stop,
             pump: Mutex::new(pump),
         })
@@ -252,23 +255,35 @@ fn renderer_pump(
         if state.error.is_some() {
             return;
         }
-        if !state.terminal_seen
-            && !state.cancellation_announced
-            && coordinator
-                .as_ref()
-                .is_some_and(|coordinator| coordinator.cooperative_cancellation_started())
-        {
-            if let Err(error) = state.renderer.cancellation_requested() {
-                state.error = Some(RendererError::capture(error));
-                return;
-            }
-            state.cancellation_announced = true;
+        if !announce_cancellation(&mut state, coordinator.as_deref()) {
+            return;
         }
         if let Err(error) = state.renderer.tick() {
             state.error = Some(RendererError::capture(error));
             return;
         }
     }
+}
+
+/// 在后续事件或终态赶超周期泵前发布一次取消提示。 /
+/// Publishes the cancellation notice once before a subsequent event or terminal state can
+/// overtake the periodic renderer pump.
+fn announce_cancellation(
+    state: &mut RenderingState,
+    coordinator: Option<&InterruptCoordinator>,
+) -> bool {
+    if state.terminal_seen
+        || state.cancellation_announced
+        || !coordinator.is_some_and(InterruptCoordinator::cooperative_cancellation_started)
+    {
+        return true;
+    }
+    if let Err(error) = state.renderer.cancellation_requested() {
+        state.error = Some(RendererError::capture(error));
+        return false;
+    }
+    state.cancellation_announced = true;
+    true
 }
 
 impl EventSink for RenderingSink {
@@ -292,6 +307,16 @@ impl EventSink for RenderingSink {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(error) = &state.error {
             return Err(SinkError::new(error.message.clone()));
+        }
+        if !announce_cancellation(&mut state, self.coordinator.as_deref()) {
+            return Err(SinkError::new(
+                state
+                    .error
+                    .as_ref()
+                    .expect("cancellation announcement failure is recorded")
+                    .message
+                    .clone(),
+            ));
         }
         let terminal = matches!(&event.payload, EventPayload::JobFinished(_));
         match state.renderer.render(&event) {
@@ -487,7 +512,13 @@ fn execute(
         }
     };
     let operation_json = operation_json_requested(&invocation, &config);
-    let host = match compose_host(root, &config, environment, &faults) {
+    let host = match compose_host(
+        root,
+        &config,
+        environment,
+        &faults,
+        runtime.coordinator.cancellation_token(),
+    ) {
         Ok(composed) => composed,
         Err(error) => {
             let message = format!("could not initialize project services: {error}");
@@ -647,6 +678,7 @@ fn compose_host(
     config: &Config,
     environment: Vec<(OsString, OsString)>,
     faults: &FaultPorts,
+    cancellation: CancellationToken,
 ) -> Result<ProductionHost, Box<dyn std::error::Error>> {
     let target_dir = configured_target_dir(&root)?;
     let storage = ProjectBuildLayout::new(root.clone(), target_dir)?;
@@ -677,6 +709,7 @@ fn compose_host(
     let host = ProductionHost::open(HostConfig {
         project_root: root,
         storage,
+        cancellation,
         registries,
         credentials: Arc::new(credentials),
         http: Arc::new(ReqwestTransport::new()?),
@@ -1379,5 +1412,45 @@ mod tests {
         sink.finish().expect("finish renderer host");
 
         assert_eq!(*log.lock().expect("ordering log"), ["terminal"]);
+    }
+
+    #[test]
+    fn event_after_interrupt_announces_cancellation_before_fast_terminal() {
+        let (ticked_tx, _ticked_rx) = mpsc::channel();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let coordinator = Arc::new(InterruptCoordinator::new(
+            CancellationToken::default(),
+            Arc::new(StderrEmergencyRestore::capture(false)),
+            Arc::new(StdProcessTerminator),
+        ));
+        let sink = RenderingSink::new(
+            Box::new(OrderingRenderer {
+                log: Arc::clone(&log),
+                ticked: ticked_tx,
+                cancellation_published: Arc::new(AtomicBool::new(false)),
+            }),
+            false,
+            true,
+            Some(Arc::clone(&coordinator)),
+        )
+        .expect("start renderer pump");
+        coordinator.on_interrupt();
+        let terminal = Event::new(
+            InvocationId::new("fast-cancellation-ordering").unwrap(),
+            0,
+            EventPayload::JobFinished(JobSummary {
+                job: JobId::new("build-cli-fast-cancellation").unwrap(),
+                totals: ActionTotals::default(),
+                root_failures: 0,
+                cache_hits: 0,
+                timing: Timing { elapsed_ms: 1 },
+                status: ExitStatus::Cancelled,
+            }),
+        );
+
+        sink.emit(terminal).expect("render terminal event");
+        sink.finish().expect("finish renderer host");
+
+        assert_eq!(*log.lock().expect("ordering log"), ["notice", "terminal"]);
     }
 }

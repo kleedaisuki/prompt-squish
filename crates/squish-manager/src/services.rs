@@ -75,9 +75,9 @@ pub enum ProjectBuildLayoutError {
     NonCanonicalProjectRoot,
     /// 构建根没有可用于协调文件的末级名称。 / The build root has no final name for coordination files.
     MissingBuildRootName,
-    /// `target-dir` 经现有符号链接解析后逃逸项目根。 / The `target-dir` escapes the project root through an existing symbolic link.
-    TargetDirEscapesProject,
-    /// `target-dir` 的现有祖先无法解析（例如悬空链接）。 / An existing `target-dir` ancestor cannot be resolved (for example, a dangling link).
+    /// `target-dir` 路径链含现有文件系统别名。 / The `target-dir` path chain contains an existing filesystem alias.
+    TargetDirAlias,
+    /// `target-dir` 的现有分量无法检查。 / An existing `target-dir` component cannot be inspected.
     UnresolvableTargetDir,
 }
 
@@ -94,7 +94,7 @@ impl fmt::Display for ProjectBuildLayoutError {
             Self::MissingBuildRootName => {
                 write!(formatter, "build root has no final path component")
             }
-            Self::TargetDirEscapesProject => write!(formatter, "target-dir escapes project root"),
+            Self::TargetDirAlias => write!(formatter, "target-dir contains a filesystem alias"),
             Self::UnresolvableTargetDir => write!(formatter, "target-dir cannot be resolved"),
         }
     }
@@ -145,10 +145,8 @@ impl ProjectBuildLayout {
             return Err(ProjectBuildLayoutError::NonCanonicalProjectRoot);
         }
         let target_dir = normalize_relative_path("target_dir", target_dir.into())?;
-        let ownership_root = resolve_existing_ancestor(&project_root.join(&target_dir))?;
-        if !ownership_root.starts_with(&project_root) {
-            return Err(ProjectBuildLayoutError::TargetDirEscapesProject);
-        }
+        reject_existing_target_aliases(&project_root, &target_dir)?;
+        let ownership_root = project_root.join(&target_dir);
         let artifacts_root = ownership_root.join("artifacts");
         let cache_root = ownership_root.join("cache");
         let metadata_root = ownership_root.join("metadata");
@@ -296,31 +294,45 @@ fn normalize_layout_path(
     Ok(normalized)
 }
 
-/// 规范化最近的现有祖先，再接回尚不存在的后缀。 / Canonicalizes the nearest existing ancestor and reattaches the nonexistent suffix.
-fn resolve_existing_ancestor(path: &Path) -> Result<PathBuf, ProjectBuildLayoutError> {
-    let mut existing = path;
-    let mut suffix = Vec::new();
-    loop {
-        match std::fs::symlink_metadata(existing) {
-            Ok(_) => break,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let name = existing
-                    .file_name()
-                    .ok_or(ProjectBuildLayoutError::MissingBuildRootName)?;
-                suffix.push(name.to_os_string());
-                existing = existing
-                    .parent()
-                    .ok_or(ProjectBuildLayoutError::MissingBuildRootName)?;
+/// 拒绝目标路径现有分量中的符号链接或重解析点。 / Rejects symlinks or reparse points in existing target-path components.
+///
+/// 构建状态必须由清单中的词法路径唯一命名；即使别名仍指向项目内部，也不能让拥有根、锁与
+/// 清理边界取决于文件系统解析。首个不存在的分量之后不可能已有更深分量，因此可停止遍历。
+/// / Build state must be named solely by the manifest's lexical path. Even an alias resolving
+/// inside the project would make ownership, locking, and cleanup depend on filesystem resolution.
+/// No deeper component can exist after the first missing component, so the walk may stop there.
+fn reject_existing_target_aliases(
+    project_root: &Path,
+    target_dir: &Path,
+) -> Result<(), ProjectBuildLayoutError> {
+    let mut current = project_root.to_path_buf();
+    for component in target_dir.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if is_filesystem_alias(&metadata) => {
+                return Err(ProjectBuildLayoutError::TargetDirAlias);
             }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(_) => return Err(ProjectBuildLayoutError::UnresolvableTargetDir),
         }
     }
-    let mut resolved = std::fs::canonicalize(existing)
-        .map_err(|_| ProjectBuildLayoutError::UnresolvableTargetDir)?;
-    for component in suffix.iter().rev() {
-        resolved.push(component);
-    }
-    Ok(resolved)
+    Ok(())
+}
+
+/// 判断目录项是否可把词法路径重定向到另一个对象。 / Reports whether an entry can redirect a lexical path to another object.
+#[cfg(windows)]
+fn is_filesystem_alias(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+/// 判断目录项是否为符号链接。 / Reports whether an entry is a symbolic link.
+#[cfg(not(windows))]
+fn is_filesystem_alias(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 /// 一次完整且可复现的依赖解析输入。 / Complete reproducible dependency-resolution input.

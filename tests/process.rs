@@ -66,6 +66,37 @@ fn isolated_project(name: &str, package: &str, target: &str, message: &str) -> t
     project
 }
 
+/// Creates a directory alias used to prove that project-owned state never traverses into
+/// authoritative source directories. On Unix, inability to create the symlink is a test failure;
+/// on Windows, a junction is attempted when symbolic-link privileges are unavailable.
+///
+/// 创建目录别名，用于证明项目状态绝不会跟随到权威源码目录。Unix 下无法创建即为
+/// 测试失败；Windows 下缺少符号链接权限时改用目录联接。
+#[cfg(unix)]
+fn create_directory_alias(target: &Path, alias: &Path) -> bool {
+    std::os::unix::fs::symlink(target, alias).expect("create target-dir source alias");
+    true
+}
+
+#[cfg(windows)]
+fn create_directory_alias(target: &Path, alias: &Path) -> bool {
+    use std::os::windows::fs::symlink_dir;
+
+    if symlink_dir(target, alias).is_ok() {
+        return true;
+    }
+
+    let junction = Command::new("cmd")
+        .args(["/D", "/C", "mklink", "/J"])
+        .arg(alias)
+        .arg(target)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("invoke mklink for target-dir junction");
+    junction.success()
+}
+
 #[test]
 fn bare_help_is_stdout_success_and_lists_only_direct_commands() {
     let output = binary().output().unwrap();
@@ -735,6 +766,69 @@ entry = "src/main.xml"
     assert!(target.join("metadata/publications").is_dir());
     assert!(target.join("metadata/catalog").is_dir());
     assert!(!project.path().join("target/xmlsquish").exists());
+}
+
+#[test]
+fn build_and_clean_reject_target_dir_alias_without_mutating_project_sources() {
+    let project = project("root-target-alias-");
+    fs::write(
+        project.path().join("xmlsquish.toml"),
+        r#"manifest-version = 1
+[workspace]
+target-dir = "state/xmlsquish"
+
+[package]
+name = "fixture"
+version = "1.0.0"
+
+[target.chat]
+entry = "src/main.xml"
+"#,
+    )
+    .unwrap();
+
+    let source = project.path().join("src");
+    let alias = project.path().join("state");
+    if !create_directory_alias(&source, &alias) {
+        eprintln!(
+            "skipping target-dir alias regression: Windows denied both symlink and junction creation"
+        );
+        return;
+    }
+
+    let claimed_target = source.join("xmlsquish");
+    fs::create_dir(&claimed_target).unwrap();
+    let sentinel = claimed_target.join("authoritative-source.txt");
+    fs::write(
+        &sentinel,
+        b"source-owned; clean must preserve these bytes\n",
+    )
+    .unwrap();
+    let source_before = fs::read(source.join("main.xml")).unwrap();
+    let sentinel_before = fs::read(&sentinel).unwrap();
+
+    for command in ["build", "clean"] {
+        let output = binary()
+            .current_dir(project.path())
+            .args([command, "--plain"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{command} unexpectedly accepted an aliased target-dir: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("alias"),
+            "{command} did not diagnose the target-dir alias: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(source.join("main.xml")).unwrap(), source_before);
+        assert_eq!(fs::read(&sentinel).unwrap(), sentinel_before);
+        assert!(claimed_target.is_dir());
+    }
 }
 
 #[test]

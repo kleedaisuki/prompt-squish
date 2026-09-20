@@ -158,6 +158,44 @@ fn project_build_layout_rejects_target_dir_symlink_escape() {
     assert!(ProjectBuildLayout::new(project, "linked-target/xmlsquish").is_err());
 }
 
+#[cfg(unix)]
+#[test]
+fn project_build_layout_rejects_target_dir_symlink_within_project() {
+    let project = tempfile::tempdir().unwrap();
+    let destination = project.path().join("real-target");
+    std::fs::create_dir(&destination).unwrap();
+    let link = project.path().join("linked-target");
+    create_directory_symlink(&destination, &link);
+    let project = std::fs::canonicalize(project.path()).unwrap();
+
+    assert_eq!(
+        ProjectBuildLayout::new(project, "linked-target/xmlsquish").unwrap_err(),
+        squish_manager::ProjectBuildLayoutError::TargetDirAlias
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn project_build_layout_rejects_target_dir_junction_within_project() {
+    let project = tempfile::tempdir().unwrap();
+    let destination = project.path().join("real-target");
+    std::fs::create_dir(&destination).unwrap();
+    let junction = project.path().join("junction-target");
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&destination)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let project = std::fs::canonicalize(project.path()).unwrap();
+
+    assert_eq!(
+        ProjectBuildLayout::new(project, "junction-target/xmlsquish").unwrap_err(),
+        squish_manager::ProjectBuildLayoutError::TargetDirAlias
+    );
+}
+
 #[test]
 fn project_build_layout_rejects_dangling_target_dir_symlink() {
     let project = tempfile::tempdir().unwrap();
