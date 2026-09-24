@@ -377,41 +377,10 @@ impl From<ProjectFilePath> for String {
     }
 }
 
-/// 未经领域验证的不透明源码身份。 / Opaque source identity not yet domain-validated.
-#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct OpaqueSourceId(String);
-impl OpaqueSourceId {
-    /// 创建非空不透明身份。 / Creates a non-empty opaque identity.
-    pub fn new(value: impl Into<String>) -> Result<Self, EmptyId> {
-        let value = value.into();
-        if value.is_empty() {
-            Err(EmptyId)
-        } else {
-            Ok(Self(value))
-        }
-    }
-    /// 返回尚未验证的文本。 / Returns the not-yet-validated text.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-impl fmt::Display for OpaqueSourceId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-impl TryFrom<String> for OpaqueSourceId {
-    type Error = EmptyId;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
-    }
-}
-impl From<OpaqueSourceId> for String {
-    fn from(value: OpaqueSourceId) -> Self {
-        value.0
-    }
-}
+string_id!(
+    OpaqueSourceId,
+    "未经领域验证的不透明源码身份。 / Opaque source identity not yet domain-validated."
+);
 
 /// 可静态路由的操作类别。 / Statically routable operation kind.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -2717,6 +2686,26 @@ mod tests {
         }
         assert!(PackageName::new("").is_err());
         assert!(serde_json::from_str::<PackageName>(r#"""#).is_err());
+    }
+
+    #[test]
+    fn opaque_source_id_keeps_the_nonempty_string_id_wire_contract() {
+        for accepted in ["src/main.xml", "pkg:common/file.xml", "with space", "源"] {
+            let source = OpaqueSourceId::new(accepted).unwrap();
+            assert_eq!(source.as_str(), accepted);
+            assert_eq!(source.to_string(), accepted);
+            assert_eq!(
+                serde_json::to_string(&source).unwrap(),
+                serde_json::json!(accepted).to_string()
+            );
+            assert_eq!(
+                serde_json::from_str::<OpaqueSourceId>(&serde_json::json!(accepted).to_string())
+                    .unwrap(),
+                source
+            );
+        }
+        assert_eq!(OpaqueSourceId::new(""), Err(EmptyId));
+        assert!(serde_json::from_str::<OpaqueSourceId>(r#""""#).is_err());
     }
 
     #[test]
