@@ -10,12 +10,11 @@ Use the checked-in manifest and XML sources as truth. Do not infer entries from 
 ## Common workflow
 
 ```bash
-xmlsquish new my-prompts [--name NAME] [--vcs git|none]
+xmlsquish new my-prompts --vcs none
 cd my-prompts
-xmlsquish fmt --check                 # use `fmt` without --check to rewrite
-xmlsquish build --offline             # local verified cache only
-xmlsquish build -t chat --arg chat.name=Klee
-xmlsquish inspect artifact target/xmlsquish/artifacts/chat.prompt
+xmlsquish fmt --check                 # 检查；去掉 --check 即改写 / Check; omit --check to rewrite
+xmlsquish build --offline -t prompt   # 脚手架目标，仅使用本地已验证缓存 / Scaffold target, verified local cache only
+xmlsquish inspect artifact target/xmlsquish/artifacts/prompt.prompt
 xmlsquish clean                       # remove all project-local products, cache, and build metadata
 ```
 

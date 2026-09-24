@@ -1,7 +1,9 @@
 # Site demo / 网站演示
 
 Run `xmlsquish build --manifest-path examples/site-demo/xmlsquish.toml` from the repository root. Inspect the link with `xmlsquish inspect link agent --manifest-path examples/site-demo/xmlsquish.toml --format json`.
-在仓库根目录运行以上命令；入口不需要命令行参数，逻辑产品定位符是 `target/xmlsquish/agent.prompt`；构建事件报告不可变 generation 中的实际路径。
+在仓库根目录运行以上命令；入口不需要命令行参数，稳定的逻辑产品定位符是 `target/xmlsquish/artifacts/agent.prompt`。使用 `xmlsquish inspect artifact target/xmlsquish/artifacts/agent.prompt --manifest-path examples/site-demo/xmlsquish.toml --format raw` 读取已验证的产物，不依赖发布器内部的 generation 路径。
+
+Run the commands above from the repository root. The entry needs no CLI arguments; its stable logical product locator is `target/xmlsquish/artifacts/agent.prompt`. Use `inspect artifact` to read verified bytes rather than relying on publisher-private generation paths.
 
 - `agent.xml` is an `xs:entry` document: it imports persona and task modules, then constructs the prompt directly. All macros use `expand`, and persona receives an explicit `audience` value.
   `agent.xml` 使用 `xs:entry` 声明入口，导入 persona 与 task 模块后直接构造提示词；统一使用 `expand` 展开，并向 persona 显式传入 `audience`。

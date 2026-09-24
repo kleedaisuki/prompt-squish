@@ -2,14 +2,14 @@
 
 ## 契约优先 / Contracts first
 
-先阅读 [DSL 规范](docs/dsl.md) 和 [ADR 0005](docs/adr/0005-dsl-language.md)。ADR 0001–0003 是历史记录，其旧 DSL、元数据继承决策已被替代，最终产品空白压缩保持；ADR 0004 的单 package 原则保留，其 library/binary 布局由 [ADR 0006](docs/adr/0006-binary-module-layout.md) 替代。
+先阅读 [DSL 规范](docs/dsl.md)、[ADR 0005](docs/adr/0005-dsl-language.md) 和现行管理器架构 [ADR 0009](docs/adr/0009-microkernel-manager-and-reusable-ir.md)。ADR 0001–0004 是历史记录；ADR 0009 已取代 ADR 0006 的包边界决策。不要按旧的单包或松散文件编译模型扩展当前代码。
 
-Read the DSL specification and ADR 0005 first. ADRs 0001–0003 retain historical context, not current language authority. ADR 0004's single-package principle remains; ADR 0006 supersedes its library/binary layout.
+Read the DSL specification, ADR 0005, and current manager architecture in ADR 0009 first. ADRs 0001–0004 are historical; ADR 0009 supersedes ADR 0006's package-boundary decision. Do not extend the current code according to the old single-package or loose-file compiler model.
 
 - 源码身份使用词法规范 URI，不以文件内容或 symlink 真实路径折叠。 / Use logical canonical source URIs, not content or symlink identity.
 - 源码装载闭包、不可变宏定义与运行时展开帧（Expansion Frame）分离。 / Separate discovery, immutable definitions, and runtime frames.
 - 参数是字符串，slot 是 XML；禁止隐式转换和动态环境继承。 / Arguments are strings; slots are XML; no implicit conversion or dynamic inheritance.
-- 宏求值与 lowering 保留用户文本语义；最终 `.o.xml` 产品阶段单独运行 `squish`。 / Preserve text during evaluation/lowering; run `squish` separately for the final `.o.xml` product.
+- 宏求值与 lowering 保留用户文本语义；后端只对最终 `.prompt` 产品执行空白压缩。 / Preserve text during evaluation/lowering; compress whitespace only in the final `.prompt` backend product.
 - 诊断保留真实源码位置与完整调用链；失败不得发布部分结果。 / Retain real source positions and complete frame chains; never publish partial failures.
 
 ## 环境与验证 / Environment and validation
@@ -17,24 +17,28 @@ Read the DSL specification and ADR 0005 first. ADRs 0001–0003 retain historica
 Rust 1.88+，工具链见 `rust-toolchain.toml`；站点使用 Node.js 22.12+ 与锁定的 npm 依赖。 / Rust 1.88+; see the toolchain file. The site uses Node.js 22.12+ and locked npm dependencies.
 
 ```bash
-cargo build --locked
+cargo build --workspace --all-targets --all-features --locked
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo test --all-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-targets --all-features --locked
+cargo test --workspace --doc --all-features --locked
+python -m unittest discover -s scripts/tests -p "test_*.py"
+python scripts/check_architecture.py
+python -m unittest discover -s .github/scripts -p "test_*.py"
+python .github/scripts/release.py verify .
 cargo build --release --locked
 
 cd site
 npm ci
-npm run test
-npm run demo:generate
-npm run demo:check
-npx playwright install chromium
+npm test
+npm run demo:check # Run from the checkout; uses the real workspace CLI.
+npx playwright install chromium # Linux CI 以 --with-deps 安装系统依赖 / Linux CI adds --with-deps for OS packages.
 npm run test:browser
 ```
 
-测试应使用临时目录，不提交 `.i.xml` / `.o.xml`、`target`、`site/dist` 或浏览器缓存。不要在并行测试中修改进程环境；用子进程隔离。
+测试应使用仓库 `.temp` 中的临时目录，不提交产品、`target`、`site/dist` 或浏览器缓存。只有在有意更新网站演示内容时才运行 `npm run demo:generate` 并评审数据差异。不要在并行测试中修改进程环境；用子进程隔离。
 
-Tests use temporary directories. Do not commit generated XML, build directories, or browser caches. Isolate environment changes in child processes.
+Keep test scratch space in the repository's `.temp` directory. Do not commit generated products, build directories, or browser caches. Run `npm run demo:generate` only when intentionally updating the site demo, and review its data diff. Isolate environment changes in child processes.
 
 ### IntelliJ IDEA / RustRover indexing diagnostics
 
@@ -53,9 +57,9 @@ yet been independently verified.
 
 ## 结构与测试 / Structure and tests
 
-保持一个 Cargo package 和一个 binary target，以 `src/main.rs` 为唯一入口，不保留库门面。编译器负责源码装载、静态验证、展开与来源记录；CLI 负责路径发现、预算/参数、诊断展示、统计和原子写入。词法转换器不参与宏求值，但负责最终产品空白压缩。
+根包提供 `src/main.rs` 的唯一 CLI 二进制；领域逻辑分布在 `crates/` 下的工作区成员。遵守 `scripts/check_architecture.py` 检查的无环依赖边界：内核组合操作和端口，项目与解析器管理清单和依赖，前端/IR/链接/后端负责构建阶段，发布器负责产物提交。不要以根包门面绕过边界。
 
-Keep one Cargo package with a single binary target rooted at `src/main.rs`, without a library facade. The compiler owns loading, validation, expansion, and provenance; the CLI owns discovery, options, presentation, metrics, and atomic persistence. The lexical utility is outside macro evaluation but performs final product whitespace compression.
+The root package supplies the sole CLI binary at `src/main.rs`; domain logic lives in workspace members under `crates/`. Respect the acyclic boundaries enforced by `scripts/check_architecture.py`: the kernel composes operations and ports, project and resolver own manifests and dependencies, frontend/IR/link/backend own build stages, and the publisher commits artifacts. Do not route around those boundaries through a root-package facade.
 
 最低回归矩阵 / Minimum regression matrix:
 
@@ -68,7 +72,9 @@ Keep one Cargo package with a single binary target rooted at `src/main.rs`, with
 | 正则 / Regex | 非法/位置/重复捕获、可选捕获、嵌套遮蔽与恢复 / Invalid and positional captures, optional groups, lexical restoration |
 | 递归 / Recursion | 停机、相互递归、三类预算与完整帧链 / Termination, mutual recursion, all guards and complete chains |
 | 输出 / Output | 单根文档、命名空间、混合内容、PI、来源清理 / Single document root, namespaces, mixed content, PIs, provenance cleanup |
-| CLI | `-I` / `-O`、debug 等价、失败不覆盖、颜色重定向 / Stages, debug equivalence, failure safety, redirected color |
+| 项目 / Project | 清单发现、工作区选择、锁文件模式、依赖解析、干净构建根 / Manifest discovery, workspace selection, lock modes, dependency resolution, clean build root |
+| 发布 / Publication | `.prompt`、`.xsir`、`.psdbg` 定位符、generation 恢复、失败不覆盖 / Artifact locators, generation recovery, failure safety |
+| CLI | 命令帮助、结构化消息、诊断与重定向颜色 / Command help, structured events, diagnostics, redirected color |
 
 文档注释须中英双语，用 rustdoc 解释契约和不变量，不复述代码。新增公共 API 要有可运行示例。模块测试紧邻源码；只为真实共享需求引入抽象。
 
