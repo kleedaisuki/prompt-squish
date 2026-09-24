@@ -954,6 +954,8 @@ const pipelineArtifacts = demo.artifacts.filter((item) => item.kind !== "source"
       font-size: clamp(3rem, 8vw, 4.3rem);
     }
     .build-graph {
+      /* 允许单列网格在窄屏内收缩，不让图示的最小内容宽度撑开页面。 / Let the single-column grid shrink below the graph's min-content width. */
+      min-width: 0;
       width: 100%;
       max-width: 40rem;
       margin-inline: auto;
