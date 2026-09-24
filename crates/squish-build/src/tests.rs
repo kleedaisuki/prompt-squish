@@ -109,6 +109,26 @@ fn plan_rejects_every_structural_ambiguity() {
 }
 
 #[test]
+fn plan_reuses_canonical_reverse_edges_without_changing_cycle_detection() {
+    let resources = Resources::new(1, 0, 0);
+    let plan = BuildPlan::new([
+        action("root", &[], resources),
+        action("later", &["root"], resources),
+        action("earlier", &["root", "root"], resources),
+    ])
+    .unwrap();
+    assert_eq!(plan.dependents(&id("root")), &[id("earlier"), id("later")]);
+
+    let error = BuildPlan::new([
+        action("a", &["b"], resources),
+        action("b", &["c"], resources),
+        action("c", &["b"], resources),
+    ])
+    .unwrap_err();
+    assert_eq!(error, PlanError::Cycle(vec![id("b"), id("c"), id("b")]));
+}
+
+#[test]
 fn ready_order_is_independent_of_input_permutation() {
     let permutations = [
         ["c", "a", "b"],

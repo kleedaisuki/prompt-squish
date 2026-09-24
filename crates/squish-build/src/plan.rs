@@ -125,8 +125,8 @@ impl BuildPlan {
         canonicalize_dependencies(&mut actions);
         validate_outputs(&actions)?;
         validate_inputs(&actions)?;
-        detect_cycle(&actions)?;
         let dependents = reverse_edges(&actions);
+        detect_cycle(&actions, &dependents)?;
         Ok(Self {
             actions,
             dependents,
@@ -289,8 +289,11 @@ fn reverse_edges(actions: &BTreeMap<ActionId, Action>) -> BTreeMap<ActionId, Vec
     result
 }
 
-fn detect_cycle(actions: &BTreeMap<ActionId, Action>) -> Result<(), PlanError> {
-    let dependents = reverse_edges(actions);
+/// 检查封闭图是否无环，并复用计划将保留的反向边。 / Checks acyclicity using the reverse edges retained by the plan.
+fn detect_cycle(
+    actions: &BTreeMap<ActionId, Action>,
+    dependents: &BTreeMap<ActionId, Vec<ActionId>>,
+) -> Result<(), PlanError> {
     let mut indegree: BTreeMap<_, _> = actions
         .values()
         .map(|action| (action.id.clone(), action.dependencies.len()))
