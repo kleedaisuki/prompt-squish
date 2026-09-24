@@ -2368,7 +2368,7 @@ impl WorkExecutor<BuildWork> for BuildExecutor {
         work: &BuildWork,
         result: &ActionResult,
     ) -> Result<(), ManagerError> {
-        if work.effect() == Effect::Transform && result.outcome.is_ok() {
+        if work.effect().cacheable() && result.outcome.is_ok() {
             self.runtime
                 .record_action(&ActionRecord {
                     key: dispatch.key.clone(),

@@ -21,7 +21,7 @@ use squish_protocol::{
     PlanningIssueId, PlanningStepId, PlanningStepKind, Severity, SupersedeReason, Timing,
 };
 
-use crate::{Effect, InvocationSettings, ManagerError, PlannedWork, PreparedPlan};
+use crate::{InvocationSettings, ManagerError, PlannedWork, PreparedPlan};
 
 /// 持久动作缓存的一项已校验命中。 / One validated persistent action-cache hit.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -973,7 +973,7 @@ fn execute_dispatch<W: PlannedWork + Sync>(
         .work(&dispatch.action.id)
         .expect("PreparedPlan guarantees graph/work correspondence");
     let started = Instant::now();
-    let lookup_error = if work.effect() == Effect::Transform {
+    let lookup_error = if work.effect().cacheable() {
         match executor.lookup(&dispatch, work, plan, &inputs) {
             Ok(Some(hit)) => {
                 return CompletedDispatch {
@@ -1020,7 +1020,7 @@ fn execute_dispatch<W: PlannedWork + Sync>(
         });
     }
     if result.outcome.is_ok()
-        && work.effect() == Effect::Transform
+        && work.effect().cacheable()
         && let Err(error) = executor.record(&dispatch, work, &result)
     {
         result.events.push(ActionEvent::Message {
