@@ -211,7 +211,7 @@ impl Cas {
             return Ok(digest);
         }
         let temporary = temporary_path(&destination);
-        let result: Result<CasEventKind, CasError> = (|| {
+        let result: Result<(), CasError> = (|| {
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -219,28 +219,14 @@ impl Cas {
             file.write_all(bytes)?;
             file.sync_all()?;
             drop(file);
-            // 同目录 rename 是原子的；Unix 上同内容竞态可能替换目标，但字节相同。
-            // Same-directory rename is atomic; a Unix race may replace identical bytes.
-            match fs::rename(&temporary, &destination) {
-                Ok(()) => Ok(CasEventKind::Written),
-                Err(_error) if destination.exists() && self.valid_file(&destination, digest)? => {
-                    fs::remove_file(&temporary).ok();
-                    Ok(CasEventKind::Reused)
-                }
-                Err(error) if is_cross_device(&error) => {
-                    self.publish_cross_device(&temporary, &destination, digest)
-                }
-                Err(error) => Err(error.into()),
-            }
+            // 两种写入 API 共用同一提交与事件策略。 / Both write APIs share one
+            // publication and event policy, including the Windows EFS fallback.
+            self.publish_temporary(&temporary, digest)
         })();
         if result.is_err() {
             fs::remove_file(&temporary).ok();
         }
-        let kind = result?;
-        if kind == CasEventKind::Written {
-            sync_parent(&destination)?;
-        }
-        self.emit(kind, digest, None);
+        result?;
         Ok(digest)
     }
 
@@ -294,6 +280,8 @@ impl Cas {
         Ok(Some(bytes))
     }
 
+    /// 提交已同步、且内容与摘要一致的暂存 blob；负责观察事件与目录持久化。
+    /// Publishes a synced staging blob matching its digest, including events and directory sync.
     fn publish_temporary(&self, temporary: &Path, digest: BlobDigest) -> Result<(), CasError> {
         self.publish_temporary_with(
             temporary,
@@ -392,13 +380,12 @@ impl Cas {
         destination: &Path,
         digest: BlobDigest,
     ) -> Result<CasEventKind, CasError> {
-        // Rust's Windows fs::rename calls MoveFileExW, which this EFS environment
-        // rejects even with flags=0. The narrow wrapper uses MoveFileW's atomic,
-        // no-replace semantics, matching the successful native control operation.
-        // Rust 的 Windows fs::rename 调用 MoveFileExW，而该 EFS 环境即使 flags=0
-        // 也会拒绝。窄封装改用 MoveFileW 的原子、不覆盖语义，与成功的原生对照一致。
+        // Rust 的 fs::rename 在 EFS 上可能报跨设备错误；共享平台原语在 Windows
+        // 使用 MoveFileW，保留经验证的不覆盖提交语义。 / Rust's fs::rename can
+        // report a cross-device error on EFS. The shared platform primitive uses
+        // MoveFileW on Windows, retaining the verified no-replace semantics.
         for attempt in 0..2 {
-            match windows_atomic::publish_noclobber(temporary, destination) {
+            match squish_platform_fs::rename_exclusive(temporary, destination) {
                 Ok(()) => return Ok(CasEventKind::Written),
                 Err(error) => {
                     if destination.exists() && self.valid_file(destination, digest)? {
@@ -547,66 +534,6 @@ fn sync_parent(_destination: &Path) -> Result<(), CasError> {
     Ok(())
 }
 
-/// Windows EFS-compatible atomic publication primitives. / 与 Windows EFS 兼容的原子发布原语。
-///
-/// 此模块是 crate 内唯一允许 unsafe 的位置；公开面仍是安全、窄化且不覆盖的路径操作。
-/// This is the crate's sole unsafe allowance; its surface remains a safe, narrow,
-/// no-clobber path operation.
-#[cfg(windows)]
-#[allow(unsafe_code)]
-mod windows_atomic {
-    use std::{ffi::OsStr, io, os::windows::ffi::OsStrExt, path::Path};
-
-    use windows_sys::Win32::Storage::FileSystem::MoveFileW;
-
-    /// 原子移动同卷文件且拒绝覆盖目标。 / Atomically moves a same-volume file without replacing the destination.
-    pub(super) fn publish_noclobber(source: &Path, destination: &Path) -> io::Result<()> {
-        // canonicalize supplies Win32's verbatim path form, retaining long-path
-        // support that a raw UTF-16 conversion would otherwise lose.
-        // canonicalize 提供 Win32 verbatim 路径形式，避免直接转 UTF-16 丢失长路径支持。
-        let source = source.canonicalize()?;
-        let destination_name = destination.file_name().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "destination has no file name")
-        })?;
-        let destination = destination
-            .parent()
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent")
-            })?
-            .canonicalize()?
-            .join(destination_name);
-        let source = wide_path(&source)?;
-        let destination = wide_path(&destination)?;
-        // SAFETY / 安全性:
-        // - both vectors are explicitly NUL-terminated and reject interior NULs;
-        // - their allocations remain alive and immutable for the complete call;
-        // - MoveFileW only reads both pointers and provides atomic same-volume,
-        //   no-replace rename semantics; callers create both paths below one CAS;
-        // - a zero return is converted immediately from GetLastError via std.
-        // - 两个向量均显式以 NUL 结尾并拒绝内部 NUL；
-        // - 分配在整个调用期间保持存活且不可变；
-        // - MoveFileW 只读取指针，并为同一 CAS 下的同卷路径提供原子、不覆盖 rename；
-        // - 返回零时立即通过标准库读取 GetLastError。
-        if unsafe { MoveFileW(source.as_ptr(), destination.as_ptr()) } == 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    }
-
-    fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
-        let mut wide: Vec<_> = OsStr::new(path).encode_wide().collect();
-        if wide.contains(&0) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Windows path contains an interior NUL",
-            ));
-        }
-        wide.push(0);
-        Ok(wide)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,6 +568,36 @@ mod tests {
                 .starts_with(directory.path().join("blobs/v1/blake3"))
         );
         assert_eq!(store.put(b"stable bytes").unwrap(), digest);
+    }
+
+    #[test]
+    fn byte_and_stream_writers_share_publication_events() {
+        let directory = test_dir();
+        let events = Arc::new(Events::default());
+        let store = Cas::with_observer(directory.path(), events.clone()).unwrap();
+        let bytes = b"same object via both writer forms";
+
+        let digest = store.put(bytes).unwrap();
+        assert_eq!(
+            store.put_reader(&mut std::io::Cursor::new(bytes)).unwrap(),
+            digest
+        );
+        assert_eq!(store.put(bytes).unwrap(), digest);
+        assert_eq!(store.get(digest).unwrap(), Some(bytes.to_vec()));
+        assert_eq!(
+            events
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|event| event.kind)
+                .collect::<Vec<_>>(),
+            [
+                CasEventKind::Written,
+                CasEventKind::Reused,
+                CasEventKind::Reused
+            ]
+        );
     }
 
     #[test]
@@ -779,14 +736,14 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_atomic_publication_never_clobbers_an_existing_target() {
+    fn platform_publication_never_clobbers_an_existing_target() {
         let directory = test_dir();
         let source = directory.path().join("source");
         let destination = directory.path().join("destination");
         fs::write(&source, b"new").unwrap();
         fs::write(&destination, b"existing").unwrap();
 
-        let error = windows_atomic::publish_noclobber(&source, &destination).unwrap_err();
+        let error = squish_platform_fs::rename_exclusive(&source, &destination).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read(&source).unwrap(), b"new");

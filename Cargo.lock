@@ -1713,9 +1713,9 @@ dependencies = [
  "blake3",
  "rusqlite",
  "squish-build",
+ "squish-platform-fs",
  "squish-protocol",
  "tempfile",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

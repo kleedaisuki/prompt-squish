@@ -59,6 +59,7 @@ squish-repository -[normal]-> squish-source
 squish-resolver -[normal]-> squish-project
 squish-source -[normal]-> squish-protocol
 squish-store -[normal]-> squish-build
+squish-store -[normal]-> squish-platform-fs
 squish-store -[normal]-> squish-protocol
 squish-xml-front -[normal]-> squish-ir
 squish-xml-front -[normal]-> squish-protocol

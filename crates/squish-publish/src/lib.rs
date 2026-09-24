@@ -1584,14 +1584,7 @@ fn validate_generation_destinations<E>(
             .collect::<Vec<_>>()
             .join("/");
         for (prior, prior_path) in &normalized {
-            if folded == *prior
-                || folded
-                    .strip_prefix(prior)
-                    .is_some_and(|suffix| suffix.starts_with('/'))
-                || prior
-                    .strip_prefix(&folded)
-                    .is_some_and(|suffix| suffix.starts_with('/'))
-            {
+            if paths_alias(&folded, prior) {
                 return Err(PublishError::AliasConflict(prior_path.clone()));
             }
         }
@@ -1630,20 +1623,24 @@ fn validate_artifact_members<E>(artifacts: &[GenerationArtifact]) -> Result<(), 
             .map(portable_component_key)
             .collect::<Vec<_>>()
             .join("/");
-        if paths.iter().any(|prior| {
-            folded == *prior
-                || folded
-                    .strip_prefix(prior)
-                    .is_some_and(|suffix| suffix.starts_with('/'))
-                || prior
-                    .strip_prefix(&folded)
-                    .is_some_and(|suffix| suffix.starts_with('/'))
-        }) {
+        if paths.iter().any(|prior| paths_alias(&folded, prior)) {
             return Err(PublishError::IntegrityMismatch);
         }
         paths.push(folded);
     }
     Ok(())
+}
+
+/// 判断两条已折叠的可移植路径是否相同或存在祖先关系。
+/// Returns whether two folded portable paths coincide or have an ancestor relationship.
+fn paths_alias(left: &str, right: &str) -> bool {
+    left == right
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn write_new_synced<E>(path: &Path, bytes: &[u8]) -> Result<(), PublishError<E>> {

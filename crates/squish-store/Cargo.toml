@@ -11,10 +11,8 @@ description = "Artifact and cache storage domain for prompt-squish"
 blake3 = "1.8"
 rusqlite = { version = "0.40", features = ["bundled"] }
 squish-build = { path = "../squish-build" }
+squish-platform-fs = { path = "../squish-platform-fs" }
 squish-protocol = { path = "../squish-protocol" }
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tempfile = "3.27"

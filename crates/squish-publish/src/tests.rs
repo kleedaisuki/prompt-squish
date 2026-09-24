@@ -986,3 +986,12 @@ fn constructor_rejects_an_existing_intermediate_symlink() {
     ));
     assert!(!outside.path().join("artifacts").exists());
 }
+
+#[test]
+fn folded_path_aliases_respect_component_boundaries() {
+    assert!(super::paths_alias("a/b", "a"));
+    assert!(super::paths_alias("a", "a/b"));
+    assert!(super::paths_alias("a/b", "a/b"));
+    assert!(!super::paths_alias("a/b", "a/b2"));
+    assert!(!super::paths_alias("a", "ab"));
+}

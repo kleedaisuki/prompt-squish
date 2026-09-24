@@ -31,13 +31,14 @@ fix.
 
 ### Production behavior
 
-Both writers first use the portable fast path. Only for Windows error 17 they call a
-narrow internal `MoveFileW` wrapper, preserving atomic no-replace publication without
-swallowing other errors. The wrapper rejects interior NULs, keeps its NUL-terminated
-UTF-16 allocations alive for the call, and is the crate's sole scoped unsafe
-allowance. If a concurrent writer already published the digest, its complete bytes
-are verified and reused. An invalid existing destination is removed and publication
-is retried once; other Win32 failures remain observable.
+Both byte-slice and streaming writers now use the same staged-blob publication and
+event policy. Both first use the portable fast path. Only for Windows error 17 do
+they call `squish-platform-fs::rename_exclusive`, the shared platform primitive
+whose Windows implementation uses `MoveFileW`. This preserves atomic no-replace
+publication without swallowing other errors, while removing a second unsafe
+Win32 wrapper from the store. If a concurrent writer already published the digest,
+its complete bytes are verified and reused. An invalid existing destination is
+removed and publication is retried once; other Win32 failures remain observable.
 
 On non-Windows systems, a genuine `CrossesDevices` result in the streaming path uses
 a bounded copy-and-hash into a synced bucket-local temporary followed by the normal
