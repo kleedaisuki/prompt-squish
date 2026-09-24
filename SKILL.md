@@ -170,3 +170,7 @@ Essential forms:
 Scalar bindings are read-only: `file.uri|dir|name`, explicit `arg.*`, and lexically scoped `match.*`. Regexes expose named captures only (`(?&lt;tail&gt;...)` in XML); no positional captures, look-around, or backreferences. Calls must provide exactly the declared args/fills, values are evaluated once in the caller, and callee frames inherit nothing implicitly. Recursion is valid and bounded by configured execution limits. The final entry expansion must be one well-formed XML document.
 
 For full semantics and invariants, read [`docs/dsl.md`](docs/dsl.md). For runnable examples, inspect [`examples/`](examples/).
+
+## When changing this repository
+
+The installed CLI is one root binary, but its implementation is a multi-crate Cargo workspace. Start with [`CONTRIBUTING.md`](CONTRIBUTING.md), the current [responsibility map](docs/design/refactor-map.md), and [ADR 0009](docs/adr/0009-microkernel-manager-and-reusable-ir.md); older single-package ADRs are historical. Keep project commands in the manager capability and cross-context effects behind the existing runtime/port boundaries. Review `scripts/architecture_edges.txt` when changing crate dependencies and run `python scripts/check_architecture.py` alongside the workspace checks. Do not change the XML DSL, public CLI, machine protocol, or product locators as an incidental refactor.
