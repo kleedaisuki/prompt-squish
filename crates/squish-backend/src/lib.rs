@@ -536,15 +536,22 @@ impl<'a> Emitter<'a> {
         )
     }
 
+    /// 在同一次 atom 遍历中确定产品、来源映射及空白指标，避免指标与输出采用不同的分隔符策略。
+    /// Derives the product, provenance map, and whitespace metrics in one atom pass so metrics
+    /// cannot drift from the emitted separator policy.
     fn finish(self) -> Result<(Vec<u8>, ArtifactByteMap, BackendMetrics), BackendError> {
         let mut output = Vec::new();
         let mut map = ArtifactByteMap::default();
         let mut inserted = 0u64;
+        let mut retained_separators = 0u64;
         for atom_index in 0..self.atoms.len() {
             let atom = self.atoms[atom_index];
             if atom_index != 0 {
                 let prior = self.atoms[atom_index - 1];
                 let gap = &self.serialized[prior.end..atom.start];
+                if !gap.is_empty() {
+                    retained_separators += 1;
+                }
                 let continuous_text =
                     gap.is_empty() && prior.kind == AtomKind::Text && atom.kind == AtomKind::Text;
                 if !continuous_text {
@@ -572,11 +579,6 @@ impl<'a> Emitter<'a> {
                 self.max,
             )?;
         }
-        let retained_separators = self
-            .atoms
-            .windows(2)
-            .filter(|pair| !self.serialized[pair[0].end..pair[1].start].is_empty())
-            .count() as u64;
         let removed = self.recognized.saturating_sub(retained_separators);
         let metrics = BackendMetrics {
             output_bytes: output.len() as u64,

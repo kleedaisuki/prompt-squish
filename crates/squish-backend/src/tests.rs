@@ -282,6 +282,33 @@ fn markup_interior_whitespace_is_not_counted_as_squishable() {
     assert_eq!(output.metrics.whitespace_removed, 0);
 }
 
+/// 核对输出分隔符与空白指标使用同一边界判定。
+/// Checks that output separators and whitespace metrics share the same boundary decision.
+#[test]
+fn whitespace_metrics_follow_emitted_gaps() {
+    let items = vec![
+        DocumentItem::ElementStart {
+            expanded_name: QNameId(0),
+            attributes: Vec::new(),
+            children: DocumentRegionId(1),
+        },
+        DocumentItem::Text { value: StringId(0) },
+        DocumentItem::ElementEnd,
+    ];
+    let mut request = request(vec![" a \t b "], vec!["R"], items);
+    request.document.regions.push(DocumentRegion {
+        id: DocumentRegionId(1),
+        start: 1,
+        end: 2,
+    });
+
+    let output = SquishBackend.emit(request).unwrap();
+    assert_eq!(output.bytes, b"<R> a b </R>");
+    assert_eq!(output.metrics.whitespace_recognized, 5);
+    assert_eq!(output.metrics.whitespace_removed, 2);
+    assert_eq!(output.metrics.whitespace_inserted, 0);
+}
+
 #[test]
 fn xml_ncname_ranges_and_xml_char_production_are_enforced() {
     let valid_name = "A\u{b7}\u{301}";
