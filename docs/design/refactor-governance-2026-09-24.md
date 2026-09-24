@@ -70,3 +70,19 @@ One separate observation is intentionally deferred: executable bootstrap
 captures an environment snapshot for credentials/fault controls, while config
 override loading reads the process environment. Changing that timing requires a
 dedicated contract test and was not part of this behavior-preserving refactor.
+
+### Browser-matrix finding
+
+The first CI run on this branch passed Rust quality and the Linux, Windows,
+and macOS test jobs, including the real CLI demo check, but the new Ubuntu
+Chromium site job exposed a pre-existing narrow-screen overflow. At 320 px,
+the home page's intended 288 px hero grid track expanded to 328.109 px due to
+the graph's automatic minimum content width, yielding a 344 px document. The
+same width persisted after `DOMContentLoaded`, font readiness, and page load;
+it was not a test synchronization race. Giving only the existing mobile
+`.build-graph` rule `min-width: 0` restored the intended single-column width
+without changing text, controls, or test assertions. WSL Ubuntu reproduced
+344 px before and 320 px after, and the full browser suite passed all 17 tests
+across 32 routes, four widths, and two themes. The original failure is
+[Actions run 35975011345](https://github.com/kleedaisuki/prompt-squish/actions/runs/35975011345);
+the fix is in `site/src/components/LandingPage.astro`.
