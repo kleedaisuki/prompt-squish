@@ -422,21 +422,12 @@ impl<R: RegistryPort, G: GitPort, F: FilesystemPort> Resolver<R, G, F> {
         }
         let detail = detail(&spec);
         let package_name = detail.package.clone().unwrap_or_else(|| alias.clone());
-        if let Some(path) = &detail.path {
-            let target =
-                self.resolve_local(state, from_manifest, depender, alias, &package_name, path)?;
-            return self.continue_after_edge(
-                state,
-                id,
-                alias,
-                target,
-                from_manifest,
-                depender,
-                dependencies,
-                index,
-            );
-        }
-        if detail.workspace {
+        // 显式 path 与 workspace 成员最终都是相对清单的本地包；只保留一个入图路径。
+        // Explicit paths and workspace members are both manifest-relative local packages;
+        // keep one graph-insertion path for both.
+        let local_path = if let Some(path) = detail.path.clone() {
+            Some(path)
+        } else if detail.workspace {
             let member = workspace_package_path(state, &package_name).ok_or_else(|| {
                 unsat(
                     depender,
@@ -450,6 +441,11 @@ impl<R: RegistryPort, G: GitPort, F: FilesystemPort> Resolver<R, G, F> {
                     "cannot express workspace member `{member}` from `{from_manifest}`"
                 ))
             })?;
+            Some(path)
+        } else {
+            None
+        };
+        if let Some(path) = local_path {
             let target =
                 self.resolve_local(state, from_manifest, depender, alias, &package_name, &path)?;
             return self.continue_after_edge(
