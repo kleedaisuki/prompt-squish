@@ -1,4 +1,9 @@
 //! 保留注释的有类型候选清单编辑。 / Comment-preserving typed candidate-manifest edits.
+//!
+//! 初始文本同时形成保留格式的文档与已验证的语义快照；单次编辑从快照读取旧依赖，
+//! 并对修改后的文本重新验证。 / Initial text produces both a lossless document and a
+//! validated semantic snapshot. One edit reads prior dependencies from that snapshot and
+//! validates the changed text again before returning it for resolution or publication.
 
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, TableLike, Value};
 
@@ -64,15 +69,18 @@ fn line_excess(lines: &[&str], counterparts: &[&str], marker: char) -> Vec<(char
 pub struct CandidateManifest {
     original: String,
     document: DocumentMut,
+    /// 已验证意图供单次编辑使用；候选文本仍须重新验证。 / Validated intent for one edit; candidate text still needs validation.
+    manifest: Manifest,
 }
 
 impl CandidateManifest {
     /// 解析可编辑文档并首先验证当前意图。 / Parses an editable document and validates current intent first.
     pub fn parse(source: &str) -> Result<Self, ProjectError> {
-        Manifest::parse(source)?;
+        let manifest = Manifest::parse(source)?;
         Ok(Self {
             original: source.to_owned(),
             document: source.parse()?,
+            manifest,
         })
     }
 
@@ -83,8 +91,7 @@ impl CandidateManifest {
         spec: DependencySpec,
         replace: bool,
     ) -> Result<EditPlan, ProjectError> {
-        let manifest = Manifest::parse(&self.document.to_string())?;
-        let prior = manifest.dependencies.get(alias).cloned();
+        let prior = self.manifest.dependencies.get(alias).cloned();
         if prior.is_some() && !replace {
             return Err(ProjectError::DuplicateDependency(alias.into()));
         }
@@ -112,8 +119,8 @@ impl CandidateManifest {
 
     /// 删除依赖并保留其他格式与注释。 / Removes a dependency while preserving unrelated formatting and comments.
     pub fn remove(mut self, alias: &str) -> Result<EditPlan, ProjectError> {
-        let manifest = Manifest::parse(&self.document.to_string())?;
-        let spec = manifest
+        let spec = self
+            .manifest
             .dependencies
             .get(alias)
             .cloned()
@@ -234,6 +241,26 @@ mod tests {
                 .add("old", spec, false),
             Err(ProjectError::DuplicateDependency(_))
         ));
+    }
+
+    #[test]
+    fn replacement_uses_original_semantic_dependency_and_validates_candidate() {
+        let replacement = DependencySpec::Version(VersionReq::parse("2").unwrap());
+        let edit = CandidateManifest::parse(BASE)
+            .unwrap()
+            .add("old", replacement.clone(), true)
+            .unwrap();
+        assert!(matches!(
+            edit.change,
+            DependencyChange::Replaced { alias, before: DependencySpec::Version(_), after }
+                if alias == "old" && after == replacement
+        ));
+        assert!(edit.after.contains("old = \"^2\""));
+
+        let invalid = CandidateManifest::parse(BASE)
+            .unwrap()
+            .add("bad.alias", replacement, false);
+        assert!(matches!(invalid, Err(ProjectError::Validation(_))));
     }
 
     #[test]

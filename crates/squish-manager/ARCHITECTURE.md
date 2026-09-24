@@ -24,6 +24,14 @@ object-safe `BuildRuntime` and `BuildRuntimeProvider` boundary. Concrete
 registry, Git, checkout, filesystem, CAS, index, publisher, frontend, linker,
 evaluator, and backend adapters remain host/composition-root concerns.
 
+Dependency mutation uses `squish-project::CandidateManifest` as a one-edit
+boundary: parsing retains both comment-preserving TOML and validated semantic
+intent, so add/remove reads its prior dependency from that snapshot rather
+than reparsing the unchanged document. The edited candidate is validated again
+before it enters resolution. Later manifest-set and transaction validation are
+separate trust boundaries; they must not be removed merely because the editor
+validated its own output.
+
 ## Injected build runtime
 
 `Services::open_build_runtime` is called once during the recorded planning
