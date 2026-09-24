@@ -4,6 +4,14 @@ use crate::LinkError;
 use squish_ir::{LinkedImage, ObjectDigest, RelocatableUnitIr, SourceKey, UnitKind, Validate};
 use std::collections::BTreeMap;
 
+/// 装配入口的信任状态；仅内部链接路径可声明已验证。
+/// Trust state at assembly; only the internal linker may assert prior validation.
+#[derive(Clone, Copy)]
+enum UnitValidation {
+    Required,
+    AlreadyValidated,
+}
+
 /// 可执行的会话视图；可由持久化 `LinkedImage` 与语义单元重建。
 /// Executable session view reconstructed from a persistent `LinkedImage` and semantic units.
 ///
@@ -26,6 +34,27 @@ impl LinkedProgram {
         image
             .validate()
             .map_err(|e| LinkError::new("LNK001", format!("invalid linked image: {e}")))?;
+        Self::assemble(image, units, objects, UnitValidation::Required)
+    }
+
+    /// 仅供已完成快照、单元和镜像验证的链接阶段使用；仍检查装配所需的映射。
+    /// Only for the linker after snapshot, unit, and image validation; assembly mappings remain checked.
+    pub(crate) fn from_validated(
+        image: LinkedImage,
+        units: BTreeMap<SourceKey, RelocatableUnitIr>,
+        objects: BTreeMap<SourceKey, ObjectDigest>,
+    ) -> Result<Self, LinkError> {
+        Self::assemble(image, units, objects, UnitValidation::AlreadyValidated)
+    }
+
+    /// 共享有序装配逻辑，保留公开路径逐单元检查与错误优先级。
+    /// Shared ordered assembly preserves per-unit checks and error precedence on the public path.
+    fn assemble(
+        image: LinkedImage,
+        units: BTreeMap<SourceKey, RelocatableUnitIr>,
+        objects: BTreeMap<SourceKey, ObjectDigest>,
+        validation: UnitValidation,
+    ) -> Result<Self, LinkError> {
         let mut ordered = Vec::with_capacity(image.units.len());
         let mut ordered_objects = Vec::with_capacity(image.units.len());
         for linked in &image.units {
@@ -33,8 +62,10 @@ impl LinkedProgram {
                 LinkError::new("LNK002", "linked unit payload is missing")
                     .at_source(linked.source.clone())
             })?;
-            unit.validate()
-                .map_err(|e| LinkError::new("LNK003", format!("invalid unit: {e}")))?;
+            if matches!(validation, UnitValidation::Required) {
+                unit.validate()
+                    .map_err(|e| LinkError::new("LNK003", format!("invalid unit: {e}")))?;
+            }
             let kind = match unit {
                 RelocatableUnitIr::Entry(_) => UnitKind::Entry,
                 RelocatableUnitIr::Module(_) => UnitKind::Module,

@@ -661,6 +661,100 @@ fn static_link_checks_signatures_in_the_complete_closure() {
 }
 
 #[test]
+fn duplicate_fills_are_rejected_at_the_ir_boundary() {
+    let fixture = linked();
+    let e = source("entry.xml");
+    let m = source("m.xml");
+    let entry_slot = fixture.image.entry.root_region.unit_slot;
+    let RelocatableUnitIr::Entry(mut entry) = fixture.program.unit(entry_slot).unwrap().clone()
+    else {
+        panic!()
+    };
+    let Op::Call { fills, .. } = &mut entry.ops[1].op else {
+        panic!()
+    };
+    fills.push(fills[0].clone());
+    let RelocatableUnitIr::Module(module) = fixture.program.unit(1 - entry_slot).unwrap().clone()
+    else {
+        panic!()
+    };
+    let units = BTreeMap::from([
+        (e.clone(), RelocatableUnitIr::Entry(entry)),
+        (m.clone(), RelocatableUnitIr::Module(module)),
+    ]);
+    let objects = fixture
+        .image
+        .units
+        .iter()
+        .enumerate()
+        .map(|(slot, unit)| {
+            (
+                unit.source.clone(),
+                fixture.program.object(slot as u32).unwrap(),
+            )
+        })
+        .collect();
+    // 公开重建必须继续验证非可信单元。 / Public reconstruction must still validate untrusted units.
+    let error = LinkedProgram::reconstruct(fixture.image, units.clone(), objects).unwrap_err();
+    assert_eq!(error.code, "LNK003");
+
+    let snapshot = ResolutionSnapshot {
+        units: vec![
+            (e.clone(), revision(UnitKind::Entry, "entry")),
+            (m.clone(), revision(UnitKind::Module, "module")),
+        ],
+        imports: vec![
+            ImportBinding {
+                importer: e.clone(),
+                import: ImportId(0),
+                target: m.clone(),
+            },
+            ImportBinding {
+                importer: m.clone(),
+                import: ImportId(0),
+                target: m,
+            },
+        ],
+    };
+    // 链接器也必须在跳过重复校验前拒绝无效 IR。 / Linker must reject invalid IR before skipping revalidation.
+    let error = StaticLinker
+        .link(&e, UnitClosure { snapshot, units })
+        .unwrap_err();
+    assert_eq!(error.code, "LNK016");
+}
+
+#[test]
+fn extra_payload_cannot_escape_snapshot_validation() {
+    let fixture = linked();
+    let e = source("entry.xml");
+    let m = source("m.xml");
+    let units = fixture
+        .image
+        .units
+        .iter()
+        .enumerate()
+        .map(|(slot, unit)| {
+            (
+                unit.source.clone(),
+                fixture.program.unit(slot as u32).unwrap().clone(),
+            )
+        })
+        .collect();
+    let snapshot = ResolutionSnapshot {
+        units: vec![(e.clone(), revision(UnitKind::Entry, "entry"))],
+        imports: vec![ImportBinding {
+            importer: e.clone(),
+            import: ImportId(0),
+            target: m,
+        }],
+    };
+    let error = StaticLinker
+        .link(&e, UnitClosure { snapshot, units })
+        .unwrap_err();
+    assert_eq!(error.code, "LNK030");
+}
+
+#[test]
 fn phase_keys_have_the_intended_invalidation_boundaries() {
     let linked = linked();
     let a = InstantiateKeyProjection::new(

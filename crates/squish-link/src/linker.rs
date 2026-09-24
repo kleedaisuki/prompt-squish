@@ -130,7 +130,10 @@ impl StaticLinker {
             .iter()
             .map(|source| (source.clone(), revision(source).object))
             .collect();
-        let program = LinkedProgram::reconstruct(image.clone(), closure.units, objects)?;
+        // 冻结闭包中的单元与刚构造的镜像已通过验证；公开重建路径仍验证外部输入。
+        // Units in the frozen closure and the constructed image are validated above;
+        // the public reconstruction path still validates external inputs.
+        let program = LinkedProgram::from_validated(image.clone(), closure.units, objects)?;
         Ok(LinkOutput {
             map,
             image,
@@ -218,6 +221,20 @@ fn reachable_sources(
                     )
                     .at_source(source.clone())
                 })?;
+            // 冻结快照是验证闭包的边界，不能让额外 payload 绕过单元验证。
+            // The frozen snapshot bounds the validated closure; extra payloads cannot bypass unit validation.
+            if closure
+                .snapshot
+                .units
+                .binary_search_by(|(key, _)| key.cmp(target))
+                .is_err()
+            {
+                return Err(LinkError::new(
+                    "LNK030",
+                    "import target is absent from resolution snapshot",
+                )
+                .at_source(target.clone()));
+            }
             let target_unit = closure.units.get(target).ok_or_else(|| {
                 LinkError::new("LNK021", "import target payload is missing")
                     .at_source(target.clone())
@@ -310,12 +327,11 @@ fn validate_calls(
             args.iter().map(|x| x.name.as_str()),
             signature.params.iter().map(String::as_str),
         )?;
-        let actual_fills: Vec<_> = fills.iter().map(|x| x.name.as_str()).collect();
-        let unique_fills: BTreeSet<_> = actual_fills.iter().copied().collect();
-        if unique_fills.len() != actual_fills.len()
-            || unique_fills
-                .iter()
-                .any(|name| !signature.slots.iter().any(|slot| slot.name == **name))
+        // IR 边界已拒绝重复 fill；这里只验证跨单元签名允许的名称。
+        // IR validation rejects duplicate fills; only cross-unit signature names belong here.
+        if fills
+            .iter()
+            .any(|fill| !signature.slots.iter().any(|slot| slot.name == fill.name))
         {
             return Err(
                 LinkError::new("LNK027", "fill names do not match signature")
