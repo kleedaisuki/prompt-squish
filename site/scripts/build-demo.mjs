@@ -25,10 +25,9 @@ const visibleArtifacts = [
   { stage: "debug", name: "agent.psdbg", kind: "intermediate", language: "plaintext" },
 ];
 
-/** Run the workspace CLI with project-local manager state. / 使用项目内管理器状态运行工作区 CLI。 */
-function cli(project, args, quiet = false) {
-  const storage = join(project, ".manager-state").replaceAll("\\", "/");
-  const result = spawnSync("cargo", ["run", "--quiet", "--locked", "-p", "xmlsquish", "--", "--config", `manager.storage-root='${storage}'`, "--color", "never", "--plain", ...(quiet ? ["--quiet"] : []), ...args], {
+/** Run the workspace CLI; the fixture's target-dir owns all derived state. / 运行工作区 CLI；夹具的 target-dir 拥有全部派生状态。 */
+function cli(args, quiet = false) {
+  const result = spawnSync("cargo", ["run", "--quiet", "--locked", "-p", "xmlsquish", "--", "--color", "never", "--plain", ...(quiet ? ["--quiet"] : []), ...args], {
     cwd: root, encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024,
   });
   if (result.error) throw result.error;
@@ -42,8 +41,8 @@ function cli(project, args, quiet = false) {
 }
 
 /** Run a build in native NDJSON mode and return its typed build result. / 以原生 NDJSON 模式运行构建并返回类型化结果。 */
-function buildResult(project, manifest) {
-  const output = cli(project, ["--message-format", "json", "build", "--manifest-path", manifest, "--emit", "prompt", "--emit", "ir", "--emit", "debug"], true);
+function buildResult(manifest) {
+  const output = cli(["--message-format", "json", "build", "--manifest-path", manifest, "--emit", "prompt", "--emit", "ir", "--emit", "debug"], true);
   const events = output.trim().split("\n").map((line) => JSON.parse(line));
   const completed = events.find((event) => event.payload?.type === "operation_completed");
   assert(completed, "Build NDJSON must contain operation_completed");
@@ -67,10 +66,10 @@ async function scenario(mode) {
   const entry = sources["agent.xml"].replace('value="researchers"', `value="${audience}"`);
   for (const [name, text] of Object.entries({ ...sources, "agent.xml": entry })) await writeFile(join(project, name), text, "utf8");
   const manifest = join(project, "xmlsquish.toml");
-  const report = cli(project, ["--message-format", "short", "build", "--manifest-path", manifest, "--emit", "prompt", "--emit", "ir", "--emit", "debug"]);
+  const report = cli(["--message-format", "short", "build", "--manifest-path", manifest, "--emit", "prompt", "--emit", "ir", "--emit", "debug"]);
   assert(report.includes("plan:ready") && report.includes("result build published=1"), `Missing build evidence:\n${report}`);
 
-  const built = buildResult(project, manifest);
+  const built = buildResult(manifest);
   const build = built.result;
   assert.equal(build.published.length, 1, "Build must publish exactly one selected target generation");
   const generation = build.published[0];
@@ -82,17 +81,17 @@ async function scenario(mode) {
   // 通过公开 typed locator 读取并验证真实 backend 字节，不推断 publisher 物理布局。
   // Read and verify real backend bytes through the public typed locator without inferring the
   // publisher's physical layout.
-  const prompt = cli(project, ["inspect", "--manifest-path", manifest, "artifact", promptRecord.locator, "--format", "raw"], true);
+  const prompt = cli(["inspect", "--manifest-path", manifest, "artifact", promptRecord.locator, "--format", "raw"], true);
   assert.equal(prompt, expected);
   const irRecords = generation.artifacts.filter((item) => item.kind.type === "binary_ir");
   assert.equal(irRecords.length, 3, "Every project XML module must publish one reusable XSIR companion");
   for (const item of generation.artifacts) {
     assert(!item.locator.includes(".squish-publish"));
-    const inspected = cli(project, ["inspect", "--manifest-path", manifest, "artifact", item.locator, "--format", "json"], true);
+    const inspected = cli(["inspect", "--manifest-path", manifest, "artifact", item.locator, "--format", "json"], true);
     assert.doesNotThrow(() => JSON.parse(inspected));
   }
-  const inspectedIr = cli(project, ["inspect", "--manifest-path", manifest, "ir", irRecords[0].id, "--format", "json"], true);
-  const inspectedLink = cli(project, ["inspect", "--manifest-path", manifest, "link", "agent", "--format", "json"], true);
+  const inspectedIr = cli(["inspect", "--manifest-path", manifest, "ir", irRecords[0].id, "--format", "json"], true);
+  const inspectedLink = cli(["inspect", "--manifest-path", manifest, "link", "agent", "--format", "json"], true);
   assert.doesNotThrow(() => JSON.parse(inspectedIr));
   assert.doesNotThrow(() => JSON.parse(inspectedLink));
   const stages = {
