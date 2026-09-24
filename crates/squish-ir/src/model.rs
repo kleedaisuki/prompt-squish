@@ -395,6 +395,64 @@ pub enum RelocatableUnitIr {
     Entry(EntryObject),
 }
 
+impl RelocatableUnitIr {
+    /// 返回两种单元共享的头；调用方不必把单元种类当作读取元数据的特殊情况。
+    /// Returns the common header without making the unit kind a special case for metadata reads.
+    #[must_use]
+    pub fn header(&self) -> &UnitHeader {
+        match self {
+            Self::Module(unit) => &unit.header,
+            Self::Entry(unit) => &unit.header,
+        }
+    }
+
+    /// 返回持久化协议中的单元种类。 / Returns the unit kind in the persistent protocol.
+    #[must_use]
+    pub fn kind(&self) -> UnitKind {
+        match self {
+            Self::Module(_) => UnitKind::Module,
+            Self::Entry(_) => UnitKind::Entry,
+        }
+    }
+
+    /// 返回两种单元共享的区域 arena。 / Returns the region arena shared by both unit kinds.
+    #[must_use]
+    pub fn regions(&self) -> &[Region] {
+        match self {
+            Self::Module(unit) => &unit.regions,
+            Self::Entry(unit) => &unit.regions,
+        }
+    }
+
+    /// 返回两种单元共享的操作 arena。 / Returns the operation arena shared by both unit kinds.
+    #[must_use]
+    pub fn ops(&self) -> &[OpRecord] {
+        match self {
+            Self::Module(unit) => &unit.ops,
+            Self::Entry(unit) => &unit.ops,
+        }
+    }
+
+    /// 返回静态来源表；它只提供诊断证据，不参与单元语义身份。
+    /// Returns static provenance, which is diagnostic evidence rather than semantic identity.
+    #[must_use]
+    pub fn origins(&self) -> &OriginTable {
+        match self {
+            Self::Module(unit) => &unit.origins,
+            Self::Entry(unit) => &unit.origins,
+        }
+    }
+
+    /// 返回规范排序的外部符号摘要。 / Returns the canonically sorted external-symbol summary.
+    #[must_use]
+    pub fn external_symbols(&self) -> &[SymbolKey] {
+        match self {
+            Self::Module(unit) => &unit.external_symbols,
+            Self::Entry(unit) => &unit.external_symbols,
+        }
+    }
+}
+
 /// 便携定义地址。 / Portable definition address.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct DefAddr {

@@ -1,7 +1,7 @@
 //! 会话内链接程序视图。 / Session-local linked-program view.
 
 use crate::LinkError;
-use squish_ir::{LinkedImage, ObjectDigest, RelocatableUnitIr, SourceKey, UnitKind, Validate};
+use squish_ir::{LinkedImage, ObjectDigest, RelocatableUnitIr, SourceKey, Validate};
 use std::collections::BTreeMap;
 
 /// 可执行的会话视图；可由持久化 `LinkedImage` 与语义单元重建。
@@ -35,11 +35,7 @@ impl LinkedProgram {
             })?;
             unit.validate()
                 .map_err(|e| LinkError::new("LNK003", format!("invalid unit: {e}")))?;
-            let kind = match unit {
-                RelocatableUnitIr::Entry(_) => UnitKind::Entry,
-                RelocatableUnitIr::Module(_) => UnitKind::Module,
-            };
-            if kind != linked.kind {
+            if unit.kind() != linked.kind {
                 return Err(
                     LinkError::new("LNK004", "linked unit kind differs from payload")
                         .at_source(linked.source.clone()),

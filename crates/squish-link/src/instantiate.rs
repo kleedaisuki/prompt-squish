@@ -875,10 +875,9 @@ impl<'a> Machine<'a> {
     fn source(&self, slot: u32) -> Result<squish_ir::SourceKey, InstantiateError> {
         Ok(self.unit(slot)?.header().source.clone())
     }
-    fn unit(&self, slot: u32) -> Result<UnitRef<'_>, InstantiateError> {
+    fn unit(&self, slot: u32) -> Result<&RelocatableUnitIr, InstantiateError> {
         self.program
             .unit(slot)
-            .map(UnitRef)
             .ok_or_else(|| InstantiateError::new("RUN021", "unit slot is out of range"))
     }
     fn op_origin(&self, at: LinkedOpRef) -> Result<QualifiedOriginRef, InstantiateError> {
@@ -904,16 +903,6 @@ impl<'a> Machine<'a> {
             message: message.into(),
             origin: op.and_then(|x| origin_for_op(self.program, x)),
             frame_chain: chain,
-        }
-    }
-}
-
-struct UnitRef<'a>(&'a RelocatableUnitIr);
-impl UnitRef<'_> {
-    fn header(&self) -> &squish_ir::UnitHeader {
-        match self.0 {
-            RelocatableUnitIr::Entry(v) => &v.header,
-            RelocatableUnitIr::Module(v) => &v.header,
         }
     }
 }
@@ -969,11 +958,7 @@ fn region(
     let unit = program
         .unit(at.unit_slot)
         .ok_or_else(|| InstantiateError::new("RUN023", "region unit is missing"))?;
-    let regions = match unit {
-        RelocatableUnitIr::Entry(v) => &v.regions,
-        RelocatableUnitIr::Module(v) => &v.regions,
-    };
-    regions
+    unit.regions()
         .get(at.region.0 as usize)
         .ok_or_else(|| InstantiateError::new("RUN024", "region is out of range"))
 }
@@ -981,11 +966,8 @@ fn operation(program: &LinkedProgram, at: LinkedOpRef) -> Result<&Op, Instantiat
     let unit = program
         .unit(at.unit_slot)
         .ok_or_else(|| InstantiateError::new("RUN025", "operation unit is missing"))?;
-    let ops = match unit {
-        RelocatableUnitIr::Entry(v) => &v.ops,
-        RelocatableUnitIr::Module(v) => &v.ops,
-    };
-    ops.get(at.op.0 as usize)
+    unit.ops()
+        .get(at.op.0 as usize)
         .map(|x| &x.op)
         .ok_or_else(|| InstantiateError::new("RUN026", "operation is out of range"))
 }
@@ -997,11 +979,8 @@ fn origin(
     local: u32,
 ) -> Option<QualifiedOriginRef> {
     let unit = program.unit(slot)?;
-    let origins = match unit {
-        RelocatableUnitIr::Entry(v) => &v.origins,
-        RelocatableUnitIr::Module(v) => &v.origins,
-    };
-    let index = origins
+    let index = unit
+        .origins()
         .entries
         .iter()
         .position(|x| x.entity_kind == kind && x.local_id == local)?;

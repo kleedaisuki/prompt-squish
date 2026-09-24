@@ -48,6 +48,14 @@ This separation is mandatory. In particular:
 
 The final product is a plain `*.prompt` artifact. Canonical IR, source blobs, traces, and build records live in the project artifact store and may be materialized as debug bundles; they are not injected into the prompt.
 
+In the typed core, `RelocatableUnitIr` exposes read-only access to the fields shared by
+entry and module objects (header, operation and region arenas, origins, and external
+symbol summary). Consumers branch on the unit kind only when the language actually
+does—for example, an entry has a root region while a module owns definitions. This
+keeps persistence, linking, and evaluation from each maintaining an independent
+interpretation of the same variant layout. These accessors are an in-process API;
+they do not alter the canonical wire format or validation contract.
+
 ## 2. Design constraints
 
 ### 2.1 Language constraints

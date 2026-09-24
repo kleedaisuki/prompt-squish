@@ -4,7 +4,7 @@ use crate::{LinkError, LinkedProgram};
 use squish_ir::{
     DefAddr, FeatureBits, LinkedEntry, LinkedImage, LinkedMacroDef, LinkedOpRef, LinkedRegionRef,
     LinkedUnit, ModuleObject, Op, RelocatableUnitIr, ResolutionSnapshot, Signature, SourceKey,
-    StaticLinkMap, SymbolKey, UnitKind, Validate,
+    StaticLinkMap, SymbolKey, Validate,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -149,11 +149,8 @@ fn validate_snapshot_payloads(closure: &UnitClosure) -> Result<(), LinkError> {
             LinkError::new("LNK016", format!("invalid relocatable unit: {e}"))
                 .at_source(source.clone())
         })?;
-        let (kind, header) = match unit {
-            RelocatableUnitIr::Entry(v) => (UnitKind::Entry, &v.header),
-            RelocatableUnitIr::Module(v) => (UnitKind::Module, &v.header),
-        };
-        if kind != revision.kind || header.source != *source {
+        let header = unit.header();
+        if unit.kind() != revision.kind || header.source != *source {
             return Err(
                 LinkError::new("LNK017", "snapshot kind/source differs from payload")
                     .at_source(source.clone()),
@@ -204,11 +201,7 @@ fn reachable_sources(
         let unit = closure.units.get(&source).ok_or_else(|| {
             LinkError::new("LNK019", "reachable payload is missing").at_source(source.clone())
         })?;
-        let imports = match unit {
-            RelocatableUnitIr::Entry(v) => &v.header.imports,
-            RelocatableUnitIr::Module(v) => &v.header.imports,
-        };
-        for import in imports {
+        for import in &unit.header().imports {
             let target = bindings
                 .get(&(source.clone(), import.local_id))
                 .ok_or_else(|| {
@@ -275,10 +268,6 @@ fn validate_calls(
     symbols: &BTreeMap<SymbolKey, (DefAddr, Signature)>,
     relocations: &mut Vec<(LinkedOpRef, DefAddr)>,
 ) -> Result<(), LinkError> {
-    let (ops, declared_externals) = match unit {
-        RelocatableUnitIr::Entry(v) => (&v.ops, &v.external_symbols),
-        RelocatableUnitIr::Module(v) => (&v.ops, &v.external_symbols),
-    };
     let local_symbols: BTreeSet<_> = match unit {
         RelocatableUnitIr::Entry(_) => BTreeSet::new(),
         RelocatableUnitIr::Module(module) => {
@@ -286,7 +275,7 @@ fn validate_calls(
         }
     };
     let mut actual_externals = BTreeSet::new();
-    for record in ops {
+    for record in unit.ops() {
         let Op::Call {
             target,
             args,
@@ -341,7 +330,7 @@ fn validate_calls(
             *addr,
         ));
     }
-    if !actual_externals.iter().eq(declared_externals) {
+    if !actual_externals.iter().eq(unit.external_symbols()) {
         return Err(LinkError::new(
             "LNK029",
             "external symbol summary does not match call operations",
@@ -382,9 +371,6 @@ fn merged_features(
     units: &BTreeMap<SourceKey, RelocatableUnitIr>,
 ) -> FeatureBits {
     FeatureBits(sources.iter().fold(0, |bits, source| {
-        bits | match &units[source] {
-            RelocatableUnitIr::Entry(v) => v.header.feature_bits.0,
-            RelocatableUnitIr::Module(v) => v.header.feature_bits.0,
-        }
+        bits | units[source].header().feature_bits.0
     }))
 }

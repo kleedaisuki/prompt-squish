@@ -48,19 +48,13 @@ impl From<ValidationError> for PersistError {
 /// Encodes a complete unit with semantic projection and source/debug attachment in separate sections.
 pub fn encode_unit_container(unit: &RelocatableUnitIr) -> Result<Vec<u8>, PersistError> {
     unit.validate()?;
-    let header = match unit {
-        RelocatableUnitIr::Module(v) => &v.header,
-        RelocatableUnitIr::Entry(v) => &v.header,
-    };
+    let header = unit.header();
     let descriptor = SemanticDescriptor {
         dialect: header.language_abi.0.clone(),
         semantic_epoch: u64::from(header.ir_schema.major),
         feature_bits: header.feature_bits.0,
     };
-    let kind = match unit {
-        RelocatableUnitIr::Module(_) => ContainerKind::Module,
-        RelocatableUnitIr::Entry(_) => ContainerKind::Entry,
-    };
+    let kind = container_kind(unit);
     let semantic = encode_relocatable_unit(&without_debug(unit.clone()));
     let complete = encode_relocatable_unit(unit);
     let container = Container::v1(
@@ -108,10 +102,7 @@ pub fn decode_unit_container(bytes: &[u8]) -> Result<RelocatableUnitIr, PersistE
         .find(|s| s.tag == SECTION_DEBUG)
         .ok_or(PersistError::MissingSection(SECTION_DEBUG))?;
     let unit = decode_relocatable_unit(&debug.payload)?;
-    let header = match &unit {
-        RelocatableUnitIr::Module(v) => &v.header,
-        RelocatableUnitIr::Entry(v) => &v.header,
-    };
+    let header = unit.header();
     let descriptor_section = container
         .sections()
         .iter()
@@ -124,17 +115,22 @@ pub fn decode_unit_container(bytes: &[u8]) -> Result<RelocatableUnitIr, PersistE
     {
         return Err(PersistError::SemanticMismatch);
     }
-    let kind = match unit {
-        RelocatableUnitIr::Module(_) => ContainerKind::Module,
-        RelocatableUnitIr::Entry(_) => ContainerKind::Entry,
-    };
-    if kind != container.kind() {
+    if container_kind(&unit) != container.kind() {
         return Err(PersistError::KindMismatch);
     }
     if encode_relocatable_unit(&without_debug(unit.clone())) != semantic.payload {
         return Err(PersistError::SemanticMismatch);
     }
     Ok(unit)
+}
+
+/// 将领域单元种类映射到容器标签；只在持久化边界执行此策略。
+/// Maps the domain unit kind to its container tag only at the persistence boundary.
+fn container_kind(unit: &RelocatableUnitIr) -> ContainerKind {
+    match unit.kind() {
+        UnitKind::Module => ContainerKind::Module,
+        UnitKind::Entry => ContainerKind::Entry,
+    }
 }
 
 fn validate_unit_sections(sections: &[Section]) -> Result<(), PersistError> {
