@@ -498,6 +498,22 @@ fn persistent_cache_completion_is_structured_and_releases_resources() {
 }
 
 #[test]
+fn a_retired_flight_cannot_release_resources_twice() {
+    let plan = BuildPlan::new([action("a", &[], Resources::new(1, 0, 0))]).unwrap();
+    let capacity = Resources::new(1, 0, 0);
+    let mut scheduler = Scheduler::new(plan, capacity, true).unwrap();
+    let dispatch = scheduler.next_dispatch().unwrap();
+    scheduler.complete(&dispatch.action.id, success("a")).unwrap();
+
+    assert_eq!(scheduler.available(), capacity);
+    assert_eq!(
+        scheduler.complete(&dispatch.action.id, success("a")),
+        Err(CompletionError::NotLeader(dispatch.action.id.clone()))
+    );
+    assert_eq!(scheduler.available(), capacity);
+}
+
+#[test]
 fn semantic_digest_is_deterministic_under_action_and_option_insertion_order() {
     let mut first = action("a", &[], Resources::new(1, 2, 3));
     first.key = KeyRecipe::new(

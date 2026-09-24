@@ -313,16 +313,7 @@ impl Scheduler {
     /// resources from being reused while work is still active.
     pub fn request_cancellation(&mut self) -> Vec<ActionId> {
         self.cancellation_requested = true;
-        let queued: Vec<_> = self
-            .states
-            .iter()
-            .filter(|(_, state)| matches!(state, ActionState::Pending | ActionState::Ready))
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in queued {
-            self.ready.remove(&id);
-            self.change(id, ActionState::Cancelled);
-        }
+        self.cancel_queued();
         self.leaders.keys().cloned().collect()
     }
 
@@ -338,16 +329,7 @@ impl Scheduler {
         if !self.cancellation_requested {
             return Err(CompletionError::NotLeader(leader.clone()));
         }
-        let key = self
-            .leaders
-            .remove(leader)
-            .ok_or_else(|| CompletionError::NotLeader(leader.clone()))?;
-        let flight = self.flights.remove(&key).expect("leader has a flight");
-        let demand = self.plan.action(leader).expect("leader exists").resources;
-        self.available = self
-            .available
-            .checked_add(demand)
-            .expect("released resources fit integer domains");
+        let flight = self.retire_flight(leader)?;
         for member in flight.members {
             self.change(member, ActionState::Cancelled);
         }
@@ -387,13 +369,7 @@ impl Scheduler {
                 action: leader.clone(),
             });
         }
-        self.leaders.remove(leader);
-        let flight = self.flights.remove(&key).expect("leader has a flight");
-        let demand = self.plan.action(leader).expect("leader exists").resources;
-        self.available = self
-            .available
-            .checked_add(demand)
-            .expect("released resources fit integer domains");
+        let flight = self.retire_flight(leader)?;
         for event in result.events {
             self.events.push(ScheduleEvent::Worker {
                 action: leader.clone(),
@@ -414,6 +390,21 @@ impl Scheduler {
             self.finish(member, key.clone(), cached.clone(), source);
         }
         Ok(())
+    }
+
+    /// 在结果验证后一次性退役 leader，并归还其资源。 / Retires a validated leader and returns its resources exactly once.
+    fn retire_flight(&mut self, leader: &ActionId) -> Result<Flight, CompletionError> {
+        let key = self
+            .leaders
+            .remove(leader)
+            .ok_or_else(|| CompletionError::NotLeader(leader.clone()))?;
+        let flight = self.flights.remove(&key).expect("leader has a flight");
+        let demand = self.plan.action(leader).expect("leader exists").resources;
+        self.available = self
+            .available
+            .checked_add(demand)
+            .expect("released resources fit integer domains");
+        Ok(flight)
     }
 
     /// 排空结构化事件。 / Drains structured events.
