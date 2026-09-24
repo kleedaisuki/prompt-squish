@@ -4,7 +4,6 @@ Usage / 用法: python compare.py BASELINE CANDIDATE --report paired-results.jso
 """
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,6 +11,8 @@ import platform
 import re
 import statistics
 import subprocess
+
+from paired import alternating_rounds, executable_identity
 
 
 def run(binary):
@@ -52,11 +53,6 @@ def check_pair(baseline, candidate):
             raise ValueError(f"Output/IR differs / 输出或 IR 不同: {key}")
 
 
-def executable(path):
-    """Record exact executable identity. / 记录精确的可执行文件身份。"""
-    return {"name": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-
-
 def rust_version():
     """Record installed rustc, not inferred binary provenance. / 记录当前 rustc，不推断构建来源。"""
     try:
@@ -79,7 +75,7 @@ def main():
              for name in ("baseline", "candidate")}
     report = {
         "schema": 1,
-        "executables": {name: executable(path) for name, path in paths.items()},
+        "executables": {name: executable_identity(path) for name, path in paths.items()},
         "source": {"baseline": "7c1e10d with identical benchmark harness",
                    "candidate": "working tree; executable SHA256 identifies measured build"},
         "environment": {"platform": platform.platform(), "machine": platform.machine(),
@@ -95,17 +91,16 @@ def main():
         "rounds": [],
     }
     reference = None
-    for index in range(args.rounds):
-        order = ["baseline", "candidate"] if index % 2 == 0 else ["candidate", "baseline"]
+    for number, order in alternating_rounds(args.rounds):
         pair = {}
         for name in order:
-            print(f"Round {index + 1}/{args.rounds}: {name}", flush=True)
+            print(f"Round {number}/{args.rounds}: {name}", flush=True)
             pair[name] = run(paths[name])
         check_pair(pair["baseline"], pair["candidate"])
         if reference is not None:
             check_pair(reference, pair["baseline"])
         reference = pair["baseline"]
-        report["rounds"].append({"index": index + 1, "order": order,
+        report["rounds"].append({"index": number, "order": order,
                                  "measurements": {name: list(rows.values())
                                                   for name, rows in pair.items()}})
     summaries = []

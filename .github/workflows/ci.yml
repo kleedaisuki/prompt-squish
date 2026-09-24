@@ -48,6 +48,11 @@ jobs:
           python -m unittest discover -s .github/scripts -p "test_*.py"
           python .github/scripts/release.py verify .
 
+      # Keep benchmark provenance/order stable without running machine-dependent timings.
+      # 在 CI 中验证基准来源与轮次契约，不以机器相关的耗时作为门禁。
+      - name: Check benchmark tooling contracts
+        run: python -m unittest discover -s docs/performance/tests -p "test_*.py"
+
       - name: Check formatting
         run: cargo +1.88.0 fmt --all -- --check
 

@@ -67,6 +67,20 @@ Seven CLI pairs on the real, external GSP dataset have medians of 178.1 ms and 1
 
 ## 复现 / Reproduction
 
+The two paired benchmark drivers, `compare.py` and `cli_compare.py`, share
+executable identity and alternating AB/BA round ordering through `paired.py`.
+Keep workload execution, equivalence checks, and report schemas in their
+respective drivers: compiler fingerprints are not interchangeable with the
+CLI driver's exact artifact and process-output comparison. Run the focused
+helper tests with:
+
+```bash
+python -m unittest discover -s docs/performance/tests -p "test_*.py"
+```
+
+This split preserves the historical command-line entry points
+and report fields while making the pairing rule single-source.
+
 ```powershell
 cargo test --all-features --locked
 cargo test --release compiler::perf_tests::compiler_baseline -- --ignored --nocapture --test-threads=1

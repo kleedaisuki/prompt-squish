@@ -4,7 +4,6 @@ Usage / 用法: python cli_compare.py BASELINE CANDIDATE SOURCE_DIR --report rep
 """
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import platform
@@ -13,6 +12,8 @@ import statistics
 import subprocess
 import tempfile
 import time
+
+from paired import alternating_rounds, executable_identity
 
 
 def is_output(path):
@@ -59,11 +60,6 @@ def invoke(binary, directory):
     return elapsed, (process.returncode, process.stdout, process.stderr, artifacts)
 
 
-def identity(path):
-    """Publish binary identity without host paths. / 发布二进制身份而不暴露主机路径。"""
-    return {"name": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-
-
 def main():
     """Copy once, then compare both binaries on identical paths. / 仅复制一次，以相同路径比较二进制。"""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -83,7 +79,7 @@ def main():
     files = sources(source_dir)
     report = {"schema": 1, "platform": platform.platform(),
               "python": platform.python_version(),
-              "executables": {side: identity(path) for side, path in binaries.items()},
+              "executables": {side: executable_identity(path) for side, path in binaries.items()},
               "input_xml_files": len(files), "warmups_per_binary": 1,
               "scope": "Wall-clock process time includes launch, discovery, compilation, "
                        "tokenization, artifact I/O, and diagnostics. Warm filesystem caches; "
@@ -106,18 +102,17 @@ def main():
             reference = observed
             if snapshot(directory, False) != original:
                 raise ValueError("Sources changed / 源码被修改")
-        for index in range(args.rounds):
-            order = ["baseline", "candidate"] if index % 2 == 0 else ["candidate", "baseline"]
+        for number, order in alternating_rounds(args.rounds):
             measurements = {}
             for side in order:
-                print(f"Round {index + 1}/{args.rounds}: {side}", flush=True)
+                print(f"Round {number}/{args.rounds}: {side}", flush=True)
                 elapsed, observed = invoke(binaries[side], directory)
                 if observed != reference:
                     raise ValueError("CLI results differ / CLI 结果不一致")
                 if snapshot(directory, False) != original:
                     raise ValueError("Sources changed / 源码被修改")
                 measurements[side] = elapsed
-            report["rounds"].append({"index": index + 1, "order": order, "elapsed_ns": measurements,
+            report["rounds"].append({"index": number, "order": order, "elapsed_ns": measurements,
                                      "candidate_over_baseline": measurements["candidate"] / measurements["baseline"]})
         report["artifact_files"] = len(reference[3])
         report["artifact_bytes"] = sum(map(len, reference[3].values()))
