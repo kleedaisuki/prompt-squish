@@ -503,7 +503,9 @@ fn a_retired_flight_cannot_release_resources_twice() {
     let capacity = Resources::new(1, 0, 0);
     let mut scheduler = Scheduler::new(plan, capacity, true).unwrap();
     let dispatch = scheduler.next_dispatch().unwrap();
-    scheduler.complete(&dispatch.action.id, success("a")).unwrap();
+    scheduler
+        .complete(&dispatch.action.id, success("a"))
+        .unwrap();
 
     assert_eq!(scheduler.available(), capacity);
     assert_eq!(
