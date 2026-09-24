@@ -63,15 +63,18 @@ fn line_excess(lines: &[&str], counterparts: &[&str], marker: char) -> Vec<(char
 #[derive(Clone, Debug)]
 pub struct CandidateManifest {
     original: String,
+    /// 已验证的原始意图；编辑前无需再次解析未变的文档。 / Validated original intent; unchanged input need not be reparsed before an edit.
+    manifest: Manifest,
     document: DocumentMut,
 }
 
 impl CandidateManifest {
     /// 解析可编辑文档并首先验证当前意图。 / Parses an editable document and validates current intent first.
     pub fn parse(source: &str) -> Result<Self, ProjectError> {
-        Manifest::parse(source)?;
+        let manifest = Manifest::parse(source)?;
         Ok(Self {
             original: source.to_owned(),
+            manifest,
             document: source.parse()?,
         })
     }
@@ -83,8 +86,7 @@ impl CandidateManifest {
         spec: DependencySpec,
         replace: bool,
     ) -> Result<EditPlan, ProjectError> {
-        let manifest = Manifest::parse(&self.document.to_string())?;
-        let prior = manifest.dependencies.get(alias).cloned();
+        let prior = self.manifest.dependencies.get(alias).cloned();
         if prior.is_some() && !replace {
             return Err(ProjectError::DuplicateDependency(alias.into()));
         }
@@ -112,8 +114,8 @@ impl CandidateManifest {
 
     /// 删除依赖并保留其他格式与注释。 / Removes a dependency while preserving unrelated formatting and comments.
     pub fn remove(mut self, alias: &str) -> Result<EditPlan, ProjectError> {
-        let manifest = Manifest::parse(&self.document.to_string())?;
-        let spec = manifest
+        let spec = self
+            .manifest
             .dependencies
             .get(alias)
             .cloned()
@@ -234,6 +236,24 @@ mod tests {
                 .add("old", spec, false),
             Err(ProjectError::DuplicateDependency(_))
         ));
+    }
+
+    #[test]
+    fn replacement_reports_the_original_validated_dependency() {
+        let replacement = DependencySpec::Version(VersionReq::parse("2").unwrap());
+        let edit = CandidateManifest::parse(BASE)
+            .unwrap()
+            .add("old", replacement.clone(), true)
+            .unwrap();
+        assert_eq!(
+            edit.change,
+            DependencyChange::Replaced {
+                alias: "old".into(),
+                before: DependencySpec::Version(VersionReq::parse("1").unwrap()),
+                after: replacement,
+            }
+        );
+        Manifest::parse(&edit.after).unwrap();
     }
 
     #[test]
