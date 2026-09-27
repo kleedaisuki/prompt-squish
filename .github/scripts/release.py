@@ -50,6 +50,26 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def stage_skill(source, dist, version):
+    """Stage the tagged agent guide as a standalone asset. / 将标签中的 Agent 指南作为独立资产暂存。"""
+    guide = source / "SKILL.md"
+    if not guide.is_file():
+        if tuple(map(int, version.split("."))) >= (1, 0, 2):
+            raise ValueError("release source omits SKILL.md")
+        return None
+    asset = dist / "SKILL.md"
+    shutil.copyfile(guide, asset)
+    return asset
+
+
+def write_checksums(assets, manifest):
+    """Cover every release asset with stable checksums. / 为每项发布资产生成稳定校验和。"""
+    manifest.write_text(
+        "".join(f"{digest(path)}  {path.name}\n" for path in assets),
+        encoding="utf-8", newline="\n",
+    )
+
+
 def verify_repository(source, tag=None):
     """Keep release metadata mutually consistent. / 保持发布元数据彼此一致。"""
     manifest = tomllib.loads((source / "Cargo.toml").read_text(encoding="utf-8"))
@@ -82,6 +102,8 @@ def verify_repository(source, tag=None):
     notes = release_path.read_text(encoding="utf-8")
     if f"# xmlsquish {version}" not in notes or f"`{expected_tag}`" not in notes:
         raise ValueError("release notes do not match the current package version and tag")
+    if tuple(map(int, version.split("."))) >= (1, 0, 2) and not (source / "SKILL.md").is_file():
+        raise ValueError("release source omits SKILL.md")
     print(f"Verified release metadata for {expected_tag}")
     return version
 
@@ -240,9 +262,10 @@ def publish(source, dist, tag):
     expected = {archive_name(tag[1:], target) for target in TARGETS}
     if {p.name for p in dist.iterdir()} != expected:
         raise ValueError("release assets do not match all six expected targets")
+    stage_skill(source, dist, tag[1:])
     assets = sorted(dist.iterdir())
     manifest = dist / "SHA256SUMS"
-    manifest.write_text("".join(f"{digest(path)}  {path.name}\n" for path in assets), encoding="utf-8", newline="\n")
+    write_checksums(assets, manifest)
     # Refetch only the existing tag; no tag creation or movement is permitted.
     # 仅抓取既有标签，不创建或移动标签。
     run("git", "fetch", "origin", f"refs/tags/{tag}", cwd=source)

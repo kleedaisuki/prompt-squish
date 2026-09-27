@@ -14,6 +14,10 @@ xmlsquish is a project-oriented prompt builder. It discovers packages, workspace
 
 Download the archive for your OS and CPU from GitHub Releases, verify it against the checksums from the same release, extract it, and put `xmlsquish` (`xmlsquish.exe` on Windows) on `PATH`. Check the release notes for the Linux glibc requirement.
 
+Agent 用户可以从同一 Release 单独下载 `SKILL.md`；新发布的 `SHA256SUMS` 同时覆盖二进制归档和这个指南。v1.0.4 的 `SKILL.md` 是发布后的补充资产，使用单独的 `SKILL.md.sha256` 校验，不改写原有校验和。
+
+Agent users can download `SKILL.md` separately from the same Release. New releases include both binary archives and the guide in `SHA256SUMS`. The v1.0.4 guide is a post-release addition with a separate `SKILL.md.sha256`; its original checksum file is unchanged.
+
 ```bash
 xmlsquish --version
 xmlsquish --help
