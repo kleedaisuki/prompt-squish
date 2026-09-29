@@ -32,6 +32,39 @@ before it enters resolution. Later manifest-set and transaction validation are
 separate trust boundaries; they must not be removed merely because the editor
 validated its own output.
 
+## Agent Skill dependency operations
+
+`src/skill.rs` owns `add-skill`, `remove-skill`, `sync-skills`, and the separately
+bundled `install-skill`. Skill declarations live only in the workspace root
+`[skills]` table; exact source identity and complete content digest live in
+`xmlsquish.lock` `[[skill]]` entries; the agent-visible projection is a copied
+tree at `.agents/skills/<name>`. XML package resolution remains distinct, but
+skill mutation still re-resolves the package graph against the edited complete
+manifest set so package manifest digests stay coherent. `validate_skill_lock`
+and `validate_preserved_skill_lock` prevent XML build/add/remove from carrying
+stale declarations or silently changing skill pins.
+
+The manager asks `Services::resolve_skill_source` for a regular-file tree and
+exact Git commit. It validates bounded YAML frontmatter identity and computes
+the repository's normalized whole-tree digest; the source must not contain the
+reserved owner marker. The repository adds a name- and digest-bearing marker,
+stages the complete tree, and commits it with the root manifest and lock under
+one recoverable transaction. Existing unowned or user-edited directories are
+conflicts. Absolute local CLI paths are normalized into portable manifest-
+relative locators after alias/overlap checks, and the normalized source is what
+the host reads.
+
+`sync-skills` never changes authoritative manifest or lock. It verifies their
+coherence, fetches missing projections from exact locked sources, and prunes
+only stale dependency-marked trees whose content still matches their marker.
+Each publish/prune is journaled and rechecks root manifest/lock under the
+repository writer lock; contention triggers a bounded fresh planning attempt.
+The bundled `install-skill` is deliberately outside project dependency state:
+it embeds the root `SKILL.md` at compile time, uses a distinct bundled marker,
+and publishes a single complete directory with sibling staging, backup, and
+recovery under a filesystem lock. It never adopts an unowned directory, and
+`--force` only replaces an unmodified prior bundled installation.
+
 ## Injected build runtime
 
 `Services::open_build_runtime` is called once during the recorded planning

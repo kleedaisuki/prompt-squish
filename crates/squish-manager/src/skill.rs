@@ -1033,6 +1033,13 @@ fn inspect_bundle(destination: &Path, force: bool) -> Result<bool, ManagerError>
                 "bundled skill contains a link or non-regular file",
             ));
         }
+        if metadata.len() > 1_048_576 {
+            return Err(ManagerError::new(
+                "XS3321",
+                Phase::Manage,
+                "bundled skill file exceeds the inspection limit",
+            ));
+        }
         files.insert(
             PathBuf::from(name),
             fs::read(entry.path())
@@ -1416,6 +1423,17 @@ fn prepare_sync(
     request: &SyncSkillsRequest,
     services: &dyn Services,
 ) -> Result<SyncWork, ManagerError> {
+    let manifests: BTreeMap<String, Manifest> = snapshot
+        .manifests()
+        .iter()
+        .map(|item| {
+            (
+                item.path.to_string_lossy().replace('\\', "/"),
+                item.manifest.clone(),
+            )
+        })
+        .collect();
+    validate_skill_lock(&manifests, snapshot.lockfile())?;
     let manifest = &snapshot
         .manifests()
         .iter()
