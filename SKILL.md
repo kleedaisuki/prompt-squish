@@ -1,6 +1,6 @@
 ---
 name: prompt-squish
-description: Author, configure, build, format, inspect, and clean xmlsquish prompt projects. Use when working with the XML macro DSL, xmlsquish.toml packages/workspaces/dependencies/targets, or the xmlsquish CLI.
+description: Author, configure, build, format, inspect, and clean xmlsquish prompt projects; manage project Agent Skills. Use when working with the XML macro DSL, xmlsquish.toml packages/workspaces/dependencies/skills/targets, .agents/skills, or the xmlsquish CLI.
 ---
 
 # xmlsquish Agent Guide
@@ -29,25 +29,42 @@ xmlsquish add prompt-common@^2 --registry community --rename common
 xmlsquish remove common --dry-run
 ```
 
-Agent Skills are a separate workspace-root dependency domain. Add an exact local
-skill directory or a Git subtree, then synchronize the agent-visible copy from
-the shared lock when restoring a checkout:
+Agent Skills are a separate workspace-root dependency domain (available since
+xmlsquish v1.1.0). Add one exact local skill directory or Git repository/subtree;
+do not use XML package registry syntax or `-p` for skills. A path is resolved
+relative to the root manifest, not the shell's current directory. Restoring a
+checkout requires reconciling the agent-visible copies from the shared lock:
 
 ```bash
 xmlsquish add-skill review-checks --path tools/skills/review-checks
 xmlsquish add-skill release-notes --git https://example.com/skills.git --tag v2 --subdir release-notes
-xmlsquish sync-skills --locked --offline
+xmlsquish sync-skills --frozen          # equivalent to --locked --offline
 xmlsquish remove-skill review-checks --dry-run
 xmlsquish install-skill                  # user-global .agents/skills/prompt-squish
 xmlsquish install-skill --project        # current workspace .agents/skills/prompt-squish
 ```
 
-`[skills]` and `[[skill]]` are independent of XML `[dependencies]` and the
-package graph. Skill names must match the `SKILL.md` frontmatter and directory;
-xmlsquish installs the complete tree, does not execute scripts, and refuses to
-overwrite unmanaged or locally modified skill directories. Verify third-party
-skill content before enabling it: a lock digest is integrity evidence, not a
-trust or safety certificate.
+`add-skill` and `remove-skill` edit the root manifest and lock together, then
+publish/remove only the corresponding owned `.agents/skills/<name>` copy.
+Repeating `add-skill` for the same name explicitly updates it. Git sources may
+select one `--rev`, `--tag`, or `--branch`; without one, they follow remote HEAD
+when deliberately updated. The lock pins the exact commit and whole-tree digest,
+while local sources remain mutable: `sync-skills --locked` rejects source drift
+rather than silently changing the lock. `sync-skills` repairs missing copies and
+prunes stale **owned** copies without changing the manifest or lock. Use
+`--dry-run` to inspect planned changes, `--offline` to prohibit network access,
+and `--locked` to prohibit lockfile changes.
+
+`install-skill` is distinct: the executable embeds this guide and installs it
+under its public name `prompt-squish`, without editing any project manifest or
+lock. `--project` selects the current workspace; `--manifest-path PATH` is
+available with `--project`. An identical bundled installation is idempotent;
+`--force` may replace only an unmodified prior bundled installation, never an
+unmanaged or user-edited directory. Skill names must match the `SKILL.md`
+frontmatter and destination directory. xmlsquish copies the complete tree, does
+not execute scripts, and refuses to overwrite unmanaged or locally modified
+skill directories. Verify third-party content before enabling it: a lock digest
+is integrity evidence, not a trust or safety certificate.
 
 ## `xmlsquish.toml` quick reference
 
@@ -64,7 +81,7 @@ common = { path = "packages/common" }
 
 [package]
 name = "agent-prompts"
-version = "1.0.4"
+version = "1.1.0"
 dialect = "xmlsquish/1"             # optional default
 source-root = "src"                 # optional default
 
@@ -74,6 +91,10 @@ local = { path = "../local", package = "real-name" }
 kit = { git = "https://example.com/kit.git", tag = "v2" } # tag|branch|rev
 base = "^2"                         # default registry shorthand
 corp = { version = "~1.4", registry = "corp", default-features = false, features = ["chat"], optional = true }
+
+[skills]                            # workspace root only; separate from XML dependencies
+review-checks = { path = "tools/skills/review-checks" }
+release-notes = { git = "https://example.com/skills.git", tag = "v2", subdir = "release-notes" }
 
 [exports]                            # public modules for pkg: imports
 macros = "src/macros.xml"
@@ -103,7 +124,7 @@ args = { locale = "zh-CN" }
 features = ["release"]
 ```
 
-Unknown keys are errors. Names use ASCII letters, digits, `-`, or `_`. Paths are manifest-relative and may not escape their owning roots; outputs must end in `.prompt`. A dependency may additionally use `package`, `optional`, `features`, and `default-features`. Consumers import only declared exports of direct dependencies:
+Unknown keys are errors. XML package names use ASCII letters, digits, `-`, or `_`; Agent Skill names instead use lowercase ASCII letters, digits, and interior hyphens, with a maximum of 64 characters. Paths are manifest-relative and may not escape their owning roots; outputs must end in `.prompt`. A dependency may additionally use `package`, `optional`, `features`, and `default-features`. Consumers import only declared exports of direct dependencies:
 
 ```xml
 <xs:import src="pkg:common/macros"/>
@@ -111,7 +132,7 @@ Unknown keys are errors. Names use ASCII letters, digits, `-`, or `_`. Paths are
 
 Published locators are stable, readable paths below `workspace.target-dir/artifacts` (for example `target/xmlsquish/artifacts/chat.prompt`). Treat the returned locator as one complete project-relative path. Never depend on manager-private hashes, generations, journals, or storage paths.
 
-The complete project-local derived layout is `<target-dir>/{artifacts,cache,metadata,work}`. `cache` contains CAS, the action index, and dependency sources; `metadata` contains rebuildable publication/catalog evidence; `work` is non-authoritative staging. There is no machine-global build cache and v1.0.4 does not import the old layout.
+The complete project-local derived layout is `<target-dir>/{artifacts,cache,metadata,work}`. `cache` contains CAS, the action index, and dependency sources; `metadata` contains rebuildable publication/catalog evidence; `work` is non-authoritative staging. There is no machine-global build cache. Since v1.0.4, xmlsquish does not import the old layout.
 
 Operational configuration is separate from the package manifest. Put it in `$XMLSQUISH_HOME/config.toml` or workspace `.xmlsquish/config.toml`; environment and repeated `--config KEY=TOML_VALUE` override files.
 
