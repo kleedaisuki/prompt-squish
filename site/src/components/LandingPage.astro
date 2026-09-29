@@ -81,18 +81,14 @@ const pipelineArtifacts = demo.artifacts.filter((item) => item.kind !== "source"
 
   <section id="project-state" class="state-story" aria-labelledby="state-title">
     <div class="page-width state-grid">
-      <div><p class="eyebrow">v1.0.4 · PROJECT-OWNED STATE</p><h2 id="state-title">{locale === "zh-CN" ? "缓存属于项目，不属于机器。" : "The cache belongs to the project—not the machine."}</h2><p>{locale === "zh-CN" ? "默认构建根 target/xmlsquish 现在同时容纳稳定产品、可重建缓存与编译元数据。复制或删除项目时，xmlsquish 状态不会隐身在用户级全局目录。" : "The default build root, target/xmlsquish, now contains stable products, rebuildable caches, and compiler metadata together. Copying or deleting a project no longer leaves xmlsquish state hidden in a user-level global directory."}</p><a class="text-link" href={`${paths[locale].releases}${latestRelease.version}/`}>{locale === "zh-CN" ? "阅读 1.0.4 升级边界" : "Read the 1.0.4 upgrade boundary"}<span aria-hidden="true"> →</span></a></div>
-      <pre aria-label={locale === "zh-CN" ? "项目构建目录" : "Project build directory"}><code>{`target/xmlsquish/
-├── artifacts/          *.prompt · IR · debug
-├── cache/
-│   ├── sources/
-│   ├── cas/
-│   └── actions.sqlite3
-├── metadata/
-│   ├── layout.json
-│   ├── publications/
-│   └── catalog/
-└── work/`}</code></pre>
+      <div><p class="eyebrow">v1.1.0 · AGENT SKILLS</p><h2 id="state-title">{locale === "zh-CN" ? "让 Agent Skills 也成为可审计的项目依赖。" : "Make Agent Skills auditable project dependencies."}</h2><p>{locale === "zh-CN" ? "在工作区根清单声明本地或 Git skill，在锁文件中固定完整内容，再安全地同步到 .agents/skills。内置的 prompt-squish 指南也能一条命令安装。" : "Declare local or Git skills in the workspace-root manifest, pin their complete trees in the lockfile, and safely reconcile copies into .agents/skills. The bundled prompt-squish guide installs with one command, too."}</p><a class="text-link" href={`${paths[locale].namespace.replace(/\/$/, "")}/skill-dependencies/`}>{locale === "zh-CN" ? "阅读 Agent Skills 用户指南" : "Read the Agent Skills guide"}<span aria-hidden="true"> →</span></a></div>
+      <pre aria-label={locale === "zh-CN" ? "Skill 依赖工作流" : "Skill dependency workflow"}><code>{`xmlsquish.toml      [skills]
+       ↓                declare
+xmlsquish.lock      [[skill]] + BLAKE3
+       ↓                sync-skills
+.agents/skills/    review-checks/
+
+$ xmlsquish install-skill --project`}</code></pre>
     </div>
   </section>
 

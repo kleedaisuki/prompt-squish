@@ -36,7 +36,7 @@ export type DirectiveGroup = (typeof directives)[number]["group"];
  * 桌面与移动导航共用的稳定手册章节。
  */
 export const manualChapters = [
-  "getting-started", "source-model", "composition", "control-and-scope", "build-and-artifacts", "reference", "limits-and-invariants",
+  "getting-started", "source-model", "composition", "control-and-scope", "build-and-artifacts", "skill-dependencies", "reference", "limits-and-invariants",
 ] as const;
 export type ManualChapter = (typeof manualChapters)[number];
 

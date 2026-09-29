@@ -25,6 +25,18 @@
     <xhtml:link rel="alternate" hreflang="x-default" href="https://xmlsquish.moesegfault.dev/releases/" />
   </url>
   <url>
+    <loc>https://xmlsquish.moesegfault.dev/releases/1.1.0/</loc>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://xmlsquish.moesegfault.dev/releases/1.1.0/" />
+    <xhtml:link rel="alternate" hreflang="en" href="https://xmlsquish.moesegfault.dev/en/releases/1.1.0/" />
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://xmlsquish.moesegfault.dev/releases/1.1.0/" />
+  </url>
+  <url>
+    <loc>https://xmlsquish.moesegfault.dev/en/releases/1.1.0/</loc>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://xmlsquish.moesegfault.dev/releases/1.1.0/" />
+    <xhtml:link rel="alternate" hreflang="en" href="https://xmlsquish.moesegfault.dev/en/releases/1.1.0/" />
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://xmlsquish.moesegfault.dev/releases/1.1.0/" />
+  </url>
+  <url>
     <loc>https://xmlsquish.moesegfault.dev/releases/1.0.4/</loc>
     <xhtml:link rel="alternate" hreflang="zh-CN" href="https://xmlsquish.moesegfault.dev/releases/1.0.4/" />
     <xhtml:link rel="alternate" hreflang="en" href="https://xmlsquish.moesegfault.dev/en/releases/1.0.4/" />
@@ -167,6 +179,18 @@
     <xhtml:link rel="alternate" hreflang="zh-CN" href="https://xmlsquish.moesegfault.dev/ns/build-and-artifacts/" />
     <xhtml:link rel="alternate" hreflang="en" href="https://xmlsquish.moesegfault.dev/en/ns/build-and-artifacts/" />
     <xhtml:link rel="alternate" hreflang="x-default" href="https://xmlsquish.moesegfault.dev/ns/build-and-artifacts/" />
+  </url>
+  <url>
+    <loc>https://xmlsquish.moesegfault.dev/ns/skill-dependencies/</loc>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://xmlsquish.moesegfault.dev/ns/skill-dependencies/" />
+    <xhtml:link rel="alternate" hreflang="en" href="https://xmlsquish.moesegfault.dev/en/ns/skill-dependencies/" />
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://xmlsquish.moesegfault.dev/ns/skill-dependencies/" />
+  </url>
+  <url>
+    <loc>https://xmlsquish.moesegfault.dev/en/ns/skill-dependencies/</loc>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://xmlsquish.moesegfault.dev/ns/skill-dependencies/" />
+    <xhtml:link rel="alternate" hreflang="en" href="https://xmlsquish.moesegfault.dev/en/ns/skill-dependencies/" />
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://xmlsquish.moesegfault.dev/ns/skill-dependencies/" />
   </url>
   <url>
     <loc>https://xmlsquish.moesegfault.dev/ns/reference/</loc>

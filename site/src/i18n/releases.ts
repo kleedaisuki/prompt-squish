@@ -90,6 +90,18 @@ const en: ReleaseUiCopy = {
     allReleases: "All releases",
   },
   versions: {
+    "1.1.0": {
+      title: "Agent Skills become locked project dependencies",
+      description: "xmlsquish 1.1.0 manages Agent Skills in .agents/skills and adds a bundled guide installer, with machine protocol 3.2.",
+      date: "September 29, 2026",
+      summary: "Declare local or Git skills in the workspace-root manifest, pin complete bundles in the lockfile, and reconcile safe, agent-visible copies in .agents/skills. The bundled prompt-squish guide can also be installed independently.",
+      changes: [
+        { id: "skill-model", title: "Skills are first-class dependencies", items: ["A workspace-root [skills] table accepts an exact local directory or Git repository with an optional rev, tag, branch, and subdir; skills remain separate from XML package dependencies.", "xmlsquish.lock records each selected source, exact Git revision where applicable, and a BLAKE3 digest of the complete skill tree, not just SKILL.md.", "Legacy manifests and lockfiles without skills remain readable; XML package operations preserve skill pins."] },
+        { id: "skill-lifecycle", title: "A complete skill lifecycle", items: ["add-skill and remove-skill manage one declared skill; sync-skills restores missing managed copies and reconciles the declared set after checkout or interruption.", "install-skill installs xmlsquish's bundled prompt-squish guide to the user directory by default or to the workspace with --project, without modifying the project manifest or lockfile.", "The familiar --dry-run, --locked, --offline, and --frozen modes apply to project skill operations."] },
+        { id: "skill-safety", title: "Ownership and recovery", items: ["The projection at .agents/skills/<name> is a copied, managed tree; unowned or user-edited directories are not overwritten or removed.", "Acquisition validates SKILL.md identity and complete-tree paths and rejects unsafe links and collisions; no skill script is executed during installation.", "Recoverable publication and reconciliation keep the manifest, lockfile, and installed projection aligned after interrupted operations."] },
+      ],
+      compatibility: ["Machine protocol 3.2 adds typed skill operations and results; existing XML DSL, artifact locators, and exit-code meanings remain unchanged.", "Existing projects need no migration unless they declare [skills]; a skill is not an XML package and does not participate in imports or builds.", "Review a third-party skill before adding it: a digest establishes byte integrity, not the trustworthiness of its instructions or scripts."],
+    },
     "1.0.4": {
       title: "Project-owned build state",
       description: "xmlsquish 1.0.4 puts products, compiler metadata, dependency sources, and rebuild caches inside the configured project target directory.",
@@ -204,6 +216,18 @@ const zh: ReleaseUiCopy = {
     allReleases: "全部发布",
   },
   versions: {
+    "1.1.0": {
+      title: "Agent Skills 成为可锁定的项目依赖",
+      description: "xmlsquish 1.1.0 管理 .agents/skills 中的 Agent Skills，提供内置指南安装命令，并将机器协议升级至 3.2。",
+      date: "2026 年 9 月 29 日",
+      summary: "在工作区根清单中声明本地或 Git skill，在锁文件中固定完整内容，并安全地同步到 .agents/skills；也可独立安装随程序提供的 prompt-squish 指南。",
+      changes: [
+        { id: "skill-model", title: "Skill 成为一等依赖", items: ["工作区根的 [skills] 表接受精确的本地目录或 Git 仓库，可选 rev、tag、branch 和 subdir；skill 与 XML 包依赖严格分离。", "xmlsquish.lock 记录来源、适用时的精确 Git 修订，以及完整 skill 目录树的 BLAKE3 摘要，而非仅锁定 SKILL.md。", "不含 skill 的旧清单和锁文件继续可读；XML 包操作会保留 skill 锁定记录。"] },
+        { id: "skill-lifecycle", title: "完整的 Skill 生命周期", items: ["add-skill 与 remove-skill 管理声明项；sync-skills 可在检出或中断后修复缺失的受管理副本并同步声明集合。", "install-skill 默认把程序内置的 prompt-squish 指南安装到用户目录，--project 可改为当前工作区；它不改动项目清单或锁文件。", "项目 skill 操作沿用 --dry-run、--locked、--offline 与 --frozen 模式。"] },
+        { id: "skill-safety", title: "所有权与恢复", items: [".agents/skills/<name> 是复制出的受管理目录；不覆盖或删除未受管理、或已经由用户修改的目录。", "获取时检查 SKILL.md 身份和完整目录树路径，拒绝不安全链接与名称冲突；安装过程不会执行 skill 脚本。", "可恢复的发布与同步机制使清单、锁文件和已安装目录在中断后重新一致。"] },
+      ],
+      compatibility: ["机器协议 3.2 增加有类型的 skill 操作与结果；现有 XML DSL、产物定位符及退出码含义不变。", "既有项目无需迁移，除非主动声明 [skills]；skill 不是 XML 包，也不会参与导入或构建。", "添加第三方 skill 前请审阅其内容：摘要证明字节完整性，不证明指令或脚本值得信任。"],
+    },
     "1.0.4": {
       title: "构建状态归项目所有",
       description: "xmlsquish 1.0.4 将产品、编译元数据、依赖源码与重建缓存统一放入配置的项目 target 目录。",

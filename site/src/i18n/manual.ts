@@ -17,8 +17,8 @@ type ManualMessages = {
 };
 
 const en: ManualMessages = {
-  title: "xmlsquish DSL user manual", description: "Learn the xmlsquish XML DSL: project roots, imports, macros, values, content slots, control flow, builds, artifacts, and all eleven directives.",
-  eyebrow: "DSL user manual", heading: "Compose structured prompts with a small XML language.", lead: "Start with a working entry, split reusable behavior into modules, then build deterministic .prompt artifacts. This guide follows the tasks you perform—not the compiler internals.",
+  title: "xmlsquish user manual", description: "Learn the xmlsquish XML DSL, project builds and artifacts, and Agent Skills dependency management.",
+  eyebrow: "XML DSL & project guide", heading: "Compose structured prompts with a small XML language.", lead: "Start with a working entry, split reusable behavior into modules, and build deterministic .prompt artifacts. Then manage Agent Skills as separate project dependencies. This guide follows your tasks—not compiler internals.",
   status: "Stable, unversioned identity", uriLabel: "Exact XML namespace URI", copy: "Copy URI", copied: "URI copied", denied: "Clipboard unavailable; the URI is selected for manual copy.",
   onThisPage: "Manual chapters", jump: "Jump to a chapter", filter: "Filter directives", searchPlaceholder: "Name, attribute, or purpose…", empty: "No directives match.",
   chapters: {
@@ -27,6 +27,7 @@ const en: ManualMessages = {
     composition: { nav: "Macros & expansion", title: "Define contracts, then expand them", intro: "Macros have namespace-qualified names and explicit parameters. Expansion resolves a fixed target and creates an isolated invocation frame." },
     "control-and-scope": { nav: "Control & scope", title: "Match strings without leaking scope", intro: "xs:ifr provides regular-expression matching and lexical named captures. Scalar and XML content remain separate throughout evaluation." },
     "build-and-artifacts": { nav: "Build & artifacts", title: "Build through a frozen source closure", intro: "The manager resolves imports, validates the whole project, lowers canonical XSIR, links symbols, and publishes inspectable artifacts." },
+    "skill-dependencies": { nav: "Agent Skills", title: "Manage Agent Skills as project dependencies", intro: "Declare a local or Git skill at the workspace root, lock its complete tree, and reconcile a safe copy into .agents/skills. These instructions do not change the XML language." },
     reference: { nav: "Directive reference", title: "All eleven directives", intro: "Use the filter as a shortcut. Every contract remains present in the HTML and addressable by a stable fragment." },
     "limits-and-invariants": { nav: "Limits & invariants", title: "Know the boundaries that keep builds predictable", intro: "Recursive programs run within explicit budgets, while stable identity and language invariants keep projects auditable." },
   },
@@ -61,8 +62,8 @@ const en: ManualMessages = {
 };
 
 const zh: ManualMessages = {
-  title: "xmlsquish DSL 用户手册", description: "学习 xmlsquish XML DSL：项目根、导入、宏、值、内容槽、控制流、构建、产物与全部十一条指令。",
-  eyebrow: "DSL 用户手册", heading: "用一门小型 XML 语言组合结构化提示词。", lead: "先写一个可工作的 entry，再把复用逻辑拆进 module，最终构建确定性的 .prompt 产物。本手册按用户任务组织，而不是照搬编译器内部设计。",
+  title: "xmlsquish 用户手册", description: "学习 xmlsquish XML DSL、项目构建与产物，以及 Agent Skills 依赖管理。",
+  eyebrow: "XML DSL 与项目指南", heading: "用一门小型 XML 语言组合结构化提示词。", lead: "先写一个可工作的 entry，再把复用逻辑拆进 module，构建确定性的 .prompt 产物；随后把 Agent Skills 作为独立的项目依赖管理。本手册按用户任务组织，而不是照搬编译器内部设计。",
   status: "稳定、无版本号的身份", uriLabel: "精确 XML 命名空间 URI", copy: "复制 URI", copied: "URI 已复制", denied: "无法访问剪贴板；URI 已选中，请手动复制。",
   onThisPage: "手册章节", jump: "跳转到章节", filter: "筛选指令", searchPlaceholder: "名称、属性或用途…", empty: "没有匹配的指令。",
   chapters: {
@@ -71,6 +72,7 @@ const zh: ManualMessages = {
     composition: { nav: "宏、参数与展开", title: "先定义契约，再执行展开", intro: "宏拥有命名空间限定名称与显式参数。展开解析固定目标，并创建隔离的调用帧。" },
     "control-and-scope": { nav: "控制与作用域", title: "匹配字符串而不泄漏作用域", intro: "xs:ifr 提供正则匹配与词法命名捕获；标量与 XML 内容在整个求值过程中保持分离。" },
     "build-and-artifacts": { nav: "构建与产物", title: "基于冻结的源码闭包构建", intro: "管理器解析导入、验证完整项目、降低为规范 XSIR、链接符号并发布可检查产物。" },
+    "skill-dependencies": { nav: "Agent Skills", title: "将 Agent Skills 作为项目依赖管理", intro: "在工作区根声明本地或 Git skill，锁定完整目录树，再安全地同步到 .agents/skills；这些指令不会改变 XML 语言。" },
     reference: { nav: "指令参考", title: "全部十一条指令", intro: "筛选框只是快捷入口；每条契约都完整存在于 HTML 中，并拥有稳定片段链接。" },
     "limits-and-invariants": { nav: "限制与不变量", title: "理解让构建保持可预测的边界", intro: "递归程序在显式预算内运行，稳定身份与语言不变量则让项目保持可审计。" },
   },
