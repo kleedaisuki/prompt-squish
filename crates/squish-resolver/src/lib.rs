@@ -1424,6 +1424,7 @@ mod tests {
             }),
             targets: BTreeMap::new(),
             dependencies,
+            skills: BTreeMap::new(),
             exports: BTreeMap::new(),
             profiles: BTreeMap::new(),
         }
