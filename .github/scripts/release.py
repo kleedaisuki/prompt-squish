@@ -1,11 +1,11 @@
 """Package native binaries and publish a complete matrix. / 原生二进制打包及完整矩阵发布。
 
 Run from the checkout parent: / 从检出目录的父目录运行：
-    RELEASE_TAG=v1.0.4 RELEASE_TARGET=x86_64-unknown-linux-gnu \
+    RELEASE_TAG=v1.1.0 RELEASE_TARGET=x86_64-unknown-linux-gnu \
       python automation/.github/scripts/release.py package source dist
 
 Version-contract check: / 版本契约检查：
-    python .github/scripts/release.py verify . v1.0.4
+    python .github/scripts/release.py verify . v1.1.0
 """
 
 import hashlib
@@ -30,7 +30,10 @@ TARGETS = (
     "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc",
     "x86_64-apple-darwin", "aarch64-apple-darwin",
 )
-COMMANDS = ("new", "build", "clean", "fmt", "add", "remove", "inspect")
+COMMANDS = (
+    "new", "build", "clean", "fmt", "add", "remove", "inspect",
+    "add-skill", "remove-skill", "sync-skills", "install-skill",
+)
 STABLE_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 
 
@@ -175,6 +178,25 @@ def package(source, dist, tag):
             raise ValueError("native new --vcs=none smoke test created Git state")
         if (project / "xmlsquish.lock").exists():
             raise ValueError("native new smoke test unexpectedly created a lockfile")
+        # Released binaries must carry the bundled guide and reconcile real skills.
+        # 发布二进制必须内置指南，并能维护真实的技能依赖。
+        skill = project / "tools" / "skills" / "release-check"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: release-check\ndescription: Check a release build.\n---\n\n# Release check\n",
+            encoding="utf-8",
+        )
+        run(str(binary), "add-skill", "release-check", "--path", "tools/skills/release-check", cwd=project)
+        installed = project / ".agents" / "skills" / "release-check"
+        if not (installed / "SKILL.md").is_file():
+            raise ValueError("native add-skill omitted its managed projection")
+        run(str(binary), "sync-skills", "--frozen", cwd=project)
+        run(str(binary), "install-skill", "--project", cwd=project)
+        if not (project / ".agents" / "skills" / "prompt-squish" / "SKILL.md").is_file():
+            raise ValueError("native install-skill omitted the bundled guide")
+        run(str(binary), "remove-skill", "release-check", cwd=project)
+        if installed.exists():
+            raise ValueError("native remove-skill retained its managed projection")
         run(str(binary), "fmt", "--check", "--plain", cwd=project)
         source_file = project / "src" / "prompt.xml"
         source_file.write_text(
