@@ -14,8 +14,9 @@ use squish_manager::{
 };
 use squish_project::{LOCK_VERSION, Lockfile, ResolutionMode};
 use squish_protocol::{
-    AddSkillRequest, Event, InstallSkillRequest, InvocationId, LockMode, OperationRequest,
-    OperationResult, ProjectPath, RemoveSkillRequest, SkillName, SkillSource, SyncSkillsRequest,
+    AddSkillRequest, Event, EventPayload, InstallSkillRequest, InvocationId, LockMode,
+    OperationRequest, OperationResult, ProjectPath, RemoveSkillRequest, SkillName, SkillSource,
+    SyncSkillsRequest,
 };
 use tempfile::{Builder, TempDir};
 
@@ -23,7 +24,13 @@ use tempfile::{Builder, TempDir};
 struct Sink;
 
 impl EventSink for Sink {
-    fn emit(&self, _: Event) -> Result<(), SinkError> {
+    fn emit(&self, event: Event) -> Result<(), SinkError> {
+        if matches!(
+            &event.payload,
+            EventPayload::PlanningStepFailed { .. } | EventPayload::PlanningFailed { .. }
+        ) {
+            eprintln!("skill manager planning failure: {:?}", event.payload);
+        }
         Ok(())
     }
 }
@@ -388,4 +395,47 @@ fn sync_prunes_only_stale_dependency_projection() {
             .join(".agents/skills/prompt-squish/SKILL.md")
             .exists()
     );
+}
+
+#[test]
+fn sync_detects_mutated_local_source_in_every_mode_even_when_projection_matches() {
+    let temp = project();
+    skill_source(temp.path());
+    let manager = ManagerCapability::new(LocalServices, InvocationSettings::default());
+    let add = manager.execute(
+        &OperationRequest::AddSkill(add_request(temp.path(), false)),
+        &context(),
+    );
+    assert!(
+        matches!(add.result, OperationResult::AddSkill(_)),
+        "{add:?}"
+    );
+
+    let lock_path = temp.path().join("xmlsquish.lock");
+    let installed_path = temp.path().join(".agents/skills/review/notes.txt");
+    let lock_before = fs::read(&lock_path).unwrap();
+    let installed_before = fs::read(&installed_path).unwrap();
+    fs::write(temp.path().join("skill-src/notes.txt"), b"changed source").unwrap();
+
+    for mode in [
+        LockMode::Update,
+        LockMode::Offline,
+        LockMode::Locked,
+        LockMode::Frozen,
+    ] {
+        let outcome = manager.execute(
+            &OperationRequest::SyncSkills(SyncSkillsRequest {
+                project: project_path(temp.path()),
+                lock: mode,
+                dry_run: false,
+            }),
+            &context(),
+        );
+        assert!(
+            matches!(outcome.result, OperationResult::Unavailable { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&lock_path).unwrap(), lock_before);
+        assert_eq!(fs::read(&installed_path).unwrap(), installed_before);
+    }
 }

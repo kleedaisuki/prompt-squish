@@ -507,6 +507,11 @@ fn reject_source_aliases(path: &Path) -> Result<(), ManagerError> {
     let mut ancestor = PathBuf::new();
     for part in path.components() {
         ancestor.push(part.as_os_str());
+        // A Windows drive/UNC prefix alone is not a filesystem entry. Probe only after
+        // RootDir has completed an absolute path, otherwise `C:` means drive-relative cwd.
+        if matches!(part, Component::Prefix(_)) || !ancestor.is_absolute() {
+            continue;
+        }
         let metadata = fs::symlink_metadata(&ancestor).map_err(|e| {
             error(
                 "XS3305",
@@ -1095,6 +1100,7 @@ fn publish_bundle(destination: &Path, force: bool) -> Result<(), ManagerError> {
     let lock = fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&lock_path)
         .map_err(|e| error("XS3322", Phase::Publish, "could not open install lock", e))?;
     lock.lock_exclusive()
@@ -1279,7 +1285,21 @@ pub(crate) fn sync(
     durability: &DurabilityPorts,
     context: &InvocationContext,
 ) -> OperationOutcome {
-    sync_attempt(request, services, settings, durability, context, 0, 0, 0)
+    sync_attempt(
+        request,
+        services,
+        settings,
+        durability,
+        context,
+        SyncAttemptState::default(),
+    )
+}
+
+#[derive(Clone, Copy, Default)]
+struct SyncAttemptState {
+    index: u8,
+    installed: u64,
+    removed: u64,
 }
 
 fn sync_attempt(
@@ -1288,14 +1308,12 @@ fn sync_attempt(
     settings: &InvocationSettings,
     durability: &DurabilityPorts,
     context: &InvocationContext,
-    attempt_index: u8,
-    installed_before: u64,
-    removed_before: u64,
+    attempt_state: SyncAttemptState,
 ) -> OperationOutcome {
     let job = job(context, "sync-skills");
     let kind = OperationKind::SyncSkills;
     let attempt =
-        PlanningAttemptId::new(format!("sync-skills-attempt-{}", attempt_index + 1)).unwrap();
+        PlanningAttemptId::new(format!("sync-skills-attempt-{}", attempt_state.index + 1)).unwrap();
     let mut recorder = match PlanningRecorder::start(job.clone(), attempt, context) {
         Ok(v) => v,
         Err(_) => return unavailable(job, kind, context.is_cancelled()),
@@ -1345,10 +1363,10 @@ fn sync_attempt(
         Err(f) => return unavailable_for_failure(job, kind, &f),
     };
     let result = SyncSkillsResult {
-        installed: installed_before + work.pending.len() as u64,
+        installed: attempt_state.installed + work.pending.len() as u64,
         updated: 0,
-        removed: removed_before + work.stale.len() as u64,
-        unchanged: work.unchanged.saturating_sub(installed_before),
+        removed: attempt_state.removed + work.stale.len() as u64,
+        unchanged: work.unchanged.saturating_sub(attempt_state.installed),
         dry_run: request.dry_run,
     };
     let expected_manifest_digest = snapshot
@@ -1370,7 +1388,7 @@ fn sync_attempt(
         Err(_) => return unavailable(job, kind, context.is_cancelled()),
     };
     if report.superseded == Some(SupersedeReason::AuthoritativeRevisionChanged) {
-        if attempt_index < RETRIES {
+        if attempt_state.index < RETRIES {
             let (installed, removed) = *executor.progress.lock().unwrap();
             return sync_attempt(
                 request,
@@ -1378,9 +1396,11 @@ fn sync_attempt(
                 settings,
                 durability,
                 context,
-                attempt_index + 1,
-                installed_before + installed,
-                removed_before + removed,
+                SyncAttemptState {
+                    index: attempt_state.index + 1,
+                    installed: attempt_state.installed + installed,
+                    removed: attempt_state.removed + removed,
+                },
             );
         }
         let exhausted = PlanningAttemptId::new("sync-skills-retry-exhausted").unwrap();
@@ -1507,22 +1527,24 @@ fn prepare_sync(
                 format!("skill `{name}` source differs from lock"),
             ));
         }
-        match repo
+        let installed = repo
             .skill_directory_digest(name)
-            .map_err(|e| error("XS3332", Phase::Manage, "unsafe installed skill", e))?
+            .map_err(|e| error("XS3332", Phase::Manage, "unsafe installed skill", e))?;
+        if installed
+            .as_deref()
+            .is_some_and(|actual| actual != locked.digest.as_str())
         {
-            Some(actual) if actual == locked.digest => {
-                unchanged += 1;
-                continue;
-            }
-            Some(_) => {
-                return Err(ManagerError::new(
-                    "XS3332",
-                    Phase::Manage,
-                    format!("installed skill `{name}` differs from its locked content"),
-                ));
-            }
-            None => {}
+            return Err(ManagerError::new(
+                "XS3332",
+                Phase::Manage,
+                format!("installed skill `{name}` differs from its locked content"),
+            ));
+        }
+        // Sync never edits the lock, so a live path must still reproduce its exact snapshot.
+        let verify_local_drift = matches!(&locked.source, LockedSkillSource::Path { .. });
+        if installed.is_some() && !verify_local_drift {
+            unchanged += 1;
+            continue;
         }
         let source = source_from_spec(spec)?;
         let pinned = match &locked.source {
@@ -1546,6 +1568,10 @@ fn prepare_sync(
                 Phase::Resolve,
                 format!("source for skill `{name}` differs from the exact lock"),
             ));
+        }
+        if installed.is_some() {
+            unchanged += 1;
+            continue;
         }
         let mut files = resolved.files;
         files.insert(PathBuf::from(MARKER), skill_marker(name, &digest));
@@ -1804,5 +1830,24 @@ mod tests {
             "x".repeat(1025)
         );
         assert!(validate_frontmatter("review", large.as_bytes()).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn absolute_drive_prefix_is_not_probed_as_a_directory_entry() {
+        use std::{fs, path::PathBuf};
+
+        let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(".temp");
+        fs::create_dir_all(&scratch).unwrap();
+        let temp = tempfile::Builder::new()
+            .prefix("manager-skill-drive-")
+            .tempdir_in(scratch)
+            .unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        assert!(source.is_absolute());
+        super::reject_source_aliases(&source).unwrap();
     }
 }
