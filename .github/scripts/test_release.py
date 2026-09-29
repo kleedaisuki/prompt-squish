@@ -18,6 +18,14 @@ TEST_ROOT.mkdir(parents=True, exist_ok=True)
 class ReleaseMetadataTests(unittest.TestCase):
     """Exercise repository and mismatch contracts. / 验证仓库与版本失配契约。"""
 
+    def test_skill_smoke_is_version_gated(self) -> None:
+        """Historical tags keep their original public CLI contract."""
+        self.assertEqual(release.commands_for("1.0.4"), release.BASE_COMMANDS)
+        self.assertEqual(
+            release.commands_for("1.1.0"),
+            release.BASE_COMMANDS + release.SKILL_COMMANDS,
+        )
+
     def write_fixture(self, root: Path, *, manifest="1.1.0", lock="1.1.0") -> None:
         """Create the smallest complete release tree. / 创建最小完整发布树。"""
         (root / "docs" / "releases").mkdir(parents=True)

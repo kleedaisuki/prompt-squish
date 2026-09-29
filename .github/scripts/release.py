@@ -30,11 +30,16 @@ TARGETS = (
     "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc",
     "x86_64-apple-darwin", "aarch64-apple-darwin",
 )
-COMMANDS = (
-    "new", "build", "clean", "fmt", "add", "remove", "inspect",
-    "add-skill", "remove-skill", "sync-skills", "install-skill",
-)
+BASE_COMMANDS = ("new", "build", "clean", "fmt", "add", "remove", "inspect")
+SKILL_COMMANDS = ("add-skill", "remove-skill", "sync-skills", "install-skill")
 STABLE_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+
+
+def commands_for(version):
+    """Preserve historical release CLIs while checking new public commands."""
+    if tuple(map(int, version.split("."))) >= (1, 1, 0):
+        return BASE_COMMANDS + SKILL_COMMANDS
+    return BASE_COMMANDS
 
 
 def run(*args, cwd=None):
@@ -147,6 +152,27 @@ def third_party_licenses(root, metadata):
         shutil.copyfile(rust_docs / name, rust_destination / name)
 
 
+def smoke_skills(binary, project):
+    """Verify the v1.1+ skill lifecycle using only staged project files."""
+    skill = project / "tools" / "skills" / "release-check"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: release-check\ndescription: Check a release build.\n---\n\n# Release check\n",
+        encoding="utf-8",
+    )
+    run(str(binary), "add-skill", "release-check", "--path", "tools/skills/release-check", cwd=project)
+    installed = project / ".agents" / "skills" / "release-check"
+    if not (installed / "SKILL.md").is_file():
+        raise ValueError("native add-skill omitted its managed projection")
+    run(str(binary), "sync-skills", "--frozen", cwd=project)
+    run(str(binary), "install-skill", "--project", cwd=project)
+    if not (project / ".agents" / "skills" / "prompt-squish" / "SKILL.md").is_file():
+        raise ValueError("native install-skill omitted the bundled guide")
+    run(str(binary), "remove-skill", "release-check", cwd=project)
+    if installed.exists():
+        raise ValueError("native remove-skill retained its managed projection")
+
+
 def package(source, dist, tag):
     """Smoke-test the native binary before packaging. / 原生执行验证后才允许打包。"""
     target = os.environ["RELEASE_TARGET"]
@@ -164,7 +190,7 @@ def package(source, dist, tag):
     with tempfile.TemporaryDirectory() as directory:
         staging = Path(directory)
         help_text = run(str(binary))
-        for command in COMMANDS:
+        for command in commands_for(version):
             if not re.search(rf"^  {command}\s", help_text, re.MULTILINE):
                 raise ValueError(f"binary help omits direct command: {command}")
             run(str(binary), command, "--help")
@@ -178,25 +204,8 @@ def package(source, dist, tag):
             raise ValueError("native new --vcs=none smoke test created Git state")
         if (project / "xmlsquish.lock").exists():
             raise ValueError("native new smoke test unexpectedly created a lockfile")
-        # Released binaries must carry the bundled guide and reconcile real skills.
-        # 发布二进制必须内置指南，并能维护真实的技能依赖。
-        skill = project / "tools" / "skills" / "release-check"
-        skill.mkdir(parents=True)
-        (skill / "SKILL.md").write_text(
-            "---\nname: release-check\ndescription: Check a release build.\n---\n\n# Release check\n",
-            encoding="utf-8",
-        )
-        run(str(binary), "add-skill", "release-check", "--path", "tools/skills/release-check", cwd=project)
-        installed = project / ".agents" / "skills" / "release-check"
-        if not (installed / "SKILL.md").is_file():
-            raise ValueError("native add-skill omitted its managed projection")
-        run(str(binary), "sync-skills", "--frozen", cwd=project)
-        run(str(binary), "install-skill", "--project", cwd=project)
-        if not (project / ".agents" / "skills" / "prompt-squish" / "SKILL.md").is_file():
-            raise ValueError("native install-skill omitted the bundled guide")
-        run(str(binary), "remove-skill", "release-check", cwd=project)
-        if installed.exists():
-            raise ValueError("native remove-skill retained its managed projection")
+        if tuple(map(int, version.split("."))) >= (1, 1, 0):
+            smoke_skills(binary, project)
         run(str(binary), "fmt", "--check", "--plain", cwd=project)
         source_file = project / "src" / "prompt.xml"
         source_file.write_text(
