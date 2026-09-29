@@ -11,7 +11,7 @@ use std::{
 };
 
 /// 当前协议版本。 / Current protocol version.
-pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion::new(3, 1);
+pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion::new(3, 2);
 
 /// 在过渡期内仍可解码的旧事件协议主版本。 / Legacy event-protocol major decoded during the compatibility window.
 pub const LEGACY_EVENT_MAJOR: u16 = 1;
@@ -122,6 +122,77 @@ string_id!(
 );
 string_id!(TargetName, "项目目标名。 / Project target name.");
 string_id!(DependencyName, "依赖别名。 / Dependency alias.");
+/// An Agent Skills-compatible directory and frontmatter name.
+///
+/// Names are 1–64 ASCII lowercase letters, digits, or hyphens. A hyphen may
+/// occur only between alphanumeric characters and may not repeat.
+///
+/// # Example
+///
+/// ```
+/// use squish_protocol::SkillName;
+/// let name = SkillName::new("code-review")?;
+/// assert_eq!(name.as_str(), "code-review");
+/// assert!(SkillName::new("Code_Review").is_err());
+/// # Ok::<(), squish_protocol::InvalidSkillName>(())
+/// ```
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SkillName(String);
+
+impl SkillName {
+    /// Validates an Agent Skills name without consulting the filesystem.
+    pub fn new(value: impl Into<String>) -> Result<Self, InvalidSkillName> {
+        let value = value.into();
+        let bytes = value.as_bytes();
+        if bytes.is_empty()
+            || bytes.len() > 64
+            || !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit()
+            || !bytes[bytes.len() - 1].is_ascii_lowercase()
+                && !bytes[bytes.len() - 1].is_ascii_digit()
+            || !bytes
+                .iter()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+            || bytes.windows(2).any(|pair| pair == b"--")
+        {
+            return Err(InvalidSkillName);
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the validated skill name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A skill name does not satisfy the Agent Skills naming grammar.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidSkillName;
+
+impl fmt::Display for InvalidSkillName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "skill name must be 1–64 lowercase ASCII letters, digits, or single interior hyphens",
+        )
+    }
+}
+
+impl std::error::Error for InvalidSkillName {}
+
+impl TryFrom<String> for SkillName {
+    type Error = InvalidSkillName;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<SkillName> for String {
+    fn from(value: SkillName) -> Self {
+        value.0
+    }
+}
 string_id!(PackageName, "工作区包名。 / Workspace package name.");
 string_id!(ProfileName, "构建配置名。 / Build profile name.");
 string_id!(ArgumentName, "入口参数名。 / Entry argument name.");
@@ -396,6 +467,14 @@ pub enum OperationKind {
     Add,
     /// 删除依赖。 / Remove dependency.
     Remove,
+    /// Add a project-managed Agent Skill.
+    AddSkill,
+    /// Remove a project-managed Agent Skill.
+    RemoveSkill,
+    /// Install xmlsquish's bundled Agent Skill for the user or project.
+    InstallSkill,
+    /// Reconcile project-managed Agent Skills with their locked projection.
+    SyncSkills,
     /// 查询。 / Inspect.
     Inspect,
     /// 清理项目构建产物和已确认失效的依赖缓存。 / Clean project build outputs and provably invalid dependency-cache entries.
@@ -416,6 +495,14 @@ pub enum OperationRequest {
     Add(AddRequest),
     /// 删除依赖。 / Remove dependency.
     Remove(RemoveRequest),
+    /// Add a project-managed Agent Skill.
+    AddSkill(AddSkillRequest),
+    /// Remove a project-managed Agent Skill.
+    RemoveSkill(RemoveSkillRequest),
+    /// Install xmlsquish's bundled Agent Skill.
+    InstallSkill(InstallSkillRequest),
+    /// Reconcile the managed skill projection.
+    SyncSkills(SyncSkillsRequest),
     /// 查询状态。 / Inspect state.
     Inspect(InspectRequest),
     /// 清理项目状态。 / Clean project state.
@@ -430,6 +517,10 @@ impl OperationRequest {
             Self::Format(_) => OperationKind::Format,
             Self::Add(_) => OperationKind::Add,
             Self::Remove(_) => OperationKind::Remove,
+            Self::AddSkill(_) => OperationKind::AddSkill,
+            Self::RemoveSkill(_) => OperationKind::RemoveSkill,
+            Self::InstallSkill(_) => OperationKind::InstallSkill,
+            Self::SyncSkills(_) => OperationKind::SyncSkills,
             Self::Inspect(_) => OperationKind::Inspect,
             Self::Clean(_) => OperationKind::Clean,
         }
@@ -443,6 +534,13 @@ impl OperationRequest {
             Self::Format(request) => OperationLocation::Existing(&request.project),
             Self::Add(request) => OperationLocation::Existing(&request.project),
             Self::Remove(request) => OperationLocation::Existing(&request.project),
+            Self::AddSkill(request) => OperationLocation::Existing(&request.project),
+            Self::RemoveSkill(request) => OperationLocation::Existing(&request.project),
+            Self::InstallSkill(request) => match &request.project {
+                Some(project) => OperationLocation::Existing(project),
+                None => OperationLocation::Global,
+            },
+            Self::SyncSkills(request) => OperationLocation::Existing(&request.project),
             Self::Inspect(request) => OperationLocation::Existing(&request.project),
             Self::Clean(request) => OperationLocation::Existing(&request.project),
         }
@@ -456,6 +554,8 @@ pub enum OperationLocation<'a> {
     Existing(&'a ProjectPath),
     /// 尚未存在且不得通过项目发现解释的目标。 / Prospective destination that must not be interpreted through project discovery.
     Prospective(&'a ProjectDestination),
+    /// No project discovery is needed for a user-global operation.
+    Global,
 }
 
 /// 创建操作请求。 / Project-creation request.
@@ -592,6 +692,8 @@ pub enum DependencySource {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "type", content = "value")]
 pub enum GitReference {
+    /// Repository default HEAD, resolved at lock update time.
+    Head,
     /// 不可变提交。 / Immutable revision.
     Revision(GitRevision),
     /// 分支。 / Branch.
@@ -651,6 +753,75 @@ pub struct RemoveRequest {
     /// 解析与网络策略。 / Resolution and network policy.
     pub lock: LockMode,
     /// 不提交事务。 / Does not commit the transaction.
+    pub dry_run: bool,
+}
+/// Source of a managed Agent Skill. A skill is a directory, not an XML package.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum SkillSource {
+    /// Local skill directory (containing `SKILL.md`).
+    Path {
+        /// User-provided path, resolved relative to the editing package.
+        path: ProjectPath,
+    },
+    /// Skill directory in a Git repository.
+    Git {
+        /// Repository URL.
+        repository: RepositoryUrl,
+        /// Mutable selector, pinned to an exact commit in the skill lock.
+        reference: GitReference,
+        /// Directory within the repository; absent selects the root.
+        subdir: Option<ProjectPath>,
+    },
+}
+
+/// Add or update a project-managed Agent Skill.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AddSkillRequest {
+    /// Project path or manifest selector.
+    pub project: ProjectPath,
+    /// Skill name and destination directory name.
+    pub skill: SkillName,
+    /// Local directory or Git source.
+    pub source: SkillSource,
+    /// Resolution and network policy.
+    pub lock: LockMode,
+    /// Validate and report without committing changes.
+    pub dry_run: bool,
+}
+
+/// Remove a project-managed Agent Skill.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RemoveSkillRequest {
+    /// Project path or manifest selector.
+    pub project: ProjectPath,
+    /// Skill name to remove.
+    pub skill: SkillName,
+    /// Resolution and network policy.
+    pub lock: LockMode,
+    /// Validate and report without committing changes.
+    pub dry_run: bool,
+}
+
+/// Install the bundled xmlsquish Agent Skill, independent of dependency state.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct InstallSkillRequest {
+    /// Project selector for `.agents/skills/prompt-squish`; absent installs to the user's Agent Skills directory.
+    pub project: Option<ProjectPath>,
+    /// Permit replacement of a differing prompt-squish-owned installation.
+    pub force: bool,
+    /// Validate and report without writing.
+    pub dry_run: bool,
+}
+
+/// Reconcile the entire workspace skill projection from manifest and lock.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SyncSkillsRequest {
+    /// Project path or manifest selector.
+    pub project: ProjectPath,
+    /// Resolution and network policy.
+    pub lock: LockMode,
+    /// Plan and validate without writing the projection.
     pub dry_run: bool,
 }
 /// 查询视图。 / Inspection view.
@@ -726,6 +897,29 @@ impl OperationEnvelope {
         if matches!(envelope.operation, OperationRequest::Clean(_)) && version.minor < 1 {
             return Err(DecodeError::OperationRequiresProtocolMinor {
                 required: 1,
+                received: version.minor,
+            });
+        }
+        if version.minor < 2
+            && (matches!(
+                envelope.operation,
+                OperationRequest::AddSkill(_)
+                    | OperationRequest::RemoveSkill(_)
+                    | OperationRequest::InstallSkill(_)
+                    | OperationRequest::SyncSkills(_)
+            ) || matches!(
+                envelope.operation,
+                OperationRequest::Add(AddRequest {
+                    source: DependencySource::Git {
+                        reference: GitReference::Head,
+                        ..
+                    },
+                    ..
+                })
+            ))
+        {
+            return Err(DecodeError::OperationRequiresProtocolMinor {
+                required: 2,
                 received: version.minor,
             });
         }
@@ -1264,6 +1458,58 @@ pub struct RemoveResult {
     pub affected_sources: Vec<OpaqueSourceId>,
 }
 
+/// Result of adding or updating a project-managed Agent Skill.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AddSkillResult {
+    /// Skill added or updated.
+    pub skill: SkillName,
+    /// Manifest and lock identities before the operation.
+    pub before: ProjectStateDigests,
+    /// Candidate or committed manifest and lock identities.
+    pub after: ProjectStateDigests,
+    /// Whether the change was computed but not committed.
+    pub dry_run: bool,
+}
+
+/// Result of removing a project-managed Agent Skill.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RemoveSkillResult {
+    /// Skill removed.
+    pub skill: SkillName,
+    /// Manifest and lock identities before the operation.
+    pub before: ProjectStateDigests,
+    /// Candidate or committed manifest and lock identities.
+    pub after: ProjectStateDigests,
+    /// Whether the change was computed but not committed.
+    pub dry_run: bool,
+}
+
+/// Result of installing the bundled prompt-squish Agent Skill.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct InstallSkillResult {
+    /// Absolute destination directory selected for the installation.
+    pub destination: ProjectDestination,
+    /// Whether installation wrote or would write differing contents.
+    pub changed: bool,
+    /// Whether installation only planned the change.
+    pub dry_run: bool,
+}
+
+/// Summary of a complete skill projection reconciliation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SyncSkillsResult {
+    /// Directories newly installed.
+    pub installed: u64,
+    /// Existing managed directories replaced with changed content.
+    pub updated: u64,
+    /// Stale managed directories removed.
+    pub removed: u64,
+    /// Managed directories already matching the lock.
+    pub unchanged: u64,
+    /// Whether changes were planned but not written.
+    pub dry_run: bool,
+}
+
 /// 项目查询结果。 / Project inspection result.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectInspection {
@@ -1420,6 +1666,14 @@ pub enum OperationResult {
     Add(AddResult),
     /// 删除依赖结果。 / Remove-dependency result.
     Remove(RemoveResult),
+    /// Result of adding a managed Agent Skill.
+    AddSkill(AddSkillResult),
+    /// Result of removing a managed Agent Skill.
+    RemoveSkill(RemoveSkillResult),
+    /// Result of installing the bundled Agent Skill.
+    InstallSkill(InstallSkillResult),
+    /// Result of reconciling the project skill projection.
+    SyncSkills(SyncSkillsResult),
     /// 查询结果。 / Inspection result.
     Inspect(InspectResult),
     /// 清理结果。 / Clean result.
@@ -1435,6 +1689,10 @@ impl OperationResult {
             Self::Format(_) => OperationKind::Format,
             Self::Add(_) => OperationKind::Add,
             Self::Remove(_) => OperationKind::Remove,
+            Self::AddSkill(_) => OperationKind::AddSkill,
+            Self::RemoveSkill(_) => OperationKind::RemoveSkill,
+            Self::InstallSkill(_) => OperationKind::InstallSkill,
+            Self::SyncSkills(_) => OperationKind::SyncSkills,
             Self::Inspect(_) => OperationKind::Inspect,
             Self::Clean(_) => OperationKind::Clean,
         }
@@ -1460,6 +1718,18 @@ impl OperationResult {
             }
             (Self::Remove(result), OperationRequest::Remove(request)) => {
                 result.dependency == request.dependency && result.dry_run == request.dry_run
+            }
+            (Self::AddSkill(result), OperationRequest::AddSkill(request)) => {
+                result.skill == request.skill && result.dry_run == request.dry_run
+            }
+            (Self::RemoveSkill(result), OperationRequest::RemoveSkill(request)) => {
+                result.skill == request.skill && result.dry_run == request.dry_run
+            }
+            (Self::InstallSkill(result), OperationRequest::InstallSkill(request)) => {
+                result.dry_run == request.dry_run
+            }
+            (Self::SyncSkills(result), OperationRequest::SyncSkills(request)) => {
+                result.dry_run == request.dry_run
             }
             (Self::Inspect(result), OperationRequest::Inspect(request)) => {
                 result.matches_view(&request.view)
@@ -1492,6 +1762,10 @@ impl OperationResult {
             | Self::Format(_)
             | Self::Add(_)
             | Self::Remove(_)
+            | Self::AddSkill(_)
+            | Self::RemoveSkill(_)
+            | Self::InstallSkill(_)
+            | Self::SyncSkills(_)
             | Self::Inspect(_)
             | Self::Clean(_) => true,
         }
@@ -2875,5 +3149,149 @@ mod tests {
                 .collect::<Vec<_>>(),
             original.encode_wide().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn skill_name_matches_agent_skills_directory_grammar() {
+        for valid in ["a", "9", "prompt-squish", "a1-b2"] {
+            let name = SkillName::new(valid).unwrap();
+            assert_eq!(name.as_str(), valid);
+            assert_eq!(
+                serde_json::from_str::<SkillName>(&serde_json::to_string(&name).unwrap()).unwrap(),
+                name
+            );
+        }
+        for invalid in ["", "A", "-a", "a-", "a--b", "a_b", "é"] {
+            assert!(SkillName::new(invalid).is_err(), "{invalid}");
+        }
+        assert!(SkillName::new("a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn new_skill_operations_have_additive_protocol_version() {
+        let operation = OperationRequest::AddSkill(AddSkillRequest {
+            project: ProjectPath::new(".").unwrap(),
+            skill: SkillName::new("reviewer").unwrap(),
+            source: SkillSource::Path {
+                path: ProjectPath::new("../reviewer").unwrap(),
+            },
+            lock: LockMode::Offline,
+            dry_run: true,
+        });
+        let envelope = OperationEnvelope::current(operation.clone());
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        assert_eq!(OperationEnvelope::decode_json(&bytes).unwrap(), envelope);
+        assert_eq!(operation.kind(), OperationKind::AddSkill);
+        assert!(matches!(
+            operation.location(),
+            OperationLocation::Existing(_)
+        ));
+
+        let mut legacy: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        legacy["version"]["minor"] = serde_json::json!(1);
+        assert!(matches!(
+            OperationEnvelope::decode_json(&serde_json::to_vec(&legacy).unwrap()),
+            Err(DecodeError::OperationRequiresProtocolMinor {
+                required: 2,
+                received: 1
+            })
+        ));
+
+        let global = OperationRequest::InstallSkill(InstallSkillRequest {
+            project: None,
+            force: false,
+            dry_run: false,
+        });
+        assert!(matches!(global.location(), OperationLocation::Global));
+        let sync = OperationRequest::SyncSkills(SyncSkillsRequest {
+            project: ProjectPath::new(".").unwrap(),
+            lock: LockMode::Frozen,
+            dry_run: true,
+        });
+        assert_eq!(sync.kind(), OperationKind::SyncSkills);
+        assert_eq!(
+            OperationEnvelope::decode_json(
+                &serde_json::to_vec(&OperationEnvelope::current(sync.clone())).unwrap()
+            )
+            .unwrap()
+            .operation,
+            sync
+        );
+    }
+
+    #[test]
+    fn skill_results_match_request_identity_and_dry_run() {
+        let state = ProjectStateDigests {
+            manifest: Digest::new(DigestAlgorithm::Sha256, vec![0; 32]).unwrap(),
+            lock: None,
+        };
+        let request = OperationRequest::AddSkill(AddSkillRequest {
+            project: ProjectPath::new(".").unwrap(),
+            skill: SkillName::new("reviewer").unwrap(),
+            source: SkillSource::Path {
+                path: ProjectPath::new("reviewer").unwrap(),
+            },
+            lock: LockMode::Update,
+            dry_run: true,
+        });
+        let result = OperationResult::AddSkill(AddSkillResult {
+            skill: SkillName::new("reviewer").unwrap(),
+            before: state.clone(),
+            after: state,
+            dry_run: true,
+        });
+        assert!(result.matches_request(&request));
+        assert!(result.command_succeeded());
+        assert_eq!(
+            serde_json::from_slice::<OperationResult>(&serde_json::to_vec(&result).unwrap())
+                .unwrap(),
+            result
+        );
+        let wrong = OperationRequest::RemoveSkill(RemoveSkillRequest {
+            project: ProjectPath::new(".").unwrap(),
+            skill: SkillName::new("reviewer").unwrap(),
+            lock: LockMode::Update,
+            dry_run: true,
+        });
+        assert!(!result.matches_request(&wrong));
+    }
+
+    #[test]
+    fn git_head_has_distinct_wire_identity_from_branch_named_head() {
+        let head = serde_json::to_value(GitReference::Head).unwrap();
+        let branch =
+            serde_json::to_value(GitReference::Branch(GitBranch::new("HEAD").unwrap())).unwrap();
+        assert_eq!(head, serde_json::json!({"type": "head"}));
+        assert_ne!(head, branch);
+        assert_eq!(
+            serde_json::from_value::<GitReference>(branch).unwrap(),
+            GitReference::Branch(GitBranch::new("HEAD").unwrap())
+        );
+        let request = OperationRequest::Add(AddRequest {
+            project: ProjectPath::new(".").unwrap(),
+            package: None,
+            dependency: DependencyName::new("common").unwrap(),
+            rename: None,
+            source: DependencySource::Git {
+                repository: RepositoryUrl::new("https://example.test/common.git").unwrap(),
+                reference: GitReference::Head,
+            },
+            kind: DependencyKind::Normal,
+            features: vec![],
+            no_default_features: false,
+            optional: false,
+            lock: LockMode::Update,
+            dry_run: false,
+        });
+        let mut wire = serde_json::to_value(OperationEnvelope::current(request)).unwrap();
+        assert!(OperationEnvelope::decode_json(&serde_json::to_vec(&wire).unwrap()).is_ok());
+        wire["version"]["minor"] = serde_json::json!(1);
+        assert!(matches!(
+            OperationEnvelope::decode_json(&serde_json::to_vec(&wire).unwrap()),
+            Err(DecodeError::OperationRequiresProtocolMinor {
+                required: 2,
+                received: 1
+            })
+        ));
     }
 }

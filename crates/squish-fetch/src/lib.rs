@@ -11,6 +11,7 @@ mod filesystem;
 mod git;
 mod materialize;
 mod registry;
+mod skill;
 mod types;
 
 pub use clean::{DependencyCacheCleanStats, clean_dependency_cache};
@@ -23,4 +24,5 @@ pub use registry::{
     AuthorizationValue, CredentialError, CredentialLookup, CredentialPort, HttpRequest,
     HttpResponse, HttpTransport, NoCredentials, RegistryConfig, ReqwestTransport, SparseRegistry,
 };
+pub use skill::read_local_skill_tree;
 pub use types::*;

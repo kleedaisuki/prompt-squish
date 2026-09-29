@@ -458,6 +458,7 @@ impl<C: CredentialPort> SparseRegistry<C> {
                 }),
                 targets: BTreeMap::new(),
                 dependencies,
+                skills: BTreeMap::new(),
                 exports: BTreeMap::new(),
                 profiles: BTreeMap::new(),
             };
@@ -1142,6 +1143,7 @@ fn validate_metadata_body(
             }),
             targets: BTreeMap::new(),
             dependencies,
+            skills: BTreeMap::new(),
             exports: BTreeMap::new(),
             profiles: BTreeMap::new(),
         }

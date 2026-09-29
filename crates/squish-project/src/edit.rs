@@ -7,7 +7,45 @@
 
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, TableLike, Value};
 
-use crate::{DependencyDetail, DependencySpec, Manifest, ProjectError};
+use crate::{DependencyDetail, DependencySpec, Manifest, ProjectError, SkillSpec};
+
+/// A skill-intent change, independent of XML dependency edits.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SkillChange {
+    /// New skill name and source.
+    Added { name: String, spec: SkillSpec },
+    /// Explicit replacement of a prior source.
+    Replaced {
+        name: String,
+        before: SkillSpec,
+        after: SkillSpec,
+    },
+    /// Removed skill name and source.
+    Removed { name: String, spec: SkillSpec },
+}
+
+/// Comment-preserving candidate skill edit; no filesystem or network effects.
+#[derive(Clone, Debug)]
+pub struct SkillEditPlan {
+    /// Semantic change.
+    pub change: SkillChange,
+    /// Exact original manifest text.
+    pub before: String,
+    /// Validated candidate manifest text.
+    pub after: String,
+}
+
+impl SkillEditPlan {
+    /// Machine-readable changed lines, preserving duplicate-line multiplicity.
+    pub fn changed_lines(&self) -> Vec<(char, String)> {
+        let before: Vec<_> = self.before.lines().collect();
+        let after: Vec<_> = self.after.lines().collect();
+        line_excess(&before, &after, '-')
+            .into_iter()
+            .chain(line_excess(&after, &before, '+'))
+            .collect()
+    }
+}
 
 /// 依赖意图变更。 / A dependency-intent change.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -144,15 +182,101 @@ impl CandidateManifest {
             after,
         })
     }
+
+    /// Add or explicitly replace a skill while retaining unrelated TOML formatting.
+    pub fn add_skill(
+        mut self,
+        name: &str,
+        spec: SkillSpec,
+        replace: bool,
+    ) -> Result<SkillEditPlan, ProjectError> {
+        let prior = self.manifest.skills.get(name).cloned();
+        if prior.is_some() && !replace {
+            return Err(ProjectError::DuplicateSkill(name.into()));
+        }
+        let skills = named_table(&mut self.document, "skills");
+        skills.insert(name, skill_item(&spec));
+        let after = self.document.to_string();
+        Manifest::parse(&after)?;
+        let change = match prior {
+            Some(before) => SkillChange::Replaced {
+                name: name.into(),
+                before,
+                after: spec,
+            },
+            None => SkillChange::Added {
+                name: name.into(),
+                spec,
+            },
+        };
+        Ok(SkillEditPlan {
+            change,
+            before: self.original,
+            after,
+        })
+    }
+
+    /// Remove a skill while preserving unrelated TOML formatting and comments.
+    pub fn remove_skill(mut self, name: &str) -> Result<SkillEditPlan, ProjectError> {
+        let spec = self
+            .manifest
+            .skills
+            .get(name)
+            .cloned()
+            .ok_or_else(|| ProjectError::MissingSkill(name.into()))?;
+        let table = self
+            .document
+            .get_mut("skills")
+            .and_then(Item::as_table_like_mut)
+            .ok_or_else(|| ProjectError::MissingSkill(name.into()))?;
+        table.remove(name);
+        let after = self.document.to_string();
+        Manifest::parse(&after)?;
+        Ok(SkillEditPlan {
+            change: SkillChange::Removed {
+                name: name.into(),
+                spec,
+            },
+            before: self.original,
+            after,
+        })
+    }
 }
 
 fn dependency_table(document: &mut DocumentMut) -> &mut dyn TableLike {
-    if !document.contains_key("dependencies") {
-        document.insert("dependencies", Item::Table(Table::new()));
+    named_table(document, "dependencies")
+}
+
+fn named_table<'a>(document: &'a mut DocumentMut, name: &str) -> &'a mut dyn TableLike {
+    if !document.contains_key(name) {
+        document.insert(name, Item::Table(Table::new()));
     }
-    document["dependencies"]
+    document[name]
         .as_table_like_mut()
-        .expect("validated manifest guarantees dependency table")
+        .expect("validated manifest guarantees a table")
+}
+
+fn skill_item(spec: &SkillSpec) -> Item {
+    let mut table = InlineTable::new();
+    if let Some(path) = &spec.path {
+        table.insert("path", Value::from(path.to_string_lossy().as_ref()));
+    }
+    if let Some(git) = &spec.git {
+        table.insert("git", Value::from(git.as_str()));
+    }
+    if let Some(branch) = &spec.git_reference.branch {
+        table.insert("branch", Value::from(branch.as_str()));
+    }
+    if let Some(tag) = &spec.git_reference.tag {
+        table.insert("tag", Value::from(tag.as_str()));
+    }
+    if let Some(rev) = &spec.git_reference.rev {
+        table.insert("rev", Value::from(rev.as_str()));
+    }
+    if let Some(subdir) = &spec.subdir {
+        table.insert("subdir", Value::from(subdir.to_string_lossy().as_ref()));
+    }
+    Item::Value(Value::InlineTable(table))
 }
 
 fn spec_item(spec: &DependencySpec) -> Item {
@@ -292,5 +416,41 @@ mod tests {
             after: "version = \"1\"\nkeep = true\n".into(),
         };
         assert_eq!(plan.changed_lines(), vec![('-', "version = \"1\"".into())]);
+    }
+
+    #[test]
+    fn skill_edits_preserve_xml_dependencies_and_comments() {
+        let source =
+            format!("{BASE}\n[skills]\nold-skill = {{ path = \"skills/old\" }} # keep me\n");
+        let add = CandidateManifest::parse(&source)
+            .unwrap()
+            .add_skill("review", SkillSpec::path("skills/review"), false)
+            .unwrap();
+        assert!(add.after.contains("old = \"1\" # keep me"));
+        assert!(
+            add.after
+                .contains("old-skill = { path = \"skills/old\" } # keep me")
+        );
+        assert!(add.after.contains("review = { path = \"skills/review\" }"));
+        assert!(matches!(
+            CandidateManifest::parse(&add.after).unwrap().add_skill(
+                "review",
+                SkillSpec::path("other"),
+                false
+            ),
+            Err(ProjectError::DuplicateSkill(_))
+        ));
+        let remove = CandidateManifest::parse(&add.after)
+            .unwrap()
+            .remove_skill("review")
+            .unwrap();
+        assert!(!remove.after.contains("review ="));
+        assert!(remove.after.contains("# keep me"));
+        assert!(matches!(
+            CandidateManifest::parse(&remove.after)
+                .unwrap()
+                .remove_skill("review"),
+            Err(ProjectError::MissingSkill(_))
+        ));
     }
 }

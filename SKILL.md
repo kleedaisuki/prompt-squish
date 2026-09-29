@@ -29,6 +29,26 @@ xmlsquish add prompt-common@^2 --registry community --rename common
 xmlsquish remove common --dry-run
 ```
 
+Agent Skills are a separate workspace-root dependency domain. Add an exact local
+skill directory or a Git subtree, then synchronize the agent-visible copy from
+the shared lock when restoring a checkout:
+
+```bash
+xmlsquish add-skill review-checks --path tools/skills/review-checks
+xmlsquish add-skill release-notes --git https://example.com/skills.git --tag v2 --subdir release-notes
+xmlsquish sync-skills --locked --offline
+xmlsquish remove-skill review-checks --dry-run
+xmlsquish install-skill                  # user-global .agents/skills/prompt-squish
+xmlsquish install-skill --project        # current workspace .agents/skills/prompt-squish
+```
+
+`[skills]` and `[[skill]]` are independent of XML `[dependencies]` and the
+package graph. Skill names must match the `SKILL.md` frontmatter and directory;
+xmlsquish installs the complete tree, does not execute scripts, and refuses to
+overwrite unmanaged or locally modified skill directories. Verify third-party
+skill content before enabling it: a lock digest is integrity evidence, not a
+trust or safety certificate.
+
 ## `xmlsquish.toml` quick reference
 
 ```toml

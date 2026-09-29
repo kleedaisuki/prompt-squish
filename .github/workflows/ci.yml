@@ -95,7 +95,7 @@ jobs:
         shell: pwsh
         run: |
           $binary = if ($IsWindows) { "target/debug/xmlsquish.exe" } else { "target/debug/xmlsquish" }
-          python .github/scripts/ci_smoke.py $binary "$env:RUNNER_TEMP/xmlsquish-ci"
+          python .github/scripts/ci_smoke.py $binary "$env:GITHUB_WORKSPACE/.temp/ci-smoke"
 
       # The checked-in site demonstration must remain reproducible with the actual CLI.
       # 站点演示的提交数据必须能由真实 CLI 重新生成。
@@ -125,7 +125,7 @@ jobs:
           set -euo pipefail
           binary="$RUNNER_TEMP/xmlsquish-install/bin/xmlsquish"
           "$binary" --version | grep -E '^xmlsquish [0-9]+\.[0-9]+\.[0-9]+'
-          for command in new build clean fmt add remove inspect; do
+          for command in new build clean fmt add remove add-skill remove-skill sync-skills install-skill inspect; do
             "$binary" | grep -E "^  ${command}[[:space:]]"
             "$binary" "$command" --help >/dev/null
           done

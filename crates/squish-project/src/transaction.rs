@@ -22,6 +22,10 @@ pub enum MutationKind {
     AddDependency { alias: String },
     /// Remove one dependency. / 删除一个依赖。
     RemoveDependency { alias: String },
+    /// Add or explicitly replace one Agent Skill.
+    AddSkill { name: String },
+    /// Remove one Agent Skill.
+    RemoveSkill { name: String },
 }
 
 /// 事务中一个文件的 compare-and-replace 计划。 / Compare-and-replace plan for one transaction file.
@@ -297,6 +301,7 @@ mod tests {
                 manifest_digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 dependencies: BTreeMap::new(),
             }],
+            skills: Vec::new(),
         }
     }
     fn file(path: &str, expected: &str) -> MutationFile {

@@ -196,6 +196,17 @@ impl<R: RegistryPort, G: GitPort, F: FilesystemPort> DependencyResolver for Reso
     type Error = ResolveError;
 
     fn resolve(&self, input: ResolutionInput<'_>) -> Result<Lockfile, Self::Error> {
+        // Agent skill discovery has one workspace-level namespace. A member
+        // manifest cannot silently create a second declaration domain.
+        for (path, manifest) in input.manifests {
+            if !manifest.skills.is_empty()
+                && normalize_manifest_key(path).as_deref() != Some(MANIFEST_FILE)
+            {
+                return Err(ResolveError::InvalidInput(format!(
+                    "skills may only be declared in the workspace root manifest, not `{path}`"
+                )));
+            }
+        }
         if matches!(input.mode, ResolutionMode::Locked | ResolutionMode::Frozen) {
             let lock = input.prior_lock.ok_or(ResolveError::LockRequired)?;
             self.validate_locked(input.manifests, input.manifest_digest, lock)?;
@@ -346,11 +357,18 @@ impl<'a> State<'a> {
     }
 
     fn finish(self) -> Result<Lockfile, ResolveError> {
+        // Skills are a separate dependency domain. Re-solving XML packages must never
+        // silently discard their exact snapshots from the shared lockfile.
+        let skills = self
+            .input
+            .prior_lock
+            .map_or_else(Vec::new, |lock| lock.skills.clone());
         let lock = Lockfile {
             lock_version: squish_project::LOCK_VERSION,
             resolver_version: RESOLVER_VERSION.into(),
             manifest_digest: self.input.manifest_digest.into(),
             packages: self.nodes.into_values().map(|node| node.package).collect(),
+            skills,
         };
         lock.validate()
             .map_err(|error| ResolveError::InvalidInput(error.to_string()))?;
@@ -1329,7 +1347,9 @@ fn slash(path: &Path) -> String {
 mod tests {
     use std::cell::RefCell;
 
-    use squish_project::{MANIFEST_VERSION, Package, Workspace};
+    use squish_project::{
+        LockedSkill, LockedSkillSource, MANIFEST_VERSION, Package, SkillSpec, Workspace,
+    };
 
     use super::*;
 
@@ -1832,6 +1852,42 @@ mod tests {
         assert!(matches!(
             resolve(&resolver, &manifests, Some(&stale), ResolutionMode::Locked),
             Err(ResolveError::LockOutdated(_))
+        ));
+    }
+
+    #[test]
+    fn re_resolving_xml_packages_preserves_independent_skill_locks() {
+        let manifests = BTreeMap::from([(
+            MANIFEST_FILE.into(),
+            manifest("app", "1.0.0", BTreeMap::new()),
+        )]);
+        let resolver = Resolver::new(Registry::default(), Git::default());
+        let mut prior = resolve(&resolver, &manifests, None, ResolutionMode::Online).unwrap();
+        prior.skills.push(LockedSkill {
+            name: "reviewer".into(),
+            source: LockedSkillSource::Path {
+                path: PathBuf::from("skills/reviewer"),
+                mutable: true,
+            },
+            digest: format!("sha256:{}", "11".repeat(32)),
+        });
+        prior.manifest_digest = format!("sha256:{}", "22".repeat(32));
+
+        let next = resolve(&resolver, &manifests, Some(&prior), ResolutionMode::Online).unwrap();
+        assert_eq!(next.skills, prior.skills);
+    }
+
+    #[test]
+    fn member_manifest_cannot_declare_workspace_skill() {
+        let mut member = manifest("member", "1.0.0", BTreeMap::new());
+        member
+            .skills
+            .insert("reviewer".into(), SkillSpec::path("skills/reviewer"));
+        let manifests = BTreeMap::from([("packages/member/xmlsquish.toml".into(), member)]);
+        let resolver = Resolver::new(Registry::default(), Git::default());
+        assert!(matches!(
+            resolve(&resolver, &manifests, None, ResolutionMode::Online),
+            Err(ResolveError::InvalidInput(message)) if message.contains("workspace root")
         ));
     }
 

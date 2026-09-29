@@ -32,18 +32,19 @@ use url::Url;
 
 use squish_fetch::{
     AuthorizationValue, CredentialError, CredentialLookup, CredentialPort, FetchError, GitHost,
-    GitInvocation, GitRunner, HostContext, HttpRequest, HttpResponse, HttpTransport, Limits,
-    Materializer, Observer, RegistryConfig, SourceEvent, SparseRegistry, SystemGitRunner,
+    GitInvocation, GitObjectFormat, GitOid, GitRunner, GitSelector, HostContext, HttpRequest,
+    HttpResponse, HttpTransport, Limits, Materializer, Observer, RegistryConfig, SourceEvent,
+    SparseRegistry, SystemGitRunner, read_local_skill_tree,
 };
 use squish_manager::{
     ArtifactLocator, BuildRuntime, ProjectBuildLayout, ProjectCleanStatus, ProjectCreationLocation,
     ProjectCreationStatus, ProvenanceNonApplicability, ProvenanceRelation, ResolveRequest,
-    ResolvedDependencies, ServiceError, Services,
+    ResolvedDependencies, ResolvedSkillSource, ServiceError, Services,
 };
 use squish_project::{
     DependencyResolver, LockedSource, Lockfile, Manifest, ResolutionInput, ResolutionMode,
 };
-use squish_protocol::{CleanResult, VcsChoice};
+use squish_protocol::{CleanResult, GitReference, SkillSource, VcsChoice};
 use squish_publish::{NoopObserver as NoopPublishObserver, PublishObserver};
 use squish_repository::{
     CreateProjectRequest, FaultInjector, PackageLocation, ProjectVcs, RepositoryError,
@@ -1720,6 +1721,87 @@ fn nearest_existing_directory(path: &Path) -> std::io::Result<PathBuf> {
 }
 
 impl Services for ProductionHost {
+    fn resolve_skill_source(
+        &self,
+        project_root: &Path,
+        source: &SkillSource,
+        locked_revision: Option<&str>,
+        mode: ResolutionMode,
+    ) -> Result<ResolvedSkillSource, ServiceError> {
+        self.require_project(project_root)?;
+        if matches!(mode, ResolutionMode::Locked | ResolutionMode::Frozen)
+            && matches!(source, SkillSource::Git { .. })
+            && locked_revision.is_none()
+        {
+            return Err(ServiceError::new(
+                "skill_lock_missing",
+                "locked Git skill requires an exact prior revision",
+            ));
+        }
+        let (revision, tree) = match source {
+            SkillSource::Path { path } => {
+                if locked_revision.is_some() {
+                    return Err(ServiceError::new(
+                        "skill_lock_invalid",
+                        "local skill cannot have a Git revision",
+                    ));
+                }
+                let tree = read_local_skill_tree(
+                    &self.project_root,
+                    Path::new(path.as_str()),
+                    &self.context.limits,
+                )
+                .map_err(|error| ServiceError::new("skill_source_failed", error.to_string()))?;
+                (None, tree)
+            }
+            SkillSource::Git {
+                repository,
+                reference,
+                subdir,
+            } => {
+                let selector = match reference {
+                    GitReference::Head => GitSelector::Head,
+                    GitReference::Revision(value) => GitSelector::Rev(value.as_str().into()),
+                    GitReference::Branch(value) => GitSelector::Branch(value.as_str().into()),
+                    GitReference::Tag(value) => GitSelector::Tag(value.as_str().into()),
+                };
+                let exact = locked_revision
+                    .map(|hex| {
+                        let format = match hex.len() {
+                            40 => GitObjectFormat::Sha1,
+                            64 => GitObjectFormat::Sha256,
+                            _ => {
+                                return Err(FetchError::Git(
+                                    "locked skill revision is not a full Git OID".into(),
+                                ));
+                            }
+                        };
+                        GitOid::new(format, hex)
+                    })
+                    .transpose()
+                    .map_err(|error| ServiceError::new("skill_lock_invalid", error.to_string()))?;
+                let subdir = subdir.as_ref().map_or(".", |path| path.as_str());
+                let (commit, tree) = self
+                    .git
+                    .resolve_skill_tree(
+                        repository.as_str(),
+                        &selector,
+                        subdir,
+                        exact.as_ref(),
+                        fetch_access(mode),
+                    )
+                    .map_err(|error| ServiceError::new("skill_source_failed", error.to_string()))?;
+                (Some(commit.hex), tree)
+            }
+        };
+        let files = tree
+            .files
+            .into_iter()
+            .map(|file| (PathBuf::from(file.path), file.bytes))
+            .collect();
+        Ok(ResolvedSkillSource { revision, files })
+    }
+
     fn open_build_runtime(
         &self,
         project_root: &Path,
@@ -2244,6 +2326,91 @@ mod tests {
     }
 
     #[test]
+    fn local_skill_resolution_returns_complete_tree_without_external_transport() {
+        let (_temporary, host, _) = fixture();
+        let skill = host.project_root().join("skills/demo");
+        std::fs::create_dir_all(skill.join("scripts")).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            b"---\nname: demo\ndescription: Demo\n---\n",
+        )
+        .unwrap();
+        std::fs::write(skill.join("scripts/run.sh"), b"echo hi\n").unwrap();
+        let source = SkillSource::Path {
+            path: squish_protocol::ProjectPath::new("skills/demo").unwrap(),
+        };
+        let result = host
+            .resolve_skill_source(host.project_root(), &source, None, ResolutionMode::Offline)
+            .unwrap();
+        assert!(result.revision.is_none());
+        assert_eq!(result.files.len(), 2);
+        assert_eq!(result.files[Path::new("scripts/run.sh")], b"echo hi\n");
+    }
+
+    #[test]
+    fn remote_head_skill_uses_symbolic_head_not_a_branch_named_head() {
+        let (temporary, _unused_host, storage) = fixture();
+        let root = temporary.path().join("project");
+        let repo = temporary.path().join("remote");
+        std::fs::create_dir_all(repo.join("skills/demo")).unwrap();
+        for args in [
+            vec!["init"],
+            vec!["config", "user.email", "test@example.invalid"],
+            vec!["config", "user.name", "test"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .current_dir(&repo)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        std::fs::write(
+            repo.join("skills/demo/SKILL.md"),
+            b"---\nname: demo\ndescription: Demo\n---\n",
+        )
+        .unwrap();
+        for args in [vec!["add", "."], vec!["commit", "-m", "fixture"]] {
+            assert!(
+                std::process::Command::new("git")
+                    .current_dir(&repo)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let host = ProductionHost::open(HostConfig {
+            project_root: root.clone(),
+            storage,
+            cancellation: squish_kernel::CancellationToken::default(),
+            registries: Vec::new(),
+            credentials: Arc::new(NoCredentials),
+            http: Arc::new(NoHttp),
+            git: GitExecution::Runner(Arc::new(SystemGitRunner::default())),
+            limits: Limits::default(),
+            observer: Arc::new(NoopObserver),
+            filesystem: Arc::new(squish_fetch::FilesystemHost::new(&root).unwrap()),
+        })
+        .unwrap();
+        let url = url::Url::from_file_path(std::fs::canonicalize(&repo).unwrap())
+            .unwrap()
+            .to_string();
+        let source = SkillSource::Git {
+            repository: squish_protocol::RepositoryUrl::new(url).unwrap(),
+            reference: GitReference::Head,
+            subdir: Some(squish_protocol::ProjectPath::new("skills/demo").unwrap()),
+        };
+        let result = host
+            .resolve_skill_source(host.project_root(), &source, None, ResolutionMode::Online)
+            .unwrap();
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.revision.as_ref().map(String::len), Some(40));
+    }
+
+    #[test]
     fn path_only_resolution_never_calls_external_transports() {
         let (_temporary, host, _) = fixture();
         let manifest = squish_project::Manifest::parse(
@@ -2548,6 +2715,7 @@ mod tests {
                 manifest_digest: format!("sha256:{manifest_digest}"),
                 dependencies: BTreeMap::new(),
             }],
+            skills: Vec::new(),
         };
         assert_eq!(
             Services::materialize_locked(&host, host.project_root(), &lock, ResolutionMode::Online)
@@ -2656,6 +2824,7 @@ mod tests {
                 manifest_digest: format!("sha256:{}", candidate.manifest_digest.0.0),
                 dependencies: BTreeMap::new(),
             }],
+            skills: Vec::new(),
         };
         assert_eq!(
             Services::materialize_locked(&host, host.project_root(), &lock, ResolutionMode::Online)

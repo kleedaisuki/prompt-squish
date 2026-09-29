@@ -39,11 +39,12 @@ use clap::{
     error::ErrorKind,
 };
 use squish_protocol::{
-    AddRequest, ArgumentName, ArtifactId, BuildRequest, CleanRequest, DependencyKind,
-    DependencyName, DependencySource, EmitKind, FeatureName, FormatRequest, FormatSelection,
-    GitBranch, GitReference, GitRevision, GitTag, InspectRequest, InspectView, LockMode,
-    NewPackageName, NewRequest, OpaqueSourceId, OperationRequest, PackageName, ProfileName,
-    ProjectDestination, ProjectPath, RegistryName, RemoveRequest, RepositoryUrl, StyleEdition,
+    AddRequest, AddSkillRequest, ArgumentName, ArtifactId, BuildRequest, CleanRequest,
+    DependencyKind, DependencyName, DependencySource, EmitKind, FeatureName, FormatRequest,
+    FormatSelection, GitBranch, GitReference, GitRevision, GitTag, InspectRequest, InspectView,
+    InstallSkillRequest, LockMode, NewPackageName, NewRequest, OpaqueSourceId, OperationRequest,
+    PackageName, ProfileName, ProjectDestination, ProjectPath, RegistryName, RemoveRequest,
+    RemoveSkillRequest, RepositoryUrl, SkillName, SkillSource, StyleEdition, SyncSkillsRequest,
     TargetName, VcsChoice, VersionRequirement, WorkspaceScope,
 };
 
@@ -405,6 +406,24 @@ enum Command {
         after_help = "Examples:\n  xmlsquish remove common\n  xmlsquish remove common -p support --dry-run"
     )]
     Remove(RemoveArgs),
+    /// Add or update a workspace-managed Agent Skill.
+    #[command(
+        after_help = "Examples:\n  xmlsquish add-skill reviewer --path ../skills/reviewer\n  xmlsquish add-skill reviewer --git https://example.com/skills.git --subdir reviewer"
+    )]
+    AddSkill(AddSkillArgs),
+    /// Remove a workspace-managed Agent Skill.
+    #[command(after_help = "Example:\n  xmlsquish remove-skill reviewer --dry-run")]
+    RemoveSkill(RemoveSkillArgs),
+    /// Install the bundled prompt-squish Agent Skill for this user or project.
+    #[command(
+        after_help = "Examples:\n  xmlsquish install-skill\n  xmlsquish install-skill --project --dry-run"
+    )]
+    InstallSkill(InstallSkillArgs),
+    /// Reconcile .agents/skills from the manifest and lock after cloning or changing sources.
+    #[command(
+        after_help = "Examples:\n  xmlsquish sync-skills --frozen\n  xmlsquish sync-skills --dry-run"
+    )]
+    SyncSkills(SyncSkillsArgs),
     /// Inspect a typed manager object without changing it.
     #[command(
         after_help = "Examples:\n  xmlsquish inspect ir ir:sha256:abcd\n  xmlsquish inspect artifact target/prompts/chat.prompt --format=json"
@@ -600,6 +619,90 @@ struct RemoveArgs {
 }
 
 #[derive(Debug, Args)]
+struct AddSkillArgs {
+    /// Agent Skills name; also the destination directory name.
+    name: String,
+    /// Use an explicit workspace manifest.
+    #[arg(long, value_name = "PATH")]
+    manifest_path: Option<String>,
+    /// Install a local directory containing SKILL.md.
+    #[arg(
+        long,
+        value_name = "PATH",
+        required_unless_present = "git",
+        conflicts_with = "git"
+    )]
+    path: Option<String>,
+    /// Install a directory from a Git repository.
+    #[arg(
+        long,
+        value_name = "URL",
+        required_unless_present = "path",
+        conflicts_with = "path"
+    )]
+    git: Option<String>,
+    /// Select a Git revision.
+    #[arg(long, value_name = "REV", requires = "git", conflicts_with_all = ["tag", "branch"])]
+    rev: Option<String>,
+    /// Select a Git tag.
+    #[arg(long, value_name = "TAG", requires = "git", conflicts_with_all = ["rev", "branch"])]
+    tag: Option<String>,
+    /// Select a Git branch.
+    #[arg(long, value_name = "BRANCH", requires = "git", conflicts_with_all = ["rev", "tag"])]
+    branch: Option<String>,
+    /// Select a directory within the Git repository.
+    #[arg(long, value_name = "DIR", requires = "git")]
+    subdir: Option<String>,
+    #[command(flatten)]
+    resolution: ResolutionArgs,
+    /// Plan and validate without committing.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+struct RemoveSkillArgs {
+    /// Agent Skills name to remove.
+    name: String,
+    /// Use an explicit workspace manifest.
+    #[arg(long, value_name = "PATH")]
+    manifest_path: Option<String>,
+    #[command(flatten)]
+    resolution: ResolutionArgs,
+    /// Plan and validate without committing.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+struct InstallSkillArgs {
+    /// Install into this project's .agents/skills instead of the user's directory.
+    #[arg(long)]
+    project: bool,
+    /// Select the project manifest when --project is used.
+    #[arg(long, value_name = "PATH", requires = "project")]
+    manifest_path: Option<String>,
+    /// Replace a differing installation owned by prompt-squish.
+    #[arg(long)]
+    force: bool,
+    /// Report the installation without writing.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+struct SyncSkillsArgs {
+    /// Use an explicit workspace manifest.
+    #[arg(long, value_name = "PATH")]
+    manifest_path: Option<String>,
+    #[command(flatten)]
+    resolution: ResolutionArgs,
+    /// Validate and report without writing.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Args)]
 struct InspectArgs {
     /// Use an explicit project manifest (no file is opened during parsing).
     #[arg(long, value_name = "PATH", global = true)]
@@ -663,6 +766,10 @@ impl Cli {
             Command::Fmt(args) => format_invocation(args, presentation),
             Command::Add(args) => add_invocation(args, presentation),
             Command::Remove(args) => remove_invocation(args, presentation),
+            Command::AddSkill(args) => add_skill_invocation(args, presentation),
+            Command::RemoveSkill(args) => remove_skill_invocation(args, presentation),
+            Command::InstallSkill(args) => install_skill_invocation(args, presentation),
+            Command::SyncSkills(args) => sync_skills_invocation(args, presentation),
             Command::Inspect(args) => inspect_invocation(args, presentation),
             Command::Clean(args) => clean_invocation(args, presentation),
         }?;
@@ -816,6 +923,102 @@ fn remove_invocation(
         OperationRequest::Remove(request),
         presentation,
     ))
+}
+
+/// Convert skill acquisition flags to a typed, filesystem-independent request.
+fn add_skill_invocation(
+    args: AddSkillArgs,
+    presentation: PresentationSettings,
+) -> Result<ParsedInvocation, clap::Error> {
+    let source = match (args.path, args.git) {
+        (Some(path), None) => SkillSource::Path {
+            path: id(path, ProjectPath::new, "skill path")?,
+        },
+        (None, Some(repository)) => {
+            let reference = if let Some(revision) = args.rev {
+                GitReference::Revision(id(revision, GitRevision::new, "Git revision")?)
+            } else if let Some(tag) = args.tag {
+                GitReference::Tag(id(tag, GitTag::new, "Git tag")?)
+            } else if let Some(branch) = args.branch {
+                GitReference::Branch(id(branch, GitBranch::new, "Git branch")?)
+            } else {
+                GitReference::Head
+            };
+            SkillSource::Git {
+                repository: id(repository, RepositoryUrl::new, "Git URL")?,
+                reference,
+                subdir: args
+                    .subdir
+                    .map(|path| id(path, ProjectPath::new, "skill subdirectory"))
+                    .transpose()?,
+            }
+        }
+        _ => return Err(usage("exactly one of --path or --git is required")),
+    };
+    Ok(simple_invocation(
+        OperationRequest::AddSkill(AddSkillRequest {
+            project: project(args.manifest_path)?,
+            skill: skill_name(args.name)?,
+            source,
+            lock: lock_mode(args.resolution),
+            dry_run: args.dry_run,
+        }),
+        presentation,
+    ))
+}
+
+/// Convert a managed-skill deletion to the protocol request.
+fn remove_skill_invocation(
+    args: RemoveSkillArgs,
+    presentation: PresentationSettings,
+) -> Result<ParsedInvocation, clap::Error> {
+    Ok(simple_invocation(
+        OperationRequest::RemoveSkill(RemoveSkillRequest {
+            project: project(args.manifest_path)?,
+            skill: skill_name(args.name)?,
+            lock: lock_mode(args.resolution),
+            dry_run: args.dry_run,
+        }),
+        presentation,
+    ))
+}
+
+/// Select either the user-global or project-local bundled-skill installer.
+fn install_skill_invocation(
+    args: InstallSkillArgs,
+    presentation: PresentationSettings,
+) -> Result<ParsedInvocation, clap::Error> {
+    Ok(simple_invocation(
+        OperationRequest::InstallSkill(InstallSkillRequest {
+            project: args
+                .project
+                .then(|| project(args.manifest_path))
+                .transpose()?,
+            force: args.force,
+            dry_run: args.dry_run,
+        }),
+        presentation,
+    ))
+}
+
+/// Convert a complete projection reconciliation to the typed protocol.
+fn sync_skills_invocation(
+    args: SyncSkillsArgs,
+    presentation: PresentationSettings,
+) -> Result<ParsedInvocation, clap::Error> {
+    Ok(simple_invocation(
+        OperationRequest::SyncSkills(SyncSkillsRequest {
+            project: project(args.manifest_path)?,
+            lock: lock_mode(args.resolution),
+            dry_run: args.dry_run,
+        }),
+        presentation,
+    ))
+}
+
+/// Validate the shared Agent Skills name grammar at the CLI boundary.
+fn skill_name(value: String) -> Result<SkillName, clap::Error> {
+    SkillName::new(value).map_err(|error| usage(&error.to_string()))
 }
 
 fn inspect_invocation(
@@ -1000,12 +1203,10 @@ fn dependency_source(
             GitReference::Revision(id(revision.clone(), GitRevision::new, "Git revision")?)
         } else if let Some(tag) = &args.tag {
             GitReference::Tag(id(tag.clone(), GitTag::new, "Git tag")?)
+        } else if let Some(branch) = &args.branch {
+            GitReference::Branch(id(branch.clone(), GitBranch::new, "Git branch")?)
         } else {
-            GitReference::Branch(id(
-                args.branch.clone().unwrap_or_else(|| "HEAD".to_owned()),
-                GitBranch::new,
-                "Git branch",
-            )?)
+            GitReference::Head
         };
         return Ok(DependencySource::Git {
             repository: id(repository.clone(), RepositoryUrl::new, "Git URL")?,
@@ -1448,5 +1649,154 @@ mod tests {
         assert_eq!(error.exit_code(), 2);
         assert!(error.json_requested());
         assert_eq!(error.kind(), ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn skill_commands_map_to_distinct_typed_requests() {
+        let local = invocation([
+            "xmlsquish",
+            "add-skill",
+            "code-review",
+            "--path",
+            "../code-review",
+            "--dry-run",
+        ]);
+        let OperationRequest::AddSkill(request) = local.request else {
+            panic!("expected add-skill")
+        };
+        assert_eq!(request.skill.as_str(), "code-review");
+        assert!(request.dry_run);
+        assert!(
+            matches!(request.source, SkillSource::Path { path } if path.as_str() == "../code-review")
+        );
+
+        let git = invocation([
+            "xmlsquish",
+            "add-skill",
+            "code-review",
+            "--git",
+            "https://example.test/skills.git",
+            "--tag",
+            "v2",
+            "--subdir",
+            "reviewer",
+            "--offline",
+        ]);
+        let OperationRequest::AddSkill(request) = git.request else {
+            panic!("expected add-skill")
+        };
+        assert_eq!(request.lock, LockMode::Offline);
+        assert!(matches!(
+            request.source,
+            SkillSource::Git {
+                reference: GitReference::Tag(_),
+                subdir: Some(_),
+                ..
+            }
+        ));
+
+        let removed = invocation(["xmlsquish", "remove-skill", "code-review", "--frozen"]);
+        let OperationRequest::RemoveSkill(request) = removed.request else {
+            panic!("expected remove-skill")
+        };
+        assert_eq!(request.lock, LockMode::Frozen);
+
+        let global = invocation(["xmlsquish", "install-skill"]);
+        assert!(matches!(
+            global.request,
+            OperationRequest::InstallSkill(InstallSkillRequest {
+                project: None,
+                force: false,
+                dry_run: false
+            })
+        ));
+        let project = invocation([
+            "xmlsquish",
+            "install-skill",
+            "--project",
+            "--force",
+            "--dry-run",
+        ]);
+        assert!(matches!(
+            project.request,
+            OperationRequest::InstallSkill(InstallSkillRequest {
+                project: Some(_),
+                force: true,
+                dry_run: true
+            })
+        ));
+        let sync = invocation(["xmlsquish", "sync-skills", "--frozen", "--dry-run"]);
+        assert!(matches!(
+            sync.request,
+            OperationRequest::SyncSkills(SyncSkillsRequest {
+                lock: LockMode::Frozen,
+                dry_run: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn skill_cli_rejects_ambiguous_sources_and_invalid_names() {
+        for argv in [
+            vec!["xmlsquish", "add-skill", "reviewer"],
+            vec![
+                "xmlsquish",
+                "add-skill",
+                "reviewer",
+                "--path",
+                "a",
+                "--git",
+                "b",
+            ],
+            vec!["xmlsquish", "add-skill", "-bad", "--path", "a"],
+            vec!["xmlsquish", "add-skill", "Bad", "--path", "a"],
+            vec![
+                "xmlsquish",
+                "install-skill",
+                "--manifest-path",
+                "xmlsquish.toml",
+            ],
+        ] {
+            assert_eq!(parse_from(argv).unwrap_err().exit_code(), 2);
+        }
+    }
+
+    #[test]
+    fn implicit_git_selector_is_head_not_a_branch_named_head() {
+        let package = invocation([
+            "xmlsquish",
+            "add",
+            "common",
+            "--git",
+            "https://example.test/common.git",
+        ]);
+        assert!(matches!(
+            package.request,
+            OperationRequest::Add(AddRequest {
+                source: DependencySource::Git {
+                    reference: GitReference::Head,
+                    ..
+                },
+                ..
+            })
+        ));
+        let skill = invocation([
+            "xmlsquish",
+            "add-skill",
+            "reviewer",
+            "--git",
+            "https://example.test/skills.git",
+        ]);
+        assert!(matches!(
+            skill.request,
+            OperationRequest::AddSkill(AddSkillRequest {
+                source: SkillSource::Git {
+                    reference: GitReference::Head,
+                    ..
+                },
+                ..
+            })
+        ));
     }
 }

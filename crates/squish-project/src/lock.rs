@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
-use crate::{LOCK_VERSION, ProjectError, ValidationIssue};
+use crate::{GitReference, LOCK_VERSION, ProjectError, ValidationIssue};
 
 /// `xmlsquish.lock` 的精确、可重现解析状态。 / Exact reproducible resolution state in `xmlsquish.lock`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -21,6 +21,38 @@ pub struct Lockfile {
     /// Exact packages sorted by stable ID when serialized. / 序列化时按稳定 ID 排序的精确包。
     #[serde(rename = "package")]
     pub packages: Vec<LockedPackage>,
+    /// Exact skill snapshots, independent of the XML package graph.
+    #[serde(default, rename = "skill", skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<LockedSkill>,
+}
+
+/// One installed Agent Skill snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct LockedSkill {
+    /// Manifest key, SKILL.md frontmatter name, and installed directory name.
+    pub name: String,
+    /// Exact source identity used to obtain this snapshot.
+    pub source: LockedSkillSource,
+    /// Digest of the normalized complete skill tree, not just SKILL.md.
+    pub digest: String,
+}
+
+/// Pinned skill source; local paths retain mutable intent while digest pins content.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum LockedSkillSource {
+    /// Directory relative to the declaring manifest.
+    Path { path: PathBuf, mutable: bool },
+    /// Repository pinned to a full commit and a repository-contained skill directory.
+    Git {
+        repository: String,
+        revision: String,
+        subdir: Option<PathBuf>,
+        /// Original mutable selector. Empty means repository HEAD.
+        #[serde(default, flatten)]
+        reference: GitReference,
+    },
 }
 
 /// 解析图中的一个精确包节点。 / One exact package node in the resolved graph.
@@ -65,6 +97,7 @@ impl Lockfile {
     pub fn parse(source: &str) -> Result<Self, ProjectError> {
         let mut value: Self = toml::from_str(source)?;
         value.packages.sort_by(|a, b| a.id.cmp(&b.id));
+        value.skills.sort_by(|a, b| a.name.cmp(&b.name));
         value.validate()?;
         Ok(value)
     }
@@ -73,6 +106,7 @@ impl Lockfile {
     pub fn to_toml(&self) -> Result<String, ProjectError> {
         let mut normalized = self.clone();
         normalized.packages.sort_by(|a, b| a.id.cmp(&b.id));
+        normalized.skills.sort_by(|a, b| a.name.cmp(&b.name));
         normalized.validate()?;
         toml_edit::ser::to_string_pretty(&normalized).map_err(ProjectError::from)
     }
@@ -162,6 +196,88 @@ impl Lockfile {
                 }
             }
         }
+        let mut skill_names = BTreeSet::new();
+        for skill in &self.skills {
+            if !valid_skill_name(&skill.name) || !skill_names.insert(skill.name.as_str()) {
+                issues.push(ValidationIssue::new(
+                    "skill.name",
+                    format!("invalid or duplicate skill name `{}`", skill.name),
+                ));
+            }
+            validate_digest(
+                &format!("skill.{}.digest", skill.name),
+                &skill.digest,
+                &mut issues,
+            );
+            match &skill.source {
+                LockedSkillSource::Path { path, mutable } => {
+                    if path.as_os_str().is_empty() || path.is_absolute() {
+                        issues.push(ValidationIssue::new(
+                            format!("skill.{}.source.path", skill.name),
+                            "path must be non-empty and relative",
+                        ));
+                    }
+                    if !mutable {
+                        issues.push(ValidationIssue::new(
+                            format!("skill.{}.source.mutable", skill.name),
+                            "path sources must declare mutable = true",
+                        ));
+                    }
+                }
+                LockedSkillSource::Git {
+                    repository,
+                    revision,
+                    subdir,
+                    reference,
+                } => {
+                    if repository.trim().is_empty() || !is_git_object_id(revision) {
+                        issues.push(ValidationIssue::new(
+                            format!("skill.{}.source", skill.name),
+                            "git repository and full 40- or 64-hex commit ID are required",
+                        ));
+                    }
+                    if subdir.as_ref().is_some_and(|path| {
+                        path.as_os_str().is_empty()
+                            || path.is_absolute()
+                            || path
+                                .components()
+                                .any(|part| matches!(part, std::path::Component::ParentDir))
+                    }) {
+                        issues.push(ValidationIssue::new(
+                            format!("skill.{}.source.subdir", skill.name),
+                            "subdir must stay within the repository",
+                        ));
+                    }
+                    let selectors = [
+                        ("branch", &reference.branch),
+                        ("tag", &reference.tag),
+                        ("rev", &reference.rev),
+                    ];
+                    if selectors
+                        .iter()
+                        .filter(|(_, selector)| selector.is_some())
+                        .count()
+                        > 1
+                    {
+                        issues.push(ValidationIssue::new(
+                            format!("skill.{}.source", skill.name),
+                            "git branch, tag, and rev are mutually exclusive",
+                        ));
+                    }
+                    for (key, selector) in selectors {
+                        if selector
+                            .as_ref()
+                            .is_some_and(|value| value.trim().is_empty())
+                        {
+                            issues.push(ValidationIssue::new(
+                                format!("skill.{}.source.{key}", skill.name),
+                                "git selector cannot be empty",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         for package in &self.packages {
             for (alias, dependency) in &package.dependencies {
                 if !ids.contains(dependency.as_str()) {
@@ -178,6 +294,17 @@ impl Lockfile {
             Err(ProjectError::Validation(issues))
         }
     }
+}
+
+fn valid_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && !name.contains("--")
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 fn validate_digest(path: &str, digest: &str, issues: &mut Vec<ValidationIssue>) {
@@ -217,6 +344,7 @@ mod tests {
                 manifest_digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 dependencies: BTreeMap::new(),
             }],
+            skills: Vec::new(),
         };
         let encoded = lock.to_toml().unwrap();
         assert_eq!(Lockfile::parse(&encoded).unwrap(), lock);
@@ -241,7 +369,80 @@ mod tests {
                 manifest_digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 dependencies: BTreeMap::new(),
             }],
+            skills: Vec::new(),
         };
+        assert!(lock.validate().is_err());
+    }
+
+    #[test]
+    fn legacy_lock_and_skill_snapshots_round_trip() {
+        let legacy = r#"lock-version = 1
+resolver-version = "r/1"
+manifest-digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+package = []
+"#;
+        let mut lock = Lockfile::parse(legacy).unwrap();
+        assert!(lock.skills.is_empty());
+        lock.skills = vec![
+            LockedSkill {
+                name: "zeta".into(),
+                source: LockedSkillSource::Path {
+                    path: "skills/zeta".into(),
+                    mutable: true,
+                },
+                digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            LockedSkill {
+                name: "alpha".into(),
+                source: LockedSkillSource::Git {
+                    repository: "https://example.invalid/skills.git".into(),
+                    revision: "a".repeat(40),
+                    subdir: Some("skills/alpha".into()),
+                    reference: GitReference {
+                        tag: Some("v1".into()),
+                        ..GitReference::default()
+                    },
+                },
+                digest: "sha256:cccccccccccccccccccccccccccccccc".into(),
+            },
+        ];
+        let encoded = lock.to_toml().unwrap();
+        assert!(encoded.contains("[[skill]]"));
+        let parsed = Lockfile::parse(&encoded).unwrap();
+        assert_eq!(parsed.skills[0].name, "alpha");
+        assert!(encoded.contains("tag = \"v1\""));
+        assert!(
+            matches!(&parsed.skills[0].source, LockedSkillSource::Git { reference, .. } if reference.tag.as_deref() == Some("v1"))
+        );
+        assert_eq!(parsed.skills[1].name, "zeta");
+        lock.skills.push(lock.skills[0].clone());
+        assert!(lock.validate().is_err());
+    }
+
+    #[test]
+    fn legacy_git_skill_without_selector_means_head_and_invalid_selectors_fail() {
+        let source = format!(
+            r#"lock-version = 1
+resolver-version = "r/1"
+manifest-digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+package = []
+[[skill]]
+name = "review"
+digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+[skill.source]
+kind = "git"
+repository = "https://example.invalid/skills.git"
+revision = "{}"
+"#,
+            "a".repeat(40)
+        );
+        let mut lock = Lockfile::parse(&source).unwrap();
+        let LockedSkillSource::Git { reference, .. } = &mut lock.skills[0].source else {
+            panic!("expected git")
+        };
+        assert_eq!(reference, &GitReference::default());
+        reference.branch = Some("main".into());
+        reference.tag = Some("v1".into());
         assert!(lock.validate().is_err());
     }
 }

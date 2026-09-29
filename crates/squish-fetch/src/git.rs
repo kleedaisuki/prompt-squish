@@ -131,6 +131,112 @@ pub struct GitHost {
 }
 
 impl GitHost {
+    /// Reads an entire skill directory from a selected or exact commit without a checkout.
+    ///
+    /// An exact commit bypasses mutable selector observations. `LocalOnly` never fetches;
+    /// unsupported Git entries, including symlinks and submodules, are rejected by `read_tree`.
+    pub fn resolve_skill_tree(
+        &self,
+        repository: &str,
+        selector: &GitSelector,
+        subdir: &str,
+        exact_commit: Option<&GitOid>,
+        access: Access,
+    ) -> Result<(GitOid, LogicalTree), FetchError> {
+        let (commit, _, _, tree) =
+            self.read_selected_tree(repository, selector, subdir, exact_commit, access)?;
+        Ok((commit, tree))
+    }
+
+    fn read_selected_tree(
+        &self,
+        repository: &str,
+        selector: &GitSelector,
+        subdir: &str,
+        exact_commit: Option<&GitOid>,
+        access: Access,
+    ) -> Result<(GitOid, GitOid, GitOid, LogicalTree), FetchError> {
+        validate_repository(repository)?;
+        validate_subdir(subdir)?;
+        validate_selector(selector)?;
+        let commit = if let Some(exact) = exact_commit {
+            let db = self.db_path(repository, exact.format);
+            if !db.join("HEAD").exists() {
+                if access == Access::LocalOnly {
+                    return Err(FetchError::OfflineMiss(format!("Git commit {}", exact.hex)));
+                }
+                self.ensure_db(&db, exact.format)?;
+            }
+            if self.require_type(&db, &exact.hex, "commit").is_err() {
+                if access == Access::LocalOnly {
+                    return Err(FetchError::OfflineMiss(format!("Git commit {}", exact.hex)));
+                }
+                self.fetch_selector(&db, repository, &GitSelector::Rev(exact.hex.clone()))?;
+                self.require_type(&db, &exact.hex, "commit")?;
+            }
+            exact.clone()
+        } else {
+            let observation = self.observation_path(repository, selector);
+            let (hex, format) = match access {
+                Access::LocalOnly => {
+                    let observed = fs::read(&observation)
+                        .ok()
+                        .and_then(|v| serde_json::from_slice::<Observation>(&v).ok())
+                        .ok_or_else(|| {
+                            FetchError::OfflineMiss(format!(
+                                "Git selector observation for {}",
+                                stable_repo(repository)
+                            ))
+                        })?;
+                    (observed.commit, observed.format)
+                }
+                Access::Online => {
+                    let format = self.remote_object_format(repository)?;
+                    let db = self.db_path(repository, format);
+                    self.ensure_db(&db, format)?;
+                    let hex = self.fetch_selector(&db, repository, selector)?;
+                    if let Some(parent) = observation.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    write_sidecar(
+                        &observation,
+                        &serde_json::to_vec(&Observation {
+                            commit: hex.clone(),
+                            format,
+                        })?,
+                    )?;
+                    (hex, format)
+                }
+            };
+            GitOid::new(format, hex)?
+        };
+        let db = self.db_path(repository, commit.format);
+        if !db.join("HEAD").exists() {
+            return Err(FetchError::OfflineMiss(format!(
+                "Git object database for {}",
+                stable_repo(repository)
+            )));
+        }
+        if self.object_format(&db)? != commit.format {
+            return Err(FetchError::Integrity(
+                "Git database object format mismatch".into(),
+            ));
+        }
+        self.require_type(&db, &commit.hex, "commit")?;
+        let root = self.git_text(&db, &["rev-parse", &format!("{}^{{tree}}", commit.hex)])?;
+        let selected = if subdir == "." {
+            root.trim().to_owned()
+        } else {
+            self.git_text(&db, &["rev-parse", &format!("{}:{subdir}", root.trim())])?
+                .trim()
+                .to_owned()
+        };
+        self.require_type(&db, &selected, "tree")?;
+        let tree = self.read_tree(&db, &selected)?;
+        let root = GitOid::new(commit.format, root.trim().to_owned())?;
+        let selected = GitOid::new(commit.format, selected)?;
+        Ok((commit, root, selected, tree))
+    }
     /// 创建 Git source host。 / Creates a Git source host.
     pub fn new(context: HostContext) -> Self {
         Self::with_runner(context, Arc::new(SystemGitRunner::default()))
@@ -153,68 +259,8 @@ impl GitHost {
         subdir: &str,
         access: Access,
     ) -> Result<ExactGitCandidate, FetchError> {
-        validate_repository(repository)?;
-        validate_subdir(subdir)?;
-        validate_selector(selector)?;
-        let observation = self.observation_path(repository, selector);
-        let (commit, format) = match access {
-            Access::LocalOnly => {
-                let observed = fs::read(&observation)
-                    .ok()
-                    .and_then(|v| serde_json::from_slice::<Observation>(&v).ok())
-                    .ok_or_else(|| {
-                        FetchError::OfflineMiss(format!(
-                            "Git selector observation for {}",
-                            stable_repo(repository)
-                        ))
-                    })?;
-                (observed.commit, observed.format)
-            }
-            Access::Online => {
-                let format = self.remote_object_format(repository)?;
-                let db = self.db_path(repository, format);
-                self.ensure_db(&db, format)?;
-                let value = self.fetch_selector(&db, repository, selector)?;
-                if let Some(parent) = observation.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                write_sidecar(
-                    &observation,
-                    &serde_json::to_vec(&Observation {
-                        commit: value.clone(),
-                        format,
-                    })?,
-                )?;
-                (value, format)
-            }
-        };
-        let db = self.db_path(repository, format);
-        if !db.join("HEAD").exists() {
-            return Err(FetchError::OfflineMiss(format!(
-                "Git object database for {}",
-                stable_repo(repository)
-            )));
-        }
-        self.require_type(&db, &commit, "commit")?;
-        if self.object_format(&db)? != format {
-            return Err(FetchError::Integrity(
-                "Git database object format mismatch".into(),
-            ));
-        }
-        let commit_oid = GitOid::new(format, commit.clone())?;
-        let root = self
-            .git_text(&db, &["rev-parse", &format!("{commit}^{{tree}}")])?
-            .trim()
-            .to_owned();
-        let package = if subdir == "." {
-            root.clone()
-        } else {
-            self.git_text(&db, &["rev-parse", &format!("{root}:{subdir}")])?
-                .trim()
-                .to_owned()
-        };
-        self.require_type(&db, &package, "tree")?;
-        let tree = self.read_tree(&db, &package)?;
+        let (commit_oid, root_tree, package_tree, tree) =
+            self.read_selected_tree(repository, selector, subdir, None, access)?;
         let manifest_file = tree
             .files
             .iter()
@@ -238,8 +284,8 @@ impl GitHost {
             .materialize(&stable_repo(repository), &tree)?;
         Ok(ExactGitCandidate {
             commit: commit_oid,
-            root_tree: GitOid::new(format, root)?,
-            package_tree: GitOid::new(format, package)?,
+            root_tree,
+            package_tree,
             subdir: subdir.into(),
             content_digest: tree.content_digest,
             manifest_digest,
@@ -339,7 +385,13 @@ impl GitHost {
     fn read_tree(&self, db: &Path, tree: &str) -> Result<LogicalTree, FetchError> {
         let output = self.run(db, &["ls-tree", "-rz", "--full-tree", "-r", tree])?;
         let mut files = Vec::new();
+        let mut total = 0u64;
         for entry in output.stdout.split(|b| *b == 0).filter(|v| !v.is_empty()) {
+            if files.len() >= self.context.limits.max_files {
+                return Err(FetchError::Integrity(
+                    "Git tree file count exceeds limit".into(),
+                ));
+            }
             let tab = entry
                 .iter()
                 .position(|b| *b == b'\t')
@@ -356,6 +408,19 @@ impl GitHost {
                 return Err(FetchError::Unsupported(format!(
                     "Git mode {mode} at {path}"
                 )));
+            }
+            let size: u64 = self
+                .git_text(db, &["cat-file", "-s", oid])?
+                .trim()
+                .parse()
+                .map_err(|_| FetchError::Git("invalid blob size".into()))?;
+            total = total
+                .checked_add(size)
+                .ok_or_else(|| FetchError::Integrity("Git tree byte count overflow".into()))?;
+            if size > self.context.limits.max_file_bytes
+                || total > self.context.limits.max_expanded_bytes
+            {
+                return Err(FetchError::Integrity("Git tree exceeds byte limits".into()));
             }
             let body = self.run(db, &["cat-file", "blob", oid])?.stdout;
             files.push(LogicalFile {
@@ -710,7 +775,13 @@ fn validate_subdir(v: &str) -> Result<(), FetchError> {
     if v.is_empty()
         || v.starts_with('/')
         || v.contains('\\')
-        || v.split('/').any(|s| s.is_empty() || s == "." || s == "..")
+        || v.split('/').any(|s| {
+            s.is_empty()
+                || s == "."
+                || s == ".."
+                || s.contains(':')
+                || s.chars().any(char::is_control)
+        })
     {
         return Err(FetchError::Path(v.into()));
     }
@@ -775,6 +846,102 @@ mod tests {
                 stderr: Vec::new(),
             })
         }
+    }
+
+    #[test]
+    fn skill_tree_needs_no_package_manifest_and_exact_commit_survives_ref_move() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.temp")
+            .join(format!(
+                "fetch-skill-git-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+        let repo = root.join("repo");
+        fs::create_dir_all(repo.join("skills/demo/scripts")).unwrap();
+        command(&repo, &["init"]);
+        command(&repo, &["config", "user.email", "test@example.invalid"]);
+        command(&repo, &["config", "user.name", "test"]);
+        fs::write(
+            repo.join("skills/demo/SKILL.md"),
+            b"---\nname: demo\ndescription: Demo\n---\n",
+        )
+        .unwrap();
+        fs::write(repo.join("skills/demo/scripts/run.sh"), b"echo old\n").unwrap();
+        command(&repo, &["add", "."]);
+        command(&repo, &["commit", "-m", "first"]);
+        let url = Url::from_file_path(fs::canonicalize(&repo).unwrap())
+            .unwrap()
+            .to_string();
+        let host = GitHost::new(HostContext::new(root.join("cache")).unwrap());
+        let selector = GitSelector::Head;
+        let (first, tree) = host
+            .resolve_skill_tree(&url, &selector, "skills/demo", None, Access::Online)
+            .unwrap();
+        assert_eq!(tree.files.len(), 2);
+        fs::write(repo.join("skills/demo/scripts/run.sh"), b"echo new\n").unwrap();
+        command(&repo, &["add", "."]);
+        command(&repo, &["commit", "-m", "second"]);
+        let (second, _) = host
+            .resolve_skill_tree(&url, &selector, "skills/demo", None, Access::Online)
+            .unwrap();
+        assert_ne!(first, second);
+        let (pinned, old_tree) = host
+            .resolve_skill_tree(
+                &url,
+                &selector,
+                "skills/demo",
+                Some(&first),
+                Access::LocalOnly,
+            )
+            .unwrap();
+        assert_eq!(pinned, first);
+        assert_eq!(old_tree.content_digest, tree.content_digest);
+        assert!(
+            old_tree
+                .files
+                .iter()
+                .any(|file| file.path == "scripts/run.sh" && file.bytes == b"echo old\n")
+        );
+        drop(host);
+        remove_git_fixture(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_tree_rejects_git_symlinks() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.temp")
+            .join(format!(
+                "fetch-skill-link-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+        let repo = root.join("repo");
+        fs::create_dir_all(repo.join("skills/demo")).unwrap();
+        command(&repo, &["init"]);
+        command(&repo, &["config", "user.email", "test@example.invalid"]);
+        command(&repo, &["config", "user.name", "test"]);
+        fs::write(repo.join("skills/demo/SKILL.md"), b"skill").unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", repo.join("skills/demo/secret")).unwrap();
+        command(&repo, &["add", "."]);
+        command(&repo, &["commit", "-m", "fixture"]);
+        let url = Url::from_file_path(fs::canonicalize(&repo).unwrap())
+            .unwrap()
+            .to_string();
+        let host = GitHost::new(HostContext::new(root.join("cache")).unwrap());
+        assert!(matches!(
+            host.resolve_skill_tree(
+                &url,
+                &GitSelector::Head,
+                "skills/demo",
+                None,
+                Access::Online
+            ),
+            Err(FetchError::Unsupported(_))
+        ));
+        drop(host);
+        remove_git_fixture(&root);
     }
 
     #[test]

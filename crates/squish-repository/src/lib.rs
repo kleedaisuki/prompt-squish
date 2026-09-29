@@ -24,4 +24,7 @@ pub use snapshot::{
     LockedManifestSnapshot, ManifestSnapshot, PackageLocation, ProjectSnapshot, ProjectSource,
     ResolvedPackage, ResolvedTarget,
 };
-pub use transaction::{FaultInjector, FaultPoint, FormatUpdate, NoFault};
+pub use transaction::{
+    FaultInjector, FaultPoint, FormatUpdate, NoFault, SkillDirectoryUpdate, skill_marker,
+    skill_tree_digest,
+};

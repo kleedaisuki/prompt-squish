@@ -7,7 +7,8 @@ use std::{
 use squish_kernel::CancellationToken;
 use squish_project::{Lockfile, Manifest, ResolutionMode};
 use squish_protocol::{
-    Artifact, ArtifactId, CachedAction, CleanResult, Digest, PlanInspection, TargetName, VcsChoice,
+    Artifact, ArtifactId, CachedAction, CleanResult, Digest, PlanInspection, SkillSource,
+    TargetName, VcsChoice,
 };
 use squish_repository::{
     CreateProjectRequest, CreatedProject, FaultInjector, PackageLocation, ProjectVcs,
@@ -385,6 +386,15 @@ pub struct ResolvedDependencies {
     pub packages: Vec<PackageLocation>,
 }
 
+/// A verified source tree returned by the host before manager-level Skill validation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedSkillSource {
+    /// Full Git commit ID for Git sources; absent for local paths.
+    pub revision: Option<String>,
+    /// Skill-relative regular files. Paths must not be absolute or traverse outside the tree.
+    pub files: BTreeMap<PathBuf, Vec<u8>>,
+}
+
 /// 来源证明目录的类型化查询结果。 / Typed result of a provenance-catalog query.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProvenanceRelation {
@@ -417,6 +427,19 @@ pub enum ProvenanceNonApplicability {
 /// ports. A production composition root must implement every raw catalog and blob port and must
 /// never rely on these defaults.
 pub trait Services: Send + Sync {
+    /// Resolve one exact skill directory without requiring an xmlsquish package manifest.
+    ///
+    /// The host enforces network policy and rejects symbolic links and special files. The
+    /// manager validates the frontmatter identity and complete content digest before commit.
+    fn resolve_skill_source(
+        &self,
+        _project_root: &Path,
+        _source: &SkillSource,
+        _locked_revision: Option<&str>,
+        _mode: ResolutionMode,
+    ) -> Result<ResolvedSkillSource, ServiceError> {
+        unavailable("skill source resolver")
+    }
     /// 在规划恢复阶段打开唯一调用级构建运行时。 / Opens the sole invocation-scoped build runtime during planning recovery.
     fn open_build_runtime(
         &self,

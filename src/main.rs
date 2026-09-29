@@ -474,6 +474,44 @@ fn execute(
         return dispatch_operation(invocation, config, host, runtime, faults.durability);
     }
 
+    // Installing the bundled guide for the current user has no project dependency.
+    // Keep this path independent of project discovery so it works from any directory.
+    if matches!(&invocation.request, OperationRequest::InstallSkill(request) if request.project.is_none())
+    {
+        let config = match load_config(None, &invocation) {
+            Ok(config) => config,
+            Err(error) => {
+                let message = format!("could not load configuration: {error}");
+                return Ok(bootstrap_failure(
+                    bootstrap_json,
+                    "config",
+                    "CONFIG001",
+                    &message,
+                    1,
+                    true,
+                ));
+            }
+        };
+        let operation_json = operation_json_requested(&invocation, &config);
+        let host = match ProjectCreationHost::new(GitExecution::Runner(Arc::new(
+            SystemGitRunner::default(),
+        ))) {
+            Ok(host) => host,
+            Err(error) => {
+                let message = format!("could not initialize skill installation services: {error}");
+                return Ok(bootstrap_failure(
+                    operation_json,
+                    "host",
+                    "HOST001",
+                    &message,
+                    1,
+                    true,
+                ));
+            }
+        };
+        return dispatch_operation(invocation, config, host, runtime, faults.durability);
+    }
+
     let explicit = requested_project(&invocation.request)
         .expect("non-new operations always address an existing project");
     let discovery = if explicit == Path::new(".") {
@@ -864,6 +902,10 @@ fn set_project(
         OperationRequest::Format(value) => value.project = project,
         OperationRequest::Add(value) => value.project = project,
         OperationRequest::Remove(value) => value.project = project,
+        OperationRequest::AddSkill(value) => value.project = project,
+        OperationRequest::RemoveSkill(value) => value.project = project,
+        OperationRequest::SyncSkills(value) => value.project = project,
+        OperationRequest::InstallSkill(value) => value.project = Some(project),
         OperationRequest::Inspect(value) => value.project = project,
     }
     Ok(())
@@ -878,6 +920,10 @@ fn requested_project(request: &OperationRequest) -> Option<&Path> {
         OperationRequest::Format(value) => value.project.as_str(),
         OperationRequest::Add(value) => value.project.as_str(),
         OperationRequest::Remove(value) => value.project.as_str(),
+        OperationRequest::AddSkill(value) => value.project.as_str(),
+        OperationRequest::RemoveSkill(value) => value.project.as_str(),
+        OperationRequest::SyncSkills(value) => value.project.as_str(),
+        OperationRequest::InstallSkill(value) => value.project.as_ref()?.as_str(),
         OperationRequest::Inspect(value) => value.project.as_str(),
     }))
 }

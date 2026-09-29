@@ -249,3 +249,51 @@ pub struct GitReference {
     /// Requested commit revision. / 请求的 commit revision。
     pub rev: Option<String>,
 }
+
+/// A skill source is deliberately separate from XML package dependencies.
+///
+/// The key in `[skills]` is both the installed directory name and the required
+/// `SKILL.md` frontmatter name. Source adapters verify that identity and hash
+/// the complete skill tree before materializing `.agents/skills/<name>`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct SkillSpec {
+    /// A skill directory relative to the declaring manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// A Git repository containing the skill directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<String>,
+    /// Mutable Git selector; the lock records the resolved full commit ID.
+    #[serde(flatten)]
+    pub git_reference: GitReference,
+    /// Skill directory inside the repository; omitted means repository root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdir: Option<PathBuf>,
+}
+
+impl SkillSpec {
+    /// Declare a skill directory relative to the manifest, not the process cwd.
+    pub fn path(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: Some(path.into()),
+            git: None,
+            git_reference: GitReference::default(),
+            subdir: None,
+        }
+    }
+
+    /// Declare a skill from Git, optionally selecting one directory within it.
+    pub fn git(
+        repository: impl Into<String>,
+        reference: GitReference,
+        subdir: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            path: None,
+            git: Some(repository.into()),
+            git_reference: reference,
+            subdir,
+        }
+    }
+}

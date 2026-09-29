@@ -54,6 +54,7 @@ impl Services for Resolver {
                 resolver_version: "mutation-test/1".into(),
                 manifest_digest: request.manifest_digest.into(),
                 packages: Vec::new(),
+                skills: Vec::new(),
             },
             packages: Vec::new(),
         })
@@ -115,6 +116,7 @@ impl Services for RacingResolver {
                 resolver_version: "racing-test/1".into(),
                 manifest_digest: request.manifest_digest.into(),
                 packages: Vec::new(),
+                skills: Vec::new(),
             },
             packages: Vec::new(),
         })
@@ -133,6 +135,48 @@ fn manifest(dependency: &str) -> String {
     format!(
         "# keep this comment\nmanifest-version = 1\n[package]\nname = \"demo\"\nversion = \"1.0.0\"\n\n[dependencies]\n{dependency}"
     )
+}
+
+#[test]
+fn package_add_rejects_manual_skill_declaration_without_lock() {
+    let temp = TempDir::new_in(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(".temp"),
+    )
+    .unwrap();
+    let path = temp.path().join("xmlsquish.toml");
+    let before = format!(
+        "{}\n[skills]\nreview-checks = {{ path = \"tools/skills/review-checks\" }}\n",
+        manifest("")
+    );
+    fs::write(&path, &before).unwrap();
+    let request = AddRequest {
+        project: ProjectPath::new(temp.path().to_string_lossy()).unwrap(),
+        package: Some(PackageName::new("demo").unwrap()),
+        dependency: DependencyName::new("dep").unwrap(),
+        rename: None,
+        source: DependencySource::Registry {
+            registry: Some(RegistryName::new("test").unwrap()),
+            version: VersionRequirement::new("^1").unwrap(),
+        },
+        kind: DependencyKind::Normal,
+        features: Vec::new(),
+        no_default_features: false,
+        optional: false,
+        lock: LockMode::Update,
+        dry_run: false,
+    };
+    let manager = ManagerCapability::new(Resolver, InvocationSettings::default());
+    let outcome = manager.execute(&OperationRequest::Add(request), &context());
+
+    assert!(matches!(
+        outcome.result,
+        OperationResult::Unavailable { .. }
+    ));
+    assert_eq!(outcome.root_failures, 1);
+    assert_eq!(fs::read_to_string(path).unwrap(), before);
+    assert!(!temp.path().join("xmlsquish.lock").exists());
 }
 
 #[test]

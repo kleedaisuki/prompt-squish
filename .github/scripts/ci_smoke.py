@@ -8,7 +8,10 @@ import sys
 import tempfile
 
 
-COMMANDS = ("new", "build", "clean", "fmt", "add", "remove", "inspect")
+COMMANDS = (
+    "new", "build", "clean", "fmt", "add", "remove", "inspect",
+    "add-skill", "remove-skill", "sync-skills", "install-skill",
+)
 
 
 def invoke(binary: Path, *arguments: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -71,6 +74,26 @@ def smoke(binary: Path, scratch: Path) -> None:
         if (project / "xmlsquish.lock").exists():
             raise RuntimeError("new unexpectedly created a lockfile")
 
+        skill = project / "tools" / "skills" / "review-checks"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: review-checks\ndescription: Review changes in this project.\n---\n\n# Review\n",
+            encoding="utf-8",
+        )
+        (skill / "reference.txt").write_text("A complete skill tree is installed.\n", encoding="utf-8")
+        run(binary, "add-skill", "review-checks", "--path", "tools/skills/review-checks", cwd=project)
+        installed = project / ".agents" / "skills" / "review-checks"
+        if not (installed / "SKILL.md").is_file() or not (installed / "reference.txt").is_file():
+            raise RuntimeError("add-skill omitted a skill file or support asset")
+        if "[skills]" not in (project / "xmlsquish.toml").read_text(encoding="utf-8"):
+            raise RuntimeError("add-skill did not declare the skill")
+        if 'name = "review-checks"' not in (project / "xmlsquish.lock").read_text(encoding="utf-8"):
+            raise RuntimeError("add-skill did not lock the skill")
+        run(binary, "sync-skills", "--locked", "--offline", cwd=project)
+        run(binary, "install-skill", "--project", cwd=project)
+        if not (project / ".agents" / "skills" / "prompt-squish" / "SKILL.md").is_file():
+            raise RuntimeError("install-skill did not install its bundled guide")
+
         run(binary, "fmt", "--check", "--plain", cwd=project)
         source = project / "src" / "prompt.xml"
         source.write_text(
@@ -84,6 +107,11 @@ def smoke(binary: Path, scratch: Path) -> None:
             raise RuntimeError("human fmt --diff did not emit a unified diff on stdout")
         run(binary, "fmt", "--plain", cwd=project)
         run(binary, "build", "--offline", "--plain", cwd=project)
+        if 'name = "review-checks"' not in (project / "xmlsquish.lock").read_text(encoding="utf-8"):
+            raise RuntimeError("build lost the independent skill lock")
+        run(binary, "remove-skill", "review-checks", cwd=project)
+        if installed.exists():
+            raise RuntimeError("remove-skill retained its owned projection")
         target = project / "target" / "xmlsquish"
         artifacts = target / "artifacts"
         prompt = artifacts / "prompt.prompt"

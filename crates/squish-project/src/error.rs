@@ -38,6 +38,12 @@ pub enum ProjectError {
     /// An edit would silently overwrite intent. / 编辑会静默覆盖意图。
     #[error("dependency `{0}` already exists; use replace explicitly")]
     DuplicateDependency(String),
+    /// A requested skill does not exist.
+    #[error("skill `{0}` does not exist")]
+    MissingSkill(String),
+    /// An edit would silently replace an existing skill source.
+    #[error("skill `{0}` already exists; use replace explicitly")]
+    DuplicateSkill(String),
     /// Serialization failed. / 序列化失败。
     #[error("serialization failed: {0}")]
     Serialization(#[from] toml_edit::ser::Error),

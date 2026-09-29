@@ -18,6 +18,7 @@ pub mod new;
 pub mod orchestrator;
 mod runtime;
 mod services;
+mod skill;
 
 pub use error::{ManagerError, ServiceError};
 pub use model::{
@@ -31,7 +32,7 @@ pub use runtime::{
 pub use services::{
     ProjectBuildLayout, ProjectBuildLayoutError, ProjectCleanStatus, ProjectCreationLocation,
     ProjectCreationStatus, ProvenanceNonApplicability, ProvenanceRelation, ResolveRequest,
-    ResolvedDependencies, Services,
+    ResolvedDependencies, ResolvedSkillSource, Services,
 };
 
 use squish_kernel::{Capability, CapabilityDescriptor, InvocationContext, OperationOutcome};
@@ -151,6 +152,10 @@ static OPERATIONS: &[OperationKind] = &[
     OperationKind::Format,
     OperationKind::Add,
     OperationKind::Remove,
+    OperationKind::AddSkill,
+    OperationKind::RemoveSkill,
+    OperationKind::InstallSkill,
+    OperationKind::SyncSkills,
     OperationKind::Inspect,
     OperationKind::Clean,
 ];
@@ -211,6 +216,18 @@ impl<S: Services> Capability for ManagerCapability<S> {
                 durability,
                 context,
             ),
+            OperationRequest::AddSkill(request) => {
+                skill::add(request, &self.services, &self.settings, durability, context)
+            }
+            OperationRequest::RemoveSkill(request) => {
+                skill::remove(request, &self.services, &self.settings, durability, context)
+            }
+            OperationRequest::InstallSkill(request) => {
+                skill::install(request, &self.settings, context)
+            }
+            OperationRequest::SyncSkills(request) => {
+                skill::sync(request, &self.services, &self.settings, durability, context)
+            }
             OperationRequest::Inspect(request) => {
                 inspect::execute(request, &self.services, &self.settings, context)
             }

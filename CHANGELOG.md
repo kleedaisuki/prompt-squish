@@ -6,7 +6,14 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 
 ## [Unreleased]
 
-尚无已记录的面向用户变化。 / No user-facing changes recorded yet.
+### Agent Skills 依赖 / Agent Skills dependencies
+
+- 工作区根清单新增 `[skills]`，支持明确的本地目录与 Git 来源；`xmlsquish.lock` 独立记录技能来源、精确 Git 提交与完整目录摘要，不把技能伪装成 XML 包依赖。
+  The workspace-root manifest now supports `[skills]` with explicit local-directory and Git sources. `xmlsquish.lock` records each skill's source, exact Git commit, and whole-tree digest independently of XML packages.
+- 新增 `add-skill`、`remove-skill` 与 `sync-skills`，将受管技能安装到 `.agents/skills/<name>`，保留非受管目录，并支持锁定、离线与只预演模式。
+  Add `add-skill`, `remove-skill`, and `sync-skills` for managed `.agents/skills/<name>` copies, preserving unmanaged directories and supporting locked, offline, and dry-run modes.
+- 新增 `install-skill`，从可执行文件内嵌内容安装名为 `prompt-squish` 的自带指南，默认作用于用户目录，也可用 `--project` 安装到当前工作区。
+  Add `install-skill` to install the executable-bundled `prompt-squish` guide for the current user, or into the current workspace with `--project`.
 
 ## [1.0.4] — 2026-09-20
 

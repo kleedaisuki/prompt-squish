@@ -15,12 +15,13 @@ mod resolver;
 mod scaffold;
 mod transaction;
 
-pub use edit::{CandidateManifest, DependencyChange, EditPlan};
+pub use edit::{CandidateManifest, DependencyChange, EditPlan, SkillChange, SkillEditPlan};
 pub use error::{ProjectError, ValidationIssue};
-pub use lock::{LockedPackage, LockedSource, Lockfile};
+pub use lock::{LockedPackage, LockedSkill, LockedSkillSource, LockedSource, Lockfile};
 pub use manifest::Manifest;
 pub use model::{
-    DependencyDetail, DependencySpec, GitReference, Limits, Package, Profile, Target, Workspace,
+    DependencyDetail, DependencySpec, GitReference, Limits, Package, Profile, SkillSpec, Target,
+    Workspace,
 };
 pub use resolver::{DependencyResolver, ResolutionInput, ResolutionMode};
 pub use scaffold::{NewProjectSpec, ProjectScaffold, STARTER_SOURCE, ScaffoldFile, ScaffoldVcs};

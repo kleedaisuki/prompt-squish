@@ -1066,6 +1066,47 @@ impl<W: Write, C: Clock, T: TerminalProbe> HumanRenderer<W, C, T> {
                 },
                 sanitize(result.dependency.as_str())
             ),
+            OperationResult::AddSkill(result) => format!(
+                "{} skill {}",
+                if result.dry_run {
+                    "would install"
+                } else {
+                    "installed"
+                },
+                sanitize(result.skill.as_str())
+            ),
+            OperationResult::RemoveSkill(result) => format!(
+                "{} skill {}",
+                if result.dry_run {
+                    "would remove"
+                } else {
+                    "removed"
+                },
+                sanitize(result.skill.as_str())
+            ),
+            OperationResult::InstallSkill(result) => format!(
+                "{} bundled skill at {}",
+                if result.dry_run {
+                    "would install"
+                } else if result.changed {
+                    "installed"
+                } else {
+                    "already installed"
+                },
+                sanitize(&result.destination.as_path().display().to_string())
+            ),
+            OperationResult::SyncSkills(result) => format!(
+                "{} skills: {} installed, {} updated, {} removed, {} unchanged",
+                if result.dry_run {
+                    "would sync"
+                } else {
+                    "synced"
+                },
+                result.installed,
+                result.updated,
+                result.removed,
+                result.unchanged
+            ),
             OperationResult::Inspect(result) => {
                 format!("inspection: {}", inspect_result_name(result))
             }
@@ -1976,6 +2017,10 @@ fn operation_kind_name(kind: squish_protocol::OperationKind) -> &'static str {
         squish_protocol::OperationKind::Format => "format",
         squish_protocol::OperationKind::Add => "add",
         squish_protocol::OperationKind::Remove => "remove",
+        squish_protocol::OperationKind::AddSkill => "add-skill",
+        squish_protocol::OperationKind::RemoveSkill => "remove-skill",
+        squish_protocol::OperationKind::InstallSkill => "install-skill",
+        squish_protocol::OperationKind::SyncSkills => "sync-skills",
         squish_protocol::OperationKind::Inspect => "inspect",
         squish_protocol::OperationKind::Clean => "clean",
     }
@@ -2009,6 +2054,26 @@ fn short_operation_result(result: &OperationResult) -> String {
             "remove dependency={} dry-run={}",
             sanitize(result.dependency.as_str()),
             result.dry_run
+        ),
+        OperationResult::AddSkill(result) => format!(
+            "add-skill skill={} dry-run={}",
+            sanitize(result.skill.as_str()),
+            result.dry_run
+        ),
+        OperationResult::RemoveSkill(result) => format!(
+            "remove-skill skill={} dry-run={}",
+            sanitize(result.skill.as_str()),
+            result.dry_run
+        ),
+        OperationResult::InstallSkill(result) => format!(
+            "install-skill destination={} changed={} dry-run={}",
+            sanitize(&result.destination.as_path().display().to_string()),
+            result.changed,
+            result.dry_run
+        ),
+        OperationResult::SyncSkills(result) => format!(
+            "sync-skills installed={} updated={} removed={} unchanged={} dry-run={}",
+            result.installed, result.updated, result.removed, result.unchanged, result.dry_run
         ),
         OperationResult::Inspect(result) => format!("inspect view={}", inspect_result_name(result)),
         OperationResult::Clean(result) => format!(

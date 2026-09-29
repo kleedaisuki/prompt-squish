@@ -174,6 +174,7 @@ fn canonical_manifest(package: &NewPackageName) -> Manifest {
         }),
         targets,
         dependencies: BTreeMap::new(),
+        skills: BTreeMap::new(),
         exports: BTreeMap::new(),
         profiles: BTreeMap::new(),
     }

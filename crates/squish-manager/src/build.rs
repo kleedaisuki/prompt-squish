@@ -45,6 +45,7 @@ use crate::{
         self, ActionExecutionFact, CachedResult, ExecutionReport, ExecutionState, PlanningFailure,
         PlanningRecorder, ResolvedInputs, WorkDisposition, WorkExecutor,
     },
+    skill::{validate_preserved_skill_lock, validate_skill_lock},
 };
 use serde::{Deserialize, Serialize};
 use squish_kernel::{CancellationToken, InvocationContext, OperationOutcome};
@@ -1188,6 +1189,8 @@ fn prepare_excluding(
         .snapshot_with_locations(&initial_locations)
         .map_err(|e| error("MGB002", Phase::Snapshot, e))?;
     let manifests = manifest_map(&initial);
+    // XML resolution owns package locks only; reject stale skill intent before it can rewrite the lock.
+    validate_skill_lock(&manifests, initial.lockfile())?;
     let resolved = services
         .resolve(ResolveRequest {
             manifests: &manifests,
@@ -1196,6 +1199,8 @@ fn prepare_excluding(
             mode,
         })
         .map_err(|e| ManagerError::new(e.code(), Phase::Resolve, e.message()))?;
+    validate_skill_lock(&manifests, Some(&resolved.lockfile))?;
+    validate_preserved_skill_lock(initial.lockfile(), &resolved.lockfile)?;
     ensure_authoritative_lock(&repository, &initial, &resolved.lockfile, mode)?;
     let snapshot = repository
         .snapshot_with_locations(&resolved.packages)
@@ -1294,6 +1299,11 @@ fn prepare_recorded(
         },
     )?;
     let manifests = manifest_map(&initial);
+    planning.step(
+        step("validate-skill-lock"),
+        PlanningStepKind::Resolve,
+        || validate_skill_lock(&manifests, initial.lockfile()),
+    )?;
     let resolved = planning.step(step("resolve"), PlanningStepKind::Resolve, || {
         planning_not_cancelled(context)?;
         services
@@ -1305,6 +1315,14 @@ fn prepare_recorded(
             })
             .map_err(|e| ManagerError::new(e.code(), Phase::Resolve, e.message()))
     })?;
+    planning.step(
+        step("validate-resolved-skill-lock"),
+        PlanningStepKind::Resolve,
+        || {
+            validate_skill_lock(&manifests, Some(&resolved.lockfile))?;
+            validate_preserved_skill_lock(initial.lockfile(), &resolved.lockfile)
+        },
+    )?;
     planning.step(
         step("reconcile-lock"),
         PlanningStepKind::ReconcileLock,

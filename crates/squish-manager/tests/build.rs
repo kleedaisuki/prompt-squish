@@ -211,6 +211,7 @@ impl Services for LocalServices {
                             .into(),
                     dependencies: BTreeMap::new(),
                 }],
+                skills: Vec::new(),
             },
             packages: Vec::new(),
         })
@@ -256,6 +257,23 @@ entry = "src/main.xml"
         lock: LockMode::Update,
     };
     (temp, request)
+}
+
+#[test]
+fn build_rejects_unlocked_skill_intent_without_rewriting_lock() {
+    let (temp, request) = fixture();
+    let manifest = temp.path().join("xmlsquish.toml");
+    let mut source = fs::read_to_string(&manifest).unwrap();
+    source.push_str("\n[skills]\nreview-checks = { path = \"tools/skills/review-checks\" }\n");
+    fs::write(&manifest, source).unwrap();
+
+    let error = match build::prepare(&request, &LocalServices) {
+        Ok(_) => panic!("build accepted unlocked skill intent"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "XS3331");
+    assert!(error.message().contains("add-skill/remove-skill"));
+    assert!(!temp.path().join("xmlsquish.lock").exists());
 }
 
 #[derive(Clone)]
@@ -1538,6 +1556,7 @@ impl Services for WorkspaceServices {
                 resolver_version: "test/1".into(),
                 manifest_digest: request.manifest_digest.into(),
                 packages,
+                skills: Vec::new(),
             },
             packages: Vec::new(),
         })

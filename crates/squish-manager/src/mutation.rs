@@ -32,6 +32,7 @@ use crate::{
         self, CachedResult, PlanningFailure, PlanningRecorder, ResolvedInputs, WorkDisposition,
         WorkExecutor,
     },
+    skill::{validate_preserved_skill_lock, validate_skill_lock},
 };
 
 const RETRIES: u8 = 4;
@@ -305,6 +306,8 @@ fn resolve_stage(
         .candidate
         .as_ref()
         .expect("Snapshot creates candidate");
+    // Package mutations must not silently reinterpret or discard the independent skill lock.
+    validate_skill_lock(&candidate.manifests, snapshot.lockfile())?;
     let digest_text = format!("blake3:{}", candidate.digest.hex());
     let resolved = services
         .resolve(ResolveRequest {
@@ -314,6 +317,8 @@ fn resolve_stage(
             mode: resolution_mode(intent.mode),
         })
         .map_err(|e| err(e.code(), Phase::Resolve, "candidate resolution failed", &e))?;
+    validate_skill_lock(&candidate.manifests, Some(&resolved.lockfile))?;
+    validate_preserved_skill_lock(snapshot.lockfile(), &resolved.lockfile)?;
     let lock_bytes = resolved
         .lockfile
         .to_toml()
@@ -431,13 +436,13 @@ fn bootstrap_locations(
         })
 }
 
-struct CandidateSet {
-    manifests: BTreeMap<String, Manifest>,
-    manifest: Vec<u8>,
-    digest: Digest,
+pub(crate) struct CandidateSet {
+    pub(crate) manifests: BTreeMap<String, Manifest>,
+    pub(crate) manifest: Vec<u8>,
+    pub(crate) digest: Digest,
 }
 
-fn candidate_set(
+pub(crate) fn candidate_set(
     snapshot: &ProjectSnapshot,
     changed: &Path,
     candidate: &[u8],
@@ -504,6 +509,7 @@ fn mutation_plan(candidate: CandidateTransaction<'_>) -> Result<MutationPlan, Ma
     ];
     let alias = match &candidate.kind {
         MutationKind::AddDependency { alias } | MutationKind::RemoveDependency { alias } => alias,
+        MutationKind::AddSkill { name } | MutationKind::RemoveSkill { name } => name,
     };
     let id = TransactionId(format!(
         "dependency-{}-{}",
@@ -596,6 +602,7 @@ fn dependency_spec(request: &AddRequest) -> Result<DependencySpec, ManagerError>
         } => {
             detail.git = Some(repository.as_str().into());
             detail.git_reference = match reference {
+                GitReference::Head => ProjectGitReference::default(),
                 GitReference::Revision(v) => ProjectGitReference {
                     rev: Some(v.as_str().into()),
                     ..Default::default()
@@ -848,6 +855,8 @@ fn sealed_digest(state: &MutationState) -> Digest {
     let (tag, alias) = match &transaction.kind {
         MutationKind::AddDependency { alias } => (b"add".as_slice(), alias.as_str()),
         MutationKind::RemoveDependency { alias } => (b"remove".as_slice(), alias.as_str()),
+        MutationKind::AddSkill { name } => (b"add-skill".as_slice(), name.as_str()),
+        MutationKind::RemoveSkill { name } => (b"remove-skill".as_slice(), name.as_str()),
     };
     hash_field(&mut hash, tag);
     hash_field(&mut hash, alias.as_bytes());

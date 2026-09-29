@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -11,7 +11,10 @@ use std::{
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use squish_project::{CommitPreparation, JournalRecord, MutationPlan, MutationPlanner};
+use squish_project::{
+    CommitPreparation, JournalRecord, MutationKind, MutationPlan, MutationPlanner, TransactionId,
+};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::{
     RepositoryError,
@@ -76,6 +79,47 @@ pub struct FormatUpdate {
     pub bytes: Vec<u8>,
 }
 
+/// One owned `.agents/skills/<name>` replacement or removal accompanying a mutation plan.
+/// `expected_digest` is `None` only when the destination must not exist. `files = None`
+/// removes an owned installation; otherwise the map is the complete replacement tree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SkillDirectoryUpdate {
+    /// Validated, single-component skill name.
+    pub name: String,
+    /// Previously observed content digest, excluding the ownership marker.
+    pub expected_digest: Option<String>,
+    /// Complete skill-relative regular-file contents, including the ownership marker.
+    pub files: Option<BTreeMap<PathBuf, Vec<u8>>>,
+}
+
+const SKILL_MARKER: &str = ".xmlsquish-managed";
+const SKILL_MARKER_PREFIX: &[u8] = b"xmlsquish skill v1\n";
+
+/// Return the complete ownership marker for a skill name and normalized content digest.
+/// The marker is stored inside the projection but excluded from that digest.
+pub fn skill_marker(name: &str, digest: &str) -> Vec<u8> {
+    let mut marker = SKILL_MARKER_PREFIX.to_vec();
+    marker.extend_from_slice(name.as_bytes());
+    marker.push(b'\n');
+    marker.extend_from_slice(digest.as_bytes());
+    marker.push(b'\n');
+    marker
+}
+const MAX_SKILL_FILES: usize = 50_000;
+const MAX_SKILL_BYTES: u64 = 512 << 20;
+const MAX_SKILL_FILE_BYTES: u64 = 128 << 20;
+const MAX_SKILL_PATH_BYTES: usize = 1024;
+const MAX_SKILL_SEGMENT_BYTES: usize = 255;
+const MAX_SKILL_MARKER_BYTES: u64 = 256;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SkillStaged {
+    name: String,
+    expected_digest: Option<String>,
+    candidate_digest: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct FormatStaged {
@@ -113,9 +157,250 @@ pub(crate) fn commit_plan(
     plan: &MutationPlan,
     faults: &dyn FaultInjector,
 ) -> Result<(), RepositoryError> {
+    commit_plan_inner(root, plan, None, faults)
+}
+
+pub(crate) fn commit_plan_with_skill(
+    root: &Path,
+    plan: &MutationPlan,
+    update: &SkillDirectoryUpdate,
+    faults: &dyn FaultInjector,
+) -> Result<(), RepositoryError> {
+    commit_plan_inner(root, plan, Some(update), faults)
+}
+
+pub(crate) fn sync_skill(
+    root: &Path,
+    name: &str,
+    expected_lock_digest: &str,
+    expected_manifest_digest: &str,
+    files: &BTreeMap<PathBuf, Vec<u8>>,
+    faults: &dyn FaultInjector,
+) -> Result<(), RepositoryError> {
+    let update = SkillDirectoryUpdate {
+        name: name.into(),
+        expected_digest: None,
+        files: Some(files.clone()),
+    };
+    let candidate = validate_skill_update(&update)?;
+    if candidate.as_deref() != Some(expected_lock_digest) {
+        return Err(RepositoryError::Layout(format!(
+            "skill `{name}` candidate differs from lock digest"
+        )));
+    }
+    let manifest_path = root.join(squish_project::MANIFEST_FILE_NAME);
+    let manifest_bytes =
+        fs::read(&manifest_path).map_err(|e| RepositoryError::io(&manifest_path, e))?;
+    let manifest_relative = PathBuf::from(squish_project::MANIFEST_FILE_NAME);
+    if digest_for_path(&manifest_relative, &manifest_bytes) != expected_manifest_digest {
+        return Err(RepositoryError::Contended(vec![manifest_relative]));
+    }
+    let manifest = squish_project::Manifest::parse(
+        std::str::from_utf8(&manifest_bytes)
+            .map_err(|_| RepositoryError::Layout("xmlsquish.toml is not UTF-8".into()))?,
+    )?;
+    if !manifest.skills.contains_key(name) {
+        return Err(RepositoryError::Layout(format!(
+            "skill `{name}` is not declared in root manifest"
+        )));
+    }
+    let lock_path = root.join(squish_project::LOCK_FILE_NAME);
+    let lock_bytes = fs::read(&lock_path).map_err(|e| RepositoryError::io(&lock_path, e))?;
+    let lock = squish_project::Lockfile::parse(
+        std::str::from_utf8(&lock_bytes)
+            .map_err(|_| RepositoryError::Layout("xmlsquish.lock is not UTF-8".into()))?,
+    )?;
+    if lock
+        .skills
+        .iter()
+        .find(|skill| skill.name == name)
+        .map(|skill| skill.digest.as_str())
+        != Some(expected_lock_digest)
+    {
+        return Err(RepositoryError::Layout(format!(
+            "skill `{name}` is not pinned to requested digest"
+        )));
+    }
+    let already_current = with_locked_repository(root, faults, || {
+        let actual_lock = fs::read(&lock_path).map_err(|e| RepositoryError::io(&lock_path, e))?;
+        if actual_lock != lock_bytes {
+            return Err(RepositoryError::Contended(vec![PathBuf::from(
+                squish_project::LOCK_FILE_NAME,
+            )]));
+        }
+        let actual_manifest =
+            fs::read(&manifest_path).map_err(|e| RepositoryError::io(&manifest_path, e))?;
+        if actual_manifest != manifest_bytes {
+            return Err(RepositoryError::Contended(vec![PathBuf::from(
+                squish_project::MANIFEST_FILE_NAME,
+            )]));
+        }
+        let current = skill_directory_digest(root, name)?;
+        if current.is_some() && current.as_deref() != Some(expected_lock_digest) {
+            return Err(RepositoryError::Contended(vec![skill_relative(name)]));
+        }
+        Ok(current.is_some())
+    })?;
+    if already_current {
+        return Ok(());
+    }
+    let lock_relative = PathBuf::from(squish_project::LOCK_FILE_NAME);
+    let plan = MutationPlan {
+        id: TransactionId(format!("sync-skill-{name}")),
+        kind: MutationKind::AddSkill { name: name.into() },
+        manifest_digest: lock.manifest_digest,
+        observations: BTreeMap::from([
+            (
+                lock_relative.clone(),
+                digest_for_path(&lock_relative, &lock_bytes),
+            ),
+            (
+                manifest_relative.clone(),
+                digest_for_path(&manifest_relative, &manifest_bytes),
+            ),
+        ]),
+        files: Vec::new(),
+        retry_limit: 0,
+    };
+    commit_plan_inner(root, &plan, Some(&update), faults)
+}
+
+/// Enumerate only dependency-owned projections, excluding bundled and foreign trees.
+/// The marker prefix identifies the product; its embedded digest is validated before return.
+pub(crate) fn managed_skill_names(root: &Path) -> Result<Vec<(String, String)>, RepositoryError> {
+    let parent = safe_skill_parent(root, false)?;
+    if parent != root.join(".agents").join("skills") || !parent.exists() {
+        return Ok(Vec::new());
+    }
+    let mut managed = Vec::new();
+    for entry in fs::read_dir(&parent).map_err(|e| RepositoryError::io(&parent, e))? {
+        let entry = entry.map_err(|e| RepositoryError::io(&parent, e))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !valid_skill_name(&name) {
+            continue;
+        }
+        let path = entry.path();
+        let meta = fs::symlink_metadata(&path).map_err(|e| RepositoryError::io(&path, e))?;
+        if is_alias(&meta) || !meta.is_dir() {
+            continue;
+        }
+        let marker = path.join(SKILL_MARKER);
+        let meta = match fs::symlink_metadata(&marker) {
+            Ok(meta)
+                if meta.is_file() && !is_alias(&meta) && meta.len() <= MAX_SKILL_MARKER_BYTES =>
+            {
+                meta
+            }
+            Ok(_) => continue,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(RepositoryError::io(&marker, e)),
+        };
+        let mut bytes = Vec::with_capacity(meta.len() as usize);
+        File::open(&marker)
+            .map_err(|e| RepositoryError::io(&marker, e))?
+            .take(MAX_SKILL_MARKER_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| RepositoryError::io(&marker, e))?;
+        if bytes.starts_with(SKILL_MARKER_PREFIX) {
+            let digest = skill_directory_digest(root, &name)?.expect("enumerated directory exists");
+            managed.push((name, digest));
+        }
+    }
+    managed.sort();
+    Ok(managed)
+}
+
+pub(crate) fn prune_skill(
+    root: &Path,
+    name: &str,
+    expected_digest: &str,
+    faults: &dyn FaultInjector,
+) -> Result<(), RepositoryError> {
+    if !valid_skill_name(name) {
+        return Err(RepositoryError::Layout(format!(
+            "invalid skill name `{name}`"
+        )));
+    }
+    let manifest_path = root.join(squish_project::MANIFEST_FILE_NAME);
+    let manifest_bytes =
+        fs::read(&manifest_path).map_err(|e| RepositoryError::io(&manifest_path, e))?;
+    let manifest = squish_project::Manifest::parse(
+        std::str::from_utf8(&manifest_bytes)
+            .map_err(|_| RepositoryError::Layout("xmlsquish.toml is not UTF-8".into()))?,
+    )?;
+    if manifest.skills.contains_key(name) {
+        return Err(RepositoryError::Layout(format!(
+            "skill `{name}` remains declared in manifest"
+        )));
+    }
+    let lock_path = root.join(squish_project::LOCK_FILE_NAME);
+    let lock_bytes = match fs::read(&lock_path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(RepositoryError::io(&lock_path, e)),
+    };
+    if let Some(bytes) = &lock_bytes {
+        let lock = squish_project::Lockfile::parse(
+            std::str::from_utf8(bytes)
+                .map_err(|_| RepositoryError::Layout("xmlsquish.lock is not UTF-8".into()))?,
+        )?;
+        if lock.skills.iter().any(|skill| skill.name == name) {
+            return Err(RepositoryError::Layout(format!(
+                "skill `{name}` remains pinned in lock"
+            )));
+        }
+    }
+    let manifest_rel = PathBuf::from(squish_project::MANIFEST_FILE_NAME);
+    let lock_rel = PathBuf::from(squish_project::LOCK_FILE_NAME);
+    let observations = BTreeMap::from([
+        (
+            manifest_rel.clone(),
+            digest_for_path(&manifest_rel, &manifest_bytes),
+        ),
+        (
+            lock_rel.clone(),
+            lock_bytes
+                .as_ref()
+                .map_or_else(missing_digest, |bytes| digest_for_path(&lock_rel, bytes)),
+        ),
+    ]);
+    let plan = MutationPlan {
+        id: TransactionId(format!("prune-skill-{name}")),
+        kind: MutationKind::RemoveSkill { name: name.into() },
+        manifest_digest: "prune-existing-authority".into(),
+        observations,
+        files: Vec::new(),
+        retry_limit: 0,
+    };
+    let update = SkillDirectoryUpdate {
+        name: name.into(),
+        expected_digest: Some(expected_digest.into()),
+        files: None,
+    };
+    commit_plan_inner(root, &plan, Some(&update), faults)
+}
+
+fn commit_plan_inner(
+    root: &Path,
+    plan: &MutationPlan,
+    update: Option<&SkillDirectoryUpdate>,
+    faults: &dyn FaultInjector,
+) -> Result<(), RepositoryError> {
     validate_plan_paths(plan)?;
+    if let Some(update) = update {
+        validate_skill_intent(plan, update)?;
+    }
+    let candidate_digest = update.map(validate_skill_update).transpose()?;
     let _lock = writer_lock(root)?;
     recover_locked(root, faults)?;
+    if let Some(update) = update {
+        let actual = skill_directory_digest(root, &update.name)?;
+        if actual != update.expected_digest {
+            return Err(RepositoryError::Contended(vec![skill_relative(
+                &update.name,
+            )]));
+        }
+    }
     let observed = observe(root, plan.observations.keys())?;
     let generation = generation();
     match MutationPlanner::prepare_commit(plan, &observed, generation, plan.retry_limit) {
@@ -139,6 +424,24 @@ pub(crate) fn commit_plan(
     sync_parent(&dir)?;
     for (index, file) in plan.files.iter().enumerate() {
         stage(&dir, index, &file.candidate)?;
+    }
+    if let Some(update) = update {
+        stage_skill_tree(&dir, update)?;
+        let state = SkillStaged {
+            name: update.name.clone(),
+            expected_digest: update.expected_digest.clone(),
+            candidate_digest: candidate_digest
+                .clone()
+                .expect("validated update has digest option"),
+        };
+        let path = dir.join("skill.json");
+        write_synced(
+            &path,
+            &serde_json::to_vec(&state).map_err(|e| RepositoryError::Journal {
+                path: path.clone(),
+                message: e.to_string(),
+            })?,
+        )?;
     }
     sync_directory(&dir)?;
     let journal = dir.join(JOURNAL_NAME);
@@ -168,6 +471,22 @@ pub(crate) fn commit_plan(
     faults
         .check(FaultPoint::CommitDecided)
         .map_err(|e| RepositoryError::io(&journal, e))?;
+    if let Some(update) = update {
+        replace_skill_tree(
+            root,
+            &dir,
+            &SkillStaged {
+                name: update.name.clone(),
+                expected_digest: update.expected_digest.clone(),
+                candidate_digest: candidate_digest
+                    .clone()
+                    .expect("validated update has digest option"),
+            },
+        )?;
+        faults
+            .check(FaultPoint::TargetReplaced)
+            .map_err(|e| RepositoryError::io(skill_relative(&update.name), e))?;
+    }
     for (index, file) in plan.files.iter().enumerate() {
         replace_staged(root, &dir, index, &file.path, &file.candidate_digest)?;
         append(
@@ -357,6 +676,19 @@ fn recover_mutation(
     if !decided {
         return remove_transaction(dir);
     }
+    let skill_path = dir.join("skill.json");
+    if skill_path.exists() {
+        let bytes = fs::read(&skill_path).map_err(|e| RepositoryError::io(&skill_path, e))?;
+        let state: SkillStaged =
+            serde_json::from_slice(&bytes).map_err(|e| RepositoryError::Journal {
+                path: skill_path.clone(),
+                message: e.to_string(),
+            })?;
+        faults
+            .check(FaultPoint::RecoveryReplace)
+            .map_err(|e| RepositoryError::io(skill_relative(&state.name), e))?;
+        replace_skill_tree(root, dir, &state)?;
+    }
     for (index, (path, expected)) in files.iter().enumerate() {
         faults
             .check(FaultPoint::RecoveryReplace)
@@ -444,6 +776,508 @@ fn replace_staged(
     write_synced(&replacement, &bytes)?;
     fs::rename(&replacement, &target).map_err(|e| RepositoryError::io(&target, e))?;
     sync_parent(&target)
+}
+
+fn valid_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && !name.contains("--")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+fn skill_relative(name: &str) -> PathBuf {
+    Path::new(".agents").join("skills").join(name)
+}
+
+fn validate_skill_update(update: &SkillDirectoryUpdate) -> Result<Option<String>, RepositoryError> {
+    if !valid_skill_name(&update.name) {
+        return Err(RepositoryError::Layout(format!(
+            "invalid skill name `{}`",
+            update.name
+        )));
+    }
+    match &update.files {
+        Some(files) => {
+            let digest = skill_tree_digest(files)?;
+            if files.get(Path::new(SKILL_MARKER)) != Some(&skill_marker(&update.name, &digest)) {
+                return Err(RepositoryError::Layout(
+                    "skill tree lacks a matching xmlsquish ownership marker".into(),
+                ));
+            }
+            if !files.contains_key(Path::new("SKILL.md")) {
+                return Err(RepositoryError::Layout("skill tree lacks SKILL.md".into()));
+            }
+            Ok(Some(digest))
+        }
+        None if update.expected_digest.is_some() => Ok(None),
+        None => Err(RepositoryError::Layout(
+            "cannot remove a skill without an expected owned tree".into(),
+        )),
+    }
+}
+
+fn validate_skill_intent(
+    plan: &MutationPlan,
+    update: &SkillDirectoryUpdate,
+) -> Result<(), RepositoryError> {
+    let matches = match (&plan.kind, &update.files) {
+        (MutationKind::AddSkill { name }, Some(_)) => name == &update.name,
+        (MutationKind::RemoveSkill { name }, None) => name == &update.name,
+        _ => false,
+    };
+    if !matches {
+        return Err(RepositoryError::Layout(
+            "skill transaction kind, name, and tree operation disagree".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Digest a complete skill tree, excluding the fixed ownership marker. Paths must be
+/// normalized, Unicode, non-overlapping relative regular-file names. The binary framing
+/// includes each path and file length so independent trees cannot be ambiguously encoded.
+///
+/// ```
+/// use std::{collections::BTreeMap, path::PathBuf};
+/// use squish_repository::skill_tree_digest;
+/// let source = BTreeMap::from([(PathBuf::from("SKILL.md"), b"example".to_vec())]);
+/// let digest = skill_tree_digest(&source).unwrap();
+/// assert!(digest.starts_with("blake3:"));
+/// ```
+pub fn skill_tree_digest(files: &BTreeMap<PathBuf, Vec<u8>>) -> Result<String, RepositoryError> {
+    if files.len() - usize::from(files.contains_key(Path::new(SKILL_MARKER))) > MAX_SKILL_FILES {
+        return Err(RepositoryError::Layout(
+            "skill tree exceeds file-count limit".into(),
+        ));
+    }
+    validate_portable_paths(files.keys())?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xmlsquish\0skill-tree\0v1\0");
+    let mut total = 0u64;
+    let mut ordered = files.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|(path, _)| {
+        path.to_str()
+            .expect("validated Unicode path")
+            .replace('\\', "/")
+    });
+    for (path, bytes) in ordered {
+        if path == Path::new(SKILL_MARKER) {
+            if bytes.len() as u64 > MAX_SKILL_MARKER_BYTES {
+                return Err(RepositoryError::Layout(
+                    "invalid skill ownership marker".into(),
+                ));
+            }
+            continue;
+        }
+        let len = bytes.len() as u64;
+        total = total
+            .checked_add(len)
+            .ok_or_else(|| RepositoryError::Layout("skill tree length overflow".into()))?;
+        if len > MAX_SKILL_FILE_BYTES || total > MAX_SKILL_BYTES {
+            return Err(RepositoryError::Layout(
+                "skill tree exceeds byte limit".into(),
+            ));
+        }
+        let text = path.to_str().ok_or_else(|| {
+            RepositoryError::Layout(format!("non-Unicode skill file `{}`", path.display()))
+        })?;
+        let portable = text.replace('\\', "/");
+        hasher.update(&(portable.len() as u64).to_le_bytes());
+        hasher.update(portable.as_bytes());
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+    Ok(format!("blake3:{}", hasher.finalize().to_hex()))
+}
+
+fn validate_skill_file_path(path: &Path) -> Result<(), RepositoryError> {
+    let components = path.components().collect::<Vec<_>>();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|c| !matches!(c, Component::Normal(_)))
+    {
+        return Err(RepositoryError::Layout(format!(
+            "unsafe skill file path `{}`",
+            path.display()
+        )));
+    }
+    let text = path.to_str().ok_or_else(|| {
+        RepositoryError::Layout(format!("non-Unicode skill file path `{}`", path.display()))
+    })?;
+    if text.len() > MAX_SKILL_PATH_BYTES {
+        return Err(RepositoryError::Layout("skill path exceeds limit".into()));
+    }
+    for component in &components {
+        let segment = component.as_os_str().to_str().expect("whole path is UTF-8");
+        let base = segment
+            .split('.')
+            .next()
+            .unwrap_or(segment)
+            .to_ascii_uppercase();
+        if segment.len() > MAX_SKILL_SEGMENT_BYTES
+            || segment.ends_with([' ', '.'])
+            || segment.contains(':')
+            || segment.contains(['<', '>', '"', '|', '?', '*'])
+            || segment.chars().any(char::is_control)
+            || segment.eq_ignore_ascii_case(".git")
+            || matches!(
+                base.as_str(),
+                "CON"
+                    | "PRN"
+                    | "AUX"
+                    | "NUL"
+                    | "COM1"
+                    | "COM2"
+                    | "COM3"
+                    | "COM4"
+                    | "COM5"
+                    | "COM6"
+                    | "COM7"
+                    | "COM8"
+                    | "COM9"
+                    | "LPT1"
+                    | "LPT2"
+                    | "LPT3"
+                    | "LPT4"
+                    | "LPT5"
+                    | "LPT6"
+                    | "LPT7"
+                    | "LPT8"
+                    | "LPT9"
+            )
+        {
+            return Err(RepositoryError::Layout(format!(
+                "non-portable skill file path `{}`",
+                path.display()
+            )));
+        }
+    }
+    if components.len() > 1 && components[0].as_os_str() == SKILL_MARKER {
+        return Err(RepositoryError::Layout(
+            "ownership marker cannot be a directory".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn portable_key(path: &Path) -> String {
+    path.to_str()
+        .expect("validated Unicode path")
+        .replace('\\', "/")
+        .split('/')
+        .map(|segment| {
+            segment
+                .nfc()
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn validate_portable_paths<'a>(
+    paths: impl IntoIterator<Item = &'a PathBuf>,
+) -> Result<(), RepositoryError> {
+    let mut files = BTreeSet::new();
+    let mut dirs = BTreeMap::<String, PathBuf>::new();
+    for path in paths {
+        validate_skill_file_path(path)?;
+        let key = portable_key(path);
+        if !files.insert(key.clone()) || dirs.contains_key(&key) {
+            return Err(RepositoryError::Layout(format!(
+                "portable skill path collision at `{}`",
+                path.display()
+            )));
+        }
+        for ancestor in path
+            .ancestors()
+            .skip(1)
+            .filter(|p| !p.as_os_str().is_empty())
+        {
+            let parent = ancestor.to_path_buf();
+            let key = portable_key(&parent);
+            if files.contains(&key) || dirs.get(&key).is_some_and(|existing| existing != &parent) {
+                return Err(RepositoryError::Layout(format!(
+                    "portable skill directory collision at `{}`",
+                    path.display()
+                )));
+            }
+            dirs.insert(key, parent);
+        }
+    }
+    Ok(())
+}
+
+fn safe_skill_parent(root: &Path, create: bool) -> Result<PathBuf, RepositoryError> {
+    let mut path = root.to_path_buf();
+    for component in [".agents", "skills"] {
+        path.push(component);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() && !is_alias(&meta) => {}
+            Ok(_) => {
+                return Err(RepositoryError::Layout(format!(
+                    "skill parent `{}` is not an ordinary directory",
+                    path.display()
+                )));
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound && create => {
+                fs::create_dir(&path).map_err(|e| RepositoryError::io(&path, e))?;
+                sync_parent(&path)?;
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(path),
+            Err(e) => return Err(RepositoryError::io(&path, e)),
+        }
+    }
+    Ok(path)
+}
+
+pub(crate) fn skill_directory_digest(
+    root: &Path,
+    name: &str,
+) -> Result<Option<String>, RepositoryError> {
+    if !valid_skill_name(name) {
+        return Err(RepositoryError::Layout(format!(
+            "invalid skill name `{name}`"
+        )));
+    }
+    let parent = safe_skill_parent(root, false)?;
+    if parent != root.join(".agents").join("skills") {
+        return Ok(None);
+    }
+    let target = parent.join(name);
+    let meta = match fs::symlink_metadata(&target) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(RepositoryError::io(&target, e)),
+    };
+    if !meta.is_dir() || is_alias(&meta) {
+        return Err(RepositoryError::Layout(format!(
+            "skill destination `{}` is not an ordinary directory",
+            target.display()
+        )));
+    }
+    Ok(Some(digest_skill_disk_tree(&target, name)?))
+}
+
+fn is_alias(meta: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
+    }
+}
+
+fn digest_skill_disk_tree(root: &Path, name: &str) -> Result<String, RepositoryError> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = Vec::<(PathBuf, u64)>::new();
+    let mut dirs = 0usize;
+    let mut total = 0u64;
+    while let Some(dir) = pending.pop() {
+        dirs += 1;
+        if dirs > MAX_SKILL_FILES + 1 {
+            return Err(RepositoryError::Layout(
+                "skill tree exceeds directory-count limit".into(),
+            ));
+        }
+        for entry in fs::read_dir(&dir).map_err(|e| RepositoryError::io(&dir, e))? {
+            let entry = entry.map_err(|e| RepositoryError::io(&dir, e))?;
+            let path = entry.path();
+            let meta = fs::symlink_metadata(&path).map_err(|e| RepositoryError::io(&path, e))?;
+            if is_alias(&meta) || (!meta.is_dir() && !meta.is_file()) {
+                return Err(RepositoryError::Layout(format!(
+                    "skill tree contains non-regular entry `{}`",
+                    path.display()
+                )));
+            }
+            if meta.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if files.len() >= MAX_SKILL_FILES + 1 || meta.len() > MAX_SKILL_FILE_BYTES {
+                return Err(RepositoryError::Layout(
+                    "skill tree exceeds file limit".into(),
+                ));
+            }
+            let relative = path
+                .strip_prefix(root)
+                .expect("descendant path")
+                .to_path_buf();
+            validate_skill_file_path(&relative)?;
+            if relative != Path::new(SKILL_MARKER) {
+                total = total
+                    .checked_add(meta.len())
+                    .ok_or_else(|| RepositoryError::Layout("skill tree length overflow".into()))?;
+                if total > MAX_SKILL_BYTES {
+                    return Err(RepositoryError::Layout(
+                        "skill tree exceeds byte limit".into(),
+                    ));
+                }
+            }
+            files.push((relative, meta.len()));
+        }
+    }
+    if files
+        .iter()
+        .filter(|(path, _)| path != Path::new(SKILL_MARKER))
+        .count()
+        > MAX_SKILL_FILES
+    {
+        return Err(RepositoryError::Layout(
+            "skill tree exceeds file-count limit".into(),
+        ));
+    }
+    validate_portable_paths(files.iter().map(|(path, _)| path))?;
+    files.sort_by_key(|(path, _)| {
+        path.to_str()
+            .expect("validated Unicode path")
+            .replace('\\', "/")
+    });
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xmlsquish\0skill-tree\0v1\0");
+    let mut marker = None;
+    let mut buffer = [0u8; 64 * 1024];
+    for (path, expected_len) in files {
+        let full = root.join(&path);
+        let mut file = File::open(&full).map_err(|e| RepositoryError::io(&full, e))?;
+        if path == Path::new(SKILL_MARKER) {
+            if expected_len > MAX_SKILL_MARKER_BYTES {
+                return Err(RepositoryError::Layout(
+                    "invalid skill ownership marker".into(),
+                ));
+            }
+            let mut bytes = Vec::new();
+            file.take(MAX_SKILL_MARKER_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| RepositoryError::io(&full, e))?;
+            marker = Some(bytes);
+            continue;
+        }
+        let name = path
+            .to_str()
+            .expect("validated Unicode path")
+            .replace('\\', "/");
+        hasher.update(&(name.len() as u64).to_le_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update(&expected_len.to_le_bytes());
+        let mut remaining = expected_len;
+        while remaining > 0 {
+            let chunk = usize::try_from(remaining.min(buffer.len() as u64)).unwrap();
+            let count = file
+                .read(&mut buffer[..chunk])
+                .map_err(|e| RepositoryError::io(&full, e))?;
+            if count == 0 {
+                return Err(RepositoryError::Layout(format!(
+                    "skill file shrank while reading `{}`",
+                    full.display()
+                )));
+            }
+            hasher.update(&buffer[..count]);
+            remaining -= count as u64;
+        }
+        if file
+            .read(&mut buffer[..1])
+            .map_err(|e| RepositoryError::io(&full, e))?
+            != 0
+        {
+            return Err(RepositoryError::Layout(format!(
+                "skill file grew while reading `{}`",
+                full.display()
+            )));
+        }
+    }
+    let digest = format!("blake3:{}", hasher.finalize().to_hex());
+    if marker.as_deref() != Some(skill_marker(name, &digest).as_slice()) {
+        return Err(RepositoryError::Layout(format!(
+            "skill destination `{}` is unowned or modified",
+            root.display()
+        )));
+    }
+    Ok(digest)
+}
+
+fn stage_skill_tree(dir: &Path, update: &SkillDirectoryUpdate) -> Result<(), RepositoryError> {
+    let Some(files) = &update.files else {
+        return Ok(());
+    };
+    let base = dir.join("skill.candidate");
+    fs::create_dir(&base).map_err(|e| RepositoryError::io(&base, e))?;
+    for (relative, bytes) in files {
+        let path = base.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| RepositoryError::io(parent, e))?;
+        }
+        write_synced(&path, bytes)?;
+    }
+    sync_staged_dirs(&base)
+}
+
+fn sync_staged_dirs(dir: &Path) -> Result<(), RepositoryError> {
+    for entry in fs::read_dir(dir).map_err(|e| RepositoryError::io(dir, e))? {
+        let entry = entry.map_err(|e| RepositoryError::io(dir, e))?;
+        if entry
+            .file_type()
+            .map_err(|e| RepositoryError::io(entry.path(), e))?
+            .is_dir()
+        {
+            sync_staged_dirs(&entry.path())?;
+        }
+    }
+    sync_directory(dir)
+}
+
+fn replace_skill_tree(root: &Path, dir: &Path, state: &SkillStaged) -> Result<(), RepositoryError> {
+    if !valid_skill_name(&state.name) {
+        return Err(RepositoryError::Journal {
+            path: dir.join("skill.json"),
+            message: "invalid skill name".into(),
+        });
+    }
+    let target = root.join(skill_relative(&state.name));
+    let parent = safe_skill_parent(root, state.candidate_digest.is_some())?;
+    if parent != root.join(".agents").join("skills") && state.candidate_digest.is_none() {
+        return Ok(());
+    }
+    let actual = skill_directory_digest(root, &state.name)?;
+    if actual == state.candidate_digest {
+        return Ok(());
+    }
+    let backup = dir.join("skill.previous");
+    if actual.is_some() {
+        if actual != state.expected_digest || backup.exists() {
+            return Err(RepositoryError::Layout(format!(
+                "skill `{}` changed during committed transaction",
+                state.name
+            )));
+        }
+        fs::rename(&target, &backup).map_err(|e| RepositoryError::io(&target, e))?;
+        sync_parent(&target)?;
+    } else if state.expected_digest.is_none() && backup.exists() {
+        return Err(RepositoryError::Journal {
+            path: backup,
+            message: "unexpected skill backup".into(),
+        });
+    }
+    if let Some(expected) = &state.candidate_digest {
+        let staged = dir.join("skill.candidate");
+        if digest_skill_disk_tree(&staged, &state.name)? != *expected {
+            return Err(RepositoryError::Journal {
+                path: staged,
+                message: "staged skill tree digest mismatch".into(),
+            });
+        }
+        fs::rename(&staged, &target).map_err(|e| RepositoryError::io(&target, e))?;
+        sync_parent(&target)?;
+    }
+    Ok(())
 }
 
 fn observe<'a>(
@@ -595,7 +1429,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use squish_project::{MutationFile, MutationKind, TransactionId};
+    use squish_project::{
+        LockedSkill, LockedSkillSource, MutationFile, MutationKind, TransactionId,
+    };
 
     struct OnceAt {
         point: FaultPoint,
@@ -610,6 +1446,320 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    fn skill_files() -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::from([
+            (
+                PathBuf::from("SKILL.md"),
+                b"---\nname: demo\n---\nDemo\n".to_vec(),
+            ),
+            (PathBuf::from("references/usage.md"), b"usage".to_vec()),
+        ]);
+        let digest = skill_tree_digest(&files).unwrap();
+        files.insert(PathBuf::from(SKILL_MARKER), skill_marker("demo", &digest));
+        files
+    }
+
+    fn skill_test_dir() -> TempDir {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(".temp");
+        fs::create_dir_all(&root).unwrap();
+        tempfile::tempdir_in(root).unwrap()
+    }
+
+    fn skill_plan(root: &Path) -> MutationPlan {
+        let manifest = PathBuf::from("xmlsquish.toml");
+        let lock = PathBuf::from("xmlsquish.lock");
+        let old_manifest = fs::read(root.join(&manifest)).unwrap();
+        let old_lock = fs::read(root.join(&lock)).unwrap();
+        let observations = BTreeMap::from([
+            (manifest.clone(), digest_for_path(&manifest, &old_manifest)),
+            (lock.clone(), digest_for_path(&lock, &old_lock)),
+        ]);
+        let files = [
+            (manifest, b"new manifest".to_vec()),
+            (lock, b"new lock".to_vec()),
+        ]
+        .into_iter()
+        .map(|(path, candidate)| MutationFile {
+            expected_digest: observations[&path].clone(),
+            candidate_digest: digest_for_path(&path, &candidate),
+            path,
+            candidate,
+        })
+        .collect();
+        MutationPlan {
+            id: TransactionId("skill-test".into()),
+            kind: MutationKind::AddSkill {
+                name: "demo".into(),
+            },
+            manifest_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            observations,
+            files,
+            retry_limit: 0,
+        }
+    }
+
+    #[test]
+    fn skill_publish_and_files_roll_forward_after_commit_decision() {
+        let temp = skill_test_dir();
+        fs::write(temp.path().join("xmlsquish.toml"), b"old manifest").unwrap();
+        fs::write(temp.path().join("xmlsquish.lock"), b"old lock").unwrap();
+        let plan = skill_plan(temp.path());
+        let update = SkillDirectoryUpdate {
+            name: "demo".into(),
+            expected_digest: None,
+            files: Some(skill_files()),
+        };
+        let fault = OnceAt {
+            point: FaultPoint::CommitDecided,
+            fired: AtomicBool::new(false),
+        };
+        assert!(commit_plan_with_skill(temp.path(), &plan, &update, &fault).is_err());
+        assert!(!temp.path().join(skill_relative("demo")).exists());
+        assert_eq!(
+            fs::read(temp.path().join("xmlsquish.toml")).unwrap(),
+            b"old manifest"
+        );
+        recover_transactions(temp.path(), &NoFault).unwrap();
+        assert_eq!(
+            skill_directory_digest(temp.path(), "demo").unwrap(),
+            Some(skill_tree_digest(&skill_files()).unwrap())
+        );
+        assert_eq!(
+            fs::read(temp.path().join("xmlsquish.toml")).unwrap(),
+            b"new manifest"
+        );
+        assert_eq!(
+            fs::read(temp.path().join("xmlsquish.lock")).unwrap(),
+            b"new lock"
+        );
+    }
+
+    #[test]
+    fn skill_removal_recovery_does_not_delete_unowned_or_modified_tree() {
+        let temp = skill_test_dir();
+        fs::write(temp.path().join("xmlsquish.toml"), b"old manifest").unwrap();
+        fs::write(temp.path().join("xmlsquish.lock"), b"old lock").unwrap();
+        let target = temp.path().join(skill_relative("demo"));
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("SKILL.md"), b"user-owned").unwrap();
+        let files = skill_files();
+        let old = skill_tree_digest(&files).unwrap();
+        let update = SkillDirectoryUpdate {
+            name: "demo".into(),
+            expected_digest: Some(old.clone()),
+            files: None,
+        };
+        let mut plan = skill_plan(temp.path());
+        plan.kind = MutationKind::RemoveSkill {
+            name: "demo".into(),
+        };
+        assert!(matches!(
+            commit_plan_with_skill(temp.path(), &plan, &update, &NoFault),
+            Err(RepositoryError::Layout(_))
+        ));
+        assert_eq!(fs::read(target.join("SKILL.md")).unwrap(), b"user-owned");
+
+        fs::remove_dir_all(&target).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        for (path, bytes) in files {
+            let full = target.join(path);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, bytes).unwrap();
+        }
+        fs::write(target.join("SKILL.md"), b"edited").unwrap();
+        assert!(matches!(
+            commit_plan_with_skill(temp.path(), &plan, &update, &NoFault),
+            Err(RepositoryError::Layout(_))
+        ));
+        assert_eq!(fs::read(target.join("SKILL.md")).unwrap(), b"edited");
+    }
+
+    #[test]
+    fn removal_after_detach_rolls_forward_idempotently() {
+        let temp = skill_test_dir();
+        fs::write(temp.path().join("xmlsquish.toml"), b"old manifest").unwrap();
+        fs::write(temp.path().join("xmlsquish.lock"), b"old lock").unwrap();
+        let target = temp.path().join(skill_relative("demo"));
+        for (path, bytes) in skill_files() {
+            let full = target.join(path);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, bytes).unwrap();
+        }
+        let update = SkillDirectoryUpdate {
+            name: "demo".into(),
+            expected_digest: skill_directory_digest(temp.path(), "demo").unwrap(),
+            files: None,
+        };
+        let fault = OnceAt {
+            point: FaultPoint::TargetReplaced,
+            fired: AtomicBool::new(false),
+        };
+        let mut plan = skill_plan(temp.path());
+        plan.kind = MutationKind::RemoveSkill {
+            name: "demo".into(),
+        };
+        assert!(commit_plan_with_skill(temp.path(), &plan, &update, &fault).is_err());
+        assert!(!target.exists());
+        recover_transactions(temp.path(), &NoFault).unwrap();
+        recover_transactions(temp.path(), &NoFault).unwrap();
+        assert!(!target.exists());
+        assert_eq!(
+            fs::read(temp.path().join("xmlsquish.lock")).unwrap(),
+            b"new lock"
+        );
+    }
+
+    #[test]
+    fn sync_skill_publishes_only_the_pinned_missing_tree() {
+        let temp = skill_test_dir();
+        fs::write(
+            temp.path().join("xmlsquish.toml"),
+            "manifest-version = 1\n[workspace]\n[skills.demo]\npath = \"local/demo\"\n",
+        )
+        .unwrap();
+        let files = skill_files();
+        let expected = skill_tree_digest(&files).unwrap();
+        let lock = squish_project::Lockfile {
+            lock_version: squish_project::LOCK_VERSION,
+            resolver_version: "test-v1".into(),
+            manifest_digest:
+                "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            packages: Vec::new(),
+            skills: vec![LockedSkill {
+                name: "demo".into(),
+                source: LockedSkillSource::Path {
+                    path: "local/demo".into(),
+                    mutable: true,
+                },
+                digest: expected.clone(),
+            }],
+        };
+        fs::write(temp.path().join("xmlsquish.lock"), lock.to_toml().unwrap()).unwrap();
+        let manifest_bytes = fs::read(temp.path().join("xmlsquish.toml")).unwrap();
+        let manifest_digest = digest_for_path(Path::new("xmlsquish.toml"), &manifest_bytes);
+        sync_skill(
+            temp.path(),
+            "demo",
+            &expected,
+            &manifest_digest,
+            &files,
+            &NoFault,
+        )
+        .unwrap();
+        sync_skill(
+            temp.path(),
+            "demo",
+            &expected,
+            &manifest_digest,
+            &files,
+            &NoFault,
+        )
+        .unwrap();
+        assert_eq!(
+            skill_directory_digest(temp.path(), "demo").unwrap(),
+            Some(expected.clone())
+        );
+        fs::write(
+            temp.path().join("xmlsquish.toml"),
+            "manifest-version = 1\n[workspace]\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            sync_skill(
+                temp.path(),
+                "demo",
+                &expected,
+                &manifest_digest,
+                &files,
+                &NoFault
+            ),
+            Err(RepositoryError::Contended(_))
+        ));
+        fs::write(temp.path().join("xmlsquish.toml"), &manifest_bytes).unwrap();
+        fs::write(
+            temp.path().join(skill_relative("demo")).join("SKILL.md"),
+            b"edited",
+        )
+        .unwrap();
+        assert!(matches!(
+            sync_skill(
+                temp.path(),
+                "demo",
+                &expected,
+                &manifest_digest,
+                &files,
+                &NoFault
+            ),
+            Err(RepositoryError::Layout(_))
+        ));
+    }
+
+    #[test]
+    fn prune_removes_only_verified_stale_dependency_projection() {
+        let temp = skill_test_dir();
+        fs::write(
+            temp.path().join("xmlsquish.toml"),
+            "manifest-version = 1\n[workspace]\n",
+        )
+        .unwrap();
+        let target = temp.path().join(skill_relative("demo"));
+        for (path, bytes) in skill_files() {
+            let full = target.join(path);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, bytes).unwrap();
+        }
+        let bundled = temp.path().join(skill_relative("bundled"));
+        fs::create_dir_all(&bundled).unwrap();
+        fs::write(
+            bundled.join(SKILL_MARKER),
+            b"xmlsquish bundled skill v1\nblake3:other\n",
+        )
+        .unwrap();
+        let names = managed_skill_names(temp.path()).unwrap();
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0].0, "demo");
+        let renamed = temp.path().join(skill_relative("renamed"));
+        fs::rename(&target, &renamed).unwrap();
+        assert!(matches!(
+            skill_directory_digest(temp.path(), "renamed"),
+            Err(RepositoryError::Layout(_))
+        ));
+        fs::rename(&renamed, &target).unwrap();
+        fs::write(
+            temp.path().join("xmlsquish.toml"),
+            "manifest-version = 1\n[workspace]\n[skills.demo]\npath = \"local/demo\"\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            prune_skill(temp.path(), "demo", &names[0].1, &NoFault),
+            Err(RepositoryError::Layout(_))
+        ));
+        assert!(target.exists());
+        fs::write(
+            temp.path().join("xmlsquish.toml"),
+            "manifest-version = 1\n[workspace]\n",
+        )
+        .unwrap();
+        prune_skill(temp.path(), "demo", &names[0].1, &NoFault).unwrap();
+        assert!(!target.exists());
+        assert!(bundled.exists());
+    }
+
+    #[test]
+    fn skill_paths_reject_windows_devices_and_unicode_aliases() {
+        let devices = BTreeMap::from([(PathBuf::from("CON.txt"), Vec::new())]);
+        assert!(skill_tree_digest(&devices).is_err());
+        let dots = BTreeMap::from([(PathBuf::from("notes. "), Vec::new())]);
+        assert!(skill_tree_digest(&dots).is_err());
+        let aliases = BTreeMap::from([
+            (PathBuf::from("Caf\u{e9}.txt"), Vec::new()),
+            (PathBuf::from("Cafe\u{301}.txt"), Vec::new()),
+        ]);
+        assert!(skill_tree_digest(&aliases).is_err());
     }
 
     #[test]

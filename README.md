@@ -92,6 +92,9 @@ output = "chat.prompt" # 可省略；默认 <target>.prompt / optional
 
 [target.chat.args]
 name = "Klee"
+
+[skills] # optional; owned by the workspace-root manifest
+review-checks = { path = "tools/skills/review-checks" }
 ```
 
 `target.entry` 是相对包清单的 `xs:entry` 源码，也是链接根；它不是宏、没有隐式 `main`。工作区可在根清单中声明 `[workspace]`、`members`、`exclude`、`target-dir` 和共享依赖；`-p/--package`、`--workspace` 与 `--exclude` 控制包选择。目标输出必须使用 `.prompt` 后缀且不得逃逸共享目标目录。
@@ -107,6 +110,10 @@ name = "Klee"
 | `xmlsquish fmt` | 格式化项目自有 XML；保持 DSL 语义 | `--check`, `--diff`, `--path`, `--style-edition` |
 | `xmlsquish add SPEC` | 新增或更新有类型依赖，并协调清单与锁文件 | `--path`, `--git`, `--rev/--tag/--branch`, `--registry`, `--rename`, `--dry-run` |
 | `xmlsquish remove ALIAS` | 按别名移除直接依赖 | `-p/--package`, `--dev`, `--build`, `--dry-run` |
+| `xmlsquish add-skill NAME` | 声明并安装工作区 Agent Skill | `--path`, `--git`, `--rev/--tag/--branch`, `--subdir`, `--dry-run` |
+| `xmlsquish remove-skill NAME` | 移除声明、锁定记录及未被改动的受管安装 | `--dry-run`, `--manifest-path` |
+| `xmlsquish sync-skills` | 从声明与锁定状态恢复受管安装 | `--locked`, `--offline`, `--frozen`, `--dry-run` |
+| `xmlsquish install-skill` | 安装 xmlsquish 自带 Agent Skill | `--project`, `--force`, `--dry-run` |
 | `xmlsquish inspect …` | 只读检查 IR、链接、源码来源、缓存键或产物 | `ir`, `link`, `source`, `cache`, `artifact`; `--format human|json|raw` |
 | `xmlsquish clean` | 原子分离并删除当前项目/工作区的完整本地构建根 | `--manifest-path` |
 
@@ -133,6 +140,25 @@ xmlsquish build --frozen
 - `--frozen`：同时启用二者。
 
 These modes apply to `build`, `add`, and `remove`. A dependency edit is planned and validated before commit; `--dry-run` writes neither manifest nor lock state. Adding or removing a dependency never rewrites `xs:import` automatically.
+
+### Agent Skills 依赖 / Agent Skills dependencies
+
+Agent Skills 与 XML 包依赖是两个独立领域。工作区根清单的 `[skills]` 声明本地目录或 Git 来源，`xmlsquish.lock` 中的 `[[skill]]` 固定来源及**完整目录**摘要；安装视图是工作区根的 `.agents/skills/<name>/`。技能名必须与 `SKILL.md` 元数据中的 `name` 及目录名完全相同。xmlsquish 不会在安装过程中执行技能脚本，也不会覆盖或删除不属于它管理的目录。
+
+Agent Skills are separate from XML package dependencies. The workspace-root `[skills]` table declares a local directory or Git source; `[[skill]]` records in `xmlsquish.lock` pin the source and **whole-tree** digest. The agent-visible installation is `.agents/skills/<name>/` under the workspace root. The name must match both the `SKILL.md` frontmatter and the directory. Installation never executes skill scripts or adopts unrelated directories.
+
+```bash
+xmlsquish add-skill review-checks --path tools/skills/review-checks
+xmlsquish add-skill release-notes --git https://example.com/agent-skills.git --tag v2 --subdir release-notes
+xmlsquish sync-skills --locked --offline
+xmlsquish remove-skill review-checks --dry-run
+xmlsquish install-skill                 # ~/.agents/skills/prompt-squish
+xmlsquish install-skill --project       # current workspace .agents/skills/prompt-squish
+```
+
+`install-skill` 安装随可执行文件内嵌的 xmlsquish 指南，不修改项目清单或锁文件；其现有公开名称是 `prompt-squish`。第三方 Skill 是可影响 Agent 行为的指令与文件：摘要证明安装内容未变，**不证明安全性**，请在启用前审阅来源和内容。具体模型、安全边界及恢复语义见[设计文档](docs/design/skill-dependencies.md)。
+
+`install-skill` copies the executable-bundled xmlsquish guide without changing project dependency state; its existing public skill name is `prompt-squish`. Third-party skills can influence agent behavior: a digest proves byte identity, **not safety**. Review source and content before use. The [design contract](docs/design/skill-dependencies.md) covers recovery and ownership.
 
 ### 项目本地构建根 / Project-local build root
 

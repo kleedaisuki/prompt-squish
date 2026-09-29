@@ -6,8 +6,8 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    DependencySpec, MANIFEST_VERSION, Package, Profile, ProjectError, Target, ValidationIssue,
-    Workspace, validate_package_name,
+    DependencySpec, MANIFEST_VERSION, Package, Profile, ProjectError, SkillSpec, Target,
+    ValidationIssue, Workspace, validate_package_name,
 };
 
 /// 完整的人工编写项目意图。 / Complete human-authored project intent.
@@ -28,6 +28,9 @@ pub struct Manifest {
     /// Direct dependency aliases. / 直接依赖别名。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<String, DependencySpec>,
+    /// Agent Skills installed to `.agents/skills/<name>` independently of XML dependencies.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub skills: BTreeMap<String, SkillSpec>,
     /// Public export name to source path. / 公开 export 名称到源路径。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub exports: BTreeMap<String, std::path::PathBuf>,
@@ -154,6 +157,9 @@ impl Manifest {
             validate_name(&format!("dependencies.{alias}"), alias, &mut issues);
             validate_dependency(&format!("dependencies.{alias}"), dependency, &mut issues);
         }
+        for (name, skill) in &self.skills {
+            validate_skill(name, skill, &mut issues);
+        }
         for (name, path) in &self.exports {
             validate_name(&format!("exports.{name}"), name, &mut issues);
             if path.as_os_str().is_empty() || path.is_absolute() {
@@ -205,6 +211,89 @@ impl Manifest {
         } else {
             Err(ProjectError::Validation(issues))
         }
+    }
+}
+
+fn validate_skill(name: &str, spec: &SkillSpec, issues: &mut Vec<ValidationIssue>) {
+    let base = format!("skills.{name}");
+    if name.len() > 64
+        || name.is_empty()
+        || name.starts_with('-')
+        || name.ends_with('-')
+        || name.as_bytes().windows(2).any(|pair| pair == b"--")
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        issues.push(ValidationIssue::new(
+            &base,
+            "skill name must be 1–64 lowercase ASCII letters, digits, or single interior hyphens",
+        ));
+    }
+    if spec.path.is_some() == spec.git.is_some() {
+        issues.push(ValidationIssue::new(
+            &base,
+            "skill must select exactly one of `path` or `git`",
+        ));
+    }
+    if let Some(path) = &spec.path
+        && (path.as_os_str().is_empty() || path.is_absolute())
+    {
+        issues.push(ValidationIssue::new(
+            format!("{base}.path"),
+            "skill path must be a non-empty relative path",
+        ));
+    }
+    if let Some(git) = &spec.git
+        && git.trim().is_empty()
+    {
+        issues.push(ValidationIssue::new(
+            format!("{base}.git"),
+            "git repository cannot be empty",
+        ));
+    }
+    let refs = [
+        &spec.git_reference.branch,
+        &spec.git_reference.tag,
+        &spec.git_reference.rev,
+    ];
+    if refs.iter().filter(|reference| reference.is_some()).count() > 1 {
+        issues.push(ValidationIssue::new(
+            &base,
+            "git branch, tag, and rev are mutually exclusive",
+        ));
+    }
+    if spec.git.is_none()
+        && (refs.iter().any(|reference| reference.is_some()) || spec.subdir.is_some())
+    {
+        issues.push(ValidationIssue::new(
+            &base,
+            "git selectors and subdir require `git`",
+        ));
+    }
+    for (key, value) in [
+        ("branch", &spec.git_reference.branch),
+        ("tag", &spec.git_reference.tag),
+        ("rev", &spec.git_reference.rev),
+    ] {
+        if value.as_ref().is_some_and(|value| value.trim().is_empty()) {
+            issues.push(ValidationIssue::new(
+                format!("{base}.{key}"),
+                "git selector cannot be empty",
+            ));
+        }
+    }
+    if let Some(subdir) = &spec.subdir
+        && (subdir.as_os_str().is_empty()
+            || lexical_normalize(subdir).is_none()
+            || subdir
+                .components()
+                .any(|component| matches!(component, Component::ParentDir)))
+    {
+        issues.push(ValidationIssue::new(
+            format!("{base}.subdir"),
+            "git subdir must stay within the repository",
+        ));
     }
 }
 
@@ -402,5 +491,53 @@ output = "../outside.prompt"
                 .any(|issue| issue.message.contains("collides"))
         );
         assert!(issues.iter().any(|issue| issue.message.contains("escape")));
+    }
+
+    #[test]
+    fn skills_are_independent_of_package_dependencies_and_allowed_at_virtual_root() {
+        let source = r#"
+manifest-version = 1
+[workspace]
+members = ["app"]
+[skills]
+review = { path = "skills/review" }
+audit = { git = "https://example.invalid/skills.git", tag = "v1", subdir = "skills/audit" }
+"#;
+        let manifest = Manifest::parse(source).unwrap();
+        assert_eq!(manifest.skills.len(), 2);
+        assert!(manifest.dependencies.is_empty());
+        assert_eq!(
+            Manifest::parse(&manifest.to_toml().unwrap()).unwrap(),
+            manifest
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_skill_sources_names_and_git_subdirectories() {
+        let source = r#"
+manifest-version = 1
+[package]
+name = "demo"
+version = "1.0.0"
+[skills]
+"bad.name" = { path = "x" }
+ambiguous = { path = "x", git = "https://example.invalid/x" }
+escape = { git = "https://example.invalid/x", subdir = "../outside" }
+selector = { path = "x", branch = "main" }
+"#;
+        let ProjectError::Validation(issues) = Manifest::parse(source).unwrap_err() else {
+            panic!("expected semantic validation")
+        };
+        for path in [
+            "skills.bad.name",
+            "skills.ambiguous",
+            "skills.escape.subdir",
+            "skills.selector",
+        ] {
+            assert!(
+                issues.iter().any(|issue| issue.path == path),
+                "missing {path}: {issues:?}"
+            );
+        }
     }
 }
