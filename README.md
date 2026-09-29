@@ -12,6 +12,8 @@ xmlsquish is a project-oriented prompt builder. It discovers packages, workspace
 
 从 [GitHub Releases](https://github.com/kleedaisuki/prompt-squish/releases) 下载与操作系统和处理器匹配的归档，按同次发布的校验和验证后解压，并把 `xmlsquish`（Windows 为 `xmlsquish.exe`）加入 `PATH`。Linux 发布包需要其发布说明所列的 glibc 版本；它不是 Alpine/musl 二进制。
 
+当前版本的具体资产、平台要求与升级说明见 [v1.1.0 发布说明](docs/releases/1.1.0.md)。
+
 Download the archive for your OS and CPU from GitHub Releases, verify it against the checksums from the same release, extract it, and put `xmlsquish` (`xmlsquish.exe` on Windows) on `PATH`. Check the release notes for the Linux glibc requirement.
 
 Agent 用户可以从同一 Release 单独下载 `SKILL.md`；新发布的 `SHA256SUMS` 同时覆盖二进制归档和这个指南。v1.0.4 的 `SKILL.md` 是发布后的补充资产，使用单独的 `SKILL.md.sha256` 校验，不改写原有校验和。
@@ -32,6 +34,8 @@ Source installation requires Rust 1.88 or newer. Install the complete Cargo work
 ```bash
 cargo install --git https://github.com/kleedaisuki/prompt-squish --locked
 ```
+
+如需可复现安装 v1.1.0，而非当时的默认分支，请指定 `--tag v1.1.0`。To install the immutable v1.1.0 release rather than the then-current default branch, add `--tag v1.1.0`.
 
 从当前检出安装 / Install from the current checkout:
 
@@ -111,7 +115,7 @@ review-checks = { path = "tools/skills/review-checks" }
 | `xmlsquish add SPEC` | 新增或更新有类型依赖，并协调清单与锁文件 | `--path`, `--git`, `--rev/--tag/--branch`, `--registry`, `--rename`, `--dry-run` |
 | `xmlsquish remove ALIAS` | 按别名移除直接依赖 | `-p/--package`, `--dev`, `--build`, `--dry-run` |
 | `xmlsquish add-skill NAME` | 声明并安装工作区 Agent Skill | `--path`, `--git`, `--rev/--tag/--branch`, `--subdir`, `--dry-run` |
-| `xmlsquish remove-skill NAME` | 移除声明、锁定记录及未被改动的受管安装 | `--dry-run`, `--manifest-path` |
+| `xmlsquish remove-skill NAME` | 移除声明、锁定记录及未被改动的受管安装 | `--dry-run`, `--manifest-path`, `--locked/--offline/--frozen` |
 | `xmlsquish sync-skills` | 从声明与锁定状态恢复受管安装 | `--locked`, `--offline`, `--frozen`, `--dry-run` |
 | `xmlsquish install-skill` | 安装 xmlsquish 自带 Agent Skill | `--project`, `--force`, `--dry-run` |
 | `xmlsquish inspect …` | 只读检查 IR、链接、源码来源、缓存键或产物 | `ir`, `link`, `source`, `cache`, `artifact`; `--format human|json|raw` |
@@ -156,7 +160,17 @@ xmlsquish install-skill                 # ~/.agents/skills/prompt-squish
 xmlsquish install-skill --project       # current workspace .agents/skills/prompt-squish
 ```
 
+`add-skill` 必须明确选择 `--path` 或 `--git`：没有裸名称的默认技能仓库，也不把 XML 包仓库当作技能仓库。本地路径指向**直接包含** `SKILL.md` 的目录，写入清单时按声明清单的目录转成相对路径；Git 的 `--subdir` 则选择仓库中的技能目录，未给 `--rev`、`--tag` 或 `--branch` 时跟踪远端默认分支。技能名采用小写字母、数字和内部单连字符，且与元数据的 `name` 一致；`description` 也必须有效。项目命令从工作区成员启动时仍更新**工作区根**的 `[skills]`、锁文件和安装目录；`--manifest-path` 也可以指向成员清单。
+
+`add-skill` requires an explicit `--path` or `--git`; there is no implicit skill registry. A local path names the exact directory containing `SKILL.md` and is stored relative to its declaring manifest; `--subdir` picks one directory inside a Git repository. With no Git selector, the source follows remote HEAD. Skill commands invoked from a workspace member still manage the workspace-root declaration, lock, and projection.
+
+锁文件固定 Git 的精确提交和技能**整棵文件树**的 BLAKE3 摘要。本地目录依然是可变输入：内容变化后须显式重新执行 `add-skill` 更新锁，`sync-skills --locked`/`--frozen` 不会悄悄接受漂移。检出新机器时执行 `sync-skills --locked`；需要完全离线时先确保所需 Git 对象已缓存，再用 `sync-skills --frozen`。`--locked` 不修改锁文件，`--offline` 不访问网络，`--frozen` 合并两者；`--dry-run` 做验证和计划但不提交。`remove-skill` 只删除相应声明、锁记录和**未经修改**的受管目录，`sync-skills` 可恢复缺失目录并清理过时的受管目录；手工安装、用户编辑或路径别名会触发拒绝而非强制接管。
+
+The lock pins an exact Git commit and a BLAKE3 digest of the complete skill tree. Local directories remain mutable: rerun `add-skill` to intentionally update a changed local source; a locked sync rejects drift. After checkout, use `sync-skills --locked`, or `--frozen` when the exact Git objects are already cached. `--locked` forbids lock edits, `--offline` forbids network, and `--dry-run` validates and plans without committing. Only unchanged owned projections may be replaced or removed.
+
 `install-skill` 安装随可执行文件内嵌的 xmlsquish 指南，不修改项目清单或锁文件；其现有公开名称是 `prompt-squish`。第三方 Skill 是可影响 Agent 行为的指令与文件：摘要证明安装内容未变，**不证明安全性**，请在启用前审阅来源和内容。具体模型、安全边界及恢复语义见[设计文档](docs/design/skill-dependencies.md)。
+
+默认用户级安装位置是 Unix 上的 `$HOME/.agents/skills/prompt-squish`、Windows 上的 `%USERPROFILE%\.agents\skills\prompt-squish`；`--project` 改用当前工作区。重复安装相同内容是幂等操作；`--force` **仅**能替换已有且未被编辑的 xmlsquish 自带安装，不能覆盖手工目录或用户修改。已安装的指南不需要项目清单；需要团队共享可复现的第三方技能时请用 `add-skill` 和 `sync-skills`。
 
 `install-skill` copies the executable-bundled xmlsquish guide without changing project dependency state; its existing public skill name is `prompt-squish`. Third-party skills can influence agent behavior: a digest proves byte identity, **not safety**. Review source and content before use. The [design contract](docs/design/skill-dependencies.md) covers recovery and ownership.
 
@@ -215,7 +229,7 @@ defaults
 
 相对路径按声明它的配置文件目录解析；CLI 覆盖中的相对路径按当前工作目录解析。支持的配置表是 `build`、`new`、`term` 与 `registries.<alias>`。构建布局只由项目清单的 `workspace.target-dir` 决定；旧 `source.cache-root`、`manager.storage-root`、`XMLSQUISH_SOURCE_CACHE_ROOT` 与 `XMLSQUISH_STORAGE_ROOT` 已移除。
 
-操作消息支持 `--message-format human|short|json`。`json` 是换行分隔 JSON（Newline-Delimited JSON, NDJSON），每行一个协议 3.1 事件，写入 stdout；human/short 状态与诊断写入 stderr，stdout 留给查询数据。`inspect` 使用 `--format human|json|raw` 返回一个查询结果；`raw` 仅适用于 `inspect artifact`，且只向 stdout 写入经摘要验证的产物字节。`--plain` 禁用颜色和动态进度；`--quiet` 抑制成功状态。
+操作消息支持 `--message-format human|short|json`。`json` 是换行分隔 JSON（Newline-Delimited JSON, NDJSON），每行一个协议 3.2 事件，写入 stdout；human/short 状态与诊断写入 stderr，stdout 留给查询数据。`inspect` 使用 `--format human|json|raw` 返回一个查询结果；`raw` 仅适用于 `inspect artifact`，且只向 stdout 写入经摘要验证的产物字节。`--plain` 禁用颜色和动态进度；`--quiet` 抑制成功状态。
 
 > **自动化迁移 / Automation migration:** xmlsquish 1.0.1 发送协议 `3.0`，而不是 1.0.0 的 `2.1`。这是一次机器协议主版本迁移，尽管产品版本只增加了补丁号。构建结果现在提供有类型的发布身份和稳定逻辑 `locator`，不再暴露发布器的物理 generation URI。解析 `--message-format=json` 的消费者必须在升级 CLI 时同步迁移到 v3 结构；不要将 v2 构建结果视为可加性更改。
 
@@ -234,6 +248,10 @@ xmlsquish 1.0.4 继续使用协议 `3.1`，但产品 locator 有意迁移到
 xmlsquish 1.0.4 retains protocol `3.1`, but intentionally moves product locators to
 `<target-dir>/artifacts/...`. The disk layout is not the machine protocol; consumers should treat a
 locator as one complete opaque project-relative path rather than prepend `target-dir` themselves.
+
+xmlsquish 1.1.0 将协议次版本可加性提升至 `3.2`，新增有类型的 `add-skill`、`remove-skill`、`sync-skills`、`install-skill` 操作及结果；现有 `3.1` 构建和包依赖事件的语义不变。解析 JSON 消息的自动化应识别新操作，而不要把新结果按 XML 包依赖处理。
+
+xmlsquish 1.1.0 advances the additive protocol minor to `3.2` with typed skill operations and results. Existing `3.1` build and package-dependency semantics remain unchanged; JSON consumers should handle skill operations separately from XML package dependencies.
 
 ## 退出与自动化 / Process exits and automation
 

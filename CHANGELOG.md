@@ -6,6 +6,10 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-09-29
+
+完整发布说明与安装方法 / Full release notes and installation: [1.1.0](docs/releases/1.1.0.md).
+
 ### Agent Skills 依赖 / Agent Skills dependencies
 
 - 工作区根清单新增 `[skills]`，支持明确的本地目录与 Git 来源；`xmlsquish.lock` 独立记录技能来源、精确 Git 提交与完整目录摘要，不把技能伪装成 XML 包依赖。
@@ -14,6 +18,10 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
   Add `add-skill`, `remove-skill`, and `sync-skills` for managed `.agents/skills/<name>` copies, preserving unmanaged directories and supporting locked, offline, and dry-run modes.
 - 新增 `install-skill`，从可执行文件内嵌内容安装名为 `prompt-squish` 的自带指南，默认作用于用户目录，也可用 `--project` 安装到当前工作区。
   Add `install-skill` to install the executable-bundled `prompt-squish` guide for the current user, or into the current workspace with `--project`.
+- 新增可恢复的清单、锁文件与安装目录事务；拒绝覆盖手工安装或已编辑的技能，并在同步时检验本地来源漂移。Git 技能锁定精确提交，安装不执行技能脚本。
+  Add recoverable manifest/lock/projection transactions; refuse to overwrite manual or edited skills and detect local-source drift during sync. Git skills pin exact commits, and installation does not execute skill scripts.
+- 机器协议从 `3.1` 可加性升级到 `3.2`，新增有类型的技能操作、结果和事件；原有 XML DSL 与包依赖语义不变。
+  Advance the additive machine protocol from `3.1` to `3.2` with typed skill operations, results, and events; existing XML DSL and package dependency semantics remain unchanged.
 
 ## [1.0.4] — 2026-09-20
 
@@ -124,7 +132,8 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 - 引入命名空间感知模块、不可变命名宏、显式字符串参数与 XML slot。
   Introduced namespace-aware modules, immutable named macros, explicit scalar parameters, and XML slots.
 
-[Unreleased]: https://github.com/kleedaisuki/prompt-squish/compare/v1.0.4...HEAD
+[Unreleased]: https://github.com/kleedaisuki/prompt-squish/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.1.0
 [1.0.4]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.4
 [1.0.2]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.2
 [1.0.1]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.1
