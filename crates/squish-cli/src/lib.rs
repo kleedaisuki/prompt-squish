@@ -1018,7 +1018,7 @@ fn sync_skills_invocation(
 
 /// Validate the shared Agent Skills name grammar at the CLI boundary.
 fn skill_name(value: String) -> Result<SkillName, clap::Error> {
-    SkillName::new(value).map_err(|error| usage(&error.to_string()))
+    SkillName::new(value).map_err(|error| usage(error.to_string()))
 }
 
 fn inspect_invocation(

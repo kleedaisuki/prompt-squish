@@ -1102,7 +1102,7 @@ fn digest_skill_disk_tree(root: &Path, name: &str) -> Result<String, RepositoryE
                 pending.push(path);
                 continue;
             }
-            if files.len() >= MAX_SKILL_FILES + 1 || meta.len() > MAX_SKILL_FILE_BYTES {
+            if files.len() > MAX_SKILL_FILES || meta.len() > MAX_SKILL_FILE_BYTES {
                 return Err(RepositoryError::Layout(
                     "skill tree exceeds file limit".into(),
                 ));
