@@ -593,15 +593,20 @@ fn directory_alias(target: &Path, alias: &Path) {
 /// Junctions require no developer-mode symbolic-link privilege on Windows.
 #[cfg(windows)]
 fn directory_alias(target: &Path, alias: &Path) {
-    let output = Command::new("cmd")
-        .args(["/D", "/C", "mklink", "/J"])
-        .arg(alias)
-        .arg(target)
+    let quoted = |path: &Path| path.to_string_lossy().replace('\'', "''");
+    let command = format!(
+        "New-Item -ItemType Junction -Path '{}' -Target '{}' | Out-Null",
+        quoted(alias),
+        quoted(target)
+    );
+    let output = Command::new("pwsh")
+        .args(["-NoProfile", "-NonInteractive", "-Command"])
+        .arg(command)
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "mklink /J: {}",
+        "New-Item -ItemType Junction: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
