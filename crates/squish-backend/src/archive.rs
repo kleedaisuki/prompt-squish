@@ -365,7 +365,7 @@ pub fn write_sopack(
         package_name: payload.package_name.clone(),
         package_version: payload.package_version.clone(),
         metadata: payload.metadata.clone(),
-        root_path: payload.root_source.as_ref().map(&path_of).transpose()?,
+        root_path: payload.root_source.as_ref().map(path_of).transpose()?,
         sources: BTreeMap::new(),
         units: Vec::new(),
         imports: Vec::new(),
