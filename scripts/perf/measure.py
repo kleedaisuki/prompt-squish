@@ -266,7 +266,7 @@ def sopack_reuse(binary: Path, directory: Path, count: int) -> Path:
     consumer = fixture(directory / "consumer", "bundle",
                        f'<xs:pack xmlns:xs="{NS}" xmlns:m="urn:perf:reusable">'
                        f'<xs:import src="pkg:reusable/main"/>{expansions}</xs:pack>', "pack")
-    invoke(binary, ["add", "reusable", "--path", str(relocated)], consumer)
+    invoke(binary, ["add", "reusable", "--path", "../relocated/library.sopack"], consumer)
     invoke(binary, ["build", "--offline", "--plain"], consumer)
     with zipfile.ZipFile(consumer / "target/xmlsquish/artifacts/bundle.pack") as archive:
         if len(archive.namelist()) != count:
