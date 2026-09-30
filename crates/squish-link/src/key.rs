@@ -31,6 +31,8 @@ impl LinkKeyProjection {
             bytes.push(match revision.kind {
                 squish_ir::UnitKind::Entry => 1,
                 squish_ir::UnitKind::Module => 2,
+                squish_ir::UnitKind::Pack => 3,
+                squish_ir::UnitKind::Sopack => 4,
             });
         }
         for edge in &self.resolution.imports {

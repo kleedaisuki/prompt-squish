@@ -252,3 +252,112 @@ fn lossy_lexical_forms_keep_individual_source_boundaries() {
         1
     );
 }
+
+#[test]
+fn pack_lowers_assets_and_entry_only_include_with_portable_defaults() {
+    let output = compile(&blob(wrap("pack", r#"<xs:import src="macros.xml"/><xs:asset path="static/icon.bin"/><xs:include path="entries/hello.xml"/>"#)), &context()).unwrap();
+    assert_eq!(output.unit.kind(), squish_ir::UnitKind::Pack);
+    let header = output.unit.header();
+    assert_eq!(header.imports[1].expected_kind, squish_ir::UnitKind::Entry);
+    assert!(output.unit.ops().iter().any(|record| matches!(record.op, Op::Asset {name,..} if header.semantic_strings[name.0 as usize] == "static/icon.bin")));
+    assert!(output.unit.ops().iter().any(|record| matches!(record.op, Op::Include {import,name,..} if import.0 == 1 && header.semantic_strings[name.0 as usize] == "hello.prompt")));
+    let bytes = squish_ir::encode_unit_container(&output.unit).unwrap();
+    assert_eq!(
+        squish_ir::decode_unit_container(&bytes).unwrap(),
+        output.unit
+    );
+}
+
+#[test]
+fn sopack_preserves_asset_definition_ownership_and_public_macros() {
+    let output = compile(&blob(wrap("sopack", r#"<xs:import src="macros.xml"/><xs:asset path="README.txt"/><xs:macro name="m:files"><xs:asset path="static/icon.bin" name="icons/icon.bin"/></xs:macro><xs:expand ref="m:files"/>"#)), &context()).unwrap();
+    assert_eq!(output.unit.kind(), squish_ir::UnitKind::Sopack);
+    assert_eq!(output.unit.definitions().len(), 1);
+    assert!(output.unit.root_region().is_some());
+    assert_eq!(
+        output
+            .unit
+            .ops()
+            .iter()
+            .filter(|record| matches!(record.op, Op::Asset { .. }))
+            .count(),
+        2
+    );
+    let bytes = squish_ir::encode_unit_container(&output.unit).unwrap();
+    assert_eq!(
+        squish_ir::decode_unit_container(&bytes).unwrap(),
+        output.unit
+    );
+}
+
+#[test]
+fn sopack_rejects_include_even_in_uncalled_macros() {
+    let error = compile(
+        &blob(wrap(
+            "sopack",
+            r#"<xs:macro name="m:hidden"><xs:include path="entry.xml"/></xs:macro>"#,
+        )),
+        &context(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "XS1112");
+}
+
+#[test]
+fn package_archive_names_reject_traversal_and_platform_paths() {
+    for name in [
+        "../escape",
+        "/absolute",
+        "a//b",
+        "a/./b",
+        "C:/drive",
+        "a\\b",
+    ] {
+        let source = blob(wrap(
+            "pack",
+            &format!(r#"<xs:asset path="file.bin" name="{name}"/>"#),
+        ));
+        assert_eq!(
+            compile(&source, &context()).unwrap_err().code,
+            "XS1311",
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn module_macro_asset_remains_a_defining_unit_relative_reference() {
+    let output = compile(&blob(wrap("module",r#"<xs:macro name="m:resource"><xs:asset path="../shared/image.bin" name="image.bin"/></xs:macro>"#)),&context()).unwrap();
+    assert!(matches!(output.unit.ops()[0].op, Op::Asset { .. }));
+    assert_eq!(output.unit.definitions().len(), 1);
+    assert_eq!(output.unit.kind(), squish_ir::UnitKind::Module);
+}
+
+#[test]
+fn package_container_kind_cannot_disagree_with_typed_root() {
+    for (root, wrong_kind) in [
+        ("pack", squish_ir::ContainerKind::Entry),
+        ("sopack", squish_ir::ContainerKind::Module),
+    ] {
+        let output = compile(&blob(wrap(root, "")), &context()).unwrap();
+        let bytes = squish_ir::encode_unit_container(&output.unit).unwrap();
+        let container = squish_ir::decode_container(&bytes).unwrap();
+        let forged = squish_ir::Container::v1(wrong_kind, container.sections().to_vec()).unwrap();
+        assert!(matches!(
+            squish_ir::decode_unit_container(&squish_ir::encode_container(&forged)),
+            Err(squish_ir::PersistError::KindMismatch)
+        ));
+    }
+}
+
+#[test]
+fn include_import_kind_is_cross_validated_after_wire_decode() {
+    let mut output = compile(
+        &blob(wrap("pack", r#"<xs:include path="hello.xml"/>"#)),
+        &context(),
+    )
+    .unwrap();
+    output.unit.header_mut().imports[0].expected_kind = squish_ir::UnitKind::Module;
+    let bytes = squish_ir::encode_relocatable_unit(&output.unit);
+    assert!(squish_ir::decode_relocatable_unit(&bytes).is_err());
+}

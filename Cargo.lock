@@ -1469,6 +1469,10 @@ dependencies = [
 name = "squish-backend"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "crc32fast",
+ "serde",
+ "serde_json",
  "squish-ir",
  "squish-protocol",
 ]
@@ -2401,7 +2405,7 @@ checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
 
 [[package]]
 name = "xmlsquish"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "ctrlc",
  "fs2",

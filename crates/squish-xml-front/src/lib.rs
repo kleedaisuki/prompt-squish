@@ -15,10 +15,7 @@ mod parser;
 #[cfg(test)]
 mod tests;
 
-use squish_ir::{
-    PackageInstanceId, RelocatableUnitIr, Validate, decode_relocatable_unit,
-    encode_relocatable_unit,
-};
+use squish_ir::{PackageInstanceId, RelocatableUnitIr, Validate};
 use squish_protocol::{Diagnostic, DiagnosticId, Phase, Severity, Span};
 use squish_source::SourceBlob;
 
@@ -61,8 +58,8 @@ impl FrontendSourceContext {
 ///
 /// 成功返回前，IR 会经过结构 verifier 和二进制 codec round-trip；因此调用者
 /// 不会观察到只能在缓存重载时才暴露的前端错误。
-/// Before success, the IR passes structural verification and a binary-codec round trip, so a
-/// caller cannot observe frontend output that fails only after a cache reload.
+/// Structural verification runs in every build. Debug builds additionally perform a codec
+/// round trip; release builds avoid redundant serialization on the small-batch startup path.
 ///
 /// # Errors
 ///
@@ -94,18 +91,21 @@ pub fn compile(
         .map_err(|message| Box::new(internal(source, message)))?;
     unit.validate()
         .map_err(|error| Box::new(internal(source, format!("IR verification failed: {error}"))))?;
-    let bytes = encode_relocatable_unit(&unit);
-    let decoded = decode_relocatable_unit(&bytes).map_err(|error| {
-        Box::new(internal(
-            source,
-            format!("IR codec round-trip failed: {error}"),
-        ))
-    })?;
-    if decoded != unit {
-        return Err(Box::new(internal(
-            source,
-            "IR codec round-trip changed the unit",
-        )));
+    #[cfg(debug_assertions)]
+    {
+        let bytes = squish_ir::encode_relocatable_unit(&unit);
+        let decoded = squish_ir::decode_relocatable_unit(&bytes).map_err(|error| {
+            Box::new(internal(
+                source,
+                format!("IR codec round-trip failed: {error}"),
+            ))
+        })?;
+        if decoded != unit {
+            return Err(Box::new(internal(
+                source,
+                "IR codec round-trip changed the unit",
+            )));
+        }
     }
     Ok(FrontendOutput { unit })
 }

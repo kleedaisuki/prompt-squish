@@ -1,5 +1,8 @@
 //! 构建用例的封闭计划与执行。 / Closed planning and execution for the build use case.
 
+#[path = "archive_build.rs"]
+mod archive_build;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -1106,6 +1109,12 @@ impl PreparedBuild {
 struct FrozenSource {
     blob: Arc<SourceBlob>,
     package: squish_ir::PackageInstanceId,
+    /// Imported archives preserve their relocated identity and immutable compiled object.
+    precompiled: Option<RelocatableUnitIr>,
+    /// Frozen resource bytes are explicit action inputs, never worker filesystem reads.
+    assets: BTreeMap<String, Vec<u8>>,
+    /// Archive-local resolved imports are immutable and source-neutral to the linker.
+    archive: Option<Arc<squish_backend::archive::SopackPayload>>,
 }
 
 struct TargetBuild {
@@ -1543,6 +1552,10 @@ fn planning_snapshot_digest(prepared: &PreparedBuild) -> squish_protocol::Digest
     for source in sources {
         encode_source_key(&mut bytes, &source_key(source));
         encode_field(&mut bytes, source.blob.digest().as_bytes());
+        for (path, asset) in &source.assets {
+            encode_field(&mut bytes, path.as_bytes());
+            encode_field(&mut bytes, blake3::hash(asset).as_bytes());
+        }
     }
     protocol_blake3(&bytes)
 }
@@ -1778,14 +1791,20 @@ impl BuildExecutor {
             .ok_or_else(|| {
                 ManagerError::new("MGB101", Phase::Analyze, "planned source is absent")
             })?;
-        let unit = self
-            .runtime
-            .compile(
-                &source.blob,
-                &FrontendSourceContext::new(source.package.clone()),
-            )
-            .map_err(|cause| ManagerError::new(cause.code(), Phase::Analyze, cause.message()))?
-            .unit;
+        let unit = match &source.precompiled {
+            Some(unit) => unit.clone(),
+            None => {
+                self.runtime
+                    .compile(
+                        &source.blob,
+                        &FrontendSourceContext::new(source.package.clone()),
+                    )
+                    .map_err(|cause| {
+                        ManagerError::new(cause.code(), Phase::Analyze, cause.message())
+                    })?
+                    .unit
+            }
+        };
         if header(&unit).frontend_abi.0 != self.prepared.runtime_descriptor.frontend_abi {
             return Err(ManagerError::new(
                 "MGB040",
@@ -1827,6 +1846,7 @@ impl BuildExecutor {
             &self.prepared.snapshot,
             &self.prepared.locations,
             &state.compiled,
+            &self.prepared.sources,
         )?;
         let payloads = state
             .compiled
@@ -1882,8 +1902,10 @@ impl BuildExecutor {
             squish_ir::AbiId(self.prepared.runtime_descriptor.document_abi.clone());
         let document_bytes = encode_linked_document(&document);
         let trace_bytes = encode_expansion_trace(&instantiated.trace);
+        let directive_bytes = squish_link::encode_archive_directives(&instantiated.directives);
         self.store_blob(&document_bytes, "MGB074", Phase::Cache)?;
         self.store_blob(&trace_bytes, "MGB075", Phase::Cache)?;
+        self.store_blob(&directive_bytes, "MGB075", Phase::Cache)?;
         self.state
             .lock()
             .expect("build state mutex is not poisoned")
@@ -1893,6 +1915,7 @@ impl BuildExecutor {
             vec![
                 produced("document", ArtifactKind::Metadata, &document_bytes),
                 produced("trace", ArtifactKind::DebugInfo, &trace_bytes),
+                produced("directives", ArtifactKind::Metadata, &directive_bytes),
             ],
             Vec::new(),
         ))
@@ -1906,6 +1929,16 @@ impl BuildExecutor {
         let target = self.target(target_name)?;
         let (document, instantiated) = self.instantiated_for(target_name, inputs)?;
         let linked = self.linked_for(target_name, inputs)?;
+        if matches!(target.resolved.backend.as_str(), "pack" | "sopack") {
+            return archive_build::emit(self, target_name, target, &linked, &instantiated);
+        }
+        if !instantiated.directives.is_empty() {
+            return Err(ManagerError::new(
+                "MGB150",
+                Phase::Emit,
+                "prompt targets cannot emit asset/include members; select the pack backend",
+            ));
+        }
         let output = self
             .runtime
             .render(BackendRequest {
@@ -1954,7 +1987,11 @@ impl BuildExecutor {
         let debug = encode_debug_bundle(&bundle).map_err(|e| error("MGB078", Phase::Emit, e))?;
         self.store_blob(&debug, "MGB079", Phase::Cache)?;
         let produced = vec![
-            produced("prompt", ArtifactKind::Prompt, &output.bytes),
+            produced(
+                "prompt",
+                product_kind(&target.resolved.backend),
+                &output.bytes,
+            ),
             produced("backend-result", ArtifactKind::DebugInfo, &debug),
         ];
         self.state
@@ -2002,7 +2039,11 @@ impl BuildExecutor {
                 .iter()
                 .find_map(|(name, value)| {
                     let actual = [
-                        produced("prompt", ArtifactKind::Prompt, &value.output.bytes),
+                        produced(
+                            "prompt",
+                            product_kind(value.output.cache_identity.backend_id),
+                            &value.output.bytes,
+                        ),
                         produced("backend-result", ArtifactKind::DebugInfo, &value.debug),
                     ];
                     (actual.as_slice() == expected).then(|| name.clone())
@@ -2050,14 +2091,16 @@ impl BuildExecutor {
         {
             publications.push(publication(
                 &format!("{target_name}:prompt"),
-                ArtifactKind::Prompt,
+                product_kind(&target.resolved.backend),
                 &target.resolved.output,
                 prompt_digest,
                 output.output.bytes.len() as u64,
                 self.prepared.repository.root(),
             )?);
         }
-        if has_emit(&self.prepared.emit, EmitKind::DebugInfo) {
+        if has_emit(&self.prepared.emit, EmitKind::DebugInfo)
+            && !matches!(target.resolved.backend.as_str(), "pack" | "sopack")
+        {
             let bytes = output.debug;
             let digest = self.store_blob(&bytes, "MGB079", Phase::Cache)?;
             publications.push(publication(
@@ -2206,6 +2249,7 @@ impl BuildExecutor {
                     &self.prepared.snapshot,
                     &self.prepared.locations,
                     &state.compiled,
+                    &self.prepared.sources,
                 )?;
                 drop(state);
                 let program =
@@ -2232,6 +2276,11 @@ impl BuildExecutor {
                     .map_err(|e| error("MGB125", Phase::Cache, e))?;
                 let trace = decode_expansion_trace(&self.cached_bytes(record, "trace")?)
                     .map_err(|e| error("MGB126", Phase::Cache, e))?;
+                let directives = squish_link::decode_archive_directives(
+                    &self.cached_bytes(record, "directives")?,
+                )
+                .map_err(|e| error("MGB126", Phase::Cache, e))?;
+                archive_build::validate_directives(&directives, &trace)?;
                 if document.document_abi.0 != self.prepared.runtime_descriptor.document_abi {
                     return Err(ManagerError::new(
                         "MGB125",
@@ -2245,12 +2294,25 @@ impl BuildExecutor {
                     .instantiated
                     .insert(
                         target.clone(),
-                        (document.clone(), InstantiateOutput { document, trace }),
+                        (
+                            document.clone(),
+                            InstantiateOutput {
+                                document,
+                                trace,
+                                directives,
+                            },
+                        ),
                     );
             }
             BuildWork::Backend { target } => {
                 let bytes = self.cached_bytes(record, "prompt")?;
                 let debug = self.cached_bytes(record, "backend-result")?;
+                if matches!(
+                    self.target(target)?.resolved.backend.as_str(),
+                    "pack" | "sopack"
+                ) {
+                    return archive_build::hydrate(self, target, bytes, debug);
+                }
                 let bundle = squish_ir::decode_debug_bundle(&debug)
                     .map_err(|e| error("MGB127", Phase::Cache, e))?;
                 if bundle.artifact.digest != ArtifactDigest::of(&bytes)
@@ -2548,19 +2610,29 @@ fn freeze_sources(
     let sealed = builder
         .seal()
         .map_err(|e| error("MGB012", Phase::Analyze, e))?;
-    let sources = loaded
+    let mut sources = loaded
         .into_iter()
         .map(|(blob, package)| {
             let _ = sealed
                 .get(blob.id())
                 .expect("every successful load is present after seal");
-            FrozenSource { blob, package }
+            FrozenSource {
+                blob,
+                package,
+                precompiled: None,
+                assets: BTreeMap::new(),
+                archive: None,
+            }
         })
-        .collect();
+        .collect::<Vec<_>>();
+    archive_build::freeze_inputs(snapshot, &mut sources)?;
     Ok(sources)
 }
 
 fn source_key(source: &FrozenSource) -> SourceKey {
+    if let Some(unit) = &source.precompiled {
+        return header(unit).source.clone();
+    }
     SourceKey::Project {
         package: source.package.clone(),
         path: source
@@ -2621,7 +2693,10 @@ fn select_targets(
             let resolved = snapshot
                 .resolve_target(&package.name, name, profile)
                 .map_err(|e| error("MGB014", Phase::Analyze, e))?;
-            if resolved.backend != "squish" {
+            if !matches!(
+                resolved.backend.as_str(),
+                "squish" | "prompt" | "pack" | "sopack"
+            ) {
                 return Err(ManagerError::new(
                     "MGB015",
                     Phase::Emit,
@@ -2713,10 +2788,11 @@ fn build_plan(
                 kind: ArtifactKind::BinaryIr,
             }],
             (
-                vec![InputRef::Blob(source.blob.digest().to_protocol())],
+                archive_build::compile_inputs(source)?,
                 BTreeMap::from([
                     ("source-key".into(), canonical_source_key(&key)),
                     ("frontend-abi".into(), descriptor.frontend_abi.clone()),
+                    ("manager-schema".into(), "v1.2.0".into()),
                 ]),
             ),
         )?;
@@ -2775,7 +2851,7 @@ fn build_plan(
             BuildWork::Instantiate {
                 target: identity.clone(),
             },
-            vec![link],
+            vec![link.clone()],
             vec![
                 Output {
                     name: output_name("document"),
@@ -2785,11 +2861,15 @@ fn build_plan(
                     name: output_name("trace"),
                     kind: ArtifactKind::DebugInfo,
                 },
+                Output {
+                    name: output_name("directives"),
+                    kind: ArtifactKind::Metadata,
+                },
             ],
             (instantiate_inputs, instantiate_options(target, descriptor)),
         )?;
         let backend = action_id("backend", &identity);
-        let backend_inputs = vec![
+        let mut backend_inputs = vec![
             InputRef::Output(OutputRef {
                 action: instantiate.clone(),
                 output: output_name("document"),
@@ -2799,6 +2879,34 @@ fn build_plan(
                 output: output_name("trace"),
             }),
         ];
+        backend_inputs.push(InputRef::Output(OutputRef {
+            action: instantiate.clone(),
+            output: output_name("directives"),
+        }));
+        backend_inputs.push(InputRef::Output(OutputRef {
+            action: link.clone(),
+            output: output_name("image"),
+        }));
+        backend_inputs.push(InputRef::Output(OutputRef {
+            action: link.clone(),
+            output: output_name("map"),
+        }));
+        backend_inputs.extend(
+            sources
+                .iter()
+                .flat_map(|s| s.assets.values())
+                .map(|bytes| InputRef::Blob(protocol_blake3(bytes))),
+        );
+        let mut backend_dependencies = vec![instantiate, link];
+        if matches!(target.resolved.backend.as_str(), "pack" | "sopack") {
+            backend_dependencies.extend(compile_ids.iter().cloned());
+            backend_inputs.extend(compile_ids.iter().cloned().map(|action| {
+                InputRef::Output(OutputRef {
+                    action,
+                    output: output_name("xsir"),
+                })
+            }));
+        }
         add_action(
             &mut actions,
             &mut work,
@@ -2806,11 +2914,11 @@ fn build_plan(
             BuildWork::Backend {
                 target: identity.clone(),
             },
-            vec![instantiate],
+            backend_dependencies,
             vec![
                 Output {
                     name: output_name("prompt"),
-                    kind: ArtifactKind::Prompt,
+                    kind: product_kind(&target.resolved.backend),
                 },
                 Output {
                     name: output_name("backend-result"),
@@ -2884,7 +2992,7 @@ fn add_action(
     } else {
         ResourceClass::Cpu
     };
-    let key = KeyRecipe::new(format!("manager/{kind:?}/1"), key_parts.0, key_parts.1)
+    let key = KeyRecipe::new(format!("manager/{kind:?}/1.2.0"), key_parts.0, key_parts.1)
         .map_err(|e| error("MGB022", Phase::Manage, e))?;
     actions.push(Action {
         id: id.clone(),
@@ -2936,6 +3044,9 @@ fn freeze_backend_identities(
         .iter()
         .map(|target| {
             let target_name = format!("{}:{}", target.package, target.name);
+            if matches!(target.resolved.backend.as_str(), "pack" | "sopack") {
+                return Ok((target_name, archive_build::identity(target)));
+            }
             let identity = runtime
                 .backend_identity(SquishOptions {
                     max_output_bytes: budgets(&target.resolved).max_output_bytes,
@@ -3011,6 +3122,7 @@ fn bind_imports(
     snapshot: &ProjectSnapshot,
     locations: &[squish_repository::PackageLocation],
     units: &BTreeMap<SourceKey, CompiledUnit>,
+    sources: &[FrozenSource],
 ) -> Result<ResolutionSnapshot, ManagerError> {
     let lock = snapshot
         .lockfile()
@@ -3026,6 +3138,15 @@ fn bind_imports(
         .into_iter()
         .map(|p| (p.instance, p.lock_id))
         .collect();
+    let archives = sources
+        .iter()
+        .filter_map(|s| s.archive.as_ref().map(|a| (s.package.clone(), a)))
+        .collect::<BTreeMap<_, _>>();
+    let archived_imports = archives
+        .values()
+        .flat_map(|a| &a.imports)
+        .map(|b| ((b.importer.clone(), b.import.0), b))
+        .collect::<BTreeMap<_, _>>();
     let mut revisions = Vec::new();
     let mut imports = Vec::new();
     for (source, compiled) in units {
@@ -3039,13 +3160,19 @@ fn bind_imports(
             },
         ));
         for import in &header.imports {
+            if let Some(binding) = archived_imports.get(&(source.clone(), import.local_id.0)) {
+                imports.push((*binding).clone());
+                continue;
+            }
             let target = resolve_import(
                 source,
                 &import.spec,
+                import.expected_kind,
                 lock,
                 &locked_manifests,
                 &package_by_instance,
                 units,
+                &archives,
             )?;
             imports.push(ImportBinding {
                 importer: source.clone(),
@@ -3065,10 +3192,12 @@ fn bind_imports(
 fn resolve_import(
     source: &SourceKey,
     spec: &ImportSpec,
+    expected: UnitKind,
     lock: &Lockfile,
     manifests: &BTreeMap<&str, &Manifest>,
     instances: &BTreeMap<squish_ir::PackageInstanceId, String>,
     units: &BTreeMap<SourceKey, CompiledUnit>,
+    archives: &BTreeMap<squish_ir::PackageInstanceId, &Arc<squish_backend::archive::SopackPayload>>,
 ) -> Result<SourceKey, ManagerError> {
     let SourceKey::Project { package, path } = source else {
         return Err(ManagerError::new(
@@ -3127,6 +3256,14 @@ fn resolve_import(
                     "dependency manifest is absent from authoritative snapshot",
                 )
             })?;
+            if let Some(key) = instances.iter().find_map(|(instance, id)| {
+                (id == dependency_id)
+                    .then(|| archives.get(instance))
+                    .flatten()
+                    .and_then(|archive| archive.exports.get(export))
+            }) {
+                return validate_import_kind(key.clone(), expected, units);
+            }
             let path = manifest.exports.get(export).ok_or_else(|| {
                 ManagerError::new(
                     "MGB055",
@@ -3159,12 +3296,25 @@ fn resolve_import(
             ));
         }
     };
+    validate_import_kind(target, expected, units)
+}
+
+/// Matches the declaration's semantic kind, independent of the source provider.
+fn validate_import_kind(
+    target: SourceKey,
+    expected: UnitKind,
+    units: &BTreeMap<SourceKey, CompiledUnit>,
+) -> Result<SourceKey, ManagerError> {
     match units.get(&target).map(|u| unit_kind(&u.unit)) {
-        Some(UnitKind::Module) => Ok(target),
-        Some(UnitKind::Entry) => Err(ManagerError::new(
+        Some(kind)
+            if kind == expected || (expected == UnitKind::Module && kind == UnitKind::Sopack) =>
+        {
+            Ok(target)
+        }
+        Some(kind) => Err(ManagerError::new(
             "MGB059",
             Phase::Link,
-            "imports may target modules only",
+            format!("reference requires {expected:?}, but resolves to {kind:?}"),
         )),
         None => Err(ManagerError::new(
             "MGB060",
@@ -3470,10 +3620,7 @@ fn producer_static_origin(
 ) -> Option<QualifiedOriginRef> {
     let source = &image.units.get(producer.unit_slot as usize)?.source;
     let unit = compiled.get(source)?;
-    let origins = match &unit.unit {
-        RelocatableUnitIr::Module(module) => &module.origins,
-        RelocatableUnitIr::Entry(entry) => &entry.origins,
-    };
+    let origins = unit.unit.origins();
     let local = origins.entries.iter().position(|entry| {
         entry.entity_kind == EntityKind::Operation && entry.local_id == producer.op.0
     })?;
@@ -3594,31 +3741,28 @@ fn budgets(target: &ResolvedTarget) -> Budgets {
 }
 
 fn header(unit: &RelocatableUnitIr) -> &squish_ir::UnitHeader {
-    match unit {
-        RelocatableUnitIr::Module(v) => &v.header,
-        RelocatableUnitIr::Entry(v) => &v.header,
-    }
+    unit.header()
 }
 fn origins(unit: &RelocatableUnitIr) -> &squish_ir::OriginTable {
-    match unit {
-        RelocatableUnitIr::Module(v) => &v.origins,
-        RelocatableUnitIr::Entry(v) => &v.origins,
-    }
+    unit.origins()
 }
 fn archive_and_origins(
     unit: &RelocatableUnitIr,
 ) -> (&squish_ir::SourceArchive, &squish_ir::OriginTable) {
-    match unit {
-        RelocatableUnitIr::Module(v) => (&v.sources, &v.origins),
-        RelocatableUnitIr::Entry(v) => (&v.sources, &v.origins),
-    }
+    (unit.sources(), unit.origins())
 }
 fn unit_kind(unit: &RelocatableUnitIr) -> UnitKind {
-    match unit {
-        RelocatableUnitIr::Module(_) => UnitKind::Module,
-        RelocatableUnitIr::Entry(_) => UnitKind::Entry,
+    unit.kind()
+}
+/// Reports backend distribution truthfully while keeping internal output names stable.
+fn product_kind(backend: &str) -> ArtifactKind {
+    match backend {
+        "pack" | "xmlsquish.pack" => ArtifactKind::Other("pack".into()),
+        "sopack" | "xmlsquish.sopack" => ArtifactKind::Other("sopack".into()),
+        _ => ArtifactKind::Prompt,
     }
 }
+
 fn action_id(stage: &str, identity: &str) -> ActionId {
     ActionId::new(format!(
         "build:{stage}:{}",

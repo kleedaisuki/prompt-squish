@@ -8,11 +8,35 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) fn lower(
     source: &SourceBlob,
     context: &FrontendSourceContext,
-    unit: Unit,
+    mut unit: Unit,
 ) -> Result<RelocatableUnitIr, String> {
+    let mut package_body = None;
+    let mut is_pack = false;
+    let mut is_sopack = false;
+    unit.root = match unit.root {
+        Root::Pack { body } => {
+            is_pack = true;
+            Root::Entry {
+                params: Vec::new(),
+                param_origins: Vec::new(),
+                body,
+            }
+        }
+        Root::Sopack { definitions, body } => {
+            is_sopack = true;
+            package_body = Some(body);
+            Root::Module { definitions }
+        }
+        root => root,
+    };
     let mut pool = Pools::default();
+    if let Some(body) = &package_body {
+        pool.nodes(body);
+    }
+
     match &unit.root {
         Root::Entry { body, .. } => pool.nodes(body),
+        Root::Pack { .. } | Root::Sopack { .. } => unreachable!("normalized package root"),
         Root::Module { definitions } => {
             for d in definitions {
                 pool.nodes(&d.body)
@@ -56,8 +80,8 @@ pub(crate) fn lower(
     let source_key = source_key(source, context);
     let header = UnitHeader {
         ir_schema: Version { major: 1, minor: 0 },
-        language_abi: AbiId("xmlsquish.dsl/0.3".into()),
-        frontend_abi: AbiId("xmlsquish.xml/1".into()),
+        language_abi: AbiId("xmlsquish.dsl/0.4".into()),
+        frontend_abi: AbiId("xmlsquish.xml/2".into()),
         regex_abi: AbiId("rust-regex/1.13.1".into()),
         source: source_key.clone(),
         imports: unit
@@ -67,7 +91,7 @@ pub(crate) fn lower(
             .map(|(i, x)| ImportDecl {
                 local_id: ImportId(i as u32),
                 spec: x.spec.clone(),
-                expected_kind: UnitKind::Module,
+                expected_kind: x.expected_kind,
             })
             .collect(),
         semantic_strings: strings,
@@ -83,7 +107,7 @@ pub(crate) fn lower(
     let sources = source_archive(source, source_key);
     let producer = Producer {
         tool_version: env!("CARGO_PKG_VERSION").into(),
-        build_fingerprint: "squish-xml-front/xml-1".into(),
+        build_fingerprint: "squish-xml-front/xml-2".into(),
     };
     let mut l = Lower {
         strings: string_ids,
@@ -99,7 +123,7 @@ pub(crate) fn lower(
             let root = l.region(body)?;
             let external = l.external_symbols(BTreeSet::new());
             let origins = l.finish_origins();
-            RelocatableUnitIr::Entry(EntryObject {
+            let object = EntryObject {
                 header,
                 required_params: params,
                 root_region: root,
@@ -110,9 +134,15 @@ pub(crate) fn lower(
                 sources,
                 attachment,
                 producer,
-            })
+            };
+            if is_pack {
+                RelocatableUnitIr::Pack(object)
+            } else {
+                RelocatableUnitIr::Entry(object)
+            }
         }
         Root::Module { definitions } => {
+            let package_root = package_body.map(|body| l.region(body)).transpose()?;
             let local: BTreeSet<_> = definitions.iter().map(|d| d.symbol.clone()).collect();
             let mut defs = Vec::new();
             for (index, d) in definitions.into_iter().enumerate() {
@@ -143,7 +173,7 @@ pub(crate) fn lower(
                     .collect(),
             };
             let origins = l.finish_origins();
-            RelocatableUnitIr::Module(ModuleObject {
+            let module = ModuleObject {
                 header,
                 definitions: defs,
                 external_symbols: external,
@@ -154,8 +184,17 @@ pub(crate) fn lower(
                 sources,
                 attachment,
                 producer,
-            })
+            };
+            if is_sopack {
+                RelocatableUnitIr::Sopack(SopackObject {
+                    module,
+                    root_region: package_root.expect("sopack root"),
+                })
+            } else {
+                RelocatableUnitIr::Module(module)
+            }
         }
+        Root::Pack { .. } | Root::Sopack { .. } => unreachable!("normalized package root"),
     };
     Ok(result)
 }
@@ -183,6 +222,10 @@ impl Pools {
     }
     fn node(&mut self, n: &Node) {
         match &n.kind {
+            Kind::Asset { path, name } | Kind::Include { path, name, .. } => {
+                self.strings.insert(path.clone());
+                self.strings.insert(name.clone());
+            }
             Kind::Text(s) | Kind::Comment(s) => {
                 self.strings.insert(s.clone());
             }
@@ -294,6 +337,15 @@ impl Lower {
     ) -> Result<(Loc, Option<String>, Op, Vec<RawDecodedValue>), String> {
         let (loc, lexical, kind, decoded) = node.take();
         let op = match kind {
+            Kind::Asset { path, name } => Op::Asset {
+                path: self.strings[&path],
+                name: self.strings[&name],
+            },
+            Kind::Include { import, path, name } => Op::Include {
+                import: ImportId(import),
+                path: self.strings[&path],
+                name: self.strings[&name],
+            },
             Kind::Text(value) => Op::EmitText {
                 value: self.strings[&value],
             },
@@ -483,6 +535,7 @@ fn decoded_prefix(unit: &Unit) -> Vec<DecodedValueMap> {
         ));
     }
     match &unit.root {
+        Root::Pack { .. } | Root::Sopack { .. } => unreachable!("normalized package root"),
         Root::Entry { param_origins, .. } => {
             for (id, (_, decoded)) in param_origins.iter().enumerate() {
                 maps.push(decoded_map(

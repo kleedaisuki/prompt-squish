@@ -582,7 +582,16 @@ fn dependency_spec(request: &AddRequest) -> Result<DependencySpec, ManagerError>
         ..DependencyDetail::default()
     };
     match &request.source {
-        DependencySource::Path { path } => detail.path = Some(path.as_str().into()),
+        DependencySource::Path { path } => {
+            if Path::new(path.as_str())
+                .extension()
+                .is_some_and(|ext| ext == "sopack")
+            {
+                detail.sopack = Some(path.as_str().into());
+            } else {
+                detail.path = Some(path.as_str().into());
+            }
+        }
         DependencySource::Registry { registry, version } => {
             detail.registry = registry.as_ref().map(|v| v.as_str().into());
             detail.version = Some(

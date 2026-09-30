@@ -12,6 +12,15 @@ pub fn encode_relocatable_unit(unit: &RelocatableUnitIr) -> Vec<u8> {
             w.tag(1);
             w.module(v);
         }
+        RelocatableUnitIr::Pack(v) => {
+            w.tag(3);
+            w.entry(v);
+        }
+        RelocatableUnitIr::Sopack(v) => {
+            w.tag(4);
+            w.module(&v.module);
+            w.u32(v.root_region.0);
+        }
         RelocatableUnitIr::Entry(v) => {
             w.tag(2);
             w.entry(v);
@@ -27,6 +36,11 @@ pub fn decode_relocatable_unit(bytes: &[u8]) -> Result<RelocatableUnitIr, Decode
     let v = match r.tag()? {
         1 => RelocatableUnitIr::Module(r.module()?),
         2 => RelocatableUnitIr::Entry(r.entry()?),
+        3 => RelocatableUnitIr::Pack(r.entry()?),
+        4 => RelocatableUnitIr::Sopack(SopackObject {
+            module: r.module()?,
+            root_region: RegionId(r.u32()?),
+        }),
         _ => return Err(DecodeError::NonCanonical("relocatable unit discriminant")),
     };
     r.done()?;
@@ -148,6 +162,8 @@ impl W {
             w.tag(match x.expected_kind {
                 UnitKind::Entry => 1,
                 UnitKind::Module => 2,
+                UnitKind::Pack => 3,
+                UnitKind::Sopack => 4,
             })
         });
         self.list(&v.semantic_strings, |w, x| w.str(x));
@@ -196,6 +212,17 @@ impl W {
     }
     fn op(&mut self, v: &Op) {
         match v {
+            Op::Asset { path, name } => {
+                self.tag(9);
+                self.u32(path.0);
+                self.u32(name.0);
+            }
+            Op::Include { import, path, name } => {
+                self.tag(10);
+                self.u32(import.0);
+                self.u32(path.0);
+                self.u32(name.0);
+            }
             Op::EmitText { value } => {
                 self.tag(1);
                 self.u32(value.0)
@@ -544,6 +571,8 @@ impl<'a> R<'a> {
                     expected_kind: match r.tag()? {
                         1 => UnitKind::Entry,
                         2 => UnitKind::Module,
+                        3 => UnitKind::Pack,
+                        4 => UnitKind::Sopack,
                         _ => return Err(DecodeError::NonCanonical("unit kind")),
                     },
                 })
@@ -630,6 +659,15 @@ impl<'a> R<'a> {
                         body: RegionId(r.u32()?),
                     })
                 })?,
+            },
+            9 => Op::Asset {
+                path: StringId(self.u32()?),
+                name: StringId(self.u32()?),
+            },
+            10 => Op::Include {
+                import: ImportId(self.u32()?),
+                path: StringId(self.u32()?),
+                name: StringId(self.u32()?),
             },
             _ => return Err(DecodeError::NonCanonical("operation")),
         })

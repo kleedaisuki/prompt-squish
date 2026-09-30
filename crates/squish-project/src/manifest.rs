@@ -116,15 +116,20 @@ impl Manifest {
                     "output must be a non-empty relative path",
                 ));
             }
+            let suffix = match target.backend.as_str() {
+                "pack" => "pack",
+                "sopack" => "sopack",
+                _ => "prompt",
+            };
             if target
                 .output_path(name)
                 .extension()
                 .and_then(|value| value.to_str())
-                != Some("prompt")
+                != Some(suffix)
             {
                 issues.push(ValidationIssue::new(
                     format!("target.{name}.output"),
-                    "published target output must use the `.prompt` suffix",
+                    format!("published target output must use the `.{suffix}` suffix"),
                 ));
             }
             validate_limits(
@@ -327,14 +332,15 @@ fn validate_dependency(path: &str, spec: &DependencySpec, issues: &mut Vec<Valid
     let DependencySpec::Detail(detail) = spec else {
         return;
     };
-    let source_count = usize::from(detail.path.is_some())
+    let source_count = usize::from(detail.sopack.is_some())
+        + usize::from(detail.path.is_some())
         + usize::from(detail.git.is_some())
         + usize::from(detail.workspace)
         + usize::from(detail.version.is_some() || detail.registry.is_some());
     if source_count != 1 {
         issues.push(ValidationIssue::new(
             path,
-            "dependency must select exactly one of registry/version, git, path, or workspace",
+            "dependency must select exactly one of registry/version, git, path, sopack, or workspace",
         ));
     }
     if detail.registry.is_some() && detail.version.is_none() {
@@ -359,6 +365,16 @@ fn validate_dependency(path: &str, spec: &DependencySpec, issues: &mut Vec<Valid
     }
     if detail.git.is_none() && refs != 0 {
         issues.push(ValidationIssue::new(path, "git selector requires `git`"));
+    }
+    if let Some(archive) = &detail.sopack
+        && (archive.is_absolute()
+            || archive.as_os_str().is_empty()
+            || archive.extension().is_none_or(|ext| ext != "sopack"))
+    {
+        issues.push(ValidationIssue::new(
+            format!("{path}.sopack"),
+            "sopack dependency must be a non-empty relative .sopack file",
+        ));
     }
     if let Some(local) = &detail.path
         && (local.is_absolute() || local.as_os_str().is_empty())

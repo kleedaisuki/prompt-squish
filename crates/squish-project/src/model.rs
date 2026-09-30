@@ -90,11 +90,16 @@ fn default_backend() -> String {
 }
 
 impl Target {
-    /// 返回显式输出，否则生成 `<target>.prompt`。 / Returns the explicit output or derives `<target>.prompt`.
+    /// Returns explicit output or derives the backend-specific artifact suffix.
     pub fn output_path(&self, target_name: &str) -> PathBuf {
-        self.output
-            .clone()
-            .unwrap_or_else(|| PathBuf::from(format!("{target_name}.prompt")))
+        self.output.clone().unwrap_or_else(|| {
+            let suffix = match self.backend.as_str() {
+                "pack" => "pack",
+                "sopack" => "sopack",
+                _ => "prompt",
+            };
+            PathBuf::from(format!("{target_name}.{suffix}"))
+        })
     }
 }
 
@@ -177,6 +182,14 @@ impl DependencySpec {
         }))
     }
 
+    /// Constructs an immutable reusable SOPack archive dependency.
+    pub fn sopack(path: impl Into<PathBuf>) -> Self {
+        Self::Detail(Box::new(DependencyDetail {
+            sopack: Some(path.into()),
+            ..DependencyDetail::default()
+        }))
+    }
+
     /// 继承同别名 workspace 依赖。 / Inherits the same-alias workspace dependency.
     pub fn workspace() -> Self {
         Self::Detail(Box::new(DependencyDetail {
@@ -201,6 +214,8 @@ pub struct DependencyDetail {
     pub git_reference: GitReference,
     /// Local dependency directory. / 本地依赖目录。
     pub path: Option<PathBuf>,
+    /// Immutable compiled archive relative to the declaring manifest.
+    pub sopack: Option<PathBuf>,
     /// Inherit a workspace dependency of the same alias. / 继承同别名工作区依赖。
     #[serde(default)]
     pub workspace: bool,
@@ -225,6 +240,7 @@ impl Default for DependencyDetail {
             git: None,
             git_reference: GitReference::default(),
             path: None,
+            sopack: None,
             workspace: false,
             package: None,
             optional: false,

@@ -86,7 +86,7 @@ pub fn decode_unit_container(bytes: &[u8]) -> Result<RelocatableUnitIr, PersistE
     let container = decode_container(bytes)?;
     if !matches!(
         container.kind(),
-        ContainerKind::Module | ContainerKind::Entry
+        ContainerKind::Module | ContainerKind::Entry | ContainerKind::Pack | ContainerKind::Sopack
     ) {
         return Err(PersistError::KindMismatch);
     }
@@ -130,6 +130,8 @@ fn container_kind(unit: &RelocatableUnitIr) -> ContainerKind {
     match unit.kind() {
         UnitKind::Module => ContainerKind::Module,
         UnitKind::Entry => ContainerKind::Entry,
+        UnitKind::Pack => ContainerKind::Pack,
+        UnitKind::Sopack => ContainerKind::Sopack,
     }
 }
 
@@ -172,13 +174,19 @@ fn without_debug(mut unit: RelocatableUnitIr) -> RelocatableUnitIr {
         producer.build_fingerprint.clear();
     };
     match &mut unit {
+        RelocatableUnitIr::Sopack(v) => strip(
+            &mut v.module.origins,
+            &mut v.module.sources,
+            &mut v.module.attachment,
+            &mut v.module.producer,
+        ),
         RelocatableUnitIr::Module(v) => strip(
             &mut v.origins,
             &mut v.sources,
             &mut v.attachment,
             &mut v.producer,
         ),
-        RelocatableUnitIr::Entry(v) => strip(
+        RelocatableUnitIr::Entry(v) | RelocatableUnitIr::Pack(v) => strip(
             &mut v.origins,
             &mut v.sources,
             &mut v.attachment,

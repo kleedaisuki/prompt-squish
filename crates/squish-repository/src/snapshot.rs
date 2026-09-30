@@ -183,6 +183,8 @@ impl ProjectSnapshot {
             .as_ref()
             .ok_or_else(|| RepositoryError::Unknown("xmlsquish.lock".into()))?;
         let by_id: BTreeMap<_, _> = packages.iter().map(|p| (p.lock_id.as_str(), p)).collect();
+        let identities =
+            source_package_identities(packages.iter().map(|package| &package.instance))?;
         let mut output = BTreeMap::new();
         for locked_package in &locked.packages {
             let package = by_id
@@ -230,9 +232,10 @@ impl ProjectSnapshot {
             )?;
             paths.extend(manifest.targets.values().map(|target| target.entry.clone()));
             paths.extend(manifest.exports.values().cloned());
-            let identity = PackageId::new(declared.name.clone()).map_err(|e| {
-                RepositoryError::Layout(format!("invalid package source identity: {e}"))
-            })?;
+            let identity = identities
+                .get(&package.instance)
+                .expect("every resolved instance has a source identity")
+                .clone();
             for path in paths {
                 let logical_text = normalize_text(&path);
                 let logical = LogicalPath::new(&logical_text).map_err(|e| {
@@ -249,12 +252,7 @@ impl ProjectSnapshot {
                     locator,
                     package: package.instance.clone(),
                 };
-                if output.insert(id, source).is_some() {
-                    return Err(RepositoryError::Layout(format!(
-                        "duplicate source identity in package `{}`",
-                        declared.name
-                    )));
-                }
+                insert_owned_source(&mut output, source)?;
             }
         }
         Ok(output.into_values().collect())
@@ -335,6 +333,9 @@ impl ProjectSnapshot {
                     format!("{revision}@{checksum}"),
                     None,
                 ),
+                LockedSource::Sopack { checksum, .. } => {
+                    (5, checksum.clone(), checksum.clone(), None)
+                }
                 LockedSource::Path { path, .. } => (
                     3,
                     normalize_text(path),
@@ -549,12 +550,156 @@ fn append_manifest_sources(
             locator: SourceLocator::file(root.join(path)),
             package: instance.clone(),
         };
-        if output.insert(id, source).is_some() {
-            return Err(RepositoryError::Layout(format!(
-                "duplicate source identity in package `{}`",
-                declared.name
-            )));
-        }
+        insert_owned_source(output, source)?;
     }
     Ok(())
+}
+
+/// Deduplicates repeated lock nodes only when their exact source provider agrees.
+///
+/// Equal identities with a different instance or locator remain a layout error;
+/// aliasing an immutable instance cannot silently replace another provider.
+fn insert_owned_source(
+    output: &mut BTreeMap<SourceId, ProjectSource>,
+    source: ProjectSource,
+) -> Result<(), RepositoryError> {
+    use std::collections::btree_map::Entry;
+    match output.entry(source.id.clone()) {
+        Entry::Vacant(entry) => {
+            entry.insert(source);
+            Ok(())
+        }
+        Entry::Occupied(entry) if entry.get() == &source => Ok(()),
+        Entry::Occupied(_) => Err(RepositoryError::Layout(format!(
+            "duplicate source identity in package `{}`",
+            source.package.package_name
+        ))),
+    }
+}
+
+/// Preserves readable unique names while separating exact instances of the same package.
+///
+/// The suffix encodes all instance fields with length framing, independent of lock node
+/// aliases, iteration order, and device-local checkout locations. Full digests avoid a
+/// second collision policy; PackageInstanceId remains the compiler's authoritative identity.
+fn source_package_identities<'a>(
+    instances: impl IntoIterator<Item = &'a PackageInstanceId>,
+) -> Result<BTreeMap<PackageInstanceId, PackageId>, RepositoryError> {
+    let mut by_name: BTreeMap<&str, BTreeSet<&PackageInstanceId>> = BTreeMap::new();
+    for instance in instances {
+        by_name
+            .entry(&instance.package_name)
+            .or_default()
+            .insert(instance);
+    }
+    let mut output = BTreeMap::new();
+    for (name, group) in by_name {
+        let ambiguous = group.len() > 1;
+        for instance in group {
+            let text = if ambiguous {
+                let mut hash =
+                    blake3::Hasher::new_derive_key("xmlsquish.source-package-instance.v1");
+                hash.update(&instance.source_kind.to_le_bytes());
+                for field in [
+                    &instance.canonical_source,
+                    &instance.package_name,
+                    &instance.exact_revision,
+                ] {
+                    hash.update(&(field.len() as u64).to_le_bytes());
+                    hash.update(field.as_bytes());
+                }
+                format!("{name}.{}", hash.finalize().to_hex())
+            } else {
+                name.to_owned()
+            };
+            let identity = PackageId::new(text).map_err(|error| {
+                RepositoryError::Layout(format!("invalid package source identity: {error}"))
+            })?;
+            output.insert(instance.clone(), identity);
+        }
+    }
+    Ok(output)
+}
+
+#[cfg(test)]
+mod source_identity_tests {
+    use super::*;
+
+    #[test]
+    fn same_name_instances_keep_distinct_stable_source_ids_and_paths() {
+        let left = PackageInstanceId {
+            source_kind: 5,
+            canonical_source: "sopack:left".into(),
+            package_name: "library".into(),
+            exact_revision: "sha256:left".into(),
+        };
+        let right = PackageInstanceId {
+            canonical_source: "sopack:right".into(),
+            exact_revision: "sha256:right".into(),
+            ..left.clone()
+        };
+        let identities = source_package_identities([&left, &right]).unwrap();
+        assert_eq!(
+            identities,
+            source_package_identities([&right, &left]).unwrap()
+        );
+        let path = LogicalPath::new("src/module.xml").unwrap();
+        let left_source = SourceId::new(identities[&left].clone(), path.clone());
+        let right_source = SourceId::new(identities[&right].clone(), path);
+        assert_ne!(left_source, right_source);
+        assert_eq!(left_source.path(), right_source.path());
+        assert!(left_source.package().as_str().starts_with("library."));
+        assert_eq!(left.package_name, "library");
+        assert_eq!(right.package_name, "library");
+    }
+
+    #[test]
+    fn duplicate_immutable_provider_is_deduplicated_but_conflicts_are_rejected() {
+        let source = ProjectSource {
+            id: SourceId::new(
+                PackageId::new("library").unwrap(),
+                LogicalPath::new("src/module.xml").unwrap(),
+            ),
+            locator: SourceLocator::file(PathBuf::from("cache/immutable/src/module.xml")),
+            package: PackageInstanceId {
+                source_kind: 5,
+                canonical_source: "sha256:abc".into(),
+                package_name: "library".into(),
+                exact_revision: "sha256:abc".into(),
+            },
+        };
+        let mut output = BTreeMap::new();
+        insert_owned_source(&mut output, source.clone()).unwrap();
+        insert_owned_source(&mut output, source.clone()).unwrap();
+        assert_eq!(output.len(), 1);
+        let different_locator = ProjectSource {
+            locator: SourceLocator::file(PathBuf::from("other/src/module.xml")),
+            ..source.clone()
+        };
+        assert!(insert_owned_source(&mut output, different_locator).is_err());
+        let different_instance = ProjectSource {
+            package: PackageInstanceId {
+                exact_revision: "sha256:def".into(),
+                ..source.package.clone()
+            },
+            ..source.clone()
+        };
+        assert!(insert_owned_source(&mut output, different_instance).is_err());
+        assert_eq!(output.values().next(), Some(&source));
+    }
+
+    #[test]
+    fn unique_instance_and_repeated_exact_instance_retain_readable_name() {
+        let instance = PackageInstanceId {
+            source_kind: 1,
+            canonical_source: "registry".into(),
+            package_name: "library".into(),
+            exact_revision: "1.0.0@sha256:abc".into(),
+        };
+        for instances in [vec![&instance], vec![&instance, &instance]] {
+            let identities = source_package_identities(instances).unwrap();
+            assert_eq!(identities.len(), 1);
+            assert_eq!(identities[&instance].as_str(), "library");
+        }
+    }
 }

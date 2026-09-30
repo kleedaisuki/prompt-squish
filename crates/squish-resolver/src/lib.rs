@@ -17,7 +17,7 @@ use squish_project::{
 use thiserror::Error;
 
 /// 本实现的算法与锁协议版本。 / Algorithm and lock protocol version implemented here.
-pub const RESOLVER_VERSION: &str = "squish-backtracking/1";
+pub const RESOLVER_VERSION: &str = "squish-backtracking/2";
 const DEFAULT_REGISTRY: &str = "default";
 const MANIFEST_FILE: &str = "xmlsquish.toml";
 
@@ -108,10 +108,29 @@ pub struct LocalPackage {
     pub manifest: Manifest,
 }
 
+/// Validated archive metadata returned by the filesystem adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SopackPackage {
+    /// Workspace-relative archive locator, independent of the device root.
+    pub path: PathBuf,
+    /// Embedded package metadata; compiled archives are self-contained.
+    pub manifest: Manifest,
+    /// Exact digest of the archive bytes in algorithm:hex form.
+    pub checksum: String,
+}
+
 /// 未预载 path 包的文件系统端口。 / Filesystem port for path packages not already preloaded.
 pub trait FilesystemPort {
     /// 加载且规范化一个 path dependency。 / Loads and normalizes a path dependency.
     fn load(&self, request: LocalRequest<'_>) -> Result<LocalPackage, SourceUnavailable>;
+
+    /// Reads immutable archive metadata without recompiling its source attachments.
+    fn load_sopack(&self, request: LocalRequest<'_>) -> Result<SopackPackage, SourceUnavailable> {
+        Err(SourceUnavailable {
+            identity: request.path.display().to_string(),
+            detail: "SOPack loading is unavailable in this filesystem adapter".into(),
+        })
+    }
 }
 
 /// 无额外本地 I/O 的默认端口；适合完整 manifest 快照。 / No-I/O default for complete manifest snapshots.
@@ -466,6 +485,59 @@ impl<R: RegistryPort, G: GitPort, F: FilesystemPort> Resolver<R, G, F> {
         if let Some(path) = local_path {
             let target =
                 self.resolve_local(state, from_manifest, depender, alias, &package_name, &path)?;
+            return self.continue_after_edge(
+                state,
+                id,
+                alias,
+                target,
+                from_manifest,
+                depender,
+                dependencies,
+                index,
+            );
+        }
+        if let Some(path) = &detail.sopack {
+            let loaded = self
+                .filesystem
+                .load_sopack(LocalRequest {
+                    from_manifest,
+                    path,
+                })
+                .map_err(ResolveError::Unavailable)?;
+            if loaded
+                .manifest
+                .package
+                .as_ref()
+                .is_none_or(|package| package.name != package_name)
+            {
+                return Err(unsat(
+                    depender,
+                    alias,
+                    &package_name,
+                    "SOPack package identity does not match",
+                ));
+            }
+            validate_digest(&loaded.checksum, "SOPack checksum")?;
+            if loaded.path.is_absolute()
+                || loaded
+                    .path
+                    .components()
+                    .any(|part| matches!(part, Component::ParentDir))
+            {
+                return Err(ResolveError::InvalidInput(
+                    "SOPack adapter returned an escaping locator".into(),
+                ));
+            }
+            let manifest_path = format!("{}/xmlsquish.toml", slash(&loaded.path));
+            let target = self.install_candidate(
+                state,
+                manifest_path,
+                loaded.manifest,
+                LockedSource::Sopack {
+                    path: loaded.path,
+                    checksum: loaded.checksum,
+                },
+            )?;
             return self.continue_after_edge(
                 state,
                 id,
@@ -958,6 +1030,13 @@ impl<R: RegistryPort, G: GitPort, F: FilesystemPort> Resolver<R, G, F> {
                     revision,
                     checksum,
                 } => self.git.contains(repository, revision, checksum),
+                LockedSource::Sopack { path, checksum } => self
+                    .filesystem
+                    .load_sopack(LocalRequest {
+                        from_manifest: MANIFEST_FILE,
+                        path,
+                    })
+                    .is_ok_and(|archive| &archive.checksum == checksum),
                 LockedSource::Path { .. } | LockedSource::Workspace { .. } => true,
             };
             if !present {
@@ -1103,6 +1182,9 @@ fn validate_locked_spec(
     }
     let source_ok = if let Some(repository) = detail.git.as_ref() {
         matches!(&package.source, LockedSource::Git { repository: actual, .. } if actual == repository)
+    } else if let Some(path) = &detail.sopack {
+        let expected = normalize_path(&Path::new(&manifest_dir(from_manifest)).join(path));
+        matches!(&package.source, LockedSource::Sopack { path, .. } if expected.as_ref() == Some(path))
     } else if let Some(path) = &detail.path {
         let expected_manifest = join_manifest(&manifest_dir(from_manifest), path);
         let expected = expected_manifest
@@ -1261,6 +1343,7 @@ fn source_key(source: &LockedSource, name: &str) -> String {
             revision,
             checksum,
         } => format!("git:{repository}#{revision}/{checksum}"),
+        LockedSource::Sopack { path, checksum } => format!("sopack:{checksum}:{}", slash(path)),
         LockedSource::Path { path, .. } => format!("path:{}", slash(path)),
         LockedSource::Workspace { member, .. } => format!("workspace:{}", slash(member)),
     }
@@ -1428,6 +1511,62 @@ mod tests {
             exports: BTreeMap::new(),
             profiles: BTreeMap::new(),
         }
+    }
+
+    #[derive(Clone)]
+    struct ArchiveFixture(SopackPackage);
+
+    impl FilesystemPort for ArchiveFixture {
+        fn load(&self, _: LocalRequest<'_>) -> Result<LocalPackage, SourceUnavailable> {
+            panic!("compiled archives must not load local source manifests")
+        }
+        fn load_sopack(&self, _: LocalRequest<'_>) -> Result<SopackPackage, SourceUnavailable> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn sopack_dependencies_pin_content_and_validate_frozen_archives() {
+        let manifests = root_with_dependency("dep", DependencySpec::sopack("vendor/dep.sopack"));
+        let archive = SopackPackage {
+            path: "vendor/dep.sopack".into(),
+            manifest: manifest("dep", "1.2.3", BTreeMap::new()),
+            checksum: format!("sha256:{}", "ab".repeat(32)),
+        };
+        let resolver = Resolver::new(Registry::default(), Git::default())
+            .with_filesystem(ArchiveFixture(archive.clone()));
+        let lock = resolve(&resolver, &manifests, None, ResolutionMode::Online).unwrap();
+        let dep = lock
+            .packages
+            .iter()
+            .find(|package| package.name == "dep")
+            .unwrap();
+        assert_eq!(
+            dep.source,
+            LockedSource::Sopack {
+                path: archive.path.clone(),
+                checksum: archive.checksum.clone()
+            }
+        );
+        assert_eq!(
+            resolve(&resolver, &manifests, Some(&lock), ResolutionMode::Frozen).unwrap(),
+            lock
+        );
+        let changed = SopackPackage {
+            checksum: format!("sha256:{}", "cd".repeat(32)),
+            ..archive
+        };
+        let changed_resolver = Resolver::new(Registry::default(), Git::default())
+            .with_filesystem(ArchiveFixture(changed));
+        assert!(matches!(
+            resolve(
+                &changed_resolver,
+                &manifests,
+                Some(&lock),
+                ResolutionMode::Frozen
+            ),
+            Err(ResolveError::Unavailable(_))
+        ));
     }
 
     fn registry_candidate(

@@ -6,6 +6,9 @@
 
 #![forbid(unsafe_code)]
 
+/// Reproducible product and immutable library archive transport.
+pub mod archive;
+
 use std::{error::Error, fmt};
 
 use squish_ir::{

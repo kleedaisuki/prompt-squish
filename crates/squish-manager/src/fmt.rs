@@ -651,30 +651,41 @@ fn candidate_blob(
         })
 }
 
+/// Compares semantic structure uniformly across executable and reusable packaging roots.
 fn same_semantics(left: &RelocatableUnitIr, right: &RelocatableUnitIr) -> bool {
     match (left, right) {
-        (RelocatableUnitIr::Module(a), RelocatableUnitIr::Module(b)) => {
-            a.header == b.header
-                && a.definitions == b.definitions
-                && a.external_symbols == b.external_symbols
-                && a.interface == b.interface
-                && a.regions == b.regions
-                && a.ops == b.ops
-                && canonical_origins(&a.origins) == canonical_origins(&b.origins)
-                && a.producer == b.producer
-        }
-        (RelocatableUnitIr::Entry(a), RelocatableUnitIr::Entry(b)) => {
-            a.header == b.header
-                && a.required_params == b.required_params
-                && a.root_region == b.root_region
-                && a.external_symbols == b.external_symbols
-                && a.regions == b.regions
-                && a.ops == b.ops
-                && canonical_origins(&a.origins) == canonical_origins(&b.origins)
-                && a.producer == b.producer
+        (RelocatableUnitIr::Module(a), RelocatableUnitIr::Module(b)) => same_module(a, b),
+        (RelocatableUnitIr::Entry(a), RelocatableUnitIr::Entry(b))
+        | (RelocatableUnitIr::Pack(a), RelocatableUnitIr::Pack(b)) => same_entry(a, b),
+        (RelocatableUnitIr::Sopack(a), RelocatableUnitIr::Sopack(b)) => {
+            a.root_region == b.root_region && same_module(&a.module, &b.module)
         }
         _ => false,
     }
+}
+
+/// Source byte attachment and lexical spans do not change module semantics during formatting.
+fn same_module(a: &squish_ir::ModuleObject, b: &squish_ir::ModuleObject) -> bool {
+    a.header == b.header
+        && a.definitions == b.definitions
+        && a.external_symbols == b.external_symbols
+        && a.interface == b.interface
+        && a.regions == b.regions
+        && a.ops == b.ops
+        && canonical_origins(&a.origins) == canonical_origins(&b.origins)
+        && a.producer == b.producer
+}
+
+/// Entry and pack share execution-root shape, so format preservation has one comparison.
+fn same_entry(a: &squish_ir::EntryObject, b: &squish_ir::EntryObject) -> bool {
+    a.header == b.header
+        && a.required_params == b.required_params
+        && a.root_region == b.root_region
+        && a.external_symbols == b.external_symbols
+        && a.regions == b.regions
+        && a.ops == b.ops
+        && canonical_origins(&a.origins) == canonical_origins(&b.origins)
+        && a.producer == b.producer
 }
 
 fn canonical_origins(value: &squish_ir::OriginTable) -> squish_ir::OriginTable {
