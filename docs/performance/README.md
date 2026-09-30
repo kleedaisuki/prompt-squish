@@ -1,5 +1,9 @@
 # 宏展开与 IR 复用 / Macro expansion and IR reuse
 
+For the v1.2 archive pipeline, reproducible subprocess measurement protocol and
+CI/release resource policy, see [v1.2-pipeline.md](v1.2-pipeline.md). The results
+below are historical compiler measurements, not v1.2 archive performance claims.
+
 ## 范围与设计 / Scope and design
 
 本轮优化保留 `.o.xml`、`.i.xml`、诊断顺序和资源预算语义，不改变语言或产物格式。

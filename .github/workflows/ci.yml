@@ -6,6 +6,11 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+    inputs:
+      performance:
+        description: 'Collect paired release CLI benchmarks (enable for final release verification)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -25,6 +30,17 @@ jobs:
 
       - name: Install minimum supported Rust version with quality tools
         run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt,clippy
+
+      # Cache only rebuildable state; never store credentials or project metadata.
+      - name: Cache Rust dependencies and build state
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
 
       - name: Verify minimum supported Rust toolchain
         run: |
@@ -58,6 +74,7 @@ jobs:
         run: cargo +1.88.0 test --workspace --doc --all-features --locked
 
   rust-test:
+    needs: rust-quality
     name: Rust test (${{ matrix.name }}, MSRV 1.88)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -78,16 +95,27 @@ jobs:
       - name: Install minimum supported Rust version
         run: rustup toolchain install 1.88.0 --profile minimal
 
+      # Cache only rebuildable state; never store credentials or project metadata.
+      - name: Cache Rust dependencies and build state
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+
       - name: Verify minimum supported Rust toolchain
         run: |
           rustc +1.88.0 --version
           cargo +1.88.0 --version
 
-      - name: Build all targets
-        run: cargo +1.88.0 build --workspace --all-targets --all-features --locked
-
       - name: Run tests
         run: cargo +1.88.0 test --workspace --all-targets --all-features --locked
+
+      - name: Build composed CLI
+        run: cargo +1.88.0 build --bin xmlsquish --locked
 
       # Exercise the composed binary, not only the crates behind it.
       # 验证组合后的根二进制，而不只是其内部 crate。
@@ -116,19 +144,55 @@ jobs:
         shell: bash
         # The preceding workspace build has populated the locked dependency cache.
         # 前序 workspace 构建已填充锁定依赖缓存，因此安装无需再次访问网络。
-        run: cargo +1.88.0 install --path . --locked --offline --root "$RUNNER_TEMP/xmlsquish-install"
+        run: cargo +1.88.0 install --path . --debug --locked --offline --root "$GITHUB_WORKSPACE/.temp/xmlsquish-install"
 
       - name: Smoke test source-installed binary
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          binary="$RUNNER_TEMP/xmlsquish-install/bin/xmlsquish"
+          binary="$GITHUB_WORKSPACE/.temp/xmlsquish-install/bin/xmlsquish"
           "$binary" --version | grep -E '^xmlsquish [0-9]+\.[0-9]+\.[0-9]+'
           for command in new build clean fmt add remove add-skill remove-skill sync-skills install-skill inspect; do
             "$binary" | grep -E "^  ${command}[[:space:]]"
             "$binary" "$command" --help >/dev/null
           done
+
+  performance:
+    if: github.event_name == 'workflow_dispatch' && inputs.performance
+    needs: rust-quality
+    name: Release CLI measurements
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.88.0 --profile minimal
+      # Cache only rebuildable state; never store credentials or project metadata.
+      - name: Cache Rust dependencies and build state
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+
+      - name: Build measured release binary
+        run: cargo +1.88.0 build --release --bin xmlsquish --locked
+      - name: Measure startup, cold and warm builds, and packaging tails
+        run: |
+          python scripts/perf/download_baseline.py
+          python scripts/perf/measure.py target/release/xmlsquish --baseline .cache/perf-baseline-v1.1.0/xmlsquish --scratch .temp/performance --report .temp/performance/results.json
+      - name: Retain reproducible measurement evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: performance-${{ github.sha }}
+          path: .temp/performance/results.json
+          if-no-files-found: error
+          retention-days: 30
 
   site:
     name: Site
