@@ -1,0 +1,2104 @@
+{
+  "schema": 1,
+  "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+  "python": "3.12.3",
+  "commit": "e8b7ea3f9907563680bc68837974233fee9d1d60",
+  "runner": "GitHub Actions 1000003945",
+  "cold_definition": "empty project cache; OS page cache untouched",
+  "binaries": {
+    "candidate": {
+      "sha256": "47cebe147afccc9bcf02ac34622f2ae05dee22bfb4cd7b393a5616b2d5634693",
+      "version": "xmlsquish 1.2.0"
+    },
+    "baseline": {
+      "sha256": "89e8ee3db4943bb637cdc0e7978f04a353d137ce535fde29944dbb8d22dcee37",
+      "version": "xmlsquish 1.1.0"
+    }
+  },
+  "workloads": {
+    "candidate.startup": {
+      "samples_ns": [
+        1973319,
+        1778257,
+        1789093,
+        1764596,
+        1740219
+      ],
+      "median_ns": 1778257,
+      "min_ns": 1740219,
+      "max_ns": 1973319
+    },
+    "baseline.startup": {
+      "samples_ns": [
+        1726349,
+        1697997,
+        1645358,
+        1685437,
+        1695312
+      ],
+      "median_ns": 1695312,
+      "min_ns": 1645358,
+      "max_ns": 1726349
+    },
+    "candidate.tiny.cold": {
+      "samples_ns": [
+        24452083,
+        23396379,
+        23546245,
+        23664476,
+        23739223
+      ],
+      "median_ns": 23664476,
+      "min_ns": 23396379,
+      "max_ns": 24452083
+    },
+    "baseline.tiny.cold": {
+      "samples_ns": [
+        22533701,
+        21534262,
+        21578463,
+        21951192,
+        23287065
+      ],
+      "median_ns": 21951192,
+      "min_ns": 21534262,
+      "max_ns": 23287065
+    },
+    "candidate.tiny.warm": {
+      "samples_ns": [
+        16255171,
+        16995592,
+        16073794,
+        16300859,
+        15803117
+      ],
+      "median_ns": 16255171,
+      "min_ns": 15803117,
+      "max_ns": 16995592
+    },
+    "baseline.tiny.warm": {
+      "samples_ns": [
+        16122627,
+        15714780,
+        15164665,
+        14828181,
+        15363123
+      ],
+      "median_ns": 15363123,
+      "min_ns": 14828181,
+      "max_ns": 16122627
+    },
+    "candidate.prompt.distinct-macros-1": {
+      "samples_ns": [
+        24375078,
+        25397998,
+        24505619,
+        27945238,
+        27483340
+      ],
+      "median_ns": 25397998,
+      "min_ns": 24375078,
+      "max_ns": 27945238,
+      "output_bytes": 35,
+      "output_sha256": "e1f166b832f2a0c848fb3ddc54e261e39308a5554a34871ed5043637079d496f"
+    },
+    "baseline.prompt.distinct-macros-1": {
+      "samples_ns": [
+        25242699,
+        23811784,
+        24876791,
+        27581368,
+        23165769
+      ],
+      "median_ns": 24876791,
+      "min_ns": 23165769,
+      "max_ns": 27581368,
+      "output_bytes": 35,
+      "output_sha256": "e1f166b832f2a0c848fb3ddc54e261e39308a5554a34871ed5043637079d496f"
+    },
+    "candidate.prompt.literal-regex-1": {
+      "samples_ns": [
+        28731113,
+        26415509,
+        27491988,
+        25784046,
+        25156865
+      ],
+      "median_ns": 26415509,
+      "min_ns": 25156865,
+      "max_ns": 28731113,
+      "output_bytes": 35,
+      "output_sha256": "a5f5a660b422901579b11fb2593eaa446c2e298b4de42dc96e5a52b19f7e8cd3"
+    },
+    "baseline.prompt.literal-regex-1": {
+      "samples_ns": [
+        25270652,
+        25231107,
+        28415374,
+        24300772,
+        25475123
+      ],
+      "median_ns": 25270652,
+      "min_ns": 24300772,
+      "max_ns": 28415374,
+      "output_bytes": 35,
+      "output_sha256": "a5f5a660b422901579b11fb2593eaa446c2e298b4de42dc96e5a52b19f7e8cd3"
+    },
+    "candidate.prompt.distinct-macros-64": {
+      "samples_ns": [
+        30793610,
+        30447722,
+        35842135,
+        31165038,
+        31401102
+      ],
+      "median_ns": 31165038,
+      "min_ns": 30447722,
+      "max_ns": 35842135,
+      "output_bytes": 1160,
+      "output_sha256": "d5323959c309206729a26c6cc91da1bb049531faa644ba6459ef6895e2460101"
+    },
+    "baseline.prompt.distinct-macros-64": {
+      "samples_ns": [
+        30859950,
+        28107882,
+        33527982,
+        31226080,
+        28986871
+      ],
+      "median_ns": 30859950,
+      "min_ns": 28107882,
+      "max_ns": 33527982,
+      "output_bytes": 1160,
+      "output_sha256": "d5323959c309206729a26c6cc91da1bb049531faa644ba6459ef6895e2460101"
+    },
+    "candidate.prompt.literal-regex-64": {
+      "samples_ns": [
+        29076656,
+        31542414,
+        33947131,
+        27416065,
+        27570186
+      ],
+      "median_ns": 29076656,
+      "min_ns": 27416065,
+      "max_ns": 33947131,
+      "output_bytes": 1106,
+      "output_sha256": "6ea0e74652b7e261eb7f92e7ebd52430e733935a62e866e6954607e66802b540"
+    },
+    "baseline.prompt.literal-regex-64": {
+      "samples_ns": [
+        32325259,
+        30447932,
+        34935354,
+        30181233,
+        31017696
+      ],
+      "median_ns": 31017696,
+      "min_ns": 30181233,
+      "max_ns": 34935354,
+      "output_bytes": 1106,
+      "output_sha256": "6ea0e74652b7e261eb7f92e7ebd52430e733935a62e866e6954607e66802b540"
+    },
+    "candidate.prompt.distinct-macros-2048": {
+      "samples_ns": [
+        251899906,
+        232215729,
+        233870431,
+        229081828,
+        229933200
+      ],
+      "median_ns": 232215729,
+      "min_ns": 229081828,
+      "max_ns": 251899906,
+      "output_bytes": 39868,
+      "output_sha256": "548828a513d2fec0921ec313cd7f2620cf855b262cbc7ec0e3479ffe4ed37995"
+    },
+    "baseline.prompt.distinct-macros-2048": {
+      "samples_ns": [
+        259024694,
+        235674056,
+        236546595,
+        232010952,
+        231135658
+      ],
+      "median_ns": 235674056,
+      "min_ns": 231135658,
+      "max_ns": 259024694,
+      "output_bytes": 39868,
+      "output_sha256": "548828a513d2fec0921ec313cd7f2620cf855b262cbc7ec0e3479ffe4ed37995"
+    },
+    "candidate.prompt.literal-regex-2048": {
+      "samples_ns": [
+        121131604,
+        123959071,
+        125239201,
+        120700429,
+        129635500
+      ],
+      "median_ns": 123959071,
+      "min_ns": 120700429,
+      "max_ns": 129635500,
+      "output_bytes": 34834,
+      "output_sha256": "e1ebe0440c4784cb126539b7499d82960ba2e2f20dac9404d4ef308c2519f9c4"
+    },
+    "baseline.prompt.literal-regex-2048": {
+      "samples_ns": [
+        207374422,
+        209793620,
+        211948708,
+        216092519,
+        207017471
+      ],
+      "median_ns": 209793620,
+      "min_ns": 207017471,
+      "max_ns": 216092519,
+      "output_bytes": 34834,
+      "output_sha256": "e1ebe0440c4784cb126539b7499d82960ba2e2f20dac9404d4ef308c2519f9c4"
+    },
+    "candidate.pack.assets-1": {
+      "samples_ns": [
+        24016590,
+        23883381,
+        23464992,
+        23641262,
+        23666520
+      ],
+      "median_ns": 23666520,
+      "min_ns": 23464992,
+      "max_ns": 24016590,
+      "bytes": 65664,
+      "members": 1,
+      "sha256": "9d6bde9fe5e02e78e93f0f12e9eecbc3f07f7ffc04ed69d9539a7130d3c57f89"
+    },
+    "candidate.pack.assets-64": {
+      "samples_ns": [
+        56188124,
+        53927813,
+        55859230,
+        54256801,
+        72721739
+      ],
+      "median_ns": 55859230,
+      "min_ns": 53927813,
+      "max_ns": 72721739,
+      "bytes": 4201110,
+      "members": 64,
+      "sha256": "6da9d2eb7ce5359f2db9b0e8501a9caddafb6abf057397de8332ddae63676d2b"
+    },
+    "candidate.pack.assets-512": {
+      "samples_ns": [
+        245499985,
+        245547918,
+        262324432,
+        244832157,
+        251157114
+      ],
+      "median_ns": 245547918,
+      "min_ns": 244832157,
+      "max_ns": 262324432,
+      "bytes": 33608726,
+      "members": 512,
+      "sha256": "d5ca52e1b78e625f669790f8d69c0eaca03db921fb324fef2593e160d55aef6e"
+    },
+    "candidate.pack.distinct-includes-1": {
+      "samples_ns": [
+        28200227,
+        26419494,
+        27833553,
+        26441156,
+        27835275
+      ],
+      "median_ns": 27833553,
+      "min_ns": 26419494,
+      "max_ns": 28200227,
+      "bytes": 208,
+      "members": 1,
+      "sha256": "3e60a2c96712992587881c00bcc3fdf1a4671cda1ed438d65255e5f130018e74"
+    },
+    "candidate.pack.distinct-includes-64": {
+      "samples_ns": [
+        113679728,
+        111132717,
+        113329549,
+        108392933,
+        116028593
+      ],
+      "median_ns": 113329549,
+      "min_ns": 108392933,
+      "max_ns": 116028593,
+      "bytes": 11980,
+      "members": 64,
+      "sha256": "cb5bd742153060145338a51394865ea4083f4e16e274fcec465cd42b401462a8"
+    },
+    "candidate.pack.distinct-includes-512": {
+      "samples_ns": [
+        734218040,
+        709414327,
+        725360711,
+        720040068,
+        707569228
+      ],
+      "median_ns": 720040068,
+      "min_ns": 707569228,
+      "max_ns": 734218040,
+      "bytes": 96168,
+      "members": 512,
+      "sha256": "ece28970e4789e47bb567f4b5b3aa3c656a6ab708209f285aabbaceb535c1964"
+    },
+    "candidate.sopack.macro-reuse-1": {
+      "samples_ns": [
+        28414044,
+        28532902,
+        31556978,
+        28474064,
+        27647559
+      ],
+      "median_ns": 28474064,
+      "min_ns": 27647559,
+      "max_ns": 31556978,
+      "bytes": 65664,
+      "members": 1,
+      "sha256": "9d6bde9fe5e02e78e93f0f12e9eecbc3f07f7ffc04ed69d9539a7130d3c57f89"
+    },
+    "candidate.sopack.macro-reuse-64": {
+      "samples_ns": [
+        62411147,
+        62051692,
+        64383683,
+        64191725,
+        62129733
+      ],
+      "median_ns": 62411147,
+      "min_ns": 62051692,
+      "max_ns": 64383683,
+      "bytes": 4201110,
+      "members": 64,
+      "sha256": "6da9d2eb7ce5359f2db9b0e8501a9caddafb6abf057397de8332ddae63676d2b"
+    },
+    "candidate.sopack.macro-reuse-512": {
+      "samples_ns": [
+        272505845,
+        274835060,
+        269268554,
+        269872755,
+        274142280
+      ],
+      "median_ns": 272505845,
+      "min_ns": 269268554,
+      "max_ns": 274835060,
+      "bytes": 33608726,
+      "members": 512,
+      "sha256": "d5ca52e1b78e625f669790f8d69c0eaca03db921fb324fef2593e160d55aef6e"
+    }
+  },
+  "status": "success",
+  "paired_candidate_over_baseline": {
+    "startup": {
+      "samples_ratio": [
+        1.1430591381001176,
+        1.0472674568918556,
+        1.0873578880705597,
+        1.046966454397287,
+        1.0264889294713893
+      ],
+      "median_ratio": 1.0472674568918556,
+      "min_ratio": 1.0264889294713893,
+      "max_ratio": 1.1430591381001176
+    },
+    "tiny.cold": {
+      "samples_ratio": [
+        1.0851339067648054,
+        1.0864722923868948,
+        1.0911919444865004,
+        1.078049702266738,
+        1.0194167019330258
+      ],
+      "median_ratio": 1.0851339067648054,
+      "min_ratio": 1.0194167019330258,
+      "max_ratio": 1.0911919444865004
+    },
+    "tiny.warm": {
+      "samples_ratio": [
+        1.0082209927699748,
+        1.0815036545214123,
+        1.0599504835748104,
+        1.0993161602222148,
+        1.0286396196919076
+      ],
+      "median_ratio": 1.0599504835748104,
+      "min_ratio": 1.0082209927699748,
+      "max_ratio": 1.0993161602222148
+    },
+    "prompt.distinct-macros-1": {
+      "samples_ratio": [
+        0.9656288339055978,
+        1.0666146644031376,
+        0.9850795868325621,
+        1.0131926016142492,
+        1.1863771930040397
+      ],
+      "median_ratio": 1.0131926016142492,
+      "min_ratio": 0.9656288339055978,
+      "max_ratio": 1.1863771930040397
+    },
+    "prompt.literal-regex-1": {
+      "samples_ratio": [
+        1.1369359603384985,
+        1.0469421337716176,
+        0.9675039997713913,
+        1.0610381431503493,
+        0.9875071064426264
+      ],
+      "median_ratio": 1.0469421337716176,
+      "min_ratio": 0.9675039997713913,
+      "max_ratio": 1.1369359603384985
+    },
+    "prompt.distinct-macros-64": {
+      "samples_ratio": [
+        0.9978502881566561,
+        1.0832449773341157,
+        1.0690215414694508,
+        0.9980451596870309,
+        1.0832870508858994
+      ],
+      "median_ratio": 1.0690215414694508,
+      "min_ratio": 0.9978502881566561,
+      "max_ratio": 1.0832870508858994
+    },
+    "prompt.literal-regex-64": {
+      "samples_ratio": [
+        0.8995026459030073,
+        1.0359460208988907,
+        0.9717128098945269,
+        0.908381211595961,
+        0.8888534467550394
+      ],
+      "median_ratio": 0.908381211595961,
+      "min_ratio": 0.8888534467550394,
+      "max_ratio": 1.0359460208988907
+    },
+    "prompt.distinct-macros-2048": {
+      "samples_ratio": [
+        0.9724937885651938,
+        0.9853258052299146,
+        0.988686524952938,
+        0.9873750615014071,
+        0.9947976092896925
+      ],
+      "median_ratio": 0.9873750615014071,
+      "min_ratio": 0.9724937885651938,
+      "max_ratio": 0.9947976092896925
+    },
+    "prompt.literal-regex-2048": {
+      "samples_ratio": [
+        0.5841202730392662,
+        0.5908619671084373,
+        0.5908939109928427,
+        0.5585590355397727,
+        0.6262056017484631
+      ],
+      "median_ratio": 0.5908619671084373,
+      "min_ratio": 0.5585590355397727,
+      "max_ratio": 0.6262056017484631
+    }
+  },
+  "untimed_pipeline_trace": [
+    {
+      "data": {
+        "operation": "Build",
+        "unix_ms": 1790801319197,
+        "version": "1.2.0"
+      },
+      "elapsed_us": 7,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "command_start",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "name": "bootstrap"
+      },
+      "elapsed_us": 12,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "span_start",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "name": "discover"
+      },
+      "elapsed_us": 78,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "span_start",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "duration_us": 191,
+        "name": "discover"
+      },
+      "elapsed_us": 272,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "span_finish",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "name": "config"
+      },
+      "elapsed_us": 275,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "span_start",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "duration_us": 71,
+        "name": "config"
+      },
+      "elapsed_us": 347,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "span_finish",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "name": "compose"
+      },
+      "elapsed_us": 348,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "span_start",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "duration_us": 451,
+        "name": "compose"
+      },
+      "elapsed_us": 802,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "span_finish",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "duration_us": 791,
+        "name": "bootstrap"
+      },
+      "elapsed_us": 804,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "span_finish",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "name": "dispatch"
+      },
+      "elapsed_us": 806,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "span_start",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506"
+            },
+            "type": "planning_started"
+          },
+          "sequence": 0,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 840,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "locate",
+              "step": "locate"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 1,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 862,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "step": "locate",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 2,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 1035,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "recover",
+              "step": "recover"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 3,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 1041,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "step": "recover",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 4,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 1170,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "recover",
+              "step": "open-build-runtime"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 5,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 1204,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "step": "open-build-runtime",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 6,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 1227,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "recover",
+              "step": "recover-build-catalog"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 7,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 1236,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "step": "recover-build-catalog",
+              "timing": {
+                "elapsed_ms": 2
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 8,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 3308,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "snapshot",
+              "step": "snapshot-initial"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 9,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 3318,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "step": "snapshot-initial",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 10,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 3511,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "fetch",
+              "step": "fetch-locked"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 11,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 3522,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "step": "fetch-locked",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 12,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 3762,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "snapshot",
+              "step": "snapshot-materialized"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 13,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 3769,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "step": "snapshot-materialized",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 14,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 3904,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "resolve",
+              "step": "validate-skill-lock"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 15,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 3939,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "step": "validate-skill-lock",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 16,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 3948,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "resolve",
+              "step": "resolve"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 17,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 3953,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "step": "resolve",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 18,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4035,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "resolve",
+              "step": "validate-resolved-skill-lock"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 19,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4041,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "step": "validate-resolved-skill-lock",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 20,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4047,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "reconcile_lock",
+              "step": "reconcile-lock"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 21,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4052,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "step": "reconcile-lock",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 22,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4062,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "snapshot",
+              "step": "snapshot-authoritative"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 23,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4066,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "step": "snapshot-authoritative",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 24,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4216,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "scan",
+              "step": "scan"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 25,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4224,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "step": "scan",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 26,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4384,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "validate_plan",
+              "step": "validate-plan"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 27,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4390,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "step": "validate-plan",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 28,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4455,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "recover",
+              "step": "open-build-state"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 29,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4486,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-8606-1790801319197844506",
+              "step": "open-build-state",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 30,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4492,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "actions": 5,
+              "attempt": "attempt-1",
+              "digest": {
+                "algorithm": {
+                  "type": "blake3"
+                },
+                "hex": "3e5bc978e67057157af588a12b586ed5723cd454f421bb8c0b2d01c791274960"
+              },
+              "issues": 0,
+              "job": "build-cli-8606-1790801319197844506",
+              "mode": "execute",
+              "plan": "build-cli-8606-1790801319197844506:attempt-1:3e5bc978e6705715"
+            },
+            "type": "plan_ready"
+          },
+          "sequence": 31,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4525,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "action": "build:compile:7ef0b65ca5392ee8266042a4885b134bd502123a86e255a85ed88edeb3961019",
+              "dependencies": [],
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "compile",
+              "plan": "build-cli-8606-1790801319197844506:attempt-1:3e5bc978e6705715"
+            },
+            "type": "action_declared"
+          },
+          "sequence": 32,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4552,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "action": "build:link:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "dependencies": [
+                "build:compile:7ef0b65ca5392ee8266042a4885b134bd502123a86e255a85ed88edeb3961019"
+              ],
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "link",
+              "plan": "build-cli-8606-1790801319197844506:attempt-1:3e5bc978e6705715"
+            },
+            "type": "action_declared"
+          },
+          "sequence": 33,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4560,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "action": "build:instantiate:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "dependencies": [
+                "build:link:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51"
+              ],
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "instantiate",
+              "plan": "build-cli-8606-1790801319197844506:attempt-1:3e5bc978e6705715"
+            },
+            "type": "action_declared"
+          },
+          "sequence": 34,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4567,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "action": "build:backend:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "dependencies": [
+                "build:instantiate:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+                "build:link:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51"
+              ],
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "backend",
+              "plan": "build-cli-8606-1790801319197844506:attempt-1:3e5bc978e6705715"
+            },
+            "type": "action_declared"
+          },
+          "sequence": 35,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4577,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "action": "build:publish:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "dependencies": [
+                "build:backend:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51"
+              ],
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "publish",
+              "plan": "build-cli-8606-1790801319197844506:attempt-1:3e5bc978e6705715"
+            },
+            "type": "action_declared"
+          },
+          "sequence": 36,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4587,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "action": "build:compile:7ef0b65ca5392ee8266042a4885b134bd502123a86e255a85ed88edeb3961019",
+              "job": "build-cli-8606-1790801319197844506",
+              "plan": "build-cli-8606-1790801319197844506:attempt-1:3e5bc978e6705715"
+            },
+            "type": "action_started"
+          },
+          "sequence": 37,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4632,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "action": "build:compile:7ef0b65ca5392ee8266042a4885b134bd502123a86e255a85ed88edeb3961019",
+              "artifacts": [],
+              "job": "build-cli-8606-1790801319197844506",
+              "plan": "build-cli-8606-1790801319197844506:attempt-1:3e5bc978e6705715",
+              "timing": {
+                "elapsed_ms": 3
+              }
+            },
+            "type": "action_succeeded"
+          },
+          "sequence": 38,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 8687,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "action": "build:link:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "job": "build-cli-8606-1790801319197844506",
+              "plan": "build-cli-8606-1790801319197844506:attempt-1:3e5bc978e6705715"
+            },
+            "type": "action_started"
+          },
+          "sequence": 39,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 8710,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "action": "build:link:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "artifacts": [],
+              "job": "build-cli-8606-1790801319197844506",
+              "plan": "build-cli-8606-1790801319197844506:attempt-1:3e5bc978e6705715",
+              "timing": {
+                "elapsed_ms": 1
+              }
+            },
+            "type": "action_succeeded"
+          },
+          "sequence": 40,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 10427,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "action": "build:instantiate:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "job": "build-cli-8606-1790801319197844506",
+              "plan": "build-cli-8606-1790801319197844506:attempt-1:3e5bc978e6705715"
+            },
+            "type": "action_started"
+          },
+          "sequence": 41,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 10450,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "action": "build:instantiate:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "artifacts": [],
+              "job": "build-cli-8606-1790801319197844506",
+              "plan": "build-cli-8606-1790801319197844506:attempt-1:3e5bc978e6705715",
+              "timing": {
+                "elapsed_ms": 2
+              }
+            },
+            "type": "action_succeeded"
+          },
+          "sequence": 42,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 12664,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "action": "build:backend:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "job": "build-cli-8606-1790801319197844506",
+              "plan": "build-cli-8606-1790801319197844506:attempt-1:3e5bc978e6705715"
+            },
+            "type": "action_started"
+          },
+          "sequence": 43,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 12684,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "action": "build:backend:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "artifacts": [],
+              "job": "build-cli-8606-1790801319197844506",
+              "plan": "build-cli-8606-1790801319197844506:attempt-1:3e5bc978e6705715",
+              "timing": {
+                "elapsed_ms": 1
+              }
+            },
+            "type": "action_succeeded"
+          },
+          "sequence": 44,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 14315,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "action": "build:publish:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "job": "build-cli-8606-1790801319197844506",
+              "plan": "build-cli-8606-1790801319197844506:attempt-1:3e5bc978e6705715"
+            },
+            "type": "action_started"
+          },
+          "sequence": 45,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 14334,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "action": "build:publish:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "artifacts": [
+                {
+                  "digest": {
+                    "algorithm": {
+                      "type": "blake3"
+                    },
+                    "hex": "9a3190f0f1d3ebb9fce9dcd8716aa2820cab566efd57b2192e5a70a8d32e871d"
+                  },
+                  "id": "perf-prompt:prompt:target-record",
+                  "kind": {
+                    "type": "metadata"
+                  },
+                  "size": 481,
+                  "uri": "target/xmlsquish/artifacts/prompt.build.json"
+                },
+                {
+                  "digest": {
+                    "algorithm": {
+                      "type": "blake3"
+                    },
+                    "hex": "7e36f98fa44759e8c2d20342341c052cbd222a0c7125d062be7216af92acd1e9"
+                  },
+                  "id": "perf-prompt:prompt:prompt",
+                  "kind": {
+                    "type": "prompt"
+                  },
+                  "size": 35,
+                  "uri": "target/xmlsquish/artifacts/prompt.prompt"
+                },
+                {
+                  "digest": {
+                    "algorithm": {
+                      "type": "blake3"
+                    },
+                    "hex": "1ad48f49627079d806b802c74f40c39d55fe1d78b3faf0f8017aec62cec42122"
+                  },
+                  "id": "perf-prompt:prompt:static-link-map",
+                  "kind": {
+                    "name": "static-link-map",
+                    "type": "other"
+                  },
+                  "size": 2,
+                  "uri": "target/xmlsquish/artifacts/prompt.xsmap"
+                }
+              ],
+              "job": "build-cli-8606-1790801319197844506",
+              "plan": "build-cli-8606-1790801319197844506:attempt-1:3e5bc978e6705715",
+              "timing": {
+                "elapsed_ms": 5
+              }
+            },
+            "type": "action_succeeded"
+          },
+          "sequence": 46,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 19768,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "job": "build-cli-8606-1790801319197844506",
+              "plan": "build-cli-8606-1790801319197844506:attempt-1:3e5bc978e6705715",
+              "reason": "executed"
+            },
+            "type": "plan_closed"
+          },
+          "sequence": 47,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 19811,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "id": "persist-build-catalog",
+              "job": "build-cli-8606-1790801319197844506",
+              "kind": "persist_build_catalog"
+            },
+            "type": "finalization_started"
+          },
+          "sequence": 48,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 19832,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "id": "persist-build-catalog",
+              "job": "build-cli-8606-1790801319197844506",
+              "timing": {
+                "elapsed_ms": 3
+              }
+            },
+            "type": "finalization_succeeded"
+          },
+          "sequence": 49,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 22992,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "job": "build-cli-8606-1790801319197844506",
+              "result": {
+                "result": {
+                  "build_record": {
+                    "digest": {
+                      "algorithm": {
+                        "type": "blake3"
+                      },
+                      "hex": "bebff8a61111cee7e391e7181dd1fc1476a6aa5dcb8e7352851e798e8e94755d"
+                    },
+                    "id": "build-record-v3",
+                    "kind": {
+                      "type": "metadata"
+                    },
+                    "size": 5971,
+                    "uri": "build-record-v3.json"
+                  },
+                  "published": [
+                    {
+                      "artifacts": [
+                        {
+                          "digest": {
+                            "algorithm": {
+                              "type": "blake3"
+                            },
+                            "hex": "9a3190f0f1d3ebb9fce9dcd8716aa2820cab566efd57b2192e5a70a8d32e871d"
+                          },
+                          "id": "perf-prompt:prompt:target-record",
+                          "kind": {
+                            "type": "metadata"
+                          },
+                          "locator": "target/xmlsquish/artifacts/prompt.build.json",
+                          "size": 481
+                        },
+                        {
+                          "digest": {
+                            "algorithm": {
+                              "type": "blake3"
+                            },
+                            "hex": "7e36f98fa44759e8c2d20342341c052cbd222a0c7125d062be7216af92acd1e9"
+                          },
+                          "id": "perf-prompt:prompt:prompt",
+                          "kind": {
+                            "type": "prompt"
+                          },
+                          "locator": "target/xmlsquish/artifacts/prompt.prompt",
+                          "size": 35
+                        },
+                        {
+                          "digest": {
+                            "algorithm": {
+                              "type": "blake3"
+                            },
+                            "hex": "1ad48f49627079d806b802c74f40c39d55fe1d78b3faf0f8017aec62cec42122"
+                          },
+                          "id": "perf-prompt:prompt:static-link-map",
+                          "kind": {
+                            "name": "static-link-map",
+                            "type": "other"
+                          },
+                          "locator": "target/xmlsquish/artifacts/prompt.xsmap",
+                          "size": 2
+                        }
+                      ],
+                      "generation_id": "d4620405d27a41c72fd97f946d56b6bbcce7d8fbbacf86f6fb6ca4e01576e10e",
+                      "target": "prompt",
+                      "target_id": "perf-prompt:prompt"
+                    }
+                  ]
+                },
+                "type": "build"
+              }
+            },
+            "type": "operation_completed"
+          },
+          "sequence": 50,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 23048,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-8606-1790801319197844506",
+          "payload": {
+            "data": {
+              "cache_hits": 0,
+              "job": "build-cli-8606-1790801319197844506",
+              "root_failures": 0,
+              "status": "success",
+              "timing": {
+                "elapsed_ms": 22
+              },
+              "totals": {
+                "blocked": 0,
+                "cancelled": 0,
+                "failed": 0,
+                "succeeded": 5
+              }
+            },
+            "type": "job_finished"
+          },
+          "sequence": 51,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 23092,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "duration_us": 22963,
+        "name": "dispatch"
+      },
+      "elapsed_us": 23772,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "span_finish",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "exit_code": 0,
+        "status": "success"
+      },
+      "elapsed_us": 23778,
+      "invocation": "cli-8606-1790801319197844506",
+      "kind": "command_finish",
+      "schema": "xmlsquish.trace.v1"
+    }
+  ]
+}
