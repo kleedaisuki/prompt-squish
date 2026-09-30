@@ -52,7 +52,7 @@ use squish_repository::{
 };
 use squish_resolver::{
     Access as ResolverAccess, FilesystemPort, GitCandidate, GitPort, LocalPackage, LocalRequest,
-    RegistryCandidate, RegistryPort, Resolver, SourceUnavailable,
+    RegistryCandidate, RegistryPort, Resolver, SopackPackage, SourceUnavailable,
 };
 #[cfg(test)]
 use squish_store::{BlobDigest, Cas, VerifiedActionIndex};
@@ -1151,6 +1151,19 @@ impl ProductionHost {
                     }
                     Some(locked.materialized)
                 }
+                LockedSource::Sopack { path, checksum } => {
+                    let (_, bytes, payload) =
+                        read_project_sopack(&self.project_root, &self.project_root.join(path))?;
+                    if format!("sha256:{}", hex::encode(Sha256::digest(&bytes))) != *checksum {
+                        return Err(SourceUnavailable { identity: package.id.clone(), detail: "SOPack archive differs from its locked digest; explicitly update the dependency".into() });
+                    }
+                    let root = self.materialize_sopack(checksum, &payload)?;
+                    locations.push(PackageLocation {
+                        lock_id: package.id.clone(),
+                        root,
+                    });
+                    continue;
+                }
                 LockedSource::Path { .. } | LockedSource::Workspace { .. } => None,
             };
             if let Some(materialized) = materialized {
@@ -1162,6 +1175,50 @@ impl ProductionHost {
         }
         locations.sort_by(|left, right| left.lock_id.cmp(&right.lock_id));
         Ok(locations)
+    }
+
+    /// Publishes diagnostic source attachments; compiled IR remains authoritative.
+    fn materialize_sopack(
+        &self,
+        checksum: &str,
+        payload: &squish_backend::archive::SopackPayload,
+    ) -> Result<PathBuf, SourceUnavailable> {
+        let fail = |error: String| SourceUnavailable {
+            identity: checksum.into(),
+            detail: error,
+        };
+        let parent = self.context.cache.join("v2/sopack");
+        std::fs::create_dir_all(&parent).map_err(|error| fail(error.to_string()))?;
+        let root = parent.join(checksum.replace(':', "-"));
+        if root.join(".complete").is_file() {
+            return Ok(root);
+        }
+        let stage = tempfile::tempdir_in(&parent).map_err(|error| fail(error.to_string()))?;
+        let manifest = sopack_manifest(payload)?;
+        std::fs::write(
+            stage.path().join(squish_project::MANIFEST_FILE_NAME),
+            manifest
+                .to_toml()
+                .map_err(|error| fail(error.to_string()))?,
+        )
+        .map_err(|error| fail(error.to_string()))?;
+        for (key, bytes) in &payload.sources {
+            let logical = squish_backend::archive::logical_source_path(key)
+                .map_err(|error| fail(error.to_string()))?;
+            let path = safe_sopack_attachment(stage.path(), &logical).map_err(fail)?;
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| fail(error.to_string()))?;
+            }
+            std::fs::write(path, bytes).map_err(|error| fail(error.to_string()))?;
+        }
+        std::fs::write(stage.path().join(".complete"), checksum)
+            .map_err(|error| fail(error.to_string()))?;
+        match std::fs::rename(stage.path(), &root) {
+            Ok(()) => {}
+            Err(_) if root.join(".complete").is_file() => {}
+            Err(error) => return Err(fail(error.to_string())),
+        }
+        Ok(root)
     }
 
     fn materialize_registry(
@@ -1216,7 +1273,7 @@ impl ProductionHost {
             }
         })?;
         let resolver = Resolver::new(RegistryView(self), GitView(&self.git))
-            .with_filesystem(FilesystemView(self.filesystem.as_ref()));
+            .with_filesystem(FilesystemView(self.filesystem.as_ref(), &self.project_root));
         let lockfile = resolver
             .resolve(ResolutionInput {
                 manifests,
@@ -2128,11 +2185,115 @@ impl GitPort for GitView<'_> {
     }
 }
 
-struct FilesystemView<'a>(&'a (dyn FilesystemPort + Send + Sync));
+struct FilesystemView<'a>(&'a (dyn FilesystemPort + Send + Sync), &'a Path);
 impl FilesystemPort for FilesystemView<'_> {
     fn load(&self, request: LocalRequest<'_>) -> Result<LocalPackage, SourceUnavailable> {
         self.0.load(request)
     }
+
+    fn load_sopack(&self, request: LocalRequest<'_>) -> Result<SopackPackage, SourceUnavailable> {
+        let from = Path::new(request.from_manifest)
+            .parent()
+            .unwrap_or(Path::new(""));
+        let path = self.1.join(from).join(request.path);
+        let (relative, bytes, payload) = read_project_sopack(self.1, &path)?;
+        let manifest = sopack_manifest(&payload)?;
+        Ok(SopackPackage {
+            path: relative,
+            manifest,
+            checksum: format!("sha256:{}", hex::encode(Sha256::digest(&bytes))),
+        })
+    }
+}
+
+/// Reads a workspace-contained archive and applies the archive decoder's safety limits.
+fn read_project_sopack(
+    root: &Path,
+    path: &Path,
+) -> Result<(PathBuf, Vec<u8>, squish_backend::archive::SopackPayload), SourceUnavailable> {
+    let fail = |detail: String| SourceUnavailable {
+        identity: path.display().to_string(),
+        detail,
+    };
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| fail(error.to_string()))?;
+    let relative = canonical
+        .strip_prefix(root)
+        .map_err(|_| fail("SOPack dependency escapes workspace root".into()))?
+        .to_path_buf();
+    let limits = squish_backend::archive::ArchiveLimits::default();
+    let file = File::open(canonical).map_err(|error| fail(error.to_string()))?;
+    let metadata = file.metadata().map_err(|error| fail(error.to_string()))?;
+    if !metadata.is_file() || metadata.len() > limits.max_archive_bytes {
+        return Err(fail(
+            "SOPack archive exceeds its byte limit or is not a regular file".into(),
+        ));
+    }
+    let bytes = read_bounded_archive(file, limits.max_archive_bytes).map_err(fail)?;
+    let payload = squish_backend::archive::read_sopack(&bytes, limits)
+        .map_err(|error| fail(error.to_string()))?;
+    Ok((relative, bytes, payload))
+}
+
+/// Reads at most limit plus one byte, including files that grow after metadata checking.
+fn read_bounded_archive(reader: impl std::io::Read, limit: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > limit {
+        return Err("SOPack archive exceeds its byte limit".into());
+    }
+    Ok(bytes)
+}
+
+/// Uses embedded manifest intent; archive imports are already linked and self-contained.
+fn sopack_manifest(
+    payload: &squish_backend::archive::SopackPayload,
+) -> Result<Manifest, SourceUnavailable> {
+    let source = payload
+        .metadata
+        .get("manifest")
+        .ok_or_else(|| SourceUnavailable {
+            identity: payload.package_name.clone(),
+            detail: "SOPack metadata has no embedded manifest".into(),
+        })?;
+    let mut manifest = Manifest::parse(source).map_err(|error| SourceUnavailable {
+        identity: payload.package_name.clone(),
+        detail: error.to_string(),
+    })?;
+    if manifest.package.as_ref().is_none_or(|package| {
+        package.name != payload.package_name
+            || package.version.to_string() != payload.package_version
+    }) {
+        return Err(SourceUnavailable {
+            identity: payload.package_name.clone(),
+            detail: "SOPack embedded manifest disagrees with package metadata".into(),
+        });
+    }
+    manifest.dependencies.clear();
+    manifest.targets.clear();
+    manifest.workspace = None;
+    Ok(manifest)
+}
+
+/// Rejects attachment paths that could escape staging or overwrite archive authority.
+fn safe_sopack_attachment(root: &Path, logical: &str) -> Result<PathBuf, String> {
+    let path = Path::new(logical);
+    if path
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        || logical.contains('\\')
+        || logical.contains(':')
+        || logical == squish_project::MANIFEST_FILE_NAME
+        || logical == ".complete"
+    {
+        return Err(format!("unsafe SOPack source attachment `{logical}`"));
+    }
+    Ok(root.join(path))
 }
 
 fn source_access(access: ResolverAccess) -> squish_fetch::Access {
@@ -2169,6 +2330,17 @@ mod tests {
         Mutex,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn sopack_archive_read_is_bounded_even_when_metadata_becomes_stale() {
+        assert_eq!(
+            read_bounded_archive(std::io::Cursor::new(b"abc"), 3).unwrap(),
+            b"abc"
+        );
+        let mut reader = std::io::Cursor::new(b"abcdef");
+        assert!(read_bounded_archive(&mut reader, 3).is_err());
+        assert_eq!(reader.position(), 4);
+    }
 
     struct NoHttp;
     impl HttpTransport for NoHttp {

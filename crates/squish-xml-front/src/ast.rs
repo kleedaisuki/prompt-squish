@@ -55,6 +55,15 @@ pub(crate) enum Kind {
         attrs: Vec<(ExpandedName, String)>,
         children: Vec<Node>,
     },
+    Asset {
+        path: String,
+        name: String,
+    },
+    Include {
+        import: u32,
+        path: String,
+        name: String,
+    },
     Insert(String),
     If {
         input: Value,
@@ -102,6 +111,7 @@ pub(crate) struct Definition {
 pub(crate) struct Import {
     pub loc: Loc,
     pub spec: ImportSpec,
+    pub expected_kind: squish_ir::UnitKind,
     pub decoded: RawDecodedValue,
 }
 #[derive(Debug)]
@@ -113,6 +123,13 @@ pub(crate) enum Root {
     },
     Module {
         definitions: Vec<Definition>,
+    },
+    Pack {
+        body: Vec<Node>,
+    },
+    Sopack {
+        definitions: Vec<Definition>,
+        body: Vec<Node>,
     },
 }
 #[derive(Debug)]

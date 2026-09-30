@@ -59,6 +59,17 @@ pub enum MessageFormat {
     Json,
 }
 
+/// Persistent project-local tracing, independent of presentation and build identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum TraceMode {
+    /// Disable persistence, including when enabled by the environment.
+    Off,
+    /// Record command and bootstrap timings without protocol payloads.
+    Summary,
+    /// Also record protocol events, including diagnostics and action timings.
+    Events,
+}
+
 /// 终端能力策略。 / Terminal capability policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum TerminalPolicy {
@@ -179,6 +190,8 @@ pub enum InspectSubject {
 /// 启动解析的完整成功值。 / Complete successful bootstrap parse.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParsedInvocation {
+    /// Explicit tracing policy; `None` defers to `XMLSQUISH_TRACE`.
+    pub trace: Option<TraceMode>,
     /// 可直接交给管理器内核的类型化请求。 / Typed request ready for the manager kernel.
     pub request: OperationRequest,
     /// 不参与语义缓存键的显示设置。 / Presentation settings excluded from semantic cache keys.
@@ -337,11 +350,14 @@ where
 #[command(
     name = "xmlsquish",
     version,
-    about = "Build prompts and manage xmlsquish projects",
+    about = "Compile prompts and reproducible archives; manage xmlsquish projects",
     subcommand_required = true,
     after_help = "Examples:\n  xmlsquish new my-prompt\n  xmlsquish build -t chat\n  xmlsquish fmt --check --plain"
 )]
 struct Cli {
+    /// Persist project-local timings; events may contain paths and diagnostics.
+    #[arg(long, global = true, num_args = 0..=1, default_missing_value = "events", require_equals = true)]
+    trace: Option<TraceMode>,
     #[command(flatten)]
     presentation: PresentationArgs,
     /// 用 TOML 值覆盖一个配置键；重复项按顺序应用。 / Override one configuration key with a TOML value; repeat to apply in order.
@@ -386,7 +402,7 @@ enum Command {
         after_help = "Examples:\n  xmlsquish new my-prompt\n  xmlsquish new prompts/support --name support --vcs=none"
     )]
     New(NewArgs),
-    /// Build selected prompts.
+    /// Build selected prompts and reproducible archives.
     #[command(
         after_help = "Examples:\n  xmlsquish build -t chat\n  xmlsquish build --workspace --frozen --message-format=json"
     )]
@@ -774,6 +790,7 @@ impl Cli {
             Command::Clean(args) => clean_invocation(args, presentation),
         }?;
         invocation.config_overrides = self.config_overrides;
+        invocation.trace = self.trace;
         Ok(invocation)
     }
 }
@@ -826,6 +843,7 @@ fn build_invocation(
             inspect_subject: None,
         },
         config_overrides: Vec::new(),
+        trace: None,
     })
 }
 
@@ -860,6 +878,7 @@ fn format_invocation(
             inspect_subject: None,
         },
         config_overrides: Vec::new(),
+        trace: None,
     })
 }
 
@@ -1085,6 +1104,7 @@ fn inspect_invocation(
             inspect_subject: subject,
         },
         config_overrides: Vec::new(),
+        trace: None,
     })
 }
 
@@ -1114,6 +1134,7 @@ fn simple_invocation(
             inspect_subject: None,
         },
         config_overrides: Vec::new(),
+        trace: None,
     }
 }
 

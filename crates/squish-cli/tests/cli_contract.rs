@@ -294,3 +294,27 @@ fn convenience_and_versioned_entry_points_share_one_typed_parser() {
             .unwrap();
     assert_eq!(convenience, versioned);
 }
+
+#[test]
+fn tracing_is_global_opt_in_and_not_part_of_the_operation() {
+    use squish_cli::TraceMode;
+    let default = invocation(["xmlsquish", "build"]);
+    assert_eq!(default.trace, None);
+    let summary = invocation(["xmlsquish", "--trace=summary", "build"]);
+    assert_eq!(summary.trace, Some(TraceMode::Summary));
+    assert_eq!(summary.request, default.request);
+    let events = invocation(["xmlsquish", "build", "--trace"]);
+    assert_eq!(events.trace, Some(TraceMode::Events));
+    let off = invocation(["xmlsquish", "build", "--trace=off"]);
+    assert_eq!(off.trace, Some(TraceMode::Off));
+    assert!(parse_from(["xmlsquish", "build", "--trace=unknown"]).is_err());
+}
+
+#[test]
+fn help_exposes_trace_modes_and_archive_builds() {
+    let help = parse_from(["xmlsquish", "--help"]).unwrap_err().to_string();
+    assert!(help.contains("--trace"));
+    assert!(help.contains("summary"));
+    assert!(help.contains("events"));
+    assert!(help.contains("reproducible archives"));
+}

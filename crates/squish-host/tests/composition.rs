@@ -99,7 +99,7 @@ fn production_runtime_uses_one_cas_and_isolated_generation_spaces() {
     let reopened = Services::open_build_runtime(&host, host.project_root()).unwrap();
     assert!(Arc::ptr_eq(&runtime, &reopened));
     let descriptor = runtime.descriptor();
-    assert_eq!(descriptor.frontend_abi, "xmlsquish.xml/1");
+    assert_eq!(descriptor.frontend_abi, squish_xml_front::FRONTEND_ABI);
     assert_eq!(descriptor.linker_abi, "xmlsquish.link/1");
     assert_eq!(descriptor.evaluator_abi, "xmlsquish.instantiate/1");
     assert_eq!(descriptor.document_abi, squish_backend::DOCUMENT_ABI);
@@ -169,4 +169,94 @@ fn production_runtime_uses_one_cas_and_isolated_generation_spaces() {
             .join("project/target/xmlsquish/metadata/publications/generations")
             .exists()
     );
+}
+
+/// Raw evaluator output must satisfy the backend contract without manager ABI rewriting.
+#[test]
+fn production_compiler_pipeline_shares_document_abi_at_every_boundary() {
+    use squish_ir::{
+        ObjectDigest, PackageInstanceId, ResolutionSnapshot, SemanticUnitDigest, UnitRevision,
+        decode_linked_document, encode_linked_document, encode_relocatable_unit,
+    };
+    use squish_source::{
+        LogicalPath, PackageId, SnapshotBuilder, SourceId, SourceLocator, SourceProvider,
+    };
+    struct Memory;
+    impl SourceProvider for Memory {
+        fn read(&self, _: &SourceLocator) -> std::io::Result<Vec<u8>> {
+            Ok(br#"<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns"><message>Hello world</message></xs:entry>"#.to_vec())
+        }
+    }
+    let (_temporary, host) = fixture();
+    let runtime = Services::open_build_runtime(&host, host.project_root()).unwrap();
+    let mut snapshot = SnapshotBuilder::new(Memory);
+    let source = snapshot
+        .load(
+            SourceId::new(
+                PackageId::new("abi-fixture").unwrap(),
+                LogicalPath::new("src/main.xml").unwrap(),
+            ),
+            SourceLocator::file("unused"),
+        )
+        .unwrap();
+    let context = squish_xml_front::FrontendSourceContext::new(PackageInstanceId {
+        source_kind: 1,
+        canonical_source: "workspace:abi-fixture".into(),
+        package_name: "abi-fixture".into(),
+        exact_revision: "abi-fixture@1".into(),
+    });
+    let unit = runtime.compile(&source, &context).unwrap().unit;
+    assert_eq!(
+        unit.header().frontend_abi.0,
+        runtime.descriptor().frontend_abi
+    );
+    let key = unit.header().source.clone();
+    let bytes = encode_relocatable_unit(&unit);
+    let resolution = ResolutionSnapshot {
+        units: vec![(
+            key.clone(),
+            UnitRevision {
+                kind: unit.kind(),
+                semantic: SemanticUnitDigest::of(&bytes),
+                object: ObjectDigest::of(&bytes),
+            },
+        )],
+        imports: Vec::new(),
+    };
+    let linked = runtime
+        .link(
+            &key,
+            squish_link::UnitClosure {
+                snapshot: resolution,
+                units: BTreeMap::from([(key.clone(), unit)]),
+            },
+        )
+        .unwrap();
+    let instantiated = runtime
+        .instantiate(
+            &linked.program,
+            BTreeMap::new(),
+            squish_link::Budgets::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        instantiated.document.document_abi.0,
+        squish_ir::DOCUMENT_ABI
+    );
+    assert_eq!(
+        instantiated.document.document_abi.0,
+        runtime.descriptor().document_abi
+    );
+    assert_eq!(squish_backend::DOCUMENT_ABI, squish_ir::DOCUMENT_ABI);
+    assert!(instantiated.directives.is_empty());
+    // Included entries use this raw pipeline; persistence must not change its ABI either.
+    let document = decode_linked_document(&encode_linked_document(&instantiated.document)).unwrap();
+    let output = runtime
+        .render(squish_backend::BackendRequest {
+            document,
+            trace: instantiated.trace,
+            options: squish_backend::SquishOptions::default(),
+        })
+        .unwrap();
+    assert_eq!(output.bytes, b"<message> Hello world </message>");
 }

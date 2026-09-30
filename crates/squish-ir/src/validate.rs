@@ -31,12 +31,19 @@ impl std::error::Error for ValidationError {}
 
 impl Validate for ModuleObject {
     fn validate(&self) -> Result<(), ValidationError> {
+        self.validate_roots(&[])
+    }
+}
+impl ModuleObject {
+    fn validate_roots(&self, extra: &[RegionId]) -> Result<(), ValidationError> {
         validate_header(&self.header)?;
-        let roots: Vec<_> = self
+        validate_include_imports(&self.header, &self.ops)?;
+        let mut roots: Vec<_> = self
             .definitions
             .iter()
             .map(|definition| definition.body)
             .collect();
+        roots.extend_from_slice(extra);
         validate_arena(
             &self.regions,
             &self.ops,
@@ -67,6 +74,7 @@ impl Validate for ModuleObject {
 impl Validate for EntryObject {
     fn validate(&self) -> Result<(), ValidationError> {
         validate_header(&self.header)?;
+        validate_include_imports(&self.header, &self.ops)?;
         validate_arena(
             &self.regions,
             &self.ops,
@@ -85,15 +93,72 @@ impl Validate for EntryObject {
         validate_origins(&self.origins, &self.sources, self.ops.len())
     }
 }
+impl Validate for SopackObject {
+    fn validate(&self) -> Result<(), ValidationError> {
+        if self
+            .module
+            .ops
+            .iter()
+            .any(|o| matches!(o.op, Op::Include { .. }))
+        {
+            return Err(ValidationError::at("ops", "sopack cannot include entries"));
+        }
+        self.module.validate_roots(&[self.root_region])
+    }
+}
 impl Validate for RelocatableUnitIr {
     fn validate(&self) -> Result<(), ValidationError> {
         match self {
             Self::Module(v) => v.validate(),
-            Self::Entry(v) => v.validate(),
+            Self::Entry(v) | Self::Pack(v) => v.validate(),
+            Self::Sopack(v) => v.validate(),
         }
     }
 }
 
+fn validate_include_imports(header: &UnitHeader, ops: &[OpRecord]) -> Result<(), ValidationError> {
+    for record in ops {
+        if let Op::Asset { path, name } | Op::Include { path, name, .. } = record.op {
+            let path = header
+                .semantic_strings
+                .get(path.0 as usize)
+                .ok_or_else(|| ValidationError::at("ops.path", "out of range"))?;
+            let name = header
+                .semantic_strings
+                .get(name.0 as usize)
+                .ok_or_else(|| ValidationError::at("ops.name", "out of range"))?;
+            if path.is_empty()
+                || path.starts_with('/')
+                || path.contains(['\\', ':'])
+                || path.chars().any(char::is_control)
+            {
+                return Err(ValidationError::at("ops.path", "nonportable relative path"));
+            }
+            if name.is_empty()
+                || name.contains(['\\', ':'])
+                || name.chars().any(char::is_control)
+                || name
+                    .split('/')
+                    .any(|part| part.is_empty() || part == "." || part == "..")
+            {
+                return Err(ValidationError::at("ops.name", "unsafe archive path"));
+            }
+        }
+        if let Op::Include { import, .. } = record.op {
+            let decl = header
+                .imports
+                .get(import.0 as usize)
+                .ok_or_else(|| ValidationError::at("ops.include.import", "out of range"))?;
+            if decl.expected_kind != UnitKind::Entry {
+                return Err(ValidationError::at(
+                    "ops.include.import",
+                    "include must target an entry",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 fn validate_header(h: &UnitHeader) -> Result<(), ValidationError> {
     validate_schema(h.ir_schema, h.feature_bits, "header")?;
     validate_sorted_unique(&h.semantic_strings, "semantic_strings")?;
@@ -105,10 +170,10 @@ fn validate_header(h: &UnitHeader) -> Result<(), ValidationError> {
     }
     dense(h.imports.iter().map(|i| i.local_id.0), "imports")?;
     for i in &h.imports {
-        if i.expected_kind != UnitKind::Module {
+        if !matches!(i.expected_kind, UnitKind::Module | UnitKind::Entry) {
             return Err(ValidationError::at(
                 "imports.expected_kind",
-                "imports must target modules",
+                "imports must target modules or entries",
             ));
         }
         match &i.spec {
@@ -194,6 +259,10 @@ fn validate_arena(
     for rec in ops {
         let sid = |x: StringId, p| index(x.0, strings, p);
         match &rec.op {
+            Op::Asset { path, name } | Op::Include { path, name, .. } => {
+                sid(*path, "ops.path")?;
+                sid(*name, "ops.name")?;
+            }
             Op::EmitText { value } | Op::EmitComment { value } => sid(*value, "ops.value")?,
             Op::EmitPi { target, data } => {
                 sid(*target, "ops.target")?;

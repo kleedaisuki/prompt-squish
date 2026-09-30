@@ -8,11 +8,35 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) fn lower(
     source: &SourceBlob,
     context: &FrontendSourceContext,
-    unit: Unit,
+    mut unit: Unit,
 ) -> Result<RelocatableUnitIr, String> {
+    let mut package_body = None;
+    let mut is_pack = false;
+    let mut is_sopack = false;
+    unit.root = match unit.root {
+        Root::Pack { body } => {
+            is_pack = true;
+            Root::Entry {
+                params: Vec::new(),
+                param_origins: Vec::new(),
+                body,
+            }
+        }
+        Root::Sopack { definitions, body } => {
+            is_sopack = true;
+            package_body = Some(body);
+            Root::Module { definitions }
+        }
+        root => root,
+    };
     let mut pool = Pools::default();
+    if let Some(body) = &package_body {
+        pool.nodes(body);
+    }
+
     match &unit.root {
         Root::Entry { body, .. } => pool.nodes(body),
+        Root::Pack { .. } | Root::Sopack { .. } => unreachable!("normalized package root"),
         Root::Module { definitions } => {
             for d in definitions {
                 pool.nodes(&d.body)
@@ -56,8 +80,8 @@ pub(crate) fn lower(
     let source_key = source_key(source, context);
     let header = UnitHeader {
         ir_schema: Version { major: 1, minor: 0 },
-        language_abi: AbiId("xmlsquish.dsl/0.3".into()),
-        frontend_abi: AbiId("xmlsquish.xml/1".into()),
+        language_abi: AbiId("xmlsquish.dsl/0.4".into()),
+        frontend_abi: AbiId(crate::FRONTEND_ABI.into()),
         regex_abi: AbiId("rust-regex/1.13.1".into()),
         source: source_key.clone(),
         imports: unit
@@ -67,7 +91,7 @@ pub(crate) fn lower(
             .map(|(i, x)| ImportDecl {
                 local_id: ImportId(i as u32),
                 spec: x.spec.clone(),
-                expected_kind: UnitKind::Module,
+                expected_kind: x.expected_kind,
             })
             .collect(),
         semantic_strings: strings,
@@ -81,9 +105,15 @@ pub(crate) fn lower(
         source_record: SourceRef(0),
     };
     let sources = source_archive(source, source_key);
+    // Root provenance covers the owning XML document, even when its body is empty.
+    // Spans address the UTF-8 payload rather than including its optional BOM.
+    let root_loc = Loc {
+        start: 0,
+        end: source.bytes().len() - usize::from(sources.records[0].bom_len),
+    };
     let producer = Producer {
         tool_version: env!("CARGO_PKG_VERSION").into(),
-        build_fingerprint: "squish-xml-front/xml-1".into(),
+        build_fingerprint: "squish-xml-front/xml-2".into(),
     };
     let mut l = Lower {
         strings: string_ids,
@@ -96,10 +126,10 @@ pub(crate) fn lower(
     };
     let result = match unit.root {
         Root::Entry { params, body, .. } => {
-            let root = l.region(body)?;
+            let root = l.root_region(body, root_loc)?;
             let external = l.external_symbols(BTreeSet::new());
             let origins = l.finish_origins();
-            RelocatableUnitIr::Entry(EntryObject {
+            let object = EntryObject {
                 header,
                 required_params: params,
                 root_region: root,
@@ -110,9 +140,17 @@ pub(crate) fn lower(
                 sources,
                 attachment,
                 producer,
-            })
+            };
+            if is_pack {
+                RelocatableUnitIr::Pack(object)
+            } else {
+                RelocatableUnitIr::Entry(object)
+            }
         }
         Root::Module { definitions } => {
+            let package_root = package_body
+                .map(|body| l.root_region(body, root_loc))
+                .transpose()?;
             let local: BTreeSet<_> = definitions.iter().map(|d| d.symbol.clone()).collect();
             let mut defs = Vec::new();
             for (index, d) in definitions.into_iter().enumerate() {
@@ -143,7 +181,7 @@ pub(crate) fn lower(
                     .collect(),
             };
             let origins = l.finish_origins();
-            RelocatableUnitIr::Module(ModuleObject {
+            let module = ModuleObject {
                 header,
                 definitions: defs,
                 external_symbols: external,
@@ -154,8 +192,17 @@ pub(crate) fn lower(
                 sources,
                 attachment,
                 producer,
-            })
+            };
+            if is_sopack {
+                RelocatableUnitIr::Sopack(SopackObject {
+                    module,
+                    root_region: package_root.expect("sopack root"),
+                })
+            } else {
+                RelocatableUnitIr::Module(module)
+            }
         }
+        Root::Pack { .. } | Root::Sopack { .. } => unreachable!("normalized package root"),
     };
     Ok(result)
 }
@@ -183,6 +230,10 @@ impl Pools {
     }
     fn node(&mut self, n: &Node) {
         match &n.kind {
+            Kind::Asset { path, name } | Kind::Include { path, name, .. } => {
+                self.strings.insert(path.clone());
+                self.strings.insert(name.clone());
+            }
             Kind::Text(s) | Kind::Comment(s) => {
                 self.strings.insert(s.clone());
             }
@@ -236,6 +287,14 @@ struct Lower {
     decoded: Vec<DecodedValueMap>,
 }
 impl Lower {
+    /// Attaches an owning source origin independently of the root's emitted operations.
+    /// Declaration-only Sopacks and empty packs remain instantiable and diagnosable.
+    fn root_region(&mut self, nodes: Vec<Node>, loc: Loc) -> Result<RegionId, String> {
+        let id = self.region(nodes)?;
+        self.origins.push((EntityKind::Region, id.0, loc, None));
+        Ok(id)
+    }
+
     fn region(&mut self, nodes: Vec<Node>) -> Result<RegionId, String> {
         let id = RegionId(self.regions.len() as u32);
         self.regions.push(Region {
@@ -294,6 +353,15 @@ impl Lower {
     ) -> Result<(Loc, Option<String>, Op, Vec<RawDecodedValue>), String> {
         let (loc, lexical, kind, decoded) = node.take();
         let op = match kind {
+            Kind::Asset { path, name } => Op::Asset {
+                path: self.strings[&path],
+                name: self.strings[&name],
+            },
+            Kind::Include { import, path, name } => Op::Include {
+                import: ImportId(import),
+                path: self.strings[&path],
+                name: self.strings[&name],
+            },
             Kind::Text(value) => Op::EmitText {
                 value: self.strings[&value],
             },
@@ -483,6 +551,7 @@ fn decoded_prefix(unit: &Unit) -> Vec<DecodedValueMap> {
         ));
     }
     match &unit.root {
+        Root::Pack { .. } | Root::Sopack { .. } => unreachable!("normalized package root"),
         Root::Entry { param_origins, .. } => {
             for (id, (_, decoded)) in param_origins.iter().enumerate() {
                 maps.push(decoded_map(
@@ -587,5 +656,106 @@ fn source_archive(source: &SourceBlob, key: SourceKey) -> SourceArchive {
             },
             line_start_offsets: lines,
         }],
+    }
+}
+
+#[cfg(test)]
+mod root_origin_tests {
+    use super::*;
+    use squish_source::{
+        LogicalPath, PackageId, SnapshotBuilder, SourceId, SourceLocator, SourceProvider,
+    };
+    use std::io;
+
+    struct Memory(Vec<u8>);
+    impl SourceProvider for Memory {
+        fn read(&self, _: &SourceLocator) -> io::Result<Vec<u8>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// Exercises provenance without depending on linker first-operation fallback behavior.
+    #[test]
+    fn empty_and_declaration_only_roots_have_explicit_payload_origins() {
+        for (root, body) in [
+            ("entry", ""),
+            ("pack", ""),
+            ("sopack", ""),
+            (
+                "sopack",
+                r#"<xs:import src="dep.xml"/><xs:macro name="m:hello"><hello/></xs:macro>"#,
+            ),
+        ] {
+            for bom in [false, true] {
+                let text = format!(
+                    r#"<xs:{root} xmlns:xs="{}" xmlns:m="urn:m">{body}</xs:{root}>"#,
+                    crate::DSL_NAMESPACE
+                );
+                let mut bytes = if bom {
+                    vec![0xef, 0xbb, 0xbf]
+                } else {
+                    Vec::new()
+                };
+                bytes.extend_from_slice(text.as_bytes());
+                let mut snapshot = SnapshotBuilder::new(Memory(bytes));
+                let source = snapshot
+                    .load(
+                        SourceId::new(
+                            PackageId::new("fixture").unwrap(),
+                            LogicalPath::new("root.xml").unwrap(),
+                        ),
+                        SourceLocator::file("unused"),
+                    )
+                    .unwrap();
+                let context = FrontendSourceContext::new(PackageInstanceId {
+                    source_kind: 1,
+                    canonical_source: "workspace:fixture".into(),
+                    package_name: "fixture".into(),
+                    exact_revision: "fixture@1".into(),
+                });
+                let unit = crate::compile(&source, &context).unwrap().unit;
+                let id = unit.root_region().unwrap();
+                let origins: Vec<_> = unit
+                    .origins()
+                    .entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.entity_kind == EntityKind::Region && entry.local_id == id.0
+                    })
+                    .collect();
+                assert_eq!(origins.len(), 1, "{root}, BOM={bom}");
+                assert_eq!(origins[0].origin.source, SourceRef(0));
+                assert_eq!(
+                    origins[0].origin.span,
+                    Span {
+                        start: 0,
+                        end: text.len() as u64
+                    }
+                );
+                assert!(unit.regions()[id.0 as usize].ops.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn root_origin_uses_allocated_region_id_not_an_assumed_zero() {
+        let mut lower = Lower {
+            strings: BTreeMap::new(),
+            qnames: BTreeMap::new(),
+            regexes: BTreeMap::new(),
+            regions: Vec::new(),
+            ops: Vec::new(),
+            origins: Vec::new(),
+            decoded: Vec::new(),
+        };
+        lower.region(Vec::new()).unwrap();
+        let id = lower
+            .root_region(Vec::new(), Loc { start: 7, end: 19 })
+            .unwrap();
+        assert_eq!(id, RegionId(1));
+        assert_eq!(lower.origins[0].0, EntityKind::Region);
+        assert_eq!(lower.origins[0].1, id.0);
+        assert_eq!(lower.origins[0].2.start, 7);
+        assert_eq!(lower.origins[0].2.end, 19);
     }
 }

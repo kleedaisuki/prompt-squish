@@ -1,6 +1,6 @@
 [package]
 name = "xmlsquish"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"
@@ -76,3 +76,9 @@ tempfile = "3.23"
 name = "recovery_process"
 path = "tests/recovery_process.rs"
 required-features = ["fault-injection"]
+
+# Hosted same-source trials show smaller binaries and lower startup overhead.
+# Do not change panic behavior or CPU compatibility as part of this optimization.
+[profile.release]
+lto = "thin"
+codegen-units = 1

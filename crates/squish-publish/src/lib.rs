@@ -1500,13 +1500,15 @@ fn manifest_artifact(artifact: &GenerationArtifact) -> ManifestArtifact {
     }
 }
 
+/// Distinguishes public backend products from private generation evidence.
 fn is_user_artifact(kind: &squish_protocol::ArtifactKind) -> bool {
-    matches!(
-        kind,
+    match kind {
         squish_protocol::ArtifactKind::Prompt
-            | squish_protocol::ArtifactKind::BinaryIr
-            | squish_protocol::ArtifactKind::DebugInfo
-    )
+        | squish_protocol::ArtifactKind::BinaryIr
+        | squish_protocol::ArtifactKind::DebugInfo => true,
+        squish_protocol::ArtifactKind::Other(name) => matches!(name.as_str(), "pack" | "sopack"),
+        _ => false,
+    }
 }
 
 fn target_key(target_id: &PublicationTargetId) -> String {

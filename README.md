@@ -2,9 +2,9 @@
 
 **XML 是数据，宏是计算。 / XML is data. Macros are computation.**
 
-xmlsquish 是一个以项目为中心的提示词构建器：它从版本化 `xmlsquish.toml` 清单发现包、工作区、依赖和命名目标，把 XML DSL 编译成可复用中间表示（Intermediate Representation, IR），以入口作为链接根（link root），再发布 `.prompt` 产品。当前 XML 语言原语与语义保持不变；规范见 [`docs/dsl.md`](docs/dsl.md)，管理器架构见 [ADR 0009](docs/adr/0009-microkernel-manager-and-reusable-ir.md)。
+xmlsquish 是一个以项目为中心的提示词构建器：它从版本化 `xmlsquish.toml` 清单发现包、工作区、依赖和命名目标，把 XML DSL 编译成可复用中间表示（Intermediate Representation, IR），以入口作为链接根（link root），再通过后端发布 `.prompt`、`.pack` 或 `.sopack`。v1.2.0 新增资源和可分发编译库；规范见 [`docs/dsl.md`](docs/dsl.md)，管理器架构见 [ADR 0009](docs/adr/0009-microkernel-manager-and-reusable-ir.md)。
 
-xmlsquish is a project-oriented prompt builder. It discovers packages, workspaces, dependencies, and named targets from a versioned `xmlsquish.toml`, compiles the XML DSL to reusable IR, treats each entry as a link root, and publishes `.prompt` products. The XML language primitives and semantics are unchanged.
+xmlsquish is a project-oriented prompt builder. It discovers packages, workspaces, dependencies, and named targets from a versioned `xmlsquish.toml`, compiles the XML DSL to reusable IR, treats each entry as a link root, and publishes `.prompt`, `.pack`, or `.sopack` products. Version 1.2.0 adds byte-preserving assets and relocatable compiled libraries.
 
 ## 安装 / Installation
 
@@ -12,7 +12,7 @@ xmlsquish is a project-oriented prompt builder. It discovers packages, workspace
 
 从 [GitHub Releases](https://github.com/kleedaisuki/prompt-squish/releases) 下载与操作系统和处理器匹配的归档，按同次发布的校验和验证后解压，并把 `xmlsquish`（Windows 为 `xmlsquish.exe`）加入 `PATH`。Linux 发布包需要其发布说明所列的 glibc 版本；它不是 Alpine/musl 二进制。
 
-当前版本的具体资产、平台要求与升级说明见 [v1.1.0 发布说明](docs/releases/1.1.0.md)。
+当前版本的具体资产、平台要求与升级说明见 [v1.2.0 发布说明](docs/releases/1.2.0.md)。
 
 Download the archive for your OS and CPU from GitHub Releases, verify it against the checksums from the same release, extract it, and put `xmlsquish` (`xmlsquish.exe` on Windows) on `PATH`. Check the release notes for the Linux glibc requirement.
 
@@ -78,6 +78,80 @@ xmlsquish build --manifest-path examples/semantic/xmlsquish.toml --emit prompt -
 
 `.xsir` 与 `.psdbg` 是伴随产物，不是 XML DSL 的新原语，也不是最终提示词。
 
+## pack 与 SOPack / Packs and SOPacks
+
+```xml
+<xs:pack xmlns:xs="https://xmlsquish.moesegfault.dev/ns">
+  <xs:include path="instructions.xml" name="instructions.prompt"/>
+  <xs:asset path="scripts/check.py" name="scripts/check.py"/>
+</xs:pack>
+```
+
+`include` 只包含 entry，不包含 module；`asset` 保存整个文件的原始 bytes。
+pack 交付提示词、代码与静态资源；SOPack 则是包含 IR、编译模块、宏、资源和元信息的不可变库，**不包含最终成品**。
+二者使用可复现 ZIP（Reproducible ZIP），相同有效输入得到相同归档 bytes。
+
+`include` accepts an entry, never a module; `asset` preserves complete raw file bytes.
+A pack delivers prompts, code and static resources. A SOPack is an immutable library
+of IR, compiled modules, macros, assets and metadata, **without final products**.
+Both use reproducible ZIP containers: identical effective inputs yield identical bytes.
+
+```toml
+[dependencies]
+common = { sopack = "vendor/common.sopack" }
+
+[target.bundle]
+entry = "src/bundle.xml"
+backend = "pack"
+output = "bundle.pack"
+
+[target.library]
+entry = "src/library.xml"
+backend = "sopack"
+output = "library.sopack"
+```
+
+```console
+xmlsquish add common --path vendor/common.sopack
+xmlsquish remove common --dry-run
+xmlsquish build -t bundle
+xmlsquish build -t library
+```
+
+SOPack 可跨设备复用；源码身份重定位（Relocation）后，诊断和宏内资源仍指向库的定义位置。
+`xs:sopack` 可 import 模块、声明宏和 asset，但不能 include entry。
+普通 `.prompt` 目标仍使用 `backend = "squish"`（也接受 `"prompt"`）。
+
+A SOPack is reusable across devices. Relocated source identities preserve diagnostic
+locations and defining-source asset ownership. `xs:sopack` imports modules and defines
+macros/assets, but cannot include entries. Ordinary prompt targets retain
+`backend = "squish"` (also `"prompt"`).
+
+前端（Front end）→ IR → 中端（Middle end）优化 → 链接及链接时优化（Link-time Optimization）→ 后端（Backend）。
+不要复制内部 cache 目录来分发编译库。遥测（Telemetry）与跟踪（Tracing）默认关闭；开启后的跨运行记录位于项目元数据而非成品。
+升级到 1.2.0 不保证旧派生缓存有效；需要时执行 `xmlsquish clean` 后重建。
+
+Front end → IR → middle-end optimization → linker/link-time optimization → backend.
+Do not distribute private cache directories as libraries. Telemetry and tracing are
+opt-in, persist across runs in project metadata, and remain outside products.
+Version 1.2.0 intentionally invalidates old derived caches; clean and rebuild if needed.
+
+
+```console
+xmlsquish --trace=summary build
+xmlsquish --trace=events build
+xmlsquish --trace=off build
+```
+
+`--trace` without a value means `events`; values require `=`.
+`XMLSQUISH_TRACE=summary|events|1|true` is the environment fallback; explicit
+`--trace=off` overrides it. Summary records command and stage spans; events
+also records lifecycle events and diagnostics. JSONL records use
+`xmlsquish.trace.v1` and persist at
+`<target-dir>/metadata/traces/<invocation>.jsonl`. There is no outbound
+transmission. Trace write failures emit `TRACE001` warnings without changing
+the command result; review paths and diagnostic payloads before sharing.
+
 ## 项目清单 / Project manifest
 
 最小 `xmlsquish.toml`：
@@ -103,7 +177,7 @@ review-checks = { path = "tools/skills/review-checks" }
 
 `target.entry` 是相对包清单的 `xs:entry` 源码，也是链接根；它不是宏、没有隐式 `main`。工作区可在根清单中声明 `[workspace]`、`members`、`exclude`、`target-dir` 和共享依赖；`-p/--package`、`--workspace` 与 `--exclude` 控制包选择。目标输出必须使用 `.prompt` 后缀且不得逃逸共享目标目录。
 
-`target.entry` names an `xs:entry` source relative to its package manifest and is the link root. It is not a macro and has no implicit `main`. Root manifests may declare a workspace and shared dependencies. Outputs must use `.prompt` and remain within the shared target directory.
+`target.entry` names an `xs:entry`, `xs:pack`, or `xs:sopack` source relative to its package manifest and is the link root. It is not a macro and has no implicit `main`. Root manifests may declare a workspace and shared dependencies. Outputs must use the backend suffix (`.prompt`, `.pack`, or `.sopack`) and remain within the shared target directory.
 
 ## 命令 / Commands
 

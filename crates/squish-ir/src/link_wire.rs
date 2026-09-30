@@ -143,6 +143,8 @@ impl Writer {
         self.byte(match kind {
             UnitKind::Entry => UNIT_ENTRY,
             UnitKind::Module => UNIT_MODULE,
+            UnitKind::Pack => 3,
+            UnitKind::Sopack => 4,
         });
     }
 
@@ -348,6 +350,8 @@ impl<'a> Reader<'a> {
         match self.byte()? {
             UNIT_ENTRY => Ok(UnitKind::Entry),
             UNIT_MODULE => Ok(UnitKind::Module),
+            3 => Ok(UnitKind::Pack),
+            4 => Ok(UnitKind::Sopack),
             _ => Err(DecodeError::NonCanonical("unit kind discriminant")),
         }
     }
@@ -552,6 +556,17 @@ mod tests {
         let encoded = encode_linked_image(&image);
         assert_eq!(decode_linked_image(&encoded).unwrap(), image);
         assert_eq!(encode_linked_image(&image), encoded);
+    }
+
+    #[test]
+    fn linked_image_roundtrip_preserves_pack_and_sopack_unit_kinds() {
+        let mut image = image();
+        image.units[0].kind = UnitKind::Pack;
+        image.units[1].kind = UnitKind::Sopack;
+        assert_eq!(
+            decode_linked_image(&encode_linked_image(&image)).unwrap(),
+            image
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! ADR 0007 宏展开机。 / ADR 0007 macro-expansion machine.
 
-use crate::{InstantiateError, LinkedProgram};
+use crate::{ArchiveDirective, InstantiateError, LinkedProgram};
 use regex::Regex;
 use squish_ir::{
     BindingRef, DefAddr, DocumentItem, DocumentItemId, DocumentRegion, DocumentRegionId,
@@ -46,6 +46,8 @@ pub struct InstantiateOutput {
     pub document: LinkedDocumentIr,
     /// 与文档 occurrence 一一对应的动态来源。 / Dynamic provenance joined to document occurrences.
     pub trace: ExpansionTrace,
+    /// Ordered archive requests retaining the defining source through macro expansion.
+    pub directives: Vec<ArchiveDirective>,
 }
 
 /// 无状态 ADR 0007 求值器；绝不生成 XML 字符串。 / Stateless ADR 0007 evaluator; never emits XML strings.
@@ -164,6 +166,8 @@ struct Machine<'a> {
     scalar_values: Vec<String>,
     sequences: Vec<Vec<DocumentItemId>>,
     origins: Vec<OriginNode>,
+    directives: Vec<ArchiveDirective>,
+    directive_bytes: u64,
 }
 
 impl<'a> Machine<'a> {
@@ -253,6 +257,8 @@ impl<'a> Machine<'a> {
             scalar_values,
             sequences: Vec::new(),
             origins,
+            directives: Vec::new(),
+            directive_bytes: 0,
         })
     }
 
@@ -319,11 +325,35 @@ impl<'a> Machine<'a> {
                                 index,
                                 buffer,
                             });
-                            self.tasks.push(Task::Region {
-                                at: squish_ir::LinkedRegionRef { unit_slot, region },
-                                env: caller,
-                                output: buffer,
-                            });
+                            let literal = self
+                                .program
+                                .optimized(unit_slot)
+                                .and_then(|unit| unit.static_scalars.get(&region))
+                                .cloned();
+                            if let Some(literal) = literal {
+                                // Preserve each operation occurrence, trace and semantic budget
+                                // while skipping task dispatch for compile-time literal bodies.
+                                for segment in literal.segments {
+                                    let at = LinkedOpRef {
+                                        unit_slot,
+                                        op: segment.op,
+                                    };
+                                    self.emit_simple(
+                                        at,
+                                        &caller,
+                                        buffer,
+                                        OccurrenceKind::Text(
+                                            literal.text[segment.bytes].to_owned(),
+                                        ),
+                                    )?;
+                                }
+                            } else {
+                                self.tasks.push(Task::Region {
+                                    at: squish_ir::LinkedRegionRef { unit_slot, region },
+                                    env: caller,
+                                    output: buffer,
+                                });
+                            }
                         }
                         value => {
                             let value = self.scalar(call.op_ref.unit_slot, &value, &call.caller)?;
@@ -444,11 +474,18 @@ impl<'a> Machine<'a> {
         document.validate().map_err(|e| {
             InstantiateError::new("RUN007", format!("invalid document produced: {e}"))
         })?;
-        validate_document_shape(&document)?;
+        let root_kind = self.program.image().units
+            [self.program.image().entry.root_region.unit_slot as usize]
+            .kind;
+        validate_document_shape(&document, root_kind)?;
         trace.validate_against_document(&document).map_err(|e| {
             InstantiateError::new("RUN008", format!("invalid expansion trace produced: {e}"))
         })?;
-        Ok(InstantiateOutput { document, trace })
+        Ok(InstantiateOutput {
+            document,
+            trace,
+            directives: self.directives,
+        })
     }
 
     fn operation(
@@ -553,22 +590,42 @@ impl<'a> Machine<'a> {
                         self.binding(at.unit_slot, &b, &env)?
                     }
                 };
-                let regex = self.regex(at.unit_slot, pattern)?;
-                if let Some(found) = regex.captures(&input.text) {
+                let static_match = self
+                    .program
+                    .optimized(at.unit_slot)
+                    .and_then(|unit| unit.static_matches.get(&at.op));
+                let found = match static_match {
+                    Some(fact) if fact.matched => Some(fact.captures.clone()),
+                    Some(_) => None,
+                    None => {
+                        let regex = self.regex(at.unit_slot, pattern)?;
+                        regex.captures(&input.text).map(|found| {
+                            captures
+                                .iter()
+                                .filter_map(|name| {
+                                    found
+                                        .name(name)
+                                        .map(|value| (name.clone(), value.start()..value.end()))
+                                })
+                                .collect::<BTreeMap<_, _>>()
+                        })
+                    }
+                };
+                if let Some(found) = found {
                     let mut map = (*env.captures).clone();
                     let mut capture_records = Vec::new();
                     for name in captures {
-                        if let Some(value) = found.name(&name) {
+                        if let Some(value) = found.get(&name) {
                             let mut substitutions = input.substitutions.clone();
                             substitutions.push(SubstitutionStep {
                                 kind: SubstitutionKind::ScalarBody,
                                 origin: self.op_origin(at)?,
                             });
-                            capture_records.push((name.clone(), value.start(), value.end()));
+                            capture_records.push((name.clone(), value.start, value.end));
                             map.insert(
                                 name.clone(),
                                 Value {
-                                    text: value.as_str().into(),
+                                    text: input.text[value.clone()].into(),
                                     substitutions,
                                 },
                             );
@@ -601,6 +658,53 @@ impl<'a> Machine<'a> {
                         output,
                     });
                 }
+            }
+            Op::Asset { path, name } => {
+                let source = self.source(at.unit_slot)?;
+                let path = self.string(at.unit_slot, path)?;
+                let name = self.string(at.unit_slot, name)?;
+                let trace = self.trace_ref(at, &env, Vec::new())?;
+                self.directive_bytes = self
+                    .directive_bytes
+                    .saturating_add((path.len() + name.len()) as u64 + 64);
+                if self.directive_bytes > self.budgets.max_output_bytes {
+                    return Err(self.failure(
+                        "RUN028",
+                        "archive directives exceed output budget",
+                        env.frame,
+                        Some(at),
+                    ));
+                }
+                self.directives.push(ArchiveDirective::Asset {
+                    source,
+                    path,
+                    name,
+                    trace,
+                });
+            }
+            Op::Include { import, path, name } => {
+                let source = self.source(at.unit_slot)?;
+                let path = self.string(at.unit_slot, path)?;
+                let name = self.string(at.unit_slot, name)?;
+                let trace = self.trace_ref(at, &env, Vec::new())?;
+                self.directive_bytes = self
+                    .directive_bytes
+                    .saturating_add((path.len() + name.len()) as u64 + 64);
+                if self.directive_bytes > self.budgets.max_output_bytes {
+                    return Err(self.failure(
+                        "RUN028",
+                        "archive directives exceed output budget",
+                        env.frame,
+                        Some(at),
+                    ));
+                }
+                self.directives.push(ArchiveDirective::Include {
+                    source,
+                    import,
+                    path,
+                    name,
+                    trace,
+                });
             }
             Op::ReadSlot { name } => {
                 let Some(items) = env.slots.get(&name) else {
@@ -660,10 +764,7 @@ impl<'a> Machine<'a> {
     fn enter(&mut self, call: CallState) -> Result<(), InstantiateError> {
         let def = self
             .program
-            .image()
-            .definitions
-            .iter()
-            .find(|d| d.addr == call.target)
+            .definition(call.target)
             .ok_or_else(|| {
                 self.failure(
                     "RUN011",
@@ -862,15 +963,11 @@ impl<'a> Machine<'a> {
             .cloned()
             .ok_or_else(|| InstantiateError::new("RUN018", "QName ID is out of range"))
     }
-    fn regex(&self, slot: u32, id: squish_ir::RegexId) -> Result<Regex, InstantiateError> {
-        let unit = self.unit(slot)?;
-        let p = unit
-            .header()
-            .regexes
-            .get(id.0 as usize)
-            .ok_or_else(|| InstantiateError::new("RUN019", "regex ID is out of range"))?;
-        Regex::new(&self.string(slot, p.pattern)?)
-            .map_err(|e| InstantiateError::new("RUN020", format!("invalid frozen regex: {e}")))
+    fn regex(&self, slot: u32, id: squish_ir::RegexId) -> Result<&Regex, InstantiateError> {
+        self.program
+            .optimized(slot)
+            .and_then(|unit| unit.regexes.get(id.0 as usize))
+            .ok_or_else(|| InstantiateError::new("RUN019", "compiled regex ID is out of range"))
     }
     fn source(&self, slot: u32) -> Result<squish_ir::SourceKey, InstantiateError> {
         Ok(self.unit(slot)?.header().source.clone())
@@ -1173,7 +1270,7 @@ fn flatten(
     Ok(Flattened {
         document: LinkedDocumentIr {
             schema: image.schema,
-            document_abi: squish_ir::AbiId("xmlsquish-document-v1".into()),
+            document_abi: squish_ir::AbiId(squish_ir::DOCUMENT_ABI.into()),
             root: DocumentRegionId(0),
             regions,
             items,
@@ -1252,7 +1349,19 @@ impl TempItem {
     }
 }
 
-fn validate_document_shape(document: &LinkedDocumentIr) -> Result<(), InstantiateError> {
+fn validate_document_shape(
+    document: &LinkedDocumentIr,
+    root_kind: squish_ir::UnitKind,
+) -> Result<(), InstantiateError> {
+    // Archive units produce member directives, not XML documents. Their neutral event
+    // tape may be an empty/trivia fragment; the manager separately enforces archive
+    // content policy. Prompt entries retain their strict single-document contract.
+    if matches!(
+        root_kind,
+        squish_ir::UnitKind::Pack | squish_ir::UnitKind::Sopack
+    ) {
+        return Ok(());
+    }
     let mut depth = 0usize;
     let mut roots = 0usize;
     for item in &document.items {
@@ -1308,5 +1417,65 @@ fn canonicalize_scalars(
         if let OriginNode::ExternalArgument { value, .. } = origin {
             remap(value);
         }
+    }
+}
+
+#[cfg(test)]
+mod archive_fragment_tests {
+    use super::*;
+    use squish_ir::{AbiId, DocumentRegion, FeatureBits, UnitKind, Version};
+
+    fn empty_fragment() -> LinkedDocumentIr {
+        LinkedDocumentIr {
+            schema: Version { major: 1, minor: 0 },
+            document_abi: AbiId(squish_ir::DOCUMENT_ABI.into()),
+            root: DocumentRegionId(0),
+            regions: vec![DocumentRegion {
+                id: DocumentRegionId(0),
+                start: 0,
+                end: 0,
+            }],
+            items: Vec::new(),
+            strings: Vec::new(),
+            qnames: Vec::new(),
+            feature_bits: FeatureBits(0),
+        }
+    }
+    #[test]
+    fn archive_empty_fragments_do_not_weaken_prompt_entry_shape() {
+        let document = empty_fragment();
+        document.validate().unwrap();
+        assert!(validate_document_shape(&document, UnitKind::Pack).is_ok());
+        assert!(validate_document_shape(&document, UnitKind::Sopack).is_ok());
+        assert_eq!(
+            validate_document_shape(&document, UnitKind::Entry)
+                .unwrap_err()
+                .code,
+            "RUN029"
+        );
+    }
+    #[test]
+    fn archive_trivia_fragments_remain_valid_neutral_ir() {
+        let mut document = empty_fragment();
+        document.strings.push(" \n".into());
+        document
+            .items
+            .push(DocumentItem::Text { value: StringId(0) });
+        document.regions[0].end = 1;
+        document.validate().unwrap();
+        assert!(validate_document_shape(&document, UnitKind::Pack).is_ok());
+        assert_eq!(
+            validate_document_shape(&document, UnitKind::Entry)
+                .unwrap_err()
+                .code,
+            "RUN029"
+        );
+        document.strings[0] = "not a document".into();
+        assert_eq!(
+            validate_document_shape(&document, UnitKind::Entry)
+                .unwrap_err()
+                .code,
+            "RUN028"
+        );
     }
 }

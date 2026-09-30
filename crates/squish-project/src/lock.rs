@@ -86,6 +86,8 @@ pub enum LockedSource {
         revision: String,
         checksum: String,
     },
+    /// Portable archive locator pinned by the exact SHA-256 archive digest.
+    Sopack { path: PathBuf, checksum: String },
     /// Mutable local locator; source bytes belong to a build snapshot, not this lock. / 可变本地定位器；源字节属于构建快照而非本锁。
     Path { path: PathBuf, mutable: bool },
     /// Workspace member bound by its manifest identity. / 由清单身份绑定的工作区成员。
@@ -165,6 +167,22 @@ impl Lockfile {
                         ));
                     }
                     validate_digest("package.source.checksum", checksum, &mut issues);
+                }
+                LockedSource::Sopack { path, checksum } => {
+                    if path.as_os_str().is_empty() || path.is_absolute() {
+                        issues.push(ValidationIssue::new(
+                            "package.source.sopack",
+                            "sopack locator must be non-empty and relative",
+                        ));
+                    }
+                    if !checksum.strip_prefix("sha256:").is_some_and(|hex| {
+                        hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    }) {
+                        issues.push(ValidationIssue::new(
+                            "package.source.checksum",
+                            "SOPack requires an exact SHA-256 archive checksum",
+                        ));
+                    }
                 }
                 LockedSource::Path { path, mutable } => {
                     if path.as_os_str().is_empty() || path.is_absolute() {

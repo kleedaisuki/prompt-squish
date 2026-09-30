@@ -7,6 +7,8 @@ import subprocess
 import sys
 import tempfile
 
+from archive_smoke import smoke_archives
+
 
 COMMANDS = (
     "new", "build", "clean", "fmt", "add", "remove", "inspect",
@@ -152,6 +154,7 @@ def main() -> None:
     scratch = Path(sys.argv[2]).resolve()
     scratch.mkdir(parents=True, exist_ok=True)
     smoke(binary, scratch)
+    smoke_archives(binary, scratch)
 
 
 if __name__ == "__main__":

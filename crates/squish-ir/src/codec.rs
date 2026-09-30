@@ -38,6 +38,10 @@ pub enum ContainerKind {
     ExpansionTrace = 5,
     ArtifactMap = 6,
     DebugBundle = 7,
+    /// Packaging compilation unit, not ZIP artifact bytes.
+    Pack = 8,
+    /// Reusable-library compilation unit.
+    Sopack = 9,
 }
 impl ContainerKind {
     fn from_raw(v: u16) -> Result<Self, DecodeError> {
@@ -49,6 +53,8 @@ impl ContainerKind {
             5 => Self::ExpansionTrace,
             6 => Self::ArtifactMap,
             7 => Self::DebugBundle,
+            8 => Self::Pack,
+            9 => Self::Sopack,
             _ => return Err(DecodeError::UnknownKind(v)),
         })
     }

@@ -37,19 +37,25 @@ pub(crate) fn parse(source: &SourceBlob) -> Result<Unit, Box<Diagnostic>> {
         source,
         bom,
         imports: Vec::new(),
+        sopack: builtin(root, "sopack"),
     };
-    if !builtin(root, "entry") && !builtin(root, "module") {
+    if !["entry", "module", "pack", "sopack"]
+        .iter()
+        .any(|name| builtin(root, name))
+    {
         return Err(p.error(
             root,
             "XS1100",
-            "Syntax: source root must be xs:entry or xs:module",
+            "Syntax: source root must be xs:entry, xs:module, xs:pack, or xs:sopack",
         ));
     }
     p.attrs(root, &[])?;
     let parsed = if builtin(root, "entry") {
         p.entry(root)?
-    } else {
+    } else if builtin(root, "module") {
         p.module(root)?
+    } else {
+        p.package(root)?
     };
     Ok(Unit {
         root: parsed,
@@ -61,6 +67,7 @@ struct Parser<'a> {
     source: &'a SourceBlob,
     bom: usize,
     imports: Vec<Import>,
+    sopack: bool,
 }
 impl Parser<'_> {
     fn loc(&self, n: Xml<'_, '_>) -> Loc {
@@ -154,6 +161,7 @@ impl Parser<'_> {
         self.imports.push(Import {
             loc: self.loc(n),
             spec,
+            expected_kind: squish_ir::UnitKind::Module,
             decoded: self.attr_map(n, "src", "spec"),
         });
         Ok(())
@@ -223,6 +231,56 @@ impl Parser<'_> {
             }
         }
         Ok(Root::Module { definitions })
+    }
+    /// Package roots preserve operation ownership while keeping declarations separate.
+    fn package(&mut self, n: Xml<'_, '_>) -> Result<Root, Box<Diagnostic>> {
+        let mut definitions = Vec::new();
+        let mut body = Vec::new();
+        let mut symbols = BTreeSet::new();
+        let mut slots = BTreeMap::new();
+        for c in n.children() {
+            if trivia(c) || c.pi().is_some() {
+                continue;
+            }
+            if builtin(c, "import") {
+                self.import(c)?;
+                continue;
+            }
+            if self.sopack && builtin(c, "macro") {
+                let d = self.definition(c)?;
+                if !symbols.insert(d.symbol.clone()) {
+                    return Err(self.error(c, "XS1401", "Signature: duplicate macro"));
+                }
+                definitions.push(d);
+            } else {
+                body.push(self.node(c, &mut slots)?);
+            }
+        }
+        if !slots.is_empty() {
+            return Err(self.error(n, "XS1400", "Signature: package root cannot declare slots"));
+        }
+        if self.sopack {
+            Ok(Root::Sopack { definitions, body })
+        } else {
+            Ok(Root::Pack { body })
+        }
+    }
+    /// Archive names are portable relative paths and cannot escape their archive.
+    fn archive_name(&self, n: Xml<'_, '_>, value: String) -> Result<String, Box<Diagnostic>> {
+        if value.is_empty()
+            || value.contains(['\\', ':'])
+            || value.chars().any(char::is_control)
+            || value
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+        {
+            return Err(self.error(
+                n,
+                "XS1311",
+                "Source: archive name must be a safe relative slash-separated path",
+            ));
+        }
+        Ok(value)
     }
     fn param(
         &self,
@@ -446,6 +504,57 @@ impl Parser<'_> {
             }
         } else {
             match n.tag_name().name() {
+                "asset" | "include" => {
+                    self.attrs(n, &["path", "name"])?;
+                    self.empty(n)?;
+                    let path = self.attr(n, "path")?;
+                    if path.is_empty()
+                        || path.contains(['\\', ':'])
+                        || path.starts_with('/')
+                        || path.chars().any(char::is_control)
+                    {
+                        return Err(self.error(
+                            n,
+                            "XS1310",
+                            "Source: asset/include path must be a relative portable path",
+                        ));
+                    }
+                    let include = builtin(n, "include");
+                    if include && self.sopack {
+                        return Err(self.error(
+                            n,
+                            "XS1112",
+                            "Syntax: sopack cannot include entries",
+                        ));
+                    }
+                    let default = if include {
+                        let base = path.rsplit('/').next().unwrap_or(&path);
+                        format!(
+                            "{}.prompt",
+                            base.rsplit_once('.').map_or(base, |(stem, _)| stem)
+                        )
+                    } else {
+                        path.clone()
+                    };
+                    let name =
+                        self.archive_name(n, n.attribute("name").map_or(default, str::to_owned))?;
+                    decoded.push(self.attr_map(n, "path", "path"));
+                    if n.has_attribute("name") {
+                        decoded.push(self.attr_map(n, "name", "name"));
+                    }
+                    if include {
+                        let import = self.imports.len() as u32;
+                        self.imports.push(Import {
+                            loc: self.loc(n),
+                            spec: ImportSpec::RelativeUri(path.clone()),
+                            expected_kind: squish_ir::UnitKind::Entry,
+                            decoded: self.attr_map(n, "path", "spec"),
+                        });
+                        Kind::Include { import, path, name }
+                    } else {
+                        Kind::Asset { path, name }
+                    }
+                }
                 "insert" => {
                     self.attrs(n, &["get"])?;
                     self.empty(n)?;

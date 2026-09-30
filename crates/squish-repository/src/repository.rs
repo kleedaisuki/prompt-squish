@@ -482,7 +482,9 @@ fn freeze_locked_manifests(
         let candidate = match &package.source {
             LockedSource::Path { path, .. } => root.join(path),
             LockedSource::Workspace { member, .. } => root.join(member),
-            LockedSource::Registry { .. } | LockedSource::Git { .. } => {
+            LockedSource::Registry { .. }
+            | LockedSource::Git { .. }
+            | LockedSource::Sopack { .. } => {
                 let Some(path) = supplied.get(package.id.as_str()) else {
                     if require_external {
                         return Err(RepositoryError::MissingPackageLocation(package.id.clone()));

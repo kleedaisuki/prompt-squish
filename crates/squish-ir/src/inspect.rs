@@ -46,6 +46,14 @@ impl Inspect for RelocatableUnitIr {
                 x.regions.len(),
                 x.ops.len(),
             ),
+            Self::Pack(x) => (&x.header, "pack", 0, x.regions.len(), x.ops.len()),
+            Self::Sopack(x) => (
+                &x.module.header,
+                "sopack",
+                x.module.definitions.len(),
+                x.module.regions.len(),
+                x.module.ops.len(),
+            ),
             Self::Entry(x) => (&x.header, "entry", 0, x.regions.len(), x.ops.len()),
         };
         let mut s = String::from("{\"format\":\"xsir-inspect-v1\",\"kind\":");

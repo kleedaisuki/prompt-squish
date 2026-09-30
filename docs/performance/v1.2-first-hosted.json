@@ -1,0 +1,462 @@
+{
+  "schema": 1,
+  "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+  "python": "3.12.3",
+  "commit": "a1ffa142f45db9040a76021cd1fe849b29536b46",
+  "runner": "GitHub Actions 1000003899",
+  "cold_definition": "empty project cache; OS page cache untouched",
+  "binaries": {
+    "candidate": {
+      "sha256": "92eef4562615d6236fa700b09be6cde8e66e00c5cbdee20d6a807ba6df8f4200",
+      "version": "xmlsquish 1.2.0"
+    },
+    "baseline": {
+      "sha256": "89e8ee3db4943bb637cdc0e7978f04a353d137ce535fde29944dbb8d22dcee37",
+      "version": "xmlsquish 1.1.0"
+    }
+  },
+  "workloads": {
+    "candidate.startup": {
+      "samples_ns": [
+        2045180,
+        1822104,
+        1784908,
+        1768904,
+        1735624
+      ],
+      "median_ns": 1784908,
+      "min_ns": 1735624,
+      "max_ns": 2045180
+    },
+    "baseline.startup": {
+      "samples_ns": [
+        1798047,
+        1701172,
+        1641782,
+        1684737,
+        1666209
+      ],
+      "median_ns": 1684737,
+      "min_ns": 1641782,
+      "max_ns": 1798047
+    },
+    "candidate.tiny.cold": {
+      "samples_ns": [
+        23836101,
+        25130896,
+        23684077,
+        24687994,
+        26032488
+      ],
+      "median_ns": 24687994,
+      "min_ns": 23684077,
+      "max_ns": 26032488
+    },
+    "baseline.tiny.cold": {
+      "samples_ns": [
+        23600737,
+        22859356,
+        22697898,
+        22415888,
+        23308527
+      ],
+      "median_ns": 22859356,
+      "min_ns": 22415888,
+      "max_ns": 23600737
+    },
+    "candidate.tiny.warm": {
+      "samples_ns": [
+        16626722,
+        16199873,
+        15691697,
+        17640483,
+        17416887
+      ],
+      "median_ns": 16626722,
+      "min_ns": 15691697,
+      "max_ns": 17640483
+    },
+    "baseline.tiny.warm": {
+      "samples_ns": [
+        15994313,
+        15023732,
+        15135190,
+        15612218,
+        16439072
+      ],
+      "median_ns": 15612218,
+      "min_ns": 15023732,
+      "max_ns": 16439072
+    },
+    "candidate.prompt.distinct-macros-1": {
+      "samples_ns": [
+        26655026,
+        25709232,
+        26463798,
+        25480368,
+        25587629
+      ],
+      "median_ns": 25709232,
+      "min_ns": 25480368,
+      "max_ns": 26655026,
+      "output_bytes": 35,
+      "output_sha256": "e1f166b832f2a0c848fb3ddc54e261e39308a5554a34871ed5043637079d496f"
+    },
+    "baseline.prompt.distinct-macros-1": {
+      "samples_ns": [
+        25966078,
+        23806267,
+        24668760,
+        24647298,
+        24388944
+      ],
+      "median_ns": 24647298,
+      "min_ns": 23806267,
+      "max_ns": 25966078,
+      "output_bytes": 35,
+      "output_sha256": "e1f166b832f2a0c848fb3ddc54e261e39308a5554a34871ed5043637079d496f"
+    },
+    "candidate.prompt.literal-regex-1": {
+      "samples_ns": [
+        30793798,
+        27716084,
+        26735628,
+        26795588,
+        25519827
+      ],
+      "median_ns": 26795588,
+      "min_ns": 25519827,
+      "max_ns": 30793798,
+      "output_bytes": 35,
+      "output_sha256": "a5f5a660b422901579b11fb2593eaa446c2e298b4de42dc96e5a52b19f7e8cd3"
+    },
+    "baseline.prompt.literal-regex-1": {
+      "samples_ns": [
+        28864999,
+        26088984,
+        28658283,
+        25290782,
+        25279304
+      ],
+      "median_ns": 26088984,
+      "min_ns": 25279304,
+      "max_ns": 28864999,
+      "output_bytes": 35,
+      "output_sha256": "a5f5a660b422901579b11fb2593eaa446c2e298b4de42dc96e5a52b19f7e8cd3"
+    },
+    "candidate.prompt.distinct-macros-64": {
+      "samples_ns": [
+        30023207,
+        30483746,
+        36266509,
+        30797424,
+        29540260
+      ],
+      "median_ns": 30483746,
+      "min_ns": 29540260,
+      "max_ns": 36266509,
+      "output_bytes": 1160,
+      "output_sha256": "d5323959c309206729a26c6cc91da1bb049531faa644ba6459ef6895e2460101"
+    },
+    "baseline.prompt.distinct-macros-64": {
+      "samples_ns": [
+        28406614,
+        29333379,
+        35163548,
+        30214395,
+        29352197
+      ],
+      "median_ns": 29352197,
+      "min_ns": 28406614,
+      "max_ns": 35163548,
+      "output_bytes": 1160,
+      "output_sha256": "d5323959c309206729a26c6cc91da1bb049531faa644ba6459ef6895e2460101"
+    },
+    "candidate.prompt.literal-regex-64": {
+      "samples_ns": [
+        28942460,
+        28477360,
+        32228899,
+        28995801,
+        29127764
+      ],
+      "median_ns": 28995801,
+      "min_ns": 28477360,
+      "max_ns": 32228899,
+      "output_bytes": 1106,
+      "output_sha256": "6ea0e74652b7e261eb7f92e7ebd52430e733935a62e866e6954607e66802b540"
+    },
+    "baseline.prompt.literal-regex-64": {
+      "samples_ns": [
+        29886752,
+        28920928,
+        35250358,
+        31482565,
+        30899723
+      ],
+      "median_ns": 30899723,
+      "min_ns": 28920928,
+      "max_ns": 35250358,
+      "output_bytes": 1106,
+      "output_sha256": "6ea0e74652b7e261eb7f92e7ebd52430e733935a62e866e6954607e66802b540"
+    },
+    "candidate.prompt.distinct-macros-2048": {
+      "samples_ns": [
+        228744419,
+        228404412,
+        235269294,
+        227643851,
+        226825634
+      ],
+      "median_ns": 228404412,
+      "min_ns": 226825634,
+      "max_ns": 235269294,
+      "output_bytes": 39868,
+      "output_sha256": "548828a513d2fec0921ec313cd7f2620cf855b262cbc7ec0e3479ffe4ed37995"
+    },
+    "baseline.prompt.distinct-macros-2048": {
+      "samples_ns": [
+        232311375,
+        234121695,
+        236352935,
+        233426410,
+        229505426
+      ],
+      "median_ns": 233426410,
+      "min_ns": 229505426,
+      "max_ns": 236352935,
+      "output_bytes": 39868,
+      "output_sha256": "548828a513d2fec0921ec313cd7f2620cf855b262cbc7ec0e3479ffe4ed37995"
+    },
+    "candidate.prompt.literal-regex-2048": {
+      "samples_ns": [
+        121283786,
+        121283751,
+        126250916,
+        122874311,
+        120366540
+      ],
+      "median_ns": 121283786,
+      "min_ns": 120366540,
+      "max_ns": 126250916,
+      "output_bytes": 34834,
+      "output_sha256": "e1ebe0440c4784cb126539b7499d82960ba2e2f20dac9404d4ef308c2519f9c4"
+    },
+    "baseline.prompt.literal-regex-2048": {
+      "samples_ns": [
+        206156498,
+        205227139,
+        214827531,
+        221530411,
+        212767829
+      ],
+      "median_ns": 212767829,
+      "min_ns": 205227139,
+      "max_ns": 221530411,
+      "output_bytes": 34834,
+      "output_sha256": "e1ebe0440c4784cb126539b7499d82960ba2e2f20dac9404d4ef308c2519f9c4"
+    },
+    "candidate.pack.assets-1": {
+      "samples_ns": [
+        22800982,
+        27391517,
+        30986831,
+        24896504,
+        23280446
+      ],
+      "median_ns": 24896504,
+      "min_ns": 22800982,
+      "max_ns": 30986831,
+      "bytes": 65664,
+      "members": 1,
+      "sha256": "9d6bde9fe5e02e78e93f0f12e9eecbc3f07f7ffc04ed69d9539a7130d3c57f89"
+    },
+    "candidate.pack.assets-64": {
+      "samples_ns": [
+        59819533,
+        54410306,
+        57799880,
+        53818906,
+        58998530
+      ],
+      "median_ns": 57799880,
+      "min_ns": 53818906,
+      "max_ns": 59819533,
+      "bytes": 4201110,
+      "members": 64,
+      "sha256": "6da9d2eb7ce5359f2db9b0e8501a9caddafb6abf057397de8332ddae63676d2b"
+    },
+    "candidate.pack.assets-512": {
+      "samples_ns": [
+        243817224,
+        241424251,
+        241451381,
+        243726477,
+        252056603
+      ],
+      "median_ns": 243726477,
+      "min_ns": 241424251,
+      "max_ns": 252056603,
+      "bytes": 33608726,
+      "members": 512,
+      "sha256": "d5ca52e1b78e625f669790f8d69c0eaca03db921fb324fef2593e160d55aef6e"
+    },
+    "candidate.pack.distinct-includes-1": {
+      "samples_ns": [
+        29604203,
+        27291641,
+        29297251,
+        28628795,
+        28301011
+      ],
+      "median_ns": 28628795,
+      "min_ns": 27291641,
+      "max_ns": 29604203,
+      "bytes": 208,
+      "members": 1,
+      "sha256": "3e60a2c96712992587881c00bcc3fdf1a4671cda1ed438d65255e5f130018e74"
+    },
+    "candidate.pack.distinct-includes-64": {
+      "samples_ns": [
+        115044419,
+        110378613,
+        114366233,
+        111315774,
+        113626519
+      ],
+      "median_ns": 113626519,
+      "min_ns": 110378613,
+      "max_ns": 115044419,
+      "bytes": 11980,
+      "members": 64,
+      "sha256": "cb5bd742153060145338a51394865ea4083f4e16e274fcec465cd42b401462a8"
+    },
+    "candidate.pack.distinct-includes-512": {
+      "samples_ns": [
+        883127819,
+        907270854,
+        893906264,
+        868362449,
+        875196779
+      ],
+      "median_ns": 883127819,
+      "min_ns": 868362449,
+      "max_ns": 907270854,
+      "bytes": 96168,
+      "members": 512,
+      "sha256": "ece28970e4789e47bb567f4b5b3aa3c656a6ab708209f285aabbaceb535c1964"
+    }
+  },
+  "status": "failed",
+  "paired_candidate_over_baseline": {
+    "startup": {
+      "samples_ratio": [
+        1.1374452391956384,
+        1.071087462055571,
+        1.087177225721807,
+        1.049958539522786,
+        1.0416604399568121
+      ],
+      "median_ratio": 1.071087462055571,
+      "min_ratio": 1.0416604399568121,
+      "max_ratio": 1.1374452391956384
+    },
+    "tiny.cold": {
+      "samples_ratio": [
+        1.009972739410638,
+        1.0993702534752072,
+        1.0434480320600612,
+        1.1013614093717814,
+        1.1168654286905388
+      ],
+      "median_ratio": 1.0993702534752072,
+      "min_ratio": 1.009972739410638,
+      "max_ratio": 1.1168654286905388
+    },
+    "tiny.warm": {
+      "samples_ratio": [
+        1.039539616362391,
+        1.0782855418347452,
+        1.0367690792120878,
+        1.1299152368997154,
+        1.0594811556272763
+      ],
+      "median_ratio": 1.0594811556272763,
+      "min_ratio": 1.0367690792120878,
+      "max_ratio": 1.1299152368997154
+    },
+    "prompt.distinct-macros-1": {
+      "samples_ratio": [
+        1.026532616901174,
+        1.079935464052386,
+        1.0727656355649817,
+        1.03379964813993,
+        1.0491487044293513
+      ],
+      "median_ratio": 1.0491487044293513,
+      "min_ratio": 1.026532616901174,
+      "max_ratio": 1.079935464052386
+    },
+    "prompt.literal-regex-1": {
+      "samples_ratio": [
+        1.0668213776830549,
+        1.0623673194785967,
+        0.9329110191283965,
+        1.0595001767837784,
+        1.0095146211303918
+      ],
+      "median_ratio": 1.0595001767837784,
+      "min_ratio": 0.9329110191283965,
+      "max_ratio": 1.0668213776830549
+    },
+    "prompt.distinct-macros-64": {
+      "samples_ratio": [
+        1.056909035339446,
+        1.0392169957644497,
+        1.0313666015727423,
+        1.0192963982896233,
+        1.0064071183496077
+      ],
+      "median_ratio": 1.0313666015727423,
+      "min_ratio": 1.0064071183496077,
+      "max_ratio": 1.056909035339446
+    },
+    "prompt.literal-regex-64": {
+      "samples_ratio": [
+        0.9684043284462628,
+        0.9846627328141061,
+        0.914285721580473,
+        0.921011391543224,
+        0.942654534475924
+      ],
+      "median_ratio": 0.942654534475924,
+      "min_ratio": 0.914285721580473,
+      "max_ratio": 0.9846627328141061
+    },
+    "prompt.distinct-macros-2048": {
+      "samples_ratio": [
+        0.9846457970471743,
+        0.9755798667013751,
+        0.9954151574212522,
+        0.9752274860415323,
+        0.9883236224663376
+      ],
+      "median_ratio": 0.9846457970471743,
+      "min_ratio": 0.9752274860415323,
+      "max_ratio": 0.9954151574212522
+    },
+    "prompt.literal-regex-2048": {
+      "samples_ratio": [
+        0.5883093047108319,
+        0.5909732581712792,
+        0.5876849927582141,
+        0.5546611431150191,
+        0.5657177617768521
+      ],
+      "median_ratio": 0.5876849927582141,
+      "min_ratio": 0.5546611431150191,
+      "max_ratio": 0.5909732581712792
+    }
+  },
+  "error": "['add', 'reusable', '--path', '/home/runner/work/prompt-squish/prompt-squish/.temp/performance/run-1790800162564568225/sopack-1/relocated/library.sopack']: exit 1\n\nPlanning\nerror[XS3205] dependency edit is invalid: validation failed: [ValidationIssue { path: \"dependencies.reusable.sopack\", message: \"sopack dependency must be a non-empty relative .sopack file\" }] (manage)\nerror[XS3205] dependency edit is invalid: validation failed: [ValidationIssue { path: \"dependencies.reusable.sopack\", message: \"sopack dependency must be a non-empty relative .sopack file\" }] (manage)\nResult: add result unavailable\nFailed: 0 succeeded, 0 failed, 0 blocked, 0 cancelled, 0 cached (0 ms)\n"
+}

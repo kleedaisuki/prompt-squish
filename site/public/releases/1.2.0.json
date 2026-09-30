@@ -1,0 +1,151 @@
+{
+  "schemaVersion": 1,
+  "product": {
+    "name": "xmlsquish",
+    "description": "A local-first, deterministic project manager and compiler for XML prompt projects.",
+    "license": "GPL-3.0-or-later",
+    "homepage": "https://xmlsquish.moesegfault.dev/",
+    "repository": "https://github.com/kleedaisuki/prompt-squish",
+    "cratesIoPublished": false
+  },
+  "release": {
+    "version": "1.2.0",
+    "tag": "v1.2.0",
+    "date": "2026-10-01",
+    "releaseStatus": "published",
+    "pages": {
+      "zh-CN": "https://xmlsquish.moesegfault.dev/releases/1.2.0/",
+      "en": "https://xmlsquish.moesegfault.dev/en/releases/1.2.0/"
+    },
+    "githubRelease": "https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.2.0",
+    "checksums": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.0/SHA256SUMS"
+  },
+  "cli": {
+    "commands": [
+      "new",
+      "fmt",
+      "build",
+      "clean",
+      "add",
+      "remove",
+      "add-skill",
+      "remove-skill",
+      "sync-skills",
+      "install-skill",
+      "inspect"
+    ],
+    "sourceInstall": "cargo install --git https://github.com/kleedaisuki/prompt-squish --tag v1.2.0 --locked",
+    "sourceInstallRequirement": "Rust 1.88 or newer",
+    "machineProtocol": "3.2",
+    "automationMigration": "New pack and SOPack compilation units and product kinds require xmlsquish 1.2.0; old derived caches are not migrated."
+  },
+  "artifacts": [
+    {
+      "target": "x86_64-unknown-linux-gnu",
+      "system": "Linux",
+      "architecture": "x86_64",
+      "minimum": "glibc 2.35",
+      "format": "tar.gz",
+      "url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.0/xmlsquish-1.2.0-x86_64-unknown-linux-gnu.tar.gz"
+    },
+    {
+      "target": "aarch64-unknown-linux-gnu",
+      "system": "Linux",
+      "architecture": "aarch64",
+      "minimum": "glibc 2.35",
+      "format": "tar.gz",
+      "url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.0/xmlsquish-1.2.0-aarch64-unknown-linux-gnu.tar.gz"
+    },
+    {
+      "target": "x86_64-pc-windows-msvc",
+      "system": "Windows",
+      "architecture": "x86_64",
+      "minimum": "MSVC desktop target",
+      "format": "zip",
+      "url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.0/xmlsquish-1.2.0-x86_64-pc-windows-msvc.zip"
+    },
+    {
+      "target": "aarch64-pc-windows-msvc",
+      "system": "Windows",
+      "architecture": "aarch64",
+      "minimum": "MSVC desktop target",
+      "format": "zip",
+      "url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.0/xmlsquish-1.2.0-aarch64-pc-windows-msvc.zip"
+    },
+    {
+      "target": "x86_64-apple-darwin",
+      "system": "macOS",
+      "architecture": "x86_64",
+      "minimum": "macOS 11.0",
+      "format": "tar.gz",
+      "url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.0/xmlsquish-1.2.0-x86_64-apple-darwin.tar.gz"
+    },
+    {
+      "target": "aarch64-apple-darwin",
+      "system": "macOS",
+      "architecture": "aarch64",
+      "minimum": "macOS 11.0",
+      "format": "tar.gz",
+      "url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.0/xmlsquish-1.2.0-aarch64-apple-darwin.tar.gz"
+    }
+  ],
+  "integrity": {
+    "algorithm": "SHA-256",
+    "signed": false,
+    "notarized": false,
+    "note": "SHA256SUMS verifies downloaded bytes, not publisher identity. Binaries are unsigned and not Apple-notarized."
+  },
+  "highlights": [
+    "Four explicit source roots: module, entry, pack and sopack.",
+    "Byte-preserving assets and entry-only includes; reproducible ZIP products.",
+    "Immutable, relocatable SOPack dependencies containing IR, modules and metadata, not final products.",
+    "Explicit frontend, middle-end, linker and backend stages; opt-in persistent project telemetry."
+  ],
+  "storageLayout": {
+    "defaultRoot": "target/xmlsquish",
+    "artifacts": "artifacts/",
+    "cache": {
+      "sources": "cache/sources/",
+      "cas": "cache/cas/",
+      "actionIndex": "cache/actions.sqlite3"
+    },
+    "metadata": {
+      "layout": "metadata/layout.json",
+      "publications": "metadata/publications/",
+      "catalog": "metadata/catalog/"
+    },
+    "work": "work/",
+    "publicLocatorPattern": "target/xmlsquish/artifacts/*.{prompt,pack,sopack}"
+  },
+  "skills": {
+    "manifestTable": "[skills]",
+    "lockRecords": "[[skill]]",
+    "projection": ".agents/skills/<name>",
+    "sources": [
+      "path",
+      "git"
+    ],
+    "commands": [
+      "add-skill",
+      "remove-skill",
+      "sync-skills",
+      "install-skill"
+    ],
+    "bundledSkillName": "prompt-squish",
+    "bundledDefaultDestination": "$HOME/.agents/skills/prompt-squish",
+    "bundledProjectDestination": ".agents/skills/prompt-squish",
+    "integrity": "BLAKE3 complete-tree digest; integrity does not establish trustworthiness"
+  },
+  "products": {
+    "prompt": "Whitespace-processed prompt",
+    "pack": "Reproducible ZIP deliverable",
+    "sopack": "Reproducible ZIP compiled library without final products"
+  },
+  "sopack": {
+    "dependency": {
+      "sopack": "relative/library.sopack"
+    },
+    "immutable": true,
+    "relocatable": true
+  }
+}

@@ -894,3 +894,16 @@ fn backend_neutral_budget_counts_attributes_and_expanded_names() {
         .unwrap_err();
     assert_eq!(error.code, "RUN016");
 }
+
+#[test]
+fn instantiated_documents_advertise_authoritative_portable_abi() {
+    let fixture = linked();
+    let output = Instantiator
+        .instantiate(&fixture.program, BTreeMap::new(), Budgets::default())
+        .unwrap();
+    assert_eq!(output.document.document_abi.0, squish_ir::DOCUMENT_ABI);
+    assert_eq!(
+        decode_linked_document(&encode_linked_document(&output.document)).unwrap(),
+        output.document
+    );
+}

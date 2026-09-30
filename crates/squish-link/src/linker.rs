@@ -1,10 +1,10 @@
 //! 冻结单元闭包的静态链接。 / Static linking of a frozen unit closure.
 
-use crate::{LinkError, LinkedProgram};
+use crate::{LinkError, LinkedProgram, MiddleEnd};
 use squish_ir::{
     DefAddr, FeatureBits, LinkedEntry, LinkedImage, LinkedMacroDef, LinkedOpRef, LinkedRegionRef,
-    LinkedUnit, ModuleObject, Op, RelocatableUnitIr, ResolutionSnapshot, Signature, SourceKey,
-    StaticLinkMap, SymbolKey, Validate,
+    LinkedUnit, Op, RelocatableUnitIr, ResolutionSnapshot, Signature, SourceKey, StaticLinkMap,
+    SymbolKey, Validate,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -36,7 +36,11 @@ impl StaticLinker {
     /// 从 entry 运算 import 闭包，允许 import 环，并对所有操作做符号与签名验证。
     /// Computes the import closure from an entry, permits import cycles, and validates every
     /// operation's symbol and signature before constructing a linked image.
-    pub fn link(&self, entry: &SourceKey, closure: UnitClosure) -> Result<LinkOutput, LinkError> {
+    pub fn link(
+        &self,
+        entry: &SourceKey,
+        mut closure: UnitClosure,
+    ) -> Result<LinkOutput, LinkError> {
         closure
             .snapshot
             .validate()
@@ -44,29 +48,54 @@ impl StaticLinker {
         validate_snapshot_payloads(&closure)?;
         let reachable = reachable_sources(entry, &closure)?;
         let ordered_sources: Vec<_> = reachable.into_iter().collect();
+        // Explicit pre-link middle-end boundary: facts are computed on unbound units,
+        // then retained through symbol binding and link-time executable indexing.
+        let mut optimized_units = BTreeMap::new();
+        for source in &ordered_sources {
+            let optimized = MiddleEnd
+                .optimize(
+                    closure
+                        .units
+                        .remove(source)
+                        .expect("validated reachable payload"),
+                )
+                .map_err(|error| {
+                    LinkError::new("LNK030", format!("middle-end optimization failed: {error}"))
+                        .at_source(source.clone())
+                })?;
+            optimized_units.insert(source.clone(), optimized);
+        }
         let slots: BTreeMap<_, _> = ordered_sources
             .iter()
             .cloned()
             .enumerate()
             .map(|(i, s)| (s, i as u32))
             .collect();
-        let entry_unit = closure.units.get(entry).ok_or_else(|| {
-            LinkError::new("LNK011", "entry payload is missing").at_source(entry.clone())
-        })?;
-        let RelocatableUnitIr::Entry(entry_object) = entry_unit else {
-            return Err(
-                LinkError::new("LNK012", "link root must be an entry, not a module")
-                    .at_source(entry.clone()),
-            );
+        let entry_unit = &optimized_units
+            .get(entry)
+            .ok_or_else(|| {
+                LinkError::new("LNK011", "entry payload is missing").at_source(entry.clone())
+            })?
+            .unit;
+        let Some(root_region) = entry_unit.root_region() else {
+            return Err(LinkError::new(
+                "LNK012",
+                "link root must be an entry, pack, or sopack, not a module",
+            )
+            .at_source(entry.clone()));
         };
 
         let mut definitions = Vec::new();
         let mut symbols = BTreeMap::<SymbolKey, (DefAddr, Signature)>::new();
         for source in &ordered_sources {
             let slot = slots[source];
-            if let RelocatableUnitIr::Module(module) = &closure.units[source] {
-                add_definitions(source, slot, module, &mut definitions, &mut symbols)?;
-            }
+            add_definitions(
+                source,
+                slot,
+                optimized_units[source].unit.definitions(),
+                &mut definitions,
+                &mut symbols,
+            )?;
         }
         let mut relocations = Vec::new();
         for source in &ordered_sources {
@@ -74,7 +103,7 @@ impl StaticLinker {
             validate_calls(
                 source,
                 slot,
-                &closure.units[source],
+                &optimized_units[source].unit,
                 &symbols,
                 &mut relocations,
             )?;
@@ -107,21 +136,25 @@ impl StaticLinker {
             .collect();
         let entry_revision = revision(entry);
         let image = LinkedImage {
-            schema: entry_object.header.ir_schema,
-            language_abi: entry_object.header.language_abi.clone(),
+            schema: entry_unit.header().ir_schema,
+            language_abi: entry_unit.header().language_abi.clone(),
             entry: LinkedEntry {
                 source: entry.clone(),
                 semantic_digest: entry_revision.semantic,
-                required_params: entry_object.required_params.clone(),
+                required_params: entry_unit.required_params().to_vec(),
                 root_region: LinkedRegionRef {
                     unit_slot: slots[entry],
-                    region: entry_object.root_region,
+                    region: root_region,
                 },
             },
             units,
             definitions,
             link_map: map.clone(),
-            feature_bits: merged_features(&ordered_sources, &closure.units),
+            feature_bits: FeatureBits(
+                optimized_units
+                    .values()
+                    .fold(0, |bits, unit| bits | unit.unit.header().feature_bits.0),
+            ),
         };
         image.validate().map_err(|e| {
             LinkError::new("LNK014", format!("constructed invalid linked image: {e}"))
@@ -130,7 +163,8 @@ impl StaticLinker {
             .iter()
             .map(|source| (source.clone(), revision(source).object))
             .collect();
-        let program = LinkedProgram::reconstruct(image.clone(), closure.units, objects)?;
+        let program =
+            LinkedProgram::reconstruct_optimized(image.clone(), optimized_units, objects)?;
         Ok(LinkOutput {
             map,
             image,
@@ -215,11 +249,26 @@ fn reachable_sources(
                 LinkError::new("LNK021", "import target payload is missing")
                     .at_source(target.clone())
             })?;
-            if !matches!(target_unit, RelocatableUnitIr::Module(_)) {
-                return Err(LinkError::new("LNK022", "imports may target modules only")
-                    .at_source(target.clone()));
+            let expected = import.expected_kind;
+            let matches_kind = match expected {
+                squish_ir::UnitKind::Module => matches!(
+                    target_unit.kind(),
+                    squish_ir::UnitKind::Module | squish_ir::UnitKind::Sopack
+                ),
+                other => target_unit.kind() == other,
+            };
+            if !matches_kind {
+                return Err(LinkError::new(
+                    "LNK022",
+                    "import/include target has the wrong unit kind",
+                )
+                .at_source(target.clone()));
             }
-            queue.push_back(target.clone());
+            // Include is a product boundary, not a symbol-aggregation edge.
+            // Its entry is linked independently by the manager.
+            if expected != squish_ir::UnitKind::Entry {
+                queue.push_back(target.clone());
+            }
         }
     }
     Ok(seen)
@@ -228,11 +277,11 @@ fn reachable_sources(
 fn add_definitions(
     source: &SourceKey,
     slot: u32,
-    module: &ModuleObject,
+    definitions: &[squish_ir::MacroDef],
     out: &mut Vec<LinkedMacroDef>,
     symbols: &mut BTreeMap<SymbolKey, (DefAddr, Signature)>,
 ) -> Result<(), LinkError> {
-    for def in &module.definitions {
+    for def in definitions {
         let addr = DefAddr {
             unit_slot: slot,
             local_def: def.id,
@@ -268,12 +317,7 @@ fn validate_calls(
     symbols: &BTreeMap<SymbolKey, (DefAddr, Signature)>,
     relocations: &mut Vec<(LinkedOpRef, DefAddr)>,
 ) -> Result<(), LinkError> {
-    let local_symbols: BTreeSet<_> = match unit {
-        RelocatableUnitIr::Entry(_) => BTreeSet::new(),
-        RelocatableUnitIr::Module(module) => {
-            module.definitions.iter().map(|def| &def.symbol).collect()
-        }
-    };
+    let local_symbols: BTreeSet<_> = unit.definitions().iter().map(|def| &def.symbol).collect();
     let mut actual_externals = BTreeSet::new();
     for record in unit.ops() {
         let Op::Call {
@@ -364,13 +408,4 @@ fn exact_names<'a>(
         );
     }
     Ok(())
-}
-
-fn merged_features(
-    sources: &[SourceKey],
-    units: &BTreeMap<SourceKey, RelocatableUnitIr>,
-) -> FeatureBits {
-    FeatureBits(sources.iter().fold(0, |bits, source| {
-        bits | units[source].header().feature_bits.0
-    }))
 }

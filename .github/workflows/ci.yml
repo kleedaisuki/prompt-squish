@@ -6,6 +6,19 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+    inputs:
+      performance:
+        description: 'Collect paired release CLI benchmarks (enable for final release verification)'
+        type: boolean
+        default: false
+      site:
+        description: 'Validate site and browser contracts (disable only for Rust-only fix iterations)'
+        type: boolean
+        default: true
+      profile:
+        description: 'Explicitly authorize the bounded default-versus-ThinLTO experiment'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -17,6 +30,8 @@ concurrency:
 jobs:
   rust-quality:
     name: Rust quality (Ubuntu, MSRV 1.88)
+    outputs:
+      compiled: ${{ steps.compile.outcome }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -26,6 +41,18 @@ jobs:
       - name: Install minimum supported Rust version with quality tools
         run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt,clippy
 
+      # Cache only rebuildable state; never store credentials or project metadata.
+      - name: Restore Rust dependencies and build state
+        id: rust-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+
       - name: Verify minimum supported Rust toolchain
         run: |
           rustc +1.88.0 --version
@@ -34,6 +61,7 @@ jobs:
           cargo +1.88.0 clippy --version
 
       - name: Check minimum supported Rust version
+        id: compile
         run: cargo +1.88.0 check --workspace --all-targets --locked
 
       # Keep the declared workspace graph equal to the reviewed architectural contract.
@@ -57,7 +85,20 @@ jobs:
       - name: Test documentation examples
         run: cargo +1.88.0 test --workspace --doc --all-features --locked
 
+      # Preserve partial dependency compilation even when a later check fails.
+      - name: Save reusable Rust state after success or failure
+        if: always() && !cancelled() && steps.rust-cache.outputs.cache-hit != 'true' && steps.rust-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
   rust-test:
+    needs: rust-quality
+    if: always() && !cancelled() && needs.rust-quality.outputs.compiled == 'success'
     name: Rust test (${{ matrix.name }}, MSRV 1.88)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -78,16 +119,28 @@ jobs:
       - name: Install minimum supported Rust version
         run: rustup toolchain install 1.88.0 --profile minimal
 
+      # Cache only rebuildable state; never store credentials or project metadata.
+      - name: Restore Rust dependencies and build state
+        id: rust-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+
       - name: Verify minimum supported Rust toolchain
         run: |
           rustc +1.88.0 --version
           cargo +1.88.0 --version
 
-      - name: Build all targets
-        run: cargo +1.88.0 build --workspace --all-targets --all-features --locked
-
       - name: Run tests
-        run: cargo +1.88.0 test --workspace --all-targets --all-features --locked
+        run: cargo +1.88.0 test --workspace --all-targets --all-features --locked --no-fail-fast
+
+      - name: Build composed CLI
+        run: cargo +1.88.0 build --bin xmlsquish --locked
 
       # Exercise the composed binary, not only the crates behind it.
       # 验证组合后的根二进制，而不只是其内部 crate。
@@ -111,26 +164,172 @@ jobs:
           RUSTUP_TOOLCHAIN: 1.88.0
         run: node site/scripts/build-demo.mjs --check
 
+      - name: Retain generated site demonstration on drift
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: site-demo-expected-${{ github.sha }}
+          path: .temp/site-demo-expected.json
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Install root package from source
         if: runner.os == 'Linux'
         shell: bash
         # The preceding workspace build has populated the locked dependency cache.
         # 前序 workspace 构建已填充锁定依赖缓存，因此安装无需再次访问网络。
-        run: cargo +1.88.0 install --path . --locked --offline --root "$RUNNER_TEMP/xmlsquish-install"
+        run: cargo +1.88.0 install --path . --debug --locked --offline --root "$GITHUB_WORKSPACE/.temp/xmlsquish-install"
 
       - name: Smoke test source-installed binary
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          binary="$RUNNER_TEMP/xmlsquish-install/bin/xmlsquish"
+          binary="$GITHUB_WORKSPACE/.temp/xmlsquish-install/bin/xmlsquish"
           "$binary" --version | grep -E '^xmlsquish [0-9]+\.[0-9]+\.[0-9]+'
           for command in new build clean fmt add remove add-skill remove-skill sync-skills install-skill inspect; do
             "$binary" | grep -E "^  ${command}[[:space:]]"
             "$binary" "$command" --help >/dev/null
           done
 
+      # Preserve partial dependency compilation even when a later check fails.
+      - name: Save reusable Rust state after success or failure
+        if: always() && !cancelled() && steps.rust-cache.outputs.cache-hit != 'true' && steps.rust-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
+  performance:
+    if: github.event_name == 'workflow_dispatch' && inputs.performance
+    needs: rust-quality
+    name: Release CLI measurements
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.88.0 --profile minimal
+      # Cache only rebuildable state; never store credentials or project metadata.
+      - name: Restore Rust dependencies and build state
+        id: rust-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+
+      - name: Build measured release binary
+        run: cargo +1.88.0 build --release --bin xmlsquish --locked
+      - name: Measure startup, cold and warm builds, and packaging tails
+        run: |
+          python scripts/perf/download_baseline.py
+          python scripts/perf/measure.py target/release/xmlsquish --baseline .cache/perf-baseline-v1.1.0/xmlsquish --scratch .temp/performance --report .temp/performance/results.json
+      - name: Retain reproducible measurement evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: performance-${{ github.sha }}
+          path: .temp/performance/results.json
+          if-no-files-found: error
+          retention-days: 30
+
+      # Preserve partial dependency compilation even when a later check fails.
+      - name: Save reusable Rust state after success or failure
+        if: always() && !cancelled() && steps.rust-cache.outputs.cache-hit != 'true' && steps.rust-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
+  profile:
+    if: github.event_name == 'workflow_dispatch' && inputs.profile
+    needs: rust-quality
+    name: Bounded ThinLTO profile experiment
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Restore isolated profile build state
+        id: rust-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            .cache/profile-target
+          key: profile-v1-linux-x64-1.88-ltofalse-cgu16-thin-cgu1-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: profile-v1-linux-x64-1.88-ltofalse-cgu16-thin-cgu1-${{ hashFiles('Cargo.lock') }}-
+      # Cache versions include path lists: use the existing CI's exact three paths
+      # rather than an ineffective prefix fallback on the four-path profile cache.
+      - name: Reuse existing default-profile CI compilation on first trial
+        if: steps.rust-cache.outputs.cache-matched-key == ''
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-v1-Linux-X64-1.88-performance-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: rust-v1-Linux-X64-1.88-performance-${{ hashFiles('Cargo.lock') }}-
+      - name: Build two profiles and retain their actual wall times
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, shutil, subprocess, time
+          output = pathlib.Path('.temp/profile')
+          output.mkdir(parents=True, exist_ok=True)
+          records = {}
+          profiles = [('default', {'CARGO_TARGET_DIR': 'target', 'CARGO_PROFILE_RELEASE_LTO': 'false', 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS': '16'}),
+                      ('thin', {'CARGO_TARGET_DIR': '.cache/profile-target', 'CARGO_PROFILE_RELEASE_LTO': 'thin', 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS': '1'})]
+          for name, settings in profiles:
+              environment = dict(os.environ)
+              environment.pop('CARGO_PROFILE_RELEASE_LTO', None)
+              environment.pop('CARGO_PROFILE_RELEASE_CODEGEN_UNITS', None)
+              environment.update(settings)
+              start = time.perf_counter_ns()
+              subprocess.run(['cargo', '+1.88.0', 'build', '--release', '--bin', 'xmlsquish', '--locked'], env=environment, check=True)
+              records[name] = {'wall_ns': time.perf_counter_ns() - start, 'profile_overrides': settings}
+              shutil.copyfile(pathlib.Path(settings['CARGO_TARGET_DIR']) / 'release/xmlsquish', output / f'{name}-xmlsquish')
+              (output / f'{name}-xmlsquish').chmod(0o755)
+              (output / 'build-times.json').write_text(json.dumps(records, indent=2) + '\n')
+          PY
+      - name: Compare bounded startup and tiny builds with twenty AB/BA pairs
+        run: python scripts/perf/profile_probe.py .temp/profile/default-xmlsquish .temp/profile/thin-xmlsquish --build-times .temp/profile/build-times.json --rounds 20 --report .temp/profile/results.json
+      - name: Upload small evidence only, never native binaries or Cargo targets
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: performance-profile-${{ github.sha }}
+          path: |
+            .temp/profile/results.json
+            .temp/profile/build-times.json
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Preserve partial compilation without treating it as verification
+        if: always() && !cancelled() && steps.rust-cache.outputs.cache-hit != 'true' && steps.rust-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            .cache/profile-target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
   site:
+    if: github.event_name != 'workflow_dispatch' || inputs.site
     name: Site
     runs-on: ubuntu-latest
     timeout-minutes: 20

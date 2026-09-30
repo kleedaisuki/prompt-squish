@@ -309,6 +309,9 @@ fn detail_table(detail: &DependencyDetail) -> InlineTable {
     if let Some(value) = &detail.path {
         table.insert("path", Value::from(value.to_string_lossy().as_ref()));
     }
+    if let Some(value) = &detail.sopack {
+        table.insert("sopack", Value::from(value.to_string_lossy().as_ref()));
+    }
     if detail.workspace {
         table.insert("workspace", Value::from(true));
     }
@@ -354,6 +357,30 @@ mod tests {
             .unwrap();
         assert!(!remove.after.contains("new ="));
         assert!(remove.after.contains("# name comment"));
+    }
+
+    #[test]
+    fn sopack_add_and_remove_preserve_manifest_intent() {
+        let add = CandidateManifest::parse(BASE)
+            .unwrap()
+            .add(
+                "compiled",
+                DependencySpec::sopack("vendor/compiled.sopack"),
+                false,
+            )
+            .unwrap();
+        assert!(add.after.contains("sopack = \"vendor/compiled.sopack\""));
+        let manifest = Manifest::parse(&add.after).unwrap();
+        assert_eq!(
+            manifest.dependencies["compiled"],
+            DependencySpec::sopack("vendor/compiled.sopack")
+        );
+        let remove = CandidateManifest::parse(&add.after)
+            .unwrap()
+            .remove("compiled")
+            .unwrap();
+        assert!(!remove.after.contains("compiled ="));
+        assert!(remove.after.contains("# project comment"));
     }
 
     #[test]

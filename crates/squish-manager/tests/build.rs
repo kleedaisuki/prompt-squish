@@ -408,19 +408,19 @@ fn runtime_descriptor_identity_changes_the_sealed_plan() {
 
     for descriptor in [
         squish_manager::BuildRuntimeDescriptor {
-            frontend_abi: "xmlsquish.xml/1".into(),
+            frontend_abi: squish_xml_front::FRONTEND_ABI.into(),
             linker_abi: "xmlsquish.link/2-test".into(),
             evaluator_abi: "xmlsquish.instantiate/1".into(),
             document_abi: squish_backend::DOCUMENT_ABI.into(),
         },
         squish_manager::BuildRuntimeDescriptor {
-            frontend_abi: "xmlsquish.xml/1".into(),
+            frontend_abi: squish_xml_front::FRONTEND_ABI.into(),
             linker_abi: "xmlsquish.link/1".into(),
             evaluator_abi: "xmlsquish.instantiate/2-test".into(),
             document_abi: squish_backend::DOCUMENT_ABI.into(),
         },
         squish_manager::BuildRuntimeDescriptor {
-            frontend_abi: "xmlsquish.xml/1".into(),
+            frontend_abi: squish_xml_front::FRONTEND_ABI.into(),
             linker_abi: "xmlsquish.link/1".into(),
             evaluator_abi: "xmlsquish.instantiate/1".into(),
             document_abi: "xmlsquish.document.v2-test".into(),
@@ -439,7 +439,7 @@ fn runtime_descriptor_identity_changes_the_sealed_plan() {
         assert_ne!(baseline, digest);
     }
 
-    descriptor.frontend_abi = "xmlsquish.xml/1".into();
+    descriptor.frontend_abi = squish_xml_front::FRONTEND_ABI.into();
     let restored = build::prepare(
         &request,
         &MemoryServices {
@@ -1560,5 +1560,132 @@ impl Services for WorkspaceServices {
             },
             packages: Vec::new(),
         })
+    }
+}
+
+#[test]
+fn directive_sidechannel_is_declared_only_for_archive_distribution() {
+    for backend in ["squish", "prompt", "pack", "sopack"] {
+        let (temp, request) = fixture();
+        let manifest_path = temp.path().join("xmlsquish.toml");
+        let mut manifest = fs::read_to_string(&manifest_path).unwrap();
+        manifest.push_str(&format!("backend = \"{backend}\"\n"));
+        fs::write(manifest_path, manifest).unwrap();
+        let prepared = build::prepare(&request, &LocalServices).unwrap();
+        let action = prepared
+            .plan()
+            .graph()
+            .actions()
+            .find(|action| action.kind == squish_protocol::ActionKind::Instantiate)
+            .unwrap();
+        let names = action
+            .outputs
+            .iter()
+            .map(|output| output.name.as_str())
+            .collect::<BTreeSet<_>>();
+        let archive = matches!(backend, "pack" | "sopack");
+        let expected = if archive {
+            BTreeSet::from(["document", "trace", "directives"])
+        } else {
+            BTreeSet::from(["document", "trace"])
+        };
+        assert_eq!(
+            names, expected,
+            "{backend} has the coherent distribution schema"
+        );
+        let placeholder =
+            squish_protocol::Digest::new(squish_protocol::DigestAlgorithm::Blake3, vec![0; 32])
+                .unwrap();
+        let backend_action = prepared
+            .plan()
+            .graph()
+            .actions()
+            .find(|action| action.kind == squish_protocol::ActionKind::Backend)
+            .unwrap();
+        let mut references_directives = false;
+        backend_action
+            .key
+            .materialize(&backend_action.kind, &backend_action.outputs, |reference| {
+                references_directives |= reference.output.as_str() == "directives";
+                Some(placeholder.clone())
+            })
+            .unwrap();
+        assert_eq!(references_directives, archive);
+        if !archive {
+            let mut old_outputs = action.outputs.clone();
+            old_outputs.push(squish_build::Output {
+                name: squish_build::OutputName::new("directives").unwrap(),
+                kind: squish_protocol::ArtifactKind::Metadata,
+            });
+            let current = action
+                .key
+                .materialize(&action.kind, &action.outputs, |_| Some(placeholder.clone()))
+                .unwrap();
+            let old = action
+                .key
+                .materialize(&action.kind, &old_outputs, |_| Some(placeholder.clone()))
+                .unwrap();
+            assert_ne!(
+                current, old,
+                "old directive-bearing cache records cannot satisfy a prompt action"
+            );
+        }
+    }
+}
+
+#[test]
+fn invalid_prompt_directives_fail_before_instantiation_is_cached_on_cold_and_warm_runs() {
+    let (temp, mut request) = fixture();
+    request.emit = vec![EmitKind::Prompt];
+    fs::write(temp.path().join("src/blob.bin"), [0, 255, 42]).unwrap();
+    fs::write(temp.path().join("src/main.xml"), format!(
+        r#"<xs:entry xmlns:xs="{}"><message>Hello</message><xs:asset path="blob.bin"/></xs:entry>"#,
+        squish_xml_front::DSL_NAMESPACE)).unwrap();
+    let manager = ManagerCapability::new(LocalServices, InvocationSettings::default());
+    let capabilities: [&dyn squish_kernel::Capability; 1] = [&manager];
+    let kernel = Kernel::new(&capabilities).unwrap();
+    let layout = ProjectBuildLayout::project_local_for_tests(temp.path());
+    for invocation in ["invalid-prompt-cold", "invalid-prompt-warm"] {
+        let events = Arc::new(RecordingEvents::default());
+        let context = InvocationContext::new(
+            InvocationId::new(invocation).unwrap(),
+            CancellationToken::default(),
+            events.clone(),
+        );
+        let outcome = kernel
+            .dispatch(&OperationRequest::Build(request.clone()), &context)
+            .unwrap();
+        assert_eq!(outcome.summary.root_failures, 1);
+        let OperationResult::Build(result) = outcome.result else {
+            panic!("expected failed typed build result");
+        };
+        assert!(result.published.is_empty());
+        let captured = events.0.lock().unwrap();
+        assert!(captured.iter().any(|event| matches!(&event.payload,
+            EventPayload::ActionFailed { action, diagnostic, .. }
+                if action.as_str().starts_with("build:instantiate:") && diagnostic.code == "MGB150")));
+        assert!(!captured.iter().any(|event| matches!(&event.payload,
+            EventPayload::CacheHit { action, .. } if action.as_str().starts_with("build:instantiate:")
+                || action.as_str().starts_with("build:backend:"))));
+        drop(captured);
+        let catalog = build::read_current_build_catalog(&runtime(&layout))
+            .unwrap()
+            .unwrap();
+        let failed = catalog
+            .record
+            .actions
+            .iter()
+            .find(|action| action.kind == squish_protocol::ActionKind::Instantiate)
+            .unwrap();
+        assert!(
+            matches!(&failed.state, build::BuildTerminalState::Failed { code, .. } if code == "MGB150")
+        );
+        let key = squish_build::ActionKey::new(failed.key.as_ref().unwrap().as_str()).unwrap();
+        assert!(
+            squish_manager::BuildRuntime::lookup_action(&runtime(&layout), &key)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!layout.artifacts_root().join("chat.prompt").exists());
     }
 }

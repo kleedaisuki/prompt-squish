@@ -187,7 +187,15 @@ def package(source, dist, tag):
     binary = source / "target" / target / "release" / executable
     if run(str(binary), "--version") != f"xmlsquish {version}":
         raise ValueError("binary version does not match release tag")
-    with tempfile.TemporaryDirectory() as directory:
+    if tuple(map(int, version.split("."))) >= (1, 2, 0):
+        from archive_smoke import smoke_archives
+
+        archive_scratch = source / ".temp" / "archive-smoke"
+        archive_scratch.mkdir(parents=True, exist_ok=True)
+        smoke_archives(binary, archive_scratch)
+    scratch = source / ".temp" / "release-smoke"
+    scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=scratch) as directory:
         staging = Path(directory)
         help_text = run(str(binary))
         for command in commands_for(version):
@@ -314,7 +322,9 @@ def publish(source, dist, tag):
     # 重试时也先检查全部既有资产，再上传任何新增文件。
     for asset in [*assets, manifest]:
         if asset.name in existing:
-            with tempfile.TemporaryDirectory() as directory:
+            scratch = source / ".temp" / "release-downloads"
+            scratch.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=scratch) as directory:
                 run("gh", "release", "download", tag, "--pattern", asset.name, "--dir", directory)
                 if digest(Path(directory) / asset.name) != digest(asset):
                     raise ValueError(f"refusing to replace existing asset: {asset.name}")

@@ -813,3 +813,64 @@ fn ordinary_absolute_artifact_matches_verbatim_project_root_but_missing_absolute
     .unwrap_err();
     assert_eq!(error.code(), "XS3424");
 }
+
+#[test]
+fn packaging_unit_ir_is_inspectable_and_self_describing() {
+    let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.temp");
+    fs::create_dir_all(&scratch).unwrap();
+    let root = tempfile::tempdir_in(scratch).unwrap();
+    fs::create_dir(root.path().join("src")).unwrap();
+    fs::write(
+        root.path().join("xmlsquish.toml"),
+        "manifest-version=1\n[package]\nname=\"demo\"\nversion=\"1.0.0\"\n",
+    )
+    .unwrap();
+    for kind in ["pack", "sopack"] {
+        let xml = format!(
+            r#"<xs:{kind} xmlns:xs="{}"/>"#,
+            squish_xml_front::DSL_NAMESPACE
+        );
+        let source_path = root.path().join("src/main.xml");
+        fs::write(&source_path, xml).unwrap();
+        let mut snapshot = squish_source::SnapshotBuilder::new(squish_source::FileSourceProvider);
+        let source = snapshot
+            .load(
+                squish_source::SourceId::new(
+                    squish_source::PackageId::new("demo").unwrap(),
+                    squish_source::LogicalPath::new("src/main.xml").unwrap(),
+                ),
+                squish_source::SourceLocator::file(source_path),
+            )
+            .unwrap();
+        let context = squish_xml_front::FrontendSourceContext::new(squish_ir::PackageInstanceId {
+            source_kind: 1,
+            canonical_source: "workspace:demo".into(),
+            package_name: "demo".into(),
+            exact_revision: "manifest:demo@1".into(),
+        });
+        let unit = squish_xml_front::compile(&source, &context).unwrap().unit;
+        let bytes = squish_ir::encode_unit_container(&unit).unwrap();
+        let services = FakeServices::default();
+        insert_blob(&services, &bytes);
+        let item = artifact(kind, ArtifactKind::BinaryIr, &bytes);
+        services
+            .artifacts
+            .lock()
+            .unwrap()
+            .insert(item.id.clone(), item.clone());
+        let req = request(&root, InspectView::Ir(item.id.clone()));
+        assert!(matches!(
+            inspect_value(&req, &req.view, &services, &InvocationSettings::default()).unwrap(),
+            InspectResult::Ir(_)
+        ));
+        services.relations.lock().unwrap().insert(
+            item.id.clone(),
+            ProvenanceRelation::NotApplicable(ProvenanceNonApplicability::SelfDescribingEvidence),
+        );
+        let req = request(&root, InspectView::Provenance(item.id));
+        assert!(matches!(
+            inspect_value(&req, &req.view, &services, &InvocationSettings::default()).unwrap(),
+            InspectResult::Provenance(_)
+        ));
+    }
+}

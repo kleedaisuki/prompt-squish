@@ -191,6 +191,10 @@ pub enum ImportSpec {
 pub enum UnitKind {
     Entry,
     Module,
+    /// A distributable archive root.
+    Pack,
+    /// A reusable library archive root.
+    Sopack,
 }
 /// 可重定位导入。 / Relocatable import.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -321,6 +325,17 @@ pub struct Fill {
 /// 当前 DSL 的闭合操作代数。 / Closed operation algebra for the current DSL.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Op {
+    /// Copies complete bytes resolved relative to the defining unit, never the caller.
+    Asset {
+        path: StringId,
+        name: StringId,
+    },
+    /// Includes an entry-only import as a compiled prompt archive member.
+    Include {
+        import: ImportId,
+        path: StringId,
+        name: StringId,
+    },
     EmitText {
         value: StringId,
     },
@@ -388,21 +403,88 @@ pub struct EntryObject {
     pub attachment: UnitSourceAttachment,
     pub producer: Producer,
 }
-/// 任一可重定位单元。 / Any relocatable unit.
+/// Library declarations and a packaging root share one relocatable arena.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SopackObject {
+    /// Public macros, imports, provenance, and operations.
+    pub module: ModuleObject,
+    /// Root collecting library-owned assets without generating a prompt.
+    pub root_region: RegionId,
+}
+
+/// Any independently relocatable compilation unit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RelocatableUnitIr {
     Module(ModuleObject),
     Entry(EntryObject),
+    Pack(EntryObject),
+    Sopack(SopackObject),
 }
 
 impl RelocatableUnitIr {
+    /// Mutable access for source-identity relocation at archive boundaries.
+    pub fn header_mut(&mut self) -> &mut UnitHeader {
+        match self {
+            Self::Module(u) => &mut u.header,
+            Self::Entry(u) | Self::Pack(u) => &mut u.header,
+            Self::Sopack(u) => &mut u.module.header,
+        }
+    }
+    /// Mutable access for source-identity relocation at archive boundaries.
+    pub fn sources_mut(&mut self) -> &mut SourceArchive {
+        match self {
+            Self::Module(u) => &mut u.sources,
+            Self::Entry(u) | Self::Pack(u) => &mut u.sources,
+            Self::Sopack(u) => &mut u.module.sources,
+        }
+    }
+    /// Mutable access for source-identity relocation at archive boundaries.
+    pub fn attachment_mut(&mut self) -> &mut UnitSourceAttachment {
+        match self {
+            Self::Module(u) => &mut u.attachment,
+            Self::Entry(u) | Self::Pack(u) => &mut u.attachment,
+            Self::Sopack(u) => &mut u.module.attachment,
+        }
+    }
+    /// Source archive attached to this unit, independent of storage location.
+    pub fn sources(&self) -> &SourceArchive {
+        match self {
+            Self::Module(u) => &u.sources,
+            Self::Entry(u) | Self::Pack(u) => &u.sources,
+            Self::Sopack(u) => &u.module.sources,
+        }
+    }
+    /// Public macro definitions; executable roots have no definitions.
+    pub fn definitions(&self) -> &[MacroDef] {
+        match self {
+            Self::Module(u) => &u.definitions,
+            Self::Sopack(u) => &u.module.definitions,
+            _ => &[],
+        }
+    }
+    /// Executable or packaging root, absent for ordinary modules.
+    pub fn root_region(&self) -> Option<RegionId> {
+        match self {
+            Self::Entry(u) | Self::Pack(u) => Some(u.root_region),
+            Self::Sopack(u) => Some(u.root_region),
+            _ => None,
+        }
+    }
+    /// Runtime parameters accepted by executable roots.
+    pub fn required_params(&self) -> &[LocalName] {
+        match self {
+            Self::Entry(u) | Self::Pack(u) => &u.required_params,
+            _ => &[],
+        }
+    }
     /// 返回两种单元共享的头；调用方不必把单元种类当作读取元数据的特殊情况。
     /// Returns the common header without making the unit kind a special case for metadata reads.
     #[must_use]
     pub fn header(&self) -> &UnitHeader {
         match self {
             Self::Module(unit) => &unit.header,
-            Self::Entry(unit) => &unit.header,
+            Self::Entry(unit) | Self::Pack(unit) => &unit.header,
+            Self::Sopack(unit) => &unit.module.header,
         }
     }
 
@@ -412,6 +494,8 @@ impl RelocatableUnitIr {
         match self {
             Self::Module(_) => UnitKind::Module,
             Self::Entry(_) => UnitKind::Entry,
+            Self::Pack(_) => UnitKind::Pack,
+            Self::Sopack(_) => UnitKind::Sopack,
         }
     }
 
@@ -420,7 +504,8 @@ impl RelocatableUnitIr {
     pub fn regions(&self) -> &[Region] {
         match self {
             Self::Module(unit) => &unit.regions,
-            Self::Entry(unit) => &unit.regions,
+            Self::Entry(unit) | Self::Pack(unit) => &unit.regions,
+            Self::Sopack(unit) => &unit.module.regions,
         }
     }
 
@@ -429,7 +514,8 @@ impl RelocatableUnitIr {
     pub fn ops(&self) -> &[OpRecord] {
         match self {
             Self::Module(unit) => &unit.ops,
-            Self::Entry(unit) => &unit.ops,
+            Self::Entry(unit) | Self::Pack(unit) => &unit.ops,
+            Self::Sopack(unit) => &unit.module.ops,
         }
     }
 
@@ -439,7 +525,8 @@ impl RelocatableUnitIr {
     pub fn origins(&self) -> &OriginTable {
         match self {
             Self::Module(unit) => &unit.origins,
-            Self::Entry(unit) => &unit.origins,
+            Self::Entry(unit) | Self::Pack(unit) => &unit.origins,
+            Self::Sopack(unit) => &unit.module.origins,
         }
     }
 
@@ -448,7 +535,8 @@ impl RelocatableUnitIr {
     pub fn external_symbols(&self) -> &[SymbolKey] {
         match self {
             Self::Module(unit) => &unit.external_symbols,
-            Self::Entry(unit) => &unit.external_symbols,
+            Self::Entry(unit) | Self::Pack(unit) => &unit.external_symbols,
+            Self::Sopack(unit) => &unit.module.external_symbols,
         }
     }
 }
