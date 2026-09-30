@@ -257,16 +257,17 @@ def sopack_reuse(binary: Path, directory: Path, count: int) -> Path:
     (producer / "payload.bin").write_bytes(bytes(range(256)) * 256)
     invoke(binary, ["build", "--offline", "--plain"], producer)
     archive_check(binary, producer, "library.sopack")
-    relocated = directory / "relocated" / "library.sopack"
-    relocated.parent.mkdir()
-    shutil.copyfile(producer / "target/xmlsquish/artifacts/library.sopack", relocated)
-    immutable_digest = hashlib.sha256(relocated.read_bytes()).digest()
-    shutil.rmtree(producer)
     expansions = ''.join(f'<xs:expand ref="m:asset{i}"/>' for i in range(count))
     consumer = fixture(directory / "consumer", "bundle",
                        f'<xs:pack xmlns:xs="{NS}" xmlns:m="urn:perf:reusable">'
                        f'<xs:import src="pkg:reusable/main"/>{expansions}</xs:pack>', "pack")
-    invoke(binary, ["add", "reusable", "--path", "../relocated/library.sopack"], consumer)
+    # Dependency paths are workspace-contained, not merely syntactically relative.
+    relocated = consumer / "deps" / "library.sopack"
+    relocated.parent.mkdir()
+    shutil.copyfile(producer / "target/xmlsquish/artifacts/library.sopack", relocated)
+    immutable_digest = hashlib.sha256(relocated.read_bytes()).digest()
+    shutil.rmtree(producer)
+    invoke(binary, ["add", "reusable", "--path", "deps/library.sopack"], consumer)
     invoke(binary, ["build", "--offline", "--plain"], consumer)
     with zipfile.ZipFile(consumer / "target/xmlsquish/artifacts/bundle.pack") as archive:
         if len(archive.namelist()) != count:
