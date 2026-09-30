@@ -11,6 +11,10 @@ on:
         description: 'Collect paired release CLI benchmarks (enable for final release verification)'
         type: boolean
         default: false
+      site:
+        description: 'Validate site and browser contracts (disable only for Rust-only fix iterations)'
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -152,6 +156,15 @@ jobs:
           RUSTUP_TOOLCHAIN: 1.88.0
         run: node site/scripts/build-demo.mjs --check
 
+      - name: Retain generated site demonstration on drift
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: site-demo-expected-${{ github.sha }}
+          path: .temp/site-demo-expected.json
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Install root package from source
         if: runner.os == 'Linux'
         shell: bash
@@ -231,6 +244,7 @@ jobs:
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
   site:
+    if: github.event_name != 'workflow_dispatch' || inputs.site
     name: Site
     runs-on: ubuntu-latest
     timeout-minutes: 20

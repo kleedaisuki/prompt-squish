@@ -10,6 +10,7 @@ const root = resolve(dirname(script), "../..");
 const fixture = join(root, "examples/site-demo");
 const artifact = join(root, "site/src/data/build-demo.json");
 const temporaryRoot = join(root, ".temp");
+const expectedArtifact = join(temporaryRoot, "site-demo-expected.json");
 const temporary = join(temporaryRoot, `site-demo-${process.pid}`);
 const check = process.argv.slice(2).includes("--check");
 assert(process.argv.slice(2).every((arg) => arg === "--check"), "Usage: node site/scripts/build-demo.mjs [--check]");
@@ -97,7 +98,7 @@ async function scenario(mode) {
   const stages = {
     manifest: sources["xmlsquish.toml"], source: entry,
     xsir: descriptorSummary("XSIR/1 canonical binary module set", irRecords),
-    link: `target site-demo:agent\ncompile ${irRecords.length} modules → link → instantiate → backend → publish`,
+    link: `target site-demo:agent\ncompile ${irRecords.length} modules → middle-end optimize → link → instantiate → backend → publish`,
     prompt,
     debug: descriptorSummary("PSDBG/1 self-contained debug companion", [debugRecord]),
   };
@@ -119,8 +120,16 @@ try {
     diagnostic: '{"version":{"major":3,"minor":0},"sequence":0,"payload":{"type":"planning_started"}}\n{"version":{"major":3,"minor":0},"sequence":1,"payload":{"type":"action_succeeded","data":{"kind":"compile","cache":"persistent"}}}\n{"version":{"major":3,"minor":0},"sequence":2,"payload":{"type":"job_finished","data":{"status":"success"}}}',
   };
   const generated = `${JSON.stringify(data, null, 2)}\n`;
-  if (check) assert.equal(lf(await readFile(artifact, "utf8")), generated, "Site demo drifted. Run npm --prefix site run demo:generate.");
-  else await writeFile(artifact, generated, "utf8");
+  if (check) {
+    const tracked = lf(await readFile(artifact, "utf8"));
+    // Preserve exact CLI-derived descriptors for remote review without rewriting tracked data.
+    // The candidate lives outside the disposable scenario directory and survives finally cleanup.
+    if (tracked !== generated) {
+      await writeFile(expectedArtifact, generated, "utf8");
+      console.error("Site demo candidate saved to .temp/site-demo-expected.json; review the CI artifact before updating tracked data.");
+    }
+    assert.equal(tracked, generated, "Site demo drifted. Run npm --prefix site run demo:generate, or review the exact generated CI candidate.");
+  } else await writeFile(artifact, generated, "utf8");
   console.log(`${check ? "Verified" : "Generated"} site/src/data/build-demo.json with build + inspect`);
 } finally {
   const child = relative(temporaryRoot, temporary);

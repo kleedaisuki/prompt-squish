@@ -30,6 +30,13 @@ def check_topology(document: str) -> None:
         raise ValueError("performance dispatch input must remain boolean")
     if not re.search(r"^        default: false$", dispatch.group(1), re.MULTILINE):
         raise ValueError("performance measurements must remain opt-in")
+    site_input = re.search(r"^      site:\n(.*?)(?=^      \S|\Z)",
+                           dispatch.group(1), re.MULTILINE | re.DOTALL)
+    if site_input is None or not re.search(r"^        type: boolean$", site_input.group(1),
+                                           re.MULTILINE):
+        raise ValueError("site must remain a boolean dispatch input")
+    if not re.search(r"^        default: true$", site_input.group(1), re.MULTILINE):
+        raise ValueError("site validation must remain enabled by default")
     jobs = re.search(r"^jobs:\n(.*)\Z", document, re.MULTILINE | re.DOTALL)
     if jobs is None:
         raise ValueError("missing top-level jobs mapping")
@@ -40,6 +47,12 @@ def check_topology(document: str) -> None:
                             jobs.group(1), re.MULTILINE | re.DOTALL)
     if performance is None or "inputs.performance" not in performance.group(1):
         raise ValueError("performance job must be gated by the explicit dispatch input")
+    site = re.search(r"^  site:\n(.*?)(?=^  \S|\Z)", jobs.group(1), re.MULTILINE | re.DOTALL)
+    if site is None or not re.search(
+        r"^    if: github.event_name != 'workflow_dispatch' \|\| inputs.site$",
+        site.group(1), re.MULTILINE,
+    ):
+        raise ValueError("site validation must run for all push and pull-request events")
 
 
 class WorkflowTopologyTests(unittest.TestCase):
@@ -64,6 +77,19 @@ class WorkflowTopologyTests(unittest.TestCase):
         """Routine fix iterations must not silently enable expensive measurements."""
         source = WORKFLOW.read_text(encoding="utf-8").replace("default: false", "default: true", 1)
         with self.assertRaisesRegex(ValueError, "opt-in"):
+            check_topology(source)
+
+    def test_site_disabled_by_default_is_rejected(self) -> None:
+        """Only explicit Rust-only dispatches may omit repeated site validation."""
+        source = WORKFLOW.read_text(encoding="utf-8").replace("default: true", "default: false", 1)
+        with self.assertRaisesRegex(ValueError, "enabled by default"):
+            check_topology(source)
+
+    def test_site_push_or_pull_request_skip_is_rejected(self) -> None:
+        """The site optimization must not weaken normal main/PR coverage."""
+        source = WORKFLOW.read_text(encoding="utf-8").replace(
+            "github.event_name != 'workflow_dispatch' || inputs.site", "inputs.site", 1)
+        with self.assertRaisesRegex(ValueError, "push and pull-request"):
             check_topology(source)
 
 
