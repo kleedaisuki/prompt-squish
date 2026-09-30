@@ -1205,7 +1205,7 @@ impl ProductionHost {
         for (key, bytes) in &payload.sources {
             let logical = squish_backend::archive::logical_source_path(key)
                 .map_err(|error| fail(error.to_string()))?;
-            let path = safe_sopack_attachment(stage.path(), &logical).map_err(&fail)?;
+            let path = safe_sopack_attachment(stage.path(), &logical).map_err(fail)?;
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(|error| fail(error.to_string()))?;
             }
@@ -2230,7 +2230,7 @@ fn read_project_sopack(
             "SOPack archive exceeds its byte limit or is not a regular file".into(),
         ));
     }
-    let bytes = read_bounded_archive(file, limits.max_archive_bytes).map_err(&fail)?;
+    let bytes = read_bounded_archive(file, limits.max_archive_bytes).map_err(fail)?;
     let payload = squish_backend::archive::read_sopack(&bytes, limits)
         .map_err(|error| fail(error.to_string()))?;
     Ok((relative, bytes, payload))
