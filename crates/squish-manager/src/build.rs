@@ -1215,7 +1215,7 @@ fn prepare_excluding(
         .snapshot_with_locations(&resolved.packages)
         .map_err(|e| error("MGB004", Phase::Discover, e))?;
     let sources = freeze_sources(&snapshot, &resolved.packages)?;
-    let targets = select_targets(request, &snapshot, &sources, excluded)?;
+    let targets = select_targets(request, &snapshot, &sources, excluded, &resolved.packages)?;
     let backend_identities = freeze_backend_identities(&targets, runtime.as_ref())?;
     let plan = build_plan(
         &snapshot,
@@ -1353,7 +1353,7 @@ fn prepare_recorded(
     let (sources, targets) = planning.step(step("scan"), PlanningStepKind::Scan, || {
         planning_not_cancelled(context)?;
         let sources = freeze_sources(&snapshot, &resolved.packages)?;
-        let targets = select_targets(request, &snapshot, &sources, excluded)?;
+        let targets = select_targets(request, &snapshot, &sources, excluded, &resolved.packages)?;
         Ok((sources, targets))
     })?;
     let (backend_identities, plan) = planning.step(
@@ -2651,6 +2651,7 @@ fn select_targets(
     snapshot: &ProjectSnapshot,
     sources: &[FrozenSource],
     excluded: &BTreeSet<String>,
+    locations: &[squish_repository::PackageLocation],
 ) -> Result<Vec<TargetBuild>, ManagerError> {
     let selected_packages: BTreeSet<_> = match &request.scope {
         WorkspaceScope::Current => snapshot
@@ -2672,6 +2673,9 @@ fn select_targets(
             .collect(),
         WorkspaceScope::Packages(names) => names.iter().map(|n| n.as_str().to_owned()).collect(),
     };
+    let packages = snapshot
+        .resolved_packages(locations)
+        .map_err(|e| error("MGB014", Phase::Analyze, e))?;
     let requested: BTreeSet<_> = request.targets.iter().map(|n| n.as_str()).collect();
     let mut out = Vec::new();
     for manifest in snapshot.manifests() {
@@ -2717,9 +2721,23 @@ fn select_targets(
                     .to_string_lossy(),
             )
             .map_err(|e| error("MGB016", Phase::Analyze, e))?;
+            let owner = packages
+                .iter()
+                .find(|p| {
+                    p.instance.package_name == package.name
+                        && p.locator.as_path() == resolved.package_dir
+                        && matches!(p.instance.source_kind, 3 | 4)
+                })
+                .ok_or_else(|| {
+                    ManagerError::new(
+                        "MGB017",
+                        Phase::Analyze,
+                        "target owner is absent from the exact lock mapping",
+                    )
+                })?;
             let entry = sources
                 .iter()
-                .find(|s| s.package.package_name == package.name && s.blob.id().path() == &logical)
+                .find(|s| s.package == owner.instance && s.blob.id().path() == &logical)
                 .map(source_key)
                 .ok_or_else(|| {
                     ManagerError::new(

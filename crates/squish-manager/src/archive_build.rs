@@ -164,6 +164,10 @@ fn freeze_local_assets(source: &FrozenSource) -> Result<BTreeMap<String, Vec<u8>
 
 /// Lightweight namespace-aware pre-scan avoids compiling every source during planning.
 fn declared_assets(bytes: &[u8]) -> Result<BTreeSet<String>, ManagerError> {
+    // XML element names cannot use character references; a missing literal is a safe fast path.
+    if std::str::from_utf8(bytes).is_ok_and(|text| !text.contains("asset")) {
+        return Ok(BTreeSet::new());
+    }
     let mut reader = NsReader::from_reader(bytes);
     let mut paths = BTreeSet::new();
     loop {
@@ -385,13 +389,15 @@ fn pack_bytes(
                 let entry = bindings.get(&(source, import.0)).ok_or_else(|| {
                     ManagerError::new("MGB160", Phase::Emit, "include binding is absent")
                 })?;
-                if !includes.contains_key(*entry) {
-                    let bytes = include_bytes(executor, target, entry, resolution, compiled)?;
-                    includes.insert((*entry).clone(), bytes);
-                }
+                let bytes = match includes.entry((*entry).clone()) {
+                    std::collections::btree_map::Entry::Occupied(value) => value.into_mut(),
+                    std::collections::btree_map::Entry::Vacant(value) => value.insert(
+                        include_bytes(executor, target, entry, resolution, compiled)?,
+                    ),
+                };
                 squish_backend::archive::ArchiveEntry {
                     path: name.clone(),
-                    bytes: includes[*entry].clone(),
+                    bytes: bytes.clone(),
                 }
             }
         };
@@ -514,6 +520,13 @@ fn sopack_bytes(
         .filter(|b| reachable.contains(&b.importer) && reachable.contains(&b.target))
         .cloned()
         .collect();
+    let SourceKey::Project { package: owner, .. } = &target.entry else {
+        return Err(ManagerError::new(
+            "MGB170",
+            Phase::Emit,
+            "SOPack packaging root has no exact package identity",
+        ));
+    };
     for (name, path) in &manifest.exports {
         let logical = LogicalPath::new(path.to_string_lossy())
             .map_err(|e| error("MGB169", Phase::Emit, e))?;
@@ -522,7 +535,7 @@ fn sopack_bytes(
             .keys()
             .find(|key| {
                 matches!(key, SourceKey::Project { package: p, path }
-            if p.package_name == package.name && path.join("/") == logical.as_str())
+            if p == owner && path.join("/") == logical.as_str())
             })
             .ok_or_else(|| {
                 ManagerError::new(

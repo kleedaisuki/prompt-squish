@@ -1181,7 +1181,7 @@ impl ProductionHost {
     fn materialize_sopack(
         &self,
         checksum: &str,
-        payload: &squish_backend::SopackPayload,
+        payload: &squish_backend::archive::SopackPayload,
     ) -> Result<PathBuf, SourceUnavailable> {
         let fail = |error: String| SourceUnavailable {
             identity: checksum.into(),
@@ -1203,7 +1203,7 @@ impl ProductionHost {
         )
         .map_err(|error| fail(error.to_string()))?;
         for (key, bytes) in &payload.sources {
-            let logical = squish_backend::logical_source_path(key)
+            let logical = squish_backend::archive::logical_source_path(key)
                 .map_err(|error| fail(error.to_string()))?;
             let path = safe_sopack_attachment(stage.path(), &logical).map_err(&fail)?;
             if let Some(parent) = path.parent() {
@@ -2210,7 +2210,7 @@ impl FilesystemPort for FilesystemView<'_> {
 fn read_project_sopack(
     root: &Path,
     path: &Path,
-) -> Result<(PathBuf, Vec<u8>, squish_backend::SopackPayload), SourceUnavailable> {
+) -> Result<(PathBuf, Vec<u8>, squish_backend::archive::SopackPayload), SourceUnavailable> {
     let fail = |detail: String| SourceUnavailable {
         identity: path.display().to_string(),
         detail,
@@ -2222,7 +2222,7 @@ fn read_project_sopack(
         .strip_prefix(root)
         .map_err(|_| fail("SOPack dependency escapes workspace root".into()))?
         .to_path_buf();
-    let limits = squish_backend::ArchiveLimits::default();
+    let limits = squish_backend::archive::ArchiveLimits::default();
     let file = File::open(canonical).map_err(|error| fail(error.to_string()))?;
     let metadata = file.metadata().map_err(|error| fail(error.to_string()))?;
     if !metadata.is_file() || metadata.len() > limits.max_archive_bytes {
@@ -2231,8 +2231,8 @@ fn read_project_sopack(
         ));
     }
     let bytes = read_bounded_archive(file, limits.max_archive_bytes).map_err(&fail)?;
-    let payload =
-        squish_backend::read_sopack(&bytes, limits).map_err(|error| fail(error.to_string()))?;
+    let payload = squish_backend::archive::read_sopack(&bytes, limits)
+        .map_err(|error| fail(error.to_string()))?;
     Ok((relative, bytes, payload))
 }
 
@@ -2251,7 +2251,9 @@ fn read_bounded_archive(reader: impl std::io::Read, limit: u64) -> Result<Vec<u8
 }
 
 /// Uses embedded manifest intent; archive imports are already linked and self-contained.
-fn sopack_manifest(payload: &squish_backend::SopackPayload) -> Result<Manifest, SourceUnavailable> {
+fn sopack_manifest(
+    payload: &squish_backend::archive::SopackPayload,
+) -> Result<Manifest, SourceUnavailable> {
     let source = payload
         .metadata
         .get("manifest")
