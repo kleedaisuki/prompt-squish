@@ -26,6 +26,8 @@ concurrency:
 jobs:
   rust-quality:
     name: Rust quality (Ubuntu, MSRV 1.88)
+    outputs:
+      compiled: ${{ steps.compile.outcome }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -55,6 +57,7 @@ jobs:
           cargo +1.88.0 clippy --version
 
       - name: Check minimum supported Rust version
+        id: compile
         run: cargo +1.88.0 check --workspace --all-targets --locked
 
       # Keep the declared workspace graph equal to the reviewed architectural contract.
@@ -91,6 +94,7 @@ jobs:
 
   rust-test:
     needs: rust-quality
+    if: always() && !cancelled() && needs.rust-quality.outputs.compiled == 'success'
     name: Rust test (${{ matrix.name }}, MSRV 1.88)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20

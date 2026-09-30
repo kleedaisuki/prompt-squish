@@ -43,6 +43,19 @@ def check_topology(document: str) -> None:
     names = re.findall(r"^  ([a-z][a-z-]*):$", jobs.group(1), re.MULTILINE)
     if names != ["rust-quality", "rust-test", "performance", "site"]:
         raise ValueError("CI jobs must remain unique and below the jobs mapping")
+    quality = re.search(r"^  rust-quality:\n(.*?)(?=^  \S|\Z)",
+                        jobs.group(1), re.MULTILINE | re.DOTALL)
+    native = re.search(r"^  rust-test:\n(.*?)(?=^  \S|\Z)",
+                       jobs.group(1), re.MULTILINE | re.DOTALL)
+    if quality is None or "compiled: ${{ steps.compile.outcome }}" not in quality.group(1):
+        raise ValueError("quality job must publish the actual compile outcome")
+    if not re.search(r"^        id: compile$", quality.group(1), re.MULTILINE):
+        raise ValueError("compile outcome must belong to the real MSRV check step")
+    if native is None or (
+        "if: always() && !cancelled() && needs.rust-quality.outputs.compiled == 'success'"
+        not in native.group(1)
+    ):
+        raise ValueError("native tests must require successful compilation even after lint failure")
     performance = re.search(r"^  performance:\n(.*?)(?=^  \S|\Z)",
                             jobs.group(1), re.MULTILINE | re.DOTALL)
     if performance is None or "inputs.performance" not in performance.group(1):
