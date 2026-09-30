@@ -1,0 +1,92 @@
+name: Manual release profile experiment
+
+on:
+  workflow_dispatch:
+    inputs:
+      enabled:
+        description: 'Explicitly authorize two release builds and a bounded ThinLTO trial'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-profile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  profile:
+    if: inputs.enabled
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Restore isolated profile build state
+        id: rust-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            .cache/profile-target
+          key: profile-v1-linux-x64-1.88-ltofalse-cgu16-thin-cgu1-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: profile-v1-linux-x64-1.88-ltofalse-cgu16-thin-cgu1-${{ hashFiles('Cargo.lock') }}-
+      # Cache versions include path lists: use the existing CI's exact three paths
+      # rather than an ineffective prefix fallback on the four-path profile cache.
+      - name: Reuse existing default-profile CI compilation on first trial
+        if: steps.rust-cache.outputs.cache-matched-key == ''
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-v1-Linux-X64-1.88-performance-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: rust-v1-Linux-X64-1.88-performance-${{ hashFiles('Cargo.lock') }}-
+      - name: Build two profiles and retain their actual wall times
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, shutil, subprocess, time
+          output = pathlib.Path('.temp/profile')
+          output.mkdir(parents=True, exist_ok=True)
+          records = {}
+          profiles = [('default', {'CARGO_TARGET_DIR': 'target', 'CARGO_PROFILE_RELEASE_LTO': 'false', 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS': '16'}),
+                      ('thin', {'CARGO_TARGET_DIR': '.cache/profile-target', 'CARGO_PROFILE_RELEASE_LTO': 'thin', 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS': '1'})]
+          for name, settings in profiles:
+              environment = dict(os.environ)
+              environment.pop('CARGO_PROFILE_RELEASE_LTO', None)
+              environment.pop('CARGO_PROFILE_RELEASE_CODEGEN_UNITS', None)
+              environment.update(settings)
+              start = time.perf_counter_ns()
+              subprocess.run(['cargo', '+1.88.0', 'build', '--release', '--bin', 'xmlsquish', '--locked'], env=environment, check=True)
+              records[name] = {'wall_ns': time.perf_counter_ns() - start, 'profile_overrides': settings}
+              shutil.copyfile(pathlib.Path(settings['CARGO_TARGET_DIR']) / 'release/xmlsquish', output / f'{name}-xmlsquish')
+              (output / f'{name}-xmlsquish').chmod(0o755)
+              (output / 'build-times.json').write_text(json.dumps(records, indent=2) + '\n')
+          PY
+      - name: Compare bounded startup and tiny builds with twenty AB/BA pairs
+        run: python scripts/perf/profile_probe.py .temp/profile/default-xmlsquish .temp/profile/thin-xmlsquish --build-times .temp/profile/build-times.json --rounds 20 --report .temp/profile/results.json
+      - name: Upload small evidence only, never native binaries or Cargo targets
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: performance-profile-${{ github.sha }}
+          path: |
+            .temp/profile/results.json
+            .temp/profile/build-times.json
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Preserve partial compilation without treating it as verification
+        if: always() && !cancelled() && steps.rust-cache.outputs.cache-hit != 'true' && steps.rust-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            .cache/profile-target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
