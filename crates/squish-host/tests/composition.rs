@@ -228,7 +228,7 @@ fn production_compiler_pipeline_shares_document_abi_at_every_boundary() {
             &key,
             squish_link::UnitClosure {
                 snapshot: resolution,
-                units: BTreeMap::from([(key, unit)]),
+                units: BTreeMap::from([(key.clone(), unit)]),
             },
         )
         .unwrap();
