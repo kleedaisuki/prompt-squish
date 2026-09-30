@@ -7,6 +7,23 @@ candidate checkpoint below. Earlier failure records are retained as historical
 evidence, not the current verdict. Release publication requires a later exact-tag
 source gate and the complete native asset matrix.
 
+Final delivery status: **v1.2.0 published** at tagged source
+`85b68c04c88b6a6b8bce12f1b4e3e10a5a218366`. Exact main
+[CI 36778366614](https://github.com/kleedaisuki/prompt-squish/actions/runs/36778366614)
+and six-target [release 36779433911](https://github.com/kleedaisuki/prompt-squish/actions/runs/36779433911)
+both passed. The [public release](https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.2.0)
+is neither draft nor prerelease and contains six native archives, `SKILL.md`
+and `SHA256SUMS`. All seven manifest hashes were compared to GitHub's computed
+asset SHA-256 digests; the downloaded small guide also matches tagged source
+byte-for-byte. Native archives were not downloaded locally to save disk.
+
+Pages [deployment 36778361865](https://github.com/kleedaisuki/prompt-squish/actions/runs/36778361865)
+passed, and the public `/releases/1.2.0/` page returned HTTP 200 with the new
+version and SOPack content. Final main raw performance evidence and honest
+residual-overhead limits are recorded in `docs/performance/v1.2-final-main.json`
+and `docs/performance/v1.2-pipeline.md`. The post-release documentation commit
+does not retag or change the immutable shipped source.
+
 ## Basis and scope
 
 Expected behavior comes from the requested v1.2 contract, the pre-existing
