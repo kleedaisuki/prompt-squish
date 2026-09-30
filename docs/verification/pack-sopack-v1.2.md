@@ -39,6 +39,7 @@ an entry or store a finished prompt.
 | Include program isolation | Two included entries import different modules defining the same QName | Each entry uses its own standalone module closure |
 | Distinct package source identity | Two dependencies both own `src/lib.xml` and `src/owned.bin` | Relocated SOPack retains both symbol/asset providers without path collision |
 | Names are not package identity | Root and two aliased dependencies all named `library`, version `1.0.0`, with different source paths | Both dependency providers survive relocation despite identical name/version/path basenames |
+| Formatted asset macro body | Module macro contains indentation, XML comment and processing instruction around asset | Only exact asset member emitted; authoring trivia does not reject packaging |
 | Portable output paths | Traversal, rooted, and duplicate member names | Rejection before artifact publication |
 | SOPack-root macro export | `[exports] main="src/main.xml"` points to SOPack root declaring a macro | Relocated consumer imports `pkg:library/main` and expands the root macro with provider-owned bytes |
 
@@ -58,10 +59,33 @@ rustfmt --edition 2024 tests/pack_process.rs
 git diff --check -- tests/pack_process.rs docs/verification/pack-sopack-v1.2.md
 ```
 
-No Rust compilation or process acceptance test has yet been executed. The
+No Rust compilation or process acceptance test has been executed locally. The
 requested hosted command is `cargo test --locked --test pack_process` (the
-ordinary full root-package test suite also discovers this file). Hosted execution and its
-commit / run link must be recorded before a passing verdict is claimed.
+ordinary full root-package test suite also discovers this file).
+
+Hosted [CI run 36770694172](https://github.com/kleedaisuki/prompt-squish/actions/runs/36770694172)
+executed 13 process fixtures on Linux: **5 passed and 8 failed**. The inspectable
+local log is `.temp/v1.2-ci/ninth-linux.log`; this run is not a passing acceptance
+verdict. Three include-related failures report backend document ABI rejection;
+the compiler owner is repairing that mismatch. Five remaining tests fail to
+find expected products after successful commands. Source inspection establishes
+the latter as a publication defect, not an expected-path test error:
+
+- `Target::output_path` derives `.pack` / `.sopack`, and repository target
+  resolution joins that name to the expected artifacts directory.
+- The manager publishes those products as `ArtifactKind::Other("pack")` /
+  `Other("sopack")`.
+- `squish-publish::is_user_artifact` initially accepts only `Prompt`, `BinaryIr`
+  and `DebugInfo`; `materialize_generation` filters using that predicate, so it
+  skips materializing the newly supported products while returning success.
+
+Manager and root owners were notified with these exact code paths. The test
+harness now retains each project's last CLI stdout, stderr, arguments and exit
+status in thread-local memory; a missing-product assertion reports those plus
+actual artifact / metadata directory listings. This improves diagnosis without
+adding fixture inputs or relaxing the public publication contract. A 14th
+formatted-asset-macro fixture was subsequently added. All fixes and additions
+require a new hosted run before acceptance can be approved.
 
 ## Settled root-export contract
 

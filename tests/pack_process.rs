@@ -2,20 +2,39 @@
 //! Fixtures stay in repository `.temp`; ZIP inspection does not reuse backend code.
 
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Output},
 };
 
+thread_local! {
+    /// Retains process evidence per test thread without creating project inputs.
+    static CLI_EVIDENCE: RefCell<BTreeMap<PathBuf, String>> = const { RefCell::new(BTreeMap::new()) };
+}
+
 /// Runs the real CLI with inherited tracing disabled unless explicitly requested.
 fn cli(root: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_xmlsquish"))
+    let output = Command::new(env!("CARGO_BIN_EXE_xmlsquish"))
         .current_dir(root)
         .env_remove("XMLSQUISH_TRACE")
         .args(args)
         .output()
-        .expect("start xmlsquish")
+        .expect("start xmlsquish");
+    CLI_EVIDENCE.with(|evidence| {
+        evidence.borrow_mut().insert(
+            root.to_path_buf(),
+            format!(
+                "cwd={}\nargs={args:?}\nexit={:?}\nstdout={}\nstderr={}",
+                root.display(),
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        );
+    });
+    output
 }
 
 /// Keeps temporary project trees on the repository volume.
@@ -56,7 +75,33 @@ fn failure(output: Output) {
 
 /// Reads the user-facing product rather than private generation/cache files.
 fn artifact(root: &Path, suffix: &str) -> Vec<u8> {
-    fs::read(root.join(format!("target/xmlsquish/artifacts/chat.{suffix}"))).unwrap()
+    let path = root.join(format!("target/xmlsquish/artifacts/chat.{suffix}"));
+    fs::read(&path).unwrap_or_else(|error| {
+        let evidence = CLI_EVIDENCE.with(|evidence| evidence.borrow().get(root).cloned().unwrap_or_default());
+        panic!("cannot read expected product {}: {error}\nartifact directory: {}\nproject metadata directory: {}\nlast CLI invocation:\n{evidence}",
+            path.display(), directory_contents(&root.join("target/xmlsquish/artifacts")), directory_contents(&root.join("target/xmlsquish")));
+    })
+}
+
+/// Reports actual published filenames when a successful CLI omitted its product.
+fn directory_contents(path: &Path) -> String {
+    match fs::read_dir(path) {
+        Ok(entries) => {
+            let mut entries: Vec<_> = entries
+                .map(|entry| match entry {
+                    Ok(entry) => format!(
+                        "{} ({:?})",
+                        entry.file_name().to_string_lossy(),
+                        entry.file_type()
+                    ),
+                    Err(error) => format!("directory entry error: {error}"),
+                })
+                .collect();
+            entries.sort();
+            format!("{}: {entries:?}", path.display())
+        }
+        Err(error) => format!("{}: {error}", path.display()),
+    }
 }
 
 /// Reads a checked little-endian ZIP field.
@@ -514,6 +559,21 @@ fn included_entry_only_mutation_invalidates_warm_pack_product() {
             "included entry IR is missing from the backend action inputs"
         );
     }
+}
+
+#[test]
+fn formatted_module_asset_macro_accepts_xml_whitespace_comments_and_processing_instructions() {
+    let root = project(
+        "pretty-asset-macro-",
+        "pack",
+        "<xs:pack xmlns:xs='https://xmlsquish.moesegfault.dev/ns' xmlns:m='urn:test:pretty'><xs:import src='macros.xml'/><xs:expand ref='m:bundle'/></xs:pack>",
+    );
+    fs::write(root.path().join("src/macros.xml"), "<xs:module xmlns:xs='https://xmlsquish.moesegfault.dev/ns' xmlns:m='urn:test:pretty'>\n  <xs:macro name='m:bundle'>\n    <!-- Asset documentation is not a product member. -->\n    <?asset-owner provider?>\n    <xs:asset path='owned.bin' name='pretty.bin'/>\n  </xs:macro>\n</xs:module>").unwrap();
+    fs::write(root.path().join("src/owned.bin"), BINARY_ASSET).unwrap();
+    success(cli(root.path(), &["build", "--plain"]));
+    let members = zip_members(&artifact(root.path(), "pack"));
+    assert_eq!(members.len(), 1);
+    assert_eq!(members["pretty.bin"], BINARY_ASSET);
 }
 
 /// Exercises path identity independently of package names, versions and source basenames.

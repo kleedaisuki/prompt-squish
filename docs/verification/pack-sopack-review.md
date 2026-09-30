@@ -206,3 +206,53 @@ Remaining review limits and nonblocking measurement work:
    filesystem-normalization equivalence are not established by this source pass.
 5. Final hosted commit SHA/run URL and measured benchmark outputs must be recorded
    before stating that v1.2 passes or claiming performance improvements.
+
+## Hosted integration follow-up: artifact classification and ABI boundaries
+
+Trigger: `.temp/v1.2-ci/ninth-linux.log`, exact hosted source SHA
+`1da3e6d2bfe38873aa5623ab81319c369b9d28c0`. The archive process target had 5
+passing and 8 failing tests; the existing process (38), recovery (8), and skills
+(11) suites passed. The earlier source-only verdict did not establish runtime
+correctness, and this evidence reopens release approval pending fixes and rerun.
+
+Confirmed CI integration defects under owner repair:
+
+- Publisher `is_user_artifact` omitted `Other("pack")` / `Other("sopack")`.
+  Successful emission could commit metadata while not materializing the product.
+  The producer classification had changed but the consumer whitelist had not.
+- Included-entry rendering traversed raw instantiate -> backend and received
+  `xmlsquish-document-v1`, while the backend accepted `xmlsquish.document.v1`.
+  Ordinary manager instantiation rewrote the ABI and hid this split authority.
+  Compiler correction centralizes `squish_ir::DOCUMENT_ABI`; host regression covers
+  raw frontend/link/instantiate/codec/render without the manager rewriting it.
+
+Additional concrete reviewer finding:
+
+**P2 — valid Pack/Sopack IR cannot be inspected.**
+`crates/squish-manager/src/inspect.rs::validate_ir_bytes` initially accepts only
+Module/Entry unit containers, then LinkedImage/LinkedDocument. `build --emit ir`
+publishes Pack/Sopack unit containers with BinaryIr kind, but `inspect ir` rejects
+those valid objects with XS3421. Self-describing IR provenance validation calls the
+same helper and fails too. Add Pack/Sopack to the unit-container decoder branch and
+cover both typed unit kinds in focused inspection tests. Sent to manager owner.
+
+Systematic downstream source audit (no Cargo run locally):
+
+| Boundary | Assessment |
+| --- | --- |
+| Protocol serde / persistent generation manifests | ArtifactKind derives serialization; Other carries its named value. No archive-specific whitelist. |
+| Build action/output identity | `squish-build::model::hash_artifact_kind` hashes Other with its name and domain separation. |
+| Store binary action-result codec | Tag 4 persists/restores nonempty Other names. Pack/Sopack names survive unchanged. |
+| Store SQLite index kind codec | `("other", Some(name))` round trips arbitrary nonempty named kinds. |
+| Manager action-result identity | Other names enter the result digest; classification remains truthful across reuse. |
+| Presentation | Other names use the sanitized name, rather than pretending archives are prompt XML. |
+| Ordinary artifact inspection / cache inspection | Validates exact digest and byte length; no Prompt-only restriction. |
+| Product provenance | Archive Other kinds explicitly return UnsupportedKind; no XML byte map or psdbg is promised. This is coherent with current transport-evidence scope, not another rejection defect. |
+| Skills | Tree/file installation pipeline has no ArtifactKind classification dependency; existing hosted skills suite passes. |
+| Persistent IR decoder and inspect projections | Both support Pack/Sopack; only manager's validation dispatch missed the new kinds. |
+
+No analogous additional ABI spelling mismatch was found in inspected production
+literals after the centralized document ABI correction. Frontend uses its declared
+FRONTEND_ABI; linker validates schema/language/regex compatibility; manager action
+recipe namespaces include 1.2.0 to invalidate stale internal schemas. Hosted rerun
+is still required to establish success of the fixes.
