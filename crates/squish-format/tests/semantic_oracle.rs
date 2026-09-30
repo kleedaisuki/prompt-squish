@@ -8,8 +8,8 @@
 
 use squish_format::{StyleEdition, format};
 use squish_ir::{
-    EntryObject, InterfaceSummary, LocalName, MacroDef, OpRecord, PackageInstanceId, Region,
-    RegionId, RelocatableUnitIr, SymbolKey, UnitHeader,
+    InterfaceSummary, LocalName, MacroDef, OpRecord, PackageInstanceId, Region, RegionId,
+    RelocatableUnitIr, SymbolKey, UnitHeader, UnitKind,
 };
 use squish_source::{
     LogicalPath, PackageId, SnapshotBuilder, SourceBlob, SourceId, SourceLocator, SourceProvider,
@@ -19,54 +19,35 @@ use std::{fmt::Debug, io, sync::Arc};
 
 /// 不受格式化位置变化影响的可重定位 IR 投影。 / Relocatable IR projection unaffected by formatting positions.
 #[derive(Debug, Eq, PartialEq)]
-enum SemanticIr {
-    /// Entry 的全部语义字段。 / All semantic fields of an entry.
-    Entry {
-        header: UnitHeader,
-        required_params: Vec<LocalName>,
-        root_region: RegionId,
-        external_symbols: Vec<SymbolKey>,
-        regions: Vec<Region>,
-        ops: Vec<OpRecord>,
-    },
-    /// Module 的全部语义字段。 / All semantic fields of a module.
-    Module {
-        header: UnitHeader,
-        definitions: Vec<MacroDef>,
-        external_symbols: Vec<SymbolKey>,
-        interface: InterfaceSummary,
-        regions: Vec<Region>,
-        ops: Vec<OpRecord>,
-    },
+struct SemanticIr {
+    /// The source root remains semantic even when two kinds share their arena layout.
+    kind: UnitKind,
+    header: UnitHeader,
+    required_params: Vec<LocalName>,
+    root_region: Option<RegionId>,
+    definitions: Vec<MacroDef>,
+    external_symbols: Vec<SymbolKey>,
+    interface: Option<InterfaceSummary>,
+    regions: Vec<Region>,
+    ops: Vec<OpRecord>,
 }
 
 impl From<RelocatableUnitIr> for SemanticIr {
     fn from(unit: RelocatableUnitIr) -> Self {
-        match unit {
-            RelocatableUnitIr::Entry(EntryObject {
-                header,
-                required_params,
-                root_region,
-                external_symbols,
-                regions,
-                ops,
-                ..
-            }) => Self::Entry {
-                header,
-                required_params,
-                root_region,
-                external_symbols,
-                regions,
-                ops,
+        Self {
+            kind: unit.kind(),
+            header: unit.header().clone(),
+            required_params: unit.required_params().to_vec(),
+            root_region: unit.root_region(),
+            definitions: unit.definitions().to_vec(),
+            external_symbols: unit.external_symbols().to_vec(),
+            interface: match &unit {
+                RelocatableUnitIr::Module(module) => Some(module.interface.clone()),
+                RelocatableUnitIr::Sopack(root) => Some(root.module.interface.clone()),
+                RelocatableUnitIr::Entry(_) | RelocatableUnitIr::Pack(_) => None,
             },
-            RelocatableUnitIr::Module(module) => Self::Module {
-                header: module.header,
-                definitions: module.definitions,
-                external_symbols: module.external_symbols,
-                interface: module.interface,
-                regions: module.regions,
-                ops: module.ops,
-            },
+            regions: unit.regions().to_vec(),
+            ops: unit.ops().to_vec(),
         }
     }
 }
@@ -165,6 +146,20 @@ fn preserves_all_current_dsl_operation_families_and_xml_value_forms() {
 
     assert_semantics_preserved(entry);
     assert_semantics_preserved(module);
+}
+
+#[test]
+fn archive_units_preserve_frontend_semantics() {
+    for root in ["pack", "sopack"] {
+        let declaration = if root == "sopack" {
+            "<xs:macro name='m:asset'><xs:asset path='blob.bin' name='data/blob.bin'/></xs:macro>"
+        } else {
+            "<xs:include path='entry.xml' name='instructions.prompt'/>"
+        };
+        assert_semantics_preserved(format!(
+            "<xs:{root} xmlns:xs = '{DSL_NAMESPACE}' xmlns:m = 'urn:macro'>\n  {declaration}\n  <xs:asset path = 'blob.bin' name = 'blob.bin'/>\n</xs:{root}>"
+        ));
+    }
 }
 
 #[test]
