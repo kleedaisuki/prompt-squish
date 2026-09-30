@@ -6,6 +6,7 @@
 #[cfg(feature = "fault-injection")]
 mod fault_injection;
 mod interrupt;
+mod telemetry;
 
 use std::{
     ffi::OsString,
@@ -19,7 +20,7 @@ use std::{
 
 use squish_cli::{
     BootstrapOutcome, InspectSubject as CliInspectSubject, MessageFormat, ParsedInvocation,
-    QueryFormat, TerminalPolicy, parse_from_with_version,
+    QueryFormat, TerminalPolicy, TraceMode, parse_from_with_version,
 };
 use squish_config::{Config, ConfigHome, ConfigLoader};
 use squish_fetch::{
@@ -75,6 +76,8 @@ struct BootstrapRecord<'a> {
 
 /// 两条组合路径汇合后共享的进程级呈现状态。 / Process-level presentation state shared after composition paths converge.
 struct DispatchRuntime {
+    /// Optional command recorder, independent of rendering and cache identity.
+    trace: telemetry::Trace,
     terminal: SystemTerminal,
     emergency_terminal: Arc<StderrEmergencyRestore>,
     coordinator: Arc<InterruptCoordinator>,
@@ -336,9 +339,7 @@ impl EventSink for RenderingSink {
 
 /// 运行一次进程调用。 / Runs one process invocation.
 fn run() -> u8 {
-    // 只在进程边界捕获一次；后续组件不得再次读取全局环境。
-    // Capture once at the process boundary; downstream components never reread globals.
-    let environment = std::env::vars_os().collect::<Vec<_>>();
+    // Help, version, and usage errors need neither environment allocation nor runtime services.
     let parsed = match parse_from_with_version(std::env::args_os(), env!("CARGO_PKG_VERSION")) {
         Ok(BootstrapOutcome::BareHelp(help)) => {
             print_stdout(help.as_str());
@@ -358,11 +359,78 @@ fn run() -> u8 {
         }
     };
 
-    match execute(parsed, environment) {
+    // Capture once at the process boundary; downstream services never reread global values.
+    let environment = std::env::vars_os().collect::<Vec<_>>();
+    let trace = command_trace(&parsed, &environment);
+    trace.begin(parsed.request.kind());
+    let code = match execute(parsed, environment, trace.clone()) {
         Ok(code) => code,
         Err(error) => {
             print_stderr(&format!("internal error: {error}\n"));
             101
+        }
+    };
+    if let Err(error) = trace.finish(code) {
+        print_stderr(&format!(
+            "warning[TRACE001] could not persist trace: {error}\n"
+        ));
+    }
+    code
+}
+
+/// Resolves explicit trace policy ahead of the captured environment; never touches storage when off.
+fn command_trace(
+    invocation: &ParsedInvocation,
+    environment: &[(OsString, OsString)],
+) -> telemetry::Trace {
+    let mode = invocation.trace.or_else(|| {
+        environment
+            .iter()
+            .find(|(key, _)| key == "XMLSQUISH_TRACE")
+            .and_then(|(_, value)| match value.to_str() {
+                Some("summary") => Some(TraceMode::Summary),
+                Some("events" | "1" | "true") => Some(TraceMode::Events),
+                _ => None,
+            })
+    });
+    let Some(mode) = mode.filter(|mode| *mode != TraceMode::Off) else {
+        return telemetry::Trace::default();
+    };
+    let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+        let cwd = std::env::current_dir()?;
+        let root = if let Some(project) = requested_project(&invocation.request) {
+            let discovery = if project == Path::new(".") {
+                Discovery::Implicit(cwd.clone())
+            } else {
+                Discovery::Explicit(project.to_path_buf())
+            };
+            ProjectRepository::discover(discovery)
+                .map(|repository| repository.root().to_path_buf())
+                .unwrap_or(cwd)
+        } else {
+            cwd
+        };
+        let target_dir = if root.join(MANIFEST_FILE_NAME).is_file() {
+            configured_target_dir(&root)?
+        } else {
+            Workspace::default().target_dir
+        };
+        let root = std::fs::canonicalize(root)?;
+        let layout = ProjectBuildLayout::new(root.clone(), target_dir)?;
+        Ok(telemetry::Trace::open(
+            &root,
+            layout,
+            mode,
+            invocation_id(),
+        )?)
+    })();
+    match result {
+        Ok(trace) => trace,
+        Err(error) => {
+            print_stderr(&format!(
+                "warning[TRACE001] could not open trace: {error}\n"
+            ));
+            telemetry::Trace::default()
         }
     }
 }
@@ -371,9 +439,11 @@ fn run() -> u8 {
 fn execute(
     mut invocation: ParsedInvocation,
     environment: Vec<(OsString, OsString)>,
+    trace: telemetry::Trace,
 ) -> Result<u8, Box<dyn std::error::Error>> {
     // 在任何文件系统工作前安装处理器；定位期到达的信号会在进入内核时继续生效。
     // Install before filesystem work; a signal received during location remains set on kernel entry.
+    let bootstrap_span = trace.span("bootstrap");
     let bootstrap_json = bootstrap_json_requested(&invocation);
     let terminal = SystemTerminal::stderr();
     let terminal_capabilities = terminal.capabilities();
@@ -414,6 +484,7 @@ fn execute(
         }
     };
     let runtime = DispatchRuntime {
+        trace: trace.clone(),
         terminal,
         emergency_terminal,
         coordinator,
@@ -471,6 +542,7 @@ fn execute(
                 ));
             }
         };
+        drop(bootstrap_span);
         return dispatch_operation(invocation, config, host, runtime, faults.durability);
     }
 
@@ -509,6 +581,7 @@ fn execute(
                 ));
             }
         };
+        drop(bootstrap_span);
         return dispatch_operation(invocation, config, host, runtime, faults.durability);
     }
 
@@ -519,6 +592,7 @@ fn execute(
     } else {
         Discovery::Explicit(explicit.to_path_buf())
     };
+    let discover_span = trace.span("discover");
     let repository = match ProjectRepository::discover(discovery) {
         Ok(repository) => repository,
         Err(error) => {
@@ -533,8 +607,10 @@ fn execute(
             ));
         }
     };
+    drop(discover_span);
     let root = repository.root().to_path_buf();
     set_project(&mut invocation.request, &root)?;
+    let config_span = trace.span("config");
     let config = match load_config(Some(&root), &invocation) {
         Ok(config) => config,
         Err(error) => {
@@ -549,7 +625,9 @@ fn execute(
             ));
         }
     };
+    drop(config_span);
     let operation_json = operation_json_requested(&invocation, &config);
+    let compose_span = trace.span("compose");
     let host = match compose_host(
         root,
         &config,
@@ -570,6 +648,8 @@ fn execute(
             ));
         }
     };
+    drop(compose_span);
+    drop(bootstrap_span);
     dispatch_operation(invocation, config, host, runtime, faults.durability)
 }
 
@@ -582,6 +662,7 @@ fn dispatch_operation<S: squish_manager::Services>(
     runtime: DispatchRuntime,
     durability: DurabilityPorts,
 ) -> Result<u8, Box<dyn std::error::Error>> {
+    let _dispatch_span = runtime.trace.span("dispatch");
     let operation_json = operation_json_requested(&invocation, &config);
     let query = matches!(invocation.request, OperationRequest::Inspect(_));
     let sink = match rendering_sink(
@@ -626,10 +707,19 @@ fn dispatch_operation<S: squish_manager::Services>(
     let capabilities: [&dyn squish_kernel::Capability; 1] = [&manager];
     let kernel = Kernel::new(&capabilities)?;
 
+    let trace_invocation = runtime.trace.invocation();
+    let event_sink: Arc<dyn EventSink> = if trace_invocation.is_some() {
+        Arc::new(telemetry::TracingSink {
+            sink: sink.clone(),
+            trace: runtime.trace.clone(),
+        })
+    } else {
+        sink.clone()
+    };
     let context = InvocationContext::new(
-        invocation_id(),
+        trace_invocation.unwrap_or_else(invocation_id),
         runtime.coordinator.cancellation_token(),
-        sink.clone(),
+        event_sink,
     );
     let outcome = match kernel.dispatch(&invocation.request, &context) {
         Ok(outcome) => outcome,
@@ -1273,6 +1363,20 @@ mod tests {
         });
 
         assert_eq!(requested_project(&request), None);
+    }
+
+    #[test]
+    fn explicit_trace_off_overrides_environment_without_opening_storage() {
+        let invocation = squish_cli::parse_from(["xmlsquish", "build", "--trace=off"])
+            .unwrap()
+            .into_invocation()
+            .unwrap();
+        let environment = vec![(OsString::from("XMLSQUISH_TRACE"), OsString::from("events"))];
+        assert!(
+            command_trace(&invocation, &environment)
+                .invocation()
+                .is_none()
+        );
     }
 
     #[test]
