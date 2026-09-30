@@ -154,7 +154,8 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 - 引入命名空间感知模块、不可变命名宏、显式字符串参数与 XML slot。
   Introduced namespace-aware modules, immutable named macros, explicit scalar parameters, and XML slots.
 
-[Unreleased]: https://github.com/kleedaisuki/prompt-squish/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/kleedaisuki/prompt-squish/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.2.0
 [1.1.0]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.1.0
 [1.0.4]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.4
 [1.0.2]: https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.0.2
