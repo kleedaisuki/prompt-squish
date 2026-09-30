@@ -26,9 +26,12 @@ def check_topology(document: str) -> None:
         raise ValueError("job steps were inserted into workflow_dispatch inputs")
     if not re.search(r"^    inputs:\n      performance:\n", dispatch.group(1), re.MULTILINE):
         raise ValueError("performance must be a dispatch input below inputs")
-    if not re.search(r"^        type: boolean$", dispatch.group(1), re.MULTILINE):
+    performance_input = re.search(r"^      performance:\n(.*?)(?=^      \S|\Z)",
+                                 dispatch.group(1), re.MULTILINE | re.DOTALL)
+    if performance_input is None or not re.search(r"^        type: boolean$",
+                                                 performance_input.group(1), re.MULTILINE):
         raise ValueError("performance dispatch input must remain boolean")
-    if not re.search(r"^        default: false$", dispatch.group(1), re.MULTILINE):
+    if not re.search(r"^        default: false$", performance_input.group(1), re.MULTILINE):
         raise ValueError("performance measurements must remain opt-in")
     site_input = re.search(r"^      site:\n(.*?)(?=^      \S|\Z)",
                            dispatch.group(1), re.MULTILINE | re.DOTALL)
@@ -41,8 +44,18 @@ def check_topology(document: str) -> None:
     if jobs is None:
         raise ValueError("missing top-level jobs mapping")
     names = re.findall(r"^  ([a-z][a-z-]*):$", jobs.group(1), re.MULTILINE)
-    if names != ["rust-quality", "rust-test", "performance", "site"]:
+    if names != ["rust-quality", "rust-test", "performance", "profile", "site"]:
         raise ValueError("CI jobs must remain unique and below the jobs mapping")
+    profile_input = re.search(r"^      profile:\n(.*?)(?=^      \S|\Z)",
+                              dispatch.group(1), re.MULTILINE | re.DOTALL)
+    if profile_input is None or "        default: false" not in profile_input.group(1):
+        raise ValueError("profile experiment must remain explicitly opt-in")
+    profile = re.search(r"^  profile:\n(.*?)(?=^  \S|\Z)",
+                        jobs.group(1), re.MULTILINE | re.DOTALL)
+    if profile is None or "    needs: rust-quality" not in profile.group(1) or (
+        "if: github.event_name == 'workflow_dispatch' && inputs.profile" not in profile.group(1)
+    ):
+        raise ValueError("profile experiment must require manual input and successful quality")
     quality = re.search(r"^  rust-quality:\n(.*?)(?=^  \S|\Z)",
                         jobs.group(1), re.MULTILINE | re.DOTALL)
     native = re.search(r"^  rust-test:\n(.*?)(?=^  \S|\Z)",
