@@ -358,6 +358,7 @@ fn pack_bytes(
         .iter()
         .map(|b| ((&b.importer, b.import.0), &b.target))
         .collect();
+    let include_index = IncludeIndex::new(resolution)?;
     let mut entries = Vec::with_capacity(instantiated.directives.len());
     let mut includes = BTreeMap::new();
     for directive in &instantiated.directives {
@@ -392,7 +393,7 @@ fn pack_bytes(
                 let bytes = match includes.entry((*entry).clone()) {
                     std::collections::btree_map::Entry::Occupied(value) => value.into_mut(),
                     std::collections::btree_map::Entry::Vacant(value) => value.insert(
-                        include_bytes(executor, target, entry, resolution, compiled)?,
+                        include_bytes(executor, target, entry, &include_index, compiled)?,
                     ),
                 };
                 squish_backend::archive::ArchiveEntry {
@@ -412,12 +413,12 @@ fn include_bytes(
     executor: &BuildExecutor,
     target: &TargetBuild,
     entry: &SourceKey,
-    resolution: &ResolutionSnapshot,
+    index: &IncludeIndex<'_>,
     compiled: &BTreeMap<SourceKey, CompiledUnit>,
 ) -> Result<Vec<u8>, ManagerError> {
     let linked = executor
         .runtime
-        .link(entry, include_closure(entry, resolution, compiled)?)
+        .link(entry, index.closure(entry, compiled)?)
         .map_err(|e| error("MGB162", Phase::Link, e))?;
     let instantiated = executor
         .runtime
@@ -582,57 +583,97 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, ManagerError> {
     Ok(bytes)
 }
 
-/// Reduces independent include work to its own transitive import closure, not every project unit.
-fn include_closure(
-    entry: &SourceKey,
-    resolution: &ResolutionSnapshot,
-    compiled: &BTreeMap<SourceKey, CompiledUnit>,
-) -> Result<UnitClosure, ManagerError> {
-    let mut edges = BTreeMap::<&SourceKey, Vec<&SourceKey>>::new();
-    for binding in &resolution.imports {
-        edges
-            .entry(&binding.importer)
-            .or_default()
-            .push(&binding.target);
-    }
-    let mut reachable = BTreeSet::new();
-    let mut queue = vec![entry];
-    while let Some(key) = queue.pop() {
-        if !reachable.insert(key.clone()) {
-            continue;
+/// Immutable metadata for one source in a shared per-pack include graph.
+struct IncludeNode<'a> {
+    /// Exact revision evidence remains paired with the corresponding compiled object.
+    revision: &'a UnitRevision,
+    /// Borrowed outgoing bindings retain their original import IDs and source identities.
+    imports: Vec<&'a ImportBinding>,
+}
+
+/// Indexes a validated frozen snapshot once, avoiding a full project scan for each include.
+struct IncludeIndex<'a> {
+    /// Source-neutral unit and binding metadata; no payload is copied while indexing.
+    nodes: BTreeMap<&'a SourceKey, IncludeNode<'a>>,
+}
+
+impl<'a> IncludeIndex<'a> {
+    /// Groups exact revisions and outgoing edges without weakening linker validation.
+    fn new(snapshot: &'a ResolutionSnapshot) -> Result<Self, ManagerError> {
+        let mut nodes: BTreeMap<_, _> = snapshot
+            .units
+            .iter()
+            .map(|(key, revision)| {
+                (
+                    key,
+                    IncludeNode {
+                        revision,
+                        imports: Vec::new(),
+                    },
+                )
+            })
+            .collect();
+        for binding in &snapshot.imports {
+            let node = nodes.get_mut(&binding.importer).ok_or_else(|| {
+                ManagerError::new(
+                    "MGB172",
+                    Phase::Link,
+                    "include binding owner is absent from the frozen snapshot",
+                )
+            })?;
+            node.imports.push(binding);
         }
-        if let Some(imports) = edges.get(key) {
-            queue.extend(imports.iter().copied());
+        Ok(Self { nodes })
+    }
+
+    /// Copies only reachable evidence, preserving canonical ordering and legal import cycles.
+    fn project(&self, entry: &SourceKey) -> Result<ResolutionSnapshot, ManagerError> {
+        let mut visited = BTreeSet::new();
+        let mut pending = vec![entry];
+        let mut units = Vec::new();
+        let mut imports = Vec::new();
+        while let Some(key) = pending.pop() {
+            if !visited.insert(key) {
+                continue;
+            }
+            let node = self.nodes.get(key).ok_or_else(|| {
+                ManagerError::new(
+                    "MGB172",
+                    Phase::Link,
+                    "include transitive unit is absent from the frozen snapshot",
+                )
+            })?;
+            units.push((key.clone(), node.revision.clone()));
+            for binding in &node.imports {
+                pending.push(&binding.target);
+                imports.push((*binding).clone());
+            }
         }
+        units.sort_by(|a, b| a.0.cmp(&b.0));
+        imports.sort_by(|a, b| (&a.importer, a.import.0).cmp(&(&b.importer, b.import.0)));
+        Ok(ResolutionSnapshot { units, imports })
     }
-    let mut units = BTreeMap::new();
-    for key in &reachable {
-        let unit = compiled.get(key).ok_or_else(|| {
-            ManagerError::new(
-                "MGB172",
-                Phase::Link,
-                "include transitive unit is absent from the frozen closure",
-            )
-        })?;
-        units.insert(key.clone(), unit.unit.clone());
+
+    /// Clones child payloads only; independent entries never share an executable symbol scope.
+    fn closure(
+        &self,
+        entry: &SourceKey,
+        compiled: &BTreeMap<SourceKey, CompiledUnit>,
+    ) -> Result<UnitClosure, ManagerError> {
+        let snapshot = self.project(entry)?;
+        let mut units = BTreeMap::new();
+        for (key, _) in &snapshot.units {
+            let unit = compiled.get(key).ok_or_else(|| {
+                ManagerError::new(
+                    "MGB172",
+                    Phase::Link,
+                    "include transitive compiled unit is absent from the frozen closure",
+                )
+            })?;
+            units.insert(key.clone(), unit.unit.clone());
+        }
+        Ok(UnitClosure { units, snapshot })
     }
-    Ok(UnitClosure {
-        units,
-        snapshot: ResolutionSnapshot {
-            units: resolution
-                .units
-                .iter()
-                .filter(|(key, _)| reachable.contains(key))
-                .cloned()
-                .collect(),
-            imports: resolution
-                .imports
-                .iter()
-                .filter(|b| reachable.contains(&b.importer))
-                .cloned()
-                .collect(),
-        },
-    })
 }
 
 /// Checks persistent side-channel provenance against its inseparable companion trace.
@@ -677,6 +718,116 @@ fn archive_document_is_trivia(document: &squish_ir::LinkedDocumentIr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_include_index_projects_independent_cycles_and_retains_exact_evidence() {
+        let key = |name: &str| SourceKey::AdHoc {
+            uri: format!("test:{name}"),
+        };
+        let left = key("entry-left");
+        let right = key("entry-right");
+        let a = key("module-a");
+        let b = key("module-b");
+        let c = key("module-c");
+        let rows = [&left, &right, &a, &b, &c]
+            .into_iter()
+            .map(|source| {
+                let bytes = format!("{source:?}");
+                (
+                    source.clone(),
+                    UnitRevision {
+                        kind: if source == &left || source == &right {
+                            UnitKind::Entry
+                        } else {
+                            UnitKind::Module
+                        },
+                        semantic: squish_ir::SemanticUnitDigest::of(bytes.as_bytes()),
+                        object: ObjectDigest::of(bytes.as_bytes()),
+                    },
+                )
+            })
+            .collect();
+        let binding = |from: &SourceKey, to: &SourceKey| ImportBinding {
+            importer: from.clone(),
+            import: squish_ir::ImportId(0),
+            target: to.clone(),
+        };
+        let snapshot = ResolutionSnapshot {
+            units: rows,
+            imports: vec![
+                binding(&left, &a),
+                binding(&right, &c),
+                binding(&a, &b),
+                binding(&b, &a),
+            ],
+        };
+        let index = IncludeIndex::new(&snapshot).unwrap();
+        let left_projection = index.project(&left).unwrap();
+        let right_projection = index.project(&right).unwrap();
+        assert_eq!(
+            left_projection
+                .units
+                .iter()
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>(),
+            vec![&left, &a, &b]
+        );
+        assert_eq!(
+            right_projection
+                .units
+                .iter()
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>(),
+            vec![&right, &c]
+        );
+        assert_eq!(
+            left_projection.imports,
+            vec![binding(&left, &a), binding(&a, &b), binding(&b, &a)]
+        );
+        assert_eq!(right_projection.imports, vec![binding(&right, &c)]);
+        for (source, revision) in &left_projection.units {
+            assert_eq!(
+                snapshot
+                    .units
+                    .iter()
+                    .find(|(key, _)| key == source)
+                    .unwrap()
+                    .1,
+                *revision
+            );
+        }
+        assert_eq!(index.project(&left).unwrap(), left_projection);
+        assert_eq!(index.nodes.len(), 5);
+        assert!(index.closure(&left, &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn shared_include_index_rejects_unknown_roots_and_dangling_targets() {
+        let source = SourceKey::AdHoc {
+            uri: "test:entry".into(),
+        };
+        let missing = SourceKey::AdHoc {
+            uri: "test:missing".into(),
+        };
+        let revision = UnitRevision {
+            kind: UnitKind::Entry,
+            semantic: squish_ir::SemanticUnitDigest::of(b"entry"),
+            object: ObjectDigest::of(b"entry"),
+        };
+        let mut snapshot = ResolutionSnapshot {
+            units: vec![(source.clone(), revision)],
+            imports: vec![ImportBinding {
+                importer: source.clone(),
+                import: squish_ir::ImportId(0),
+                target: missing.clone(),
+            }],
+        };
+        let index = IncludeIndex::new(&snapshot).unwrap();
+        assert!(index.project(&source).is_err());
+        assert!(index.project(&missing).is_err());
+        snapshot.imports[0].importer = missing;
+        assert!(IncludeIndex::new(&snapshot).is_err());
+    }
 
     #[test]
     fn declared_resources_follow_namespace_not_spelling() {
