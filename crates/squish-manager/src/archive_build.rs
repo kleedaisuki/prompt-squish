@@ -659,6 +659,21 @@ pub(super) fn validate_directives(
     Ok(())
 }
 
+/// Formatting around member-producing macros is semantically inert, but content is not.
+fn archive_document_is_trivia(document: &squish_ir::LinkedDocumentIr) -> bool {
+    document.items.iter().all(|item| match item {
+        squish_ir::DocumentItem::Text { value } => {
+            document.strings.get(value.0 as usize).is_some_and(|text| {
+                text.bytes()
+                    .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+            })
+        }
+        squish_ir::DocumentItem::Comment { .. }
+        | squish_ir::DocumentItem::ProcessingInstruction { .. } => true,
+        _ => false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,19 +712,4 @@ mod tests {
         assert!(read_bounded(&file, 2).is_err());
         assert_eq!(read_bounded(&file, 3).unwrap(), [0, 255, 7]);
     }
-}
-
-/// Formatting around member-producing macros is semantically inert, but content is not.
-fn archive_document_is_trivia(document: &squish_ir::LinkedDocumentIr) -> bool {
-    document.items.iter().all(|item| match item {
-        squish_ir::DocumentItem::Text { value } => {
-            document.strings.get(value.0 as usize).is_some_and(|text| {
-                text.bytes()
-                    .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
-            })
-        }
-        squish_ir::DocumentItem::Comment { .. }
-        | squish_ir::DocumentItem::ProcessingInstruction { .. } => true,
-        _ => false,
-    })
 }

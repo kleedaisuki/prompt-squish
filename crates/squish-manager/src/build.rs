@@ -3165,6 +3165,13 @@ fn bind_imports(
         .flat_map(|a| &a.imports)
         .map(|b| ((b.importer.clone(), b.import.0), b))
         .collect::<BTreeMap<_, _>>();
+    let context = FrozenImportContext {
+        lock,
+        manifests: &locked_manifests,
+        instances: &package_by_instance,
+        units,
+        archives: &archives,
+    };
     let mut revisions = Vec::new();
     let mut imports = Vec::new();
     for (source, compiled) in units {
@@ -3182,16 +3189,7 @@ fn bind_imports(
                 imports.push((*binding).clone());
                 continue;
             }
-            let target = resolve_import(
-                source,
-                &import.spec,
-                import.expected_kind,
-                lock,
-                &locked_manifests,
-                &package_by_instance,
-                units,
-                &archives,
-            )?;
+            let target = resolve_import(source, &import.spec, import.expected_kind, &context)?;
             imports.push(ImportBinding {
                 importer: source.clone(),
                 import: import.local_id,
@@ -3207,16 +3205,35 @@ fn bind_imports(
     })
 }
 
+/// Exact, frozen provider indexes shared by every import-resolution decision.
+struct FrozenImportContext<'a> {
+    /// Authoritative dependency edges and immutable source identities.
+    lock: &'a Lockfile,
+    /// Parsed package export declarations indexed by exact lock node.
+    manifests: &'a BTreeMap<&'a str, &'a Manifest>,
+    /// Compiler package instances mapped to exact dependency lock nodes.
+    instances: &'a BTreeMap<squish_ir::PackageInstanceId, String>,
+    /// Uniform compiled objects from local sources and reusable archives.
+    units: &'a BTreeMap<SourceKey, CompiledUnit>,
+    /// Immutable archive export tables indexed by their provider identity.
+    archives:
+        &'a BTreeMap<squish_ir::PackageInstanceId, &'a Arc<squish_backend::archive::SopackPayload>>,
+}
+
+/// Binds a declaration using one coherent frozen provider context.
 fn resolve_import(
     source: &SourceKey,
     spec: &ImportSpec,
     expected: UnitKind,
-    lock: &Lockfile,
-    manifests: &BTreeMap<&str, &Manifest>,
-    instances: &BTreeMap<squish_ir::PackageInstanceId, String>,
-    units: &BTreeMap<SourceKey, CompiledUnit>,
-    archives: &BTreeMap<squish_ir::PackageInstanceId, &Arc<squish_backend::archive::SopackPayload>>,
+    context: &FrozenImportContext<'_>,
 ) -> Result<SourceKey, ManagerError> {
+    let FrozenImportContext {
+        lock,
+        manifests,
+        instances,
+        units,
+        archives,
+    } = context;
     let SourceKey::Project { package, path } = source else {
         return Err(ManagerError::new(
             "MGB050",
