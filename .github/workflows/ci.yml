@@ -7,7 +7,18 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
-      performance:
+          # Preserve partial dependency compilation even when a later check fails.
+      - name: Save reusable Rust state after success or failure
+        if: always() && !cancelled() && steps.rust-cache.outputs.cache-hit != 'true' && steps.rust-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
+  performance:
         description: 'Collect paired release CLI benchmarks (enable for final release verification)'
         type: boolean
         default: false
@@ -32,8 +43,9 @@ jobs:
         run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt,clippy
 
       # Cache only rebuildable state; never store credentials or project metadata.
-      - name: Cache Rust dependencies and build state
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - name: Restore Rust dependencies and build state
+        id: rust-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -73,6 +85,17 @@ jobs:
       - name: Test documentation examples
         run: cargo +1.88.0 test --workspace --doc --all-features --locked
 
+      # Preserve partial dependency compilation even when a later check fails.
+      - name: Save reusable Rust state after success or failure
+        if: always() && !cancelled() && steps.rust-cache.outputs.cache-hit != 'true' && steps.rust-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
   rust-test:
     needs: rust-quality
     name: Rust test (${{ matrix.name }}, MSRV 1.88)
@@ -96,8 +119,9 @@ jobs:
         run: rustup toolchain install 1.88.0 --profile minimal
 
       # Cache only rebuildable state; never store credentials or project metadata.
-      - name: Cache Rust dependencies and build state
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - name: Restore Rust dependencies and build state
+        id: rust-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -158,6 +182,17 @@ jobs:
             "$binary" "$command" --help >/dev/null
           done
 
+      # Preserve partial dependency compilation even when a later check fails.
+      - name: Save reusable Rust state after success or failure
+        if: always() && !cancelled() && steps.rust-cache.outputs.cache-hit != 'true' && steps.rust-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
   performance:
     if: github.event_name == 'workflow_dispatch' && inputs.performance
     needs: rust-quality
@@ -169,8 +204,9 @@ jobs:
       - name: Install pinned Rust
         run: rustup toolchain install 1.88.0 --profile minimal
       # Cache only rebuildable state; never store credentials or project metadata.
-      - name: Cache Rust dependencies and build state
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - name: Restore Rust dependencies and build state
+        id: rust-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -193,6 +229,17 @@ jobs:
           path: .temp/performance/results.json
           if-no-files-found: error
           retention-days: 30
+
+      # Preserve partial dependency compilation even when a later check fails.
+      - name: Save reusable Rust state after success or failure
+        if: always() && !cancelled() && steps.rust-cache.outputs.cache-hit != 'true' && steps.rust-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
   site:
     name: Site

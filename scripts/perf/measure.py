@@ -165,6 +165,27 @@ def run(arguments: argparse.Namespace, report: dict) -> None:
         result.update(archive_check(binary, project, "bundle.pack"))
         report["workloads"][f"candidate.pack.assets-{count}"] = result
     for count in (1, 64, 512):
+        includes = ''.join(f'<xs:include path="entries/entry{i:04}.xml" '
+                           f'name="prompts/{i:04}.prompt"/>' for i in range(count))
+        project = fixture(scratch / f"includes-{count}", "bundle",
+                          f'<xs:pack xmlns:xs="{NS}">{includes}</xs:pack>', "pack")
+        entries = project / "entries"
+        entries.mkdir()
+        # Each distinct root sees the shared module through its own import edge.
+        (project / "shared.xml").write_text(
+            f'<xs:module xmlns:xs="{NS}" xmlns:m="urn:perf:includes">'
+            '<xs:macro name="m:shared"><Shared>shared module payload</Shared></xs:macro>'
+            '</xs:module>', encoding="utf-8")
+        for index in range(count):
+            (entries / f"entry{index:04}.xml").write_text(
+                f'<xs:entry xmlns:xs="{NS}" xmlns:m="urn:perf:includes">'
+                '<xs:import src="../shared.xml"/>'
+                f'<Prompt><Id>{index}</Id><xs:expand ref="m:shared"/></Prompt></xs:entry>',
+                encoding="utf-8")
+        result = measure(binary, project, arguments.rounds, True)
+        result.update(archive_check(binary, project, "bundle.pack"))
+        report["workloads"][f"candidate.pack.distinct-includes-{count}"] = result
+    for count in (1, 64, 512):
         project = sopack_reuse(binary, scratch / f"sopack-{count}", count)
         result = measure(binary, project, arguments.rounds, True)
         result.update(archive_check(binary, project, "bundle.pack"))
