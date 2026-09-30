@@ -13,6 +13,8 @@ const origin = "https://xmlsquish.moesegfault.dev";
 const namespaceUri = `${origin}/ns`;
 const versions = ["1.2.0", "1.1.0", "1.0.4", "1.0.2", "1.0.1", "1.0.0", "0.3.0", "0.2.0"];
 const dates = ["2026-10-01", "2026-09-29", "2026-09-20", "2026-09-17", "2026-09-16", "2026-09-15", "2026-09-11", "2026-09-11"];
+/** Historical releases without published JSON retain their original acquisition contract. */
+const metadataVersions = new Set(["1.2.0", "1.1.0", "1.0.4", "1.0.2", "1.0.1", "1.0.0"]);
 const chapters = ["getting-started", "source-model", "composition", "control-and-scope", "build-and-artifacts", "skill-dependencies", "reference", "limits-and-invariants"];
 const expectedAssets = [
   "xmlsquish-1.2.0-x86_64-pc-windows-msvc.zip", "xmlsquish-1.2.0-aarch64-pc-windows-msvc.zip",
@@ -36,7 +38,7 @@ const routePairs = [
   ...chapters.map((chapter) => [`/ns/${chapter}/`, `/en/ns/${chapter}/`, "namespace"]),
 ];
 const routes = routePairs.flatMap(([zh, en, section]) => pair(zh, en, section));
-assert.equal(routes.length, 36);
+assert.equal(routes.length, 38);
 
 const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".json": "application/json", ".woff2": "font/woff2", ".md": "text/markdown; charset=utf-8", ".txt": "text/plain; charset=utf-8" };
 const server = createServer(async (request, response) => {
@@ -74,7 +76,7 @@ function canonicalFor(path) {
   return origin + (path === "/ns" ? "/ns" : path);
 }
 
-test("all 36 human routes have localized identity and one active global destination", async () => {
+test("all 38 human routes have localized identity and one active global destination", async () => {
   const page = await browser.newPage({ javaScriptEnabled: false, viewport: { width: 390, height: 900 } });
   for (const route of routes) {
     const response = await page.goto(base + route.path, { waitUntil: "domcontentloaded" });
@@ -118,9 +120,9 @@ test("home preserves its product layout, explorer, and direct latest-release cue
     const page = await browser.newPage();
     await page.goto(base + path, { waitUntil: "domcontentloaded" });
     await page.waitForSelector("[data-build-explorer][data-ready]");
-    assert.deepEqual(await page.locator("main > section").evaluateAll((sections) => sections.map((section) => section.id || (section.querySelector(".capabilities") ? "capabilities" : [...section.classList].find((name) => ["hero", "journey-band", "boundaries", "closing"].includes(name))))), ["hero", "how", "project-state", "build", "model", "capabilities", "cli", "stats", "boundaries", "closing"]);
+    assert.deepEqual(await page.locator("main > section").evaluateAll((sections) => sections.map((section) => section.id || (section.querySelector(".capabilities") ? "capabilities" : [...section.classList].find((name) => ["hero", "journey-band", "boundaries", "closing", "product-formats"].includes(name))))), ["hero", "how", "project-state", "build", "model", "capabilities", "cli", "stats", "boundaries", "closing", "product-formats"]);
     assert.equal(await page.locator(".hero-release-link").getAttribute("href"), releasePath);
-    assert.match(await page.locator(".hero-release-link").textContent(), /v1\.1\.0/);
+    assert.match(await page.locator(".hero-release-link").textContent(), /v1\.2\.0/);
     await page.locator('[data-example-tab="prompt"]').click();
     await page.locator('[data-mode="self"]').click();
     assert.equal(await page.locator("[data-code-panel]:visible").getAttribute("data-source"), demo.scenarios.self.stages.prompt);
@@ -128,11 +130,11 @@ test("home preserves its product layout, explorer, and direct latest-release cue
   }
 });
 
-test("release indexes list seven entries and every entry opens a same-locale detail", async () => {
+test("release indexes list eight entries and every entry opens a same-locale detail", async () => {
   for (const prefix of ["", "/en"]) {
     const page = await browser.newPage();
     await page.goto(`${base}${prefix}/releases/`, { waitUntil: "domcontentloaded" });
-    assert.equal(await page.locator(".log-entry").count(), 7);
+    assert.equal(await page.locator(".log-entry").count(), versions.length);
     assert.equal(await page.locator(".log-entry.current").count(), 1, "exactly the latest release is current");
     assert.equal(await page.locator(".log-entry.current .version-line code").textContent(), "v1.2.0");
     const links = await page.locator(".entry-body h2 a").evaluateAll((items) => items.map((item) => item.getAttribute("href")));
@@ -159,8 +161,8 @@ test("each immutable release detail has exact date, acquisition, metadata, and p
     assert.equal(schema.softwareVersion, version);
     assert.equal(schema.datePublished, dates[index]);
     const metadata = page.locator('link[rel="alternate"][type="application/json"]');
-    assert.equal(await metadata.count(), index < 5 ? 1 : 0, version);
-    if (index < 5) assert.equal(await metadata.getAttribute("href"), `${origin}/releases/${version}.json`);
+    assert.equal(await metadata.count(), metadataVersions.has(version) ? 1 : 0, version);
+    if (metadataVersions.has(version)) assert.equal(await metadata.getAttribute("href"), `${origin}/releases/${version}.json`);
     if (version === "0.2.0") {
       assert.equal(await page.locator(".download-table").count(), 0);
       assert.match(await page.locator(".release-article").textContent(), /Rust 1\.88|Rust 1.88/);
