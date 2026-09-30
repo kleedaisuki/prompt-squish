@@ -155,3 +155,15 @@ or `FrozenSource` diagnostic package ID alongside its authoritative
 `PackageInstanceId`. The frontend checks exact equality against that typed source
 package ID. No package-name prefix heuristic or hashed-name exemption is used;
 the repository's resolved mapping remains the authority for source ownership.
+
+
+### Public generation projection
+
+`ArtifactKind::Other("pack")` and `Other("sopack")` are user-facing backend
+products and must be materialized onto stable artifact paths, just like prompts.
+The publisher deliberately recognizes those two extension kinds rather than
+publishing arbitrary `Other` evidence. Static-link maps and build records remain
+private generation metadata. The same classification is used for old-generation
+cleanup, so replacing a generation also removes its obsolete archive products.
+A successful private generation commit alone does not establish end-to-end user
+publication; separated-layout regression checks verify the public files exist.

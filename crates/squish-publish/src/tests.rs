@@ -995,3 +995,55 @@ fn folded_path_aliases_respect_component_boundaries() {
     assert!(!super::paths_alias("a/b", "a/b2"));
     assert!(!super::paths_alias("a", "ab"));
 }
+
+#[test]
+fn separated_layout_materializes_archives_but_keeps_other_evidence_private() {
+    let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.temp");
+    fs::create_dir_all(&scratch).unwrap();
+    let root = tempfile::tempdir_in(scratch).unwrap();
+    let artifacts = root.path().join("target/xmlsquish/artifacts");
+    let state = root.path().join("private/publication-state");
+    let publisher = FileArtifactPublisher::open_with_layout(
+        &artifacts,
+        &state,
+        "target/xmlsquish/artifacts",
+        MemoryStore::default(),
+    )
+    .unwrap();
+    let mut pack = publication(
+        publisher.store.insert(b"pack bytes"),
+        10,
+        "target/xmlsquish/artifacts/chat.pack",
+    );
+    pack.output.kind = ArtifactKind::Other("pack".into());
+    let mut library = publication(
+        publisher.store.insert(b"library bytes"),
+        13,
+        "target/xmlsquish/artifacts/chat.sopack",
+    );
+    library.output.kind = ArtifactKind::Other("sopack".into());
+    let mut evidence = publication(
+        publisher.store.insert(b"private map"),
+        11,
+        "target/xmlsquish/artifacts/chat.xsmap",
+    );
+    evidence.output.kind = ArtifactKind::Other("static-link-map".into());
+    let generation = publisher
+        .publish_generation(&target("archives"), &[pack.clone(), library, evidence])
+        .unwrap();
+    assert_eq!(generation.artifacts.len(), 3);
+    assert_eq!(
+        fs::read(artifacts.join("chat.pack")).unwrap(),
+        b"pack bytes"
+    );
+    assert_eq!(
+        fs::read(artifacts.join("chat.sopack")).unwrap(),
+        b"library bytes"
+    );
+    assert!(!artifacts.join("chat.xsmap").exists());
+    publisher
+        .publish_generation(&target("archives"), &[pack])
+        .unwrap();
+    assert!(artifacts.join("chat.pack").is_file());
+    assert!(!artifacts.join("chat.sopack").exists());
+}
