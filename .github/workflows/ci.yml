@@ -133,7 +133,7 @@ jobs:
           cargo +1.88.0 --version
 
       - name: Run tests
-        run: cargo +1.88.0 test --workspace --all-targets --all-features --locked
+        run: cargo +1.88.0 test --workspace --all-targets --all-features --locked --no-fail-fast
 
       - name: Build composed CLI
         run: cargo +1.88.0 build --bin xmlsquish --locked
