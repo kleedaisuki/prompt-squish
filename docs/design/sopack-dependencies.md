@@ -130,3 +130,17 @@ Host archive reads now precheck regular-file metadata against ArchiveLimits and
 use a `take(limit + 1)` stream read, so a growing archive cannot bypass the
 allocation boundary. Pure Cursor tests cover exact-limit acceptance and stopping
 one byte beyond the limit; the decoder receives only bounded input.
+
+
+### Complete attachment discovery
+
+SOPack diagnostic materialization is not an authoring project source-root. Every
+regular declared attachment, including `_providers/<content-group>/...` and
+non-XML original filenames, must be frozen. The repository uses one deterministic
+non-symlink walker with an archive-attachment policy, excluding only generated
+`xmlsquish.toml` and `.complete` transport metadata. In particular, the surrounding
+project cache directory must not be applied as an exclusion to the immutable
+package it contains. Local XML source-root discovery retains its previous suffix
+and derived-directory rules. Exact archive/source-byte verification remains the
+authority; adding an undeclared file to the materialized tree is rejected rather
+than silently compiled.

@@ -224,12 +224,29 @@ impl ProjectSnapshot {
                 root.join(".xmlsquish"),
                 self.target_dir.clone(),
             ];
-            collect_xml(
-                &root.join(&declared.source_root),
-                root,
-                &excluded,
-                &mut paths,
-            )?;
+            if matches!(locked_package.source, LockedSource::Sopack { .. }) {
+                // The immutable tree contains declared diagnostic sources, including providers
+                // outside the producer source-root. Its surrounding project cache is not a source exclusion.
+                let metadata = [
+                    root.join(squish_project::MANIFEST_FILE_NAME),
+                    root.join(".complete"),
+                ];
+                collect_sources(
+                    root,
+                    root,
+                    &metadata,
+                    SourceScan::ArchiveAttachments,
+                    &mut paths,
+                )?;
+            } else {
+                collect_sources(
+                    &root.join(&declared.source_root),
+                    root,
+                    &excluded,
+                    SourceScan::Xml,
+                    &mut paths,
+                )?;
+            }
             paths.extend(manifest.targets.values().map(|target| target.entry.clone()));
             paths.extend(manifest.exports.values().cloned());
             let identity = identities
@@ -461,10 +478,21 @@ fn normalize_text(path: &Path) -> String {
         .join("/")
 }
 
-fn collect_xml(
+/// Source acquisition policies share one deterministic, no-symlink tree walker.
+#[derive(Clone, Copy)]
+enum SourceScan {
+    /// Local source-root discovery preserves the established XML suffix contract.
+    Xml,
+    /// An immutable SOPack tree contains only declared source attachments plus excluded metadata.
+    ArchiveAttachments,
+}
+
+/// Enumerates frozen package sources without following symlinks or assuming archive source-root.
+fn collect_sources(
     dir: &Path,
     package_root: &Path,
     excluded: &[PathBuf],
+    scan: SourceScan,
     output: &mut BTreeSet<PathBuf>,
 ) -> Result<(), RepositoryError> {
     if excluded.iter().any(|root| dir.starts_with(root)) {
@@ -483,16 +511,12 @@ fn collect_xml(
         let ty = entry
             .file_type()
             .map_err(|e| RepositoryError::io(entry.path(), e))?;
+        if excluded.iter().any(|path| entry.path().starts_with(path)) {
+            continue;
+        }
         if ty.is_dir() {
-            collect_xml(&entry.path(), package_root, excluded, output)?;
-        } else if ty.is_file()
-            && entry
-                .path()
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("xml"))
-            && !entry.path().to_string_lossy().ends_with(".i.xml")
-            && !entry.path().to_string_lossy().ends_with(".o.xml")
-        {
+            collect_sources(&entry.path(), package_root, excluded, scan, output)?;
+        } else if ty.is_file() && is_discovered_source(&entry.path(), scan) {
             let relative = entry
                 .path()
                 .strip_prefix(package_root)
@@ -507,6 +531,19 @@ fn collect_xml(
         }
     }
     Ok(())
+}
+
+/// Immutable attachments may have any original filename, unlike local suffix discovery.
+fn is_discovered_source(path: &Path, scan: SourceScan) -> bool {
+    match scan {
+        SourceScan::ArchiveAttachments => true,
+        SourceScan::Xml => {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("xml"))
+                && !path.to_string_lossy().ends_with(".i.xml")
+                && !path.to_string_lossy().ends_with(".o.xml")
+        }
+    }
 }
 
 fn append_manifest_sources(
@@ -526,10 +563,11 @@ fn append_manifest_sources(
         root.join(".xmlsquish"),
         target_dir.to_path_buf(),
     ];
-    collect_xml(
+    collect_sources(
         &root.join(&declared.source_root),
         root,
         &excluded,
+        SourceScan::Xml,
         &mut paths,
     )?;
     paths.extend(manifest.targets.values().map(|target| target.entry.clone()));
@@ -624,6 +662,44 @@ fn source_package_identities<'a>(
 #[cfg(test)]
 mod source_identity_tests {
     use super::*;
+
+    #[test]
+    fn archive_sources_include_foreign_units_and_non_xml_names_but_not_transport_metadata() {
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.temp");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let dir = tempfile::tempdir_in(workspace).unwrap();
+        let root = dir.path().join("target/xmlsquish/.cache/sopack/library");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("_providers/digest/lib")).unwrap();
+        for path in [
+            "src/root.xml",
+            "_providers/digest/lib/macros.dsl",
+            "xmlsquish.toml",
+            ".complete",
+        ] {
+            std::fs::write(root.join(path), b"attachment").unwrap();
+        }
+        let mut sources = BTreeSet::new();
+        let metadata = [
+            root.join(squish_project::MANIFEST_FILE_NAME),
+            root.join(".complete"),
+        ];
+        collect_sources(
+            &root,
+            &root,
+            &metadata,
+            SourceScan::ArchiveAttachments,
+            &mut sources,
+        )
+        .unwrap();
+        assert_eq!(
+            sources,
+            BTreeSet::from([
+                PathBuf::from("src/root.xml"),
+                PathBuf::from("_providers/digest/lib/macros.dsl")
+            ])
+        );
+    }
 
     #[test]
     fn same_name_instances_keep_distinct_stable_source_ids_and_paths() {
