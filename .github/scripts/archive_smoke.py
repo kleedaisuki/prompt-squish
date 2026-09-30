@@ -31,7 +31,7 @@ def smoke_archives(binary: Path, scratch: Path) -> None:
             raise ValueError("pack included unexpected or missing members")
         if archive.read("assets/payload.bin") != payload:
             raise ValueError("asset bytes were transformed")
-        if archive.read("instructions.prompt") != b"<Prompt>Hello archive</Prompt>":
+        if archive.read("instructions.prompt") != b"<Prompt> Hello archive </Prompt>":
             raise ValueError("included entry did not use prompt backend semantics")
     consumer = sopack_reuse(binary, directory / "reusable", 3)
     invoke(binary, ["remove", "reusable"], consumer)

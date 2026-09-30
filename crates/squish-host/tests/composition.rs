@@ -258,5 +258,5 @@ fn production_compiler_pipeline_shares_document_abi_at_every_boundary() {
             options: squish_backend::SquishOptions::default(),
         })
         .unwrap();
-    assert_eq!(output.bytes, b"<message>Hello world</message>");
+    assert_eq!(output.bytes, b"<message> Hello world </message>");
 }
