@@ -65,6 +65,36 @@ def measure(binary: Path, project: Path, rounds: int, cold: bool) -> dict:
     return summary(samples)
 
 
+def paired_builds(binaries: list[tuple[str, Path]], projects: dict[str, Path],
+                  rounds: int, workload: str, report: dict) -> None:
+    """Compare identical prompt corpora with alternating cold subprocess observations."""
+    command = ["build", "--offline", "--plain"]
+    samples = {label: [] for label, _ in binaries}
+    for label, binary in binaries:
+        invoke(binary, command, projects[label])
+    for round_number in range(rounds):
+        order = binaries if round_number % 2 == 0 else list(reversed(binaries))
+        for label, binary in order:
+            shutil.rmtree(projects[label] / "target/xmlsquish")
+            samples[label].append(invoke(binary, command, projects[label]))
+    outputs = {}
+    for label, values in samples.items():
+        result = summary(values)
+        output = (projects[label] / "target/xmlsquish/artifacts/prompt.prompt").read_bytes()
+        outputs[label] = output
+        result.update(output_bytes=len(output), output_sha256=hashlib.sha256(output).hexdigest())
+        report["workloads"][f"{label}.{workload}"] = result
+    if "baseline" not in samples:
+        return
+    if outputs["candidate"] != outputs["baseline"]:
+        raise ValueError(f"baseline/candidate prompt semantics differ: {workload}")
+    ratios = [candidate / baseline for candidate, baseline in
+              zip(samples["candidate"], samples["baseline"], strict=True)]
+    report.setdefault("paired_candidate_over_baseline", {})[workload] = {
+        "samples_ratio": ratios, "median_ratio": statistics.median(ratios),
+        "min_ratio": min(ratios), "max_ratio": max(ratios)}
+
+
 def archive_check(binary: Path, project: Path, name: str) -> dict:
     """Compare cold rebuilt ZIP bytes and reject mutable timestamps or unsafe names."""
     output = project / "target" / "xmlsquish" / "artifacts" / name
@@ -134,27 +164,33 @@ def run(arguments: argparse.Namespace, report: dict) -> None:
         macros = ''.join(f'<xs:macro name="m:item{i}"><Item>{i}</Item></xs:macro>'
                          for i in range(count))
         expansions = ''.join(f'<xs:expand ref="m:item{i}"/>' for i in range(count))
-        project = fixture(scratch / f"many-macros-{count}", "prompt",
-                          f'<xs:entry xmlns:xs="{NS}" xmlns:m="urn:perf:index">'
-                          f'<xs:import src="macros.xml"/><Prompt>{expansions}</Prompt></xs:entry>')
-        (project / "macros.xml").write_text(
-            f'<xs:module xmlns:xs="{NS}" xmlns:m="urn:perf:index">{macros}</xs:module>',
-            encoding="utf-8")
-        report["workloads"][f"candidate.prompt.distinct-macros-{count}"] = measure(
-            binary, project, arguments.rounds, True)
+        macro_projects = {}
+        for label, _ in binaries:
+            project = fixture(scratch / f"{label}-many-macros-{count}", "prompt",
+                              f'<xs:entry xmlns:xs="{NS}" xmlns:m="urn:perf:index">'
+                              f'<xs:import src="macros.xml"/><Prompt>{expansions}</Prompt></xs:entry>')
+            (project / "macros.xml").write_text(
+                f'<xs:module xmlns:xs="{NS}" xmlns:m="urn:perf:index">{macros}</xs:module>',
+                encoding="utf-8")
+            macro_projects[label] = project
+        paired_builds(binaries, macro_projects, arguments.rounds,
+                      f"prompt.distinct-macros-{count}", report)
         invocations = ''.join('<xs:expand ref="m:match"><xs:arg name="value" '
                               'value="literal regex input"/></xs:expand>' for _ in range(count))
-        project = fixture(scratch / f"regex-{count}", "prompt",
-                          f'<xs:entry xmlns:xs="{NS}" xmlns:m="urn:perf:regex">'
-                          '<xs:import src="macros.xml"/>'
-                          f'<Prompt>{invocations}</Prompt></xs:entry>')
-        (project / "macros.xml").write_text(
-            f'<xs:module xmlns:xs="{NS}" xmlns:m="urn:perf:regex">'
-            '<xs:macro name="m:match"><xs:param name="value"/>'
-            '<xs:ifr get="arg.value" pattern="^literal.*input$"><Match/></xs:ifr>'
-            '</xs:macro></xs:module>', encoding="utf-8")
-        report["workloads"][f"candidate.prompt.literal-regex-{count}"] = measure(
-            binary, project, arguments.rounds, True)
+        regex_projects = {}
+        for label, _ in binaries:
+            project = fixture(scratch / f"{label}-regex-{count}", "prompt",
+                              f'<xs:entry xmlns:xs="{NS}" xmlns:m="urn:perf:regex">'
+                              '<xs:import src="macros.xml"/>'
+                              f'<Prompt>{invocations}</Prompt></xs:entry>')
+            (project / "macros.xml").write_text(
+                f'<xs:module xmlns:xs="{NS}" xmlns:m="urn:perf:regex">'
+                '<xs:macro name="m:match"><xs:param name="value"/>'
+                '<xs:ifr get="arg.value" pattern="^literal.*input$"><Match/></xs:ifr>'
+                '</xs:macro></xs:module>', encoding="utf-8")
+            regex_projects[label] = project
+        paired_builds(binaries, regex_projects, arguments.rounds,
+                      f"prompt.literal-regex-{count}", report)
     for count in (1, 64, 512):
         assets = ''.join(f'<xs:asset path="payload.bin" name="assets/{i:04}.bin"/>'
                          for i in range(count))

@@ -66,6 +66,34 @@ class MeasurementTests(unittest.TestCase):
             self.assertEqual(remove.call_count, 3)
             self.assertEqual(result["samples_ns"], [17, 17, 17])
 
+    def test_paired_cold_builds_alternate_and_keep_equal_outputs(self) -> None:
+        """AB/BA pairs keep raw latencies and validate prompt semantics outside timing."""
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
+            projects = {}
+            for label in ("candidate", "baseline"):
+                project = Path(temporary) / label
+                artifact = project / "target/xmlsquish/artifacts/prompt.prompt"
+                artifact.parent.mkdir(parents=True)
+                artifact.write_bytes(b"<Prompt>same bytes</Prompt>")
+                projects[label] = project
+            binaries = [("candidate", Path("new")), ("baseline", Path("old"))]
+            report = {"workloads": {}}
+            with patch.object(measure, "invoke", side_effect=[1, 1, 10, 20, 22, 11]) as invoke:
+                with patch.object(measure.shutil, "rmtree") as remove:
+                    measure.paired_builds(binaries, projects, 2, "prompt.test", report)
+            self.assertEqual([call.args[0] for call in invoke.call_args_list],
+                             [Path("new"), Path("old"), Path("new"), Path("old"),
+                              Path("old"), Path("new")])
+            self.assertEqual(remove.call_count, 4)
+            self.assertEqual(report["workloads"]["candidate.prompt.test"]["samples_ns"], [10, 11])
+            self.assertEqual(report["paired_candidate_over_baseline"]["prompt.test"]
+                             ["samples_ratio"], [0.5, 0.5])
+            (projects["baseline"] / "target/xmlsquish/artifacts/prompt.prompt").write_bytes(b"changed")
+            with patch.object(measure, "invoke", return_value=1):
+                with patch.object(measure.shutil, "rmtree"):
+                    with self.assertRaisesRegex(ValueError, "semantics differ"):
+                        measure.paired_builds(binaries, projects, 1, "prompt.test", {"workloads": {}})
+
 
 if __name__ == "__main__":
     unittest.main()
