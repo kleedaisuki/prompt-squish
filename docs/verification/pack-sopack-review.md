@@ -1,6 +1,14 @@
 # Pack / SOPack v1.2 independent implementation review
 
-Date: 2026-10-01. Status: evolving review; implementation and hosted validation pending.
+Date: 2026-10-01. Status: candidate reviewed and hosted verified; final release gates pending.
+
+Final candidate update: all previously identified integration findings were fixed;
+complete hosted [CI run 36777315965](https://github.com/kleedaisuki/prompt-squish/actions/runs/36777315965)
+passed at `1870f3b81024735c7e8482403bb217f87a51e904`, including three native
+platforms, site/browser checks and the shipping-profile performance corpus.
+Historical checkpoints below explain the findings and their resolutions. No open
+source-review blocker remains; exact final-source CI and complete release matrix
+publication are separate gates and must still pass before claiming delivery.
 
 ## Scope and method
 

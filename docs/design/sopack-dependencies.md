@@ -80,8 +80,14 @@ Lexical and canonical checks reject package escape (including symlinks), while
 project resource walks. Worker stages consume frozen bytes and perform no hidden
 filesystem reads. Backend action keys declare every frozen resource digest.
 
-Instantiation persists an ordered `directives` output beside `document` and
-`trace`; cached execution preserves asset/include ownership and import IDs.
+Archive instantiation persists an ordered `directives` output beside `document`
+and `trace`; cached execution preserves asset/include ownership and import IDs.
+Ordinary prompt instantiation has only `document` and `trace`. Nonempty archive
+directives are rejected with MGB150/Emit before a prompt result is serialized,
+stored, marked successful or cached. Prompt hydration therefore reconstructs an
+empty sidechannel, while archive hydration must load and validate it. Action
+keys hash their exact output schema, isolating these contracts and older
+three-output prompt records without generic optional-output infrastructure.
 Archive backend keys additionally include all compiled unit objects. This is
 essential: a pack's included entry may change while its own empty document,
 link image and directives remain identical, and a reusable library may change an

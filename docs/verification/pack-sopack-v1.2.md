@@ -2,6 +2,11 @@
 
 Date: 2026-10-01. Owner: independent validation agent.
 
+Current candidate status: complete hosted CI passed at `1870f3b`; see the final
+candidate checkpoint below. Earlier failure records are retained as historical
+evidence, not the current verdict. Release publication requires a later exact-tag
+source gate and the complete native asset matrix.
+
 ## Basis and scope
 
 Expected behavior comes from the requested v1.2 contract, the pre-existing
@@ -135,7 +140,28 @@ production and test runtime descriptors. The frontend now exports the ABI
 authority rather than requiring adapters to copy its spelling. These fixes
 must be exercised by a later full hosted suite before the final verdict.
 
-## Coverage limits
+## Final candidate checkpoint
+
+[CI run 36777315965](https://github.com/kleedaisuki/prompt-squish/actions/runs/36777315965)
+passed for `1870f3b81024735c7e8482403bb217f87a51e904` with the actual shipping
+ThinLTO profile and prompt-only cache-output simplification. MSRV 1.88, strict
+Clippy, formatting, architecture, release metadata, doctests, all three native
+platform jobs, composed/source-installed CLI smoke, checked-in real-CLI site demo,
+site/browser checks and complete standard performance measurement passed.
+
+Linux reported 41 test binaries, **698 passed and zero failed**, including all
+14 independent pack process fixtures. Windows and macOS full native jobs also
+passed, including archive/SOPack smoke. The old prompt process and skills/recovery
+suites remained passing. The site demo was refreshed from hosted CLI output,
+with unchanged finished prompt bytes and action counts; hashes were not invented.
+
+Raw final candidate measurement is retained in
+`docs/performance/v1.2-shipping-hosted.json`; its methods and limitations are in
+`docs/performance/v1.2-pipeline.md`. This checkpoint proves candidate workflows,
+not that a GitHub release has already been published. Final main/tag verification
+and native release publishing are tracked in the repository Actions history.
+
+## Remaining coverage limits
 
 Cross-device portability is approximated by separate absolute project roots
 and removal of the producer tree. Actual operating-system portability needs

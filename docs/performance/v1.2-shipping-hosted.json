@@ -1,0 +1,2104 @@
+{
+  "schema": 1,
+  "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+  "python": "3.12.3",
+  "commit": "1870f3b81024735c7e8482403bb217f87a51e904",
+  "runner": "GitHub Actions 1000003984",
+  "cold_definition": "empty project cache; OS page cache untouched",
+  "binaries": {
+    "candidate": {
+      "sha256": "f3fe63696e1131225e5a4e935038020e7c388118fcd274912305a01576909c60",
+      "version": "xmlsquish 1.2.0"
+    },
+    "baseline": {
+      "sha256": "89e8ee3db4943bb637cdc0e7978f04a353d137ce535fde29944dbb8d22dcee37",
+      "version": "xmlsquish 1.1.0"
+    }
+  },
+  "workloads": {
+    "candidate.startup": {
+      "samples_ns": [
+        1817079,
+        1548849,
+        1603881,
+        1529844,
+        1502814
+      ],
+      "median_ns": 1548849,
+      "min_ns": 1502814,
+      "max_ns": 1817079
+    },
+    "baseline.startup": {
+      "samples_ns": [
+        1779960,
+        1743252,
+        1591028,
+        1559389,
+        1621324
+      ],
+      "median_ns": 1621324,
+      "min_ns": 1559389,
+      "max_ns": 1779960
+    },
+    "candidate.tiny.cold": {
+      "samples_ns": [
+        26576151,
+        26511591,
+        29797143,
+        27061760,
+        26757484
+      ],
+      "median_ns": 26757484,
+      "min_ns": 26511591,
+      "max_ns": 29797143
+    },
+    "baseline.tiny.cold": {
+      "samples_ns": [
+        26042316,
+        26403396,
+        27366014,
+        26343821,
+        27083721
+      ],
+      "median_ns": 26403396,
+      "min_ns": 26042316,
+      "max_ns": 27366014
+    },
+    "candidate.tiny.warm": {
+      "samples_ns": [
+        16831470,
+        23861902,
+        16738597,
+        16164965,
+        16059260
+      ],
+      "median_ns": 16738597,
+      "min_ns": 16059260,
+      "max_ns": 23861902
+    },
+    "baseline.tiny.warm": {
+      "samples_ns": [
+        17345217,
+        16485835,
+        15386623,
+        15750945,
+        23784682
+      ],
+      "median_ns": 16485835,
+      "min_ns": 15386623,
+      "max_ns": 23784682
+    },
+    "candidate.prompt.distinct-macros-1": {
+      "samples_ns": [
+        27943836,
+        28342069,
+        36458904,
+        30011837,
+        25414203
+      ],
+      "median_ns": 28342069,
+      "min_ns": 25414203,
+      "max_ns": 36458904,
+      "output_bytes": 35,
+      "output_sha256": "e1f166b832f2a0c848fb3ddc54e261e39308a5554a34871ed5043637079d496f"
+    },
+    "baseline.prompt.distinct-macros-1": {
+      "samples_ns": [
+        28286705,
+        28212588,
+        26636878,
+        27441055,
+        26328370
+      ],
+      "median_ns": 27441055,
+      "min_ns": 26328370,
+      "max_ns": 28286705,
+      "output_bytes": 35,
+      "output_sha256": "e1f166b832f2a0c848fb3ddc54e261e39308a5554a34871ed5043637079d496f"
+    },
+    "candidate.prompt.literal-regex-1": {
+      "samples_ns": [
+        33806246,
+        30938532,
+        31299751,
+        29406675,
+        30618555
+      ],
+      "median_ns": 30938532,
+      "min_ns": 29406675,
+      "max_ns": 33806246,
+      "output_bytes": 35,
+      "output_sha256": "a5f5a660b422901579b11fb2593eaa446c2e298b4de42dc96e5a52b19f7e8cd3"
+    },
+    "baseline.prompt.literal-regex-1": {
+      "samples_ns": [
+        34098740,
+        30601368,
+        33633114,
+        32433470,
+        30076626
+      ],
+      "median_ns": 32433470,
+      "min_ns": 30076626,
+      "max_ns": 34098740,
+      "output_bytes": 35,
+      "output_sha256": "a5f5a660b422901579b11fb2593eaa446c2e298b4de42dc96e5a52b19f7e8cd3"
+    },
+    "candidate.prompt.distinct-macros-64": {
+      "samples_ns": [
+        36801200,
+        32920535,
+        39287398,
+        36496385,
+        31015819
+      ],
+      "median_ns": 36496385,
+      "min_ns": 31015819,
+      "max_ns": 39287398,
+      "output_bytes": 1160,
+      "output_sha256": "d5323959c309206729a26c6cc91da1bb049531faa644ba6459ef6895e2460101"
+    },
+    "baseline.prompt.distinct-macros-64": {
+      "samples_ns": [
+        35697274,
+        35779585,
+        47666019,
+        36752941,
+        31949824
+      ],
+      "median_ns": 35779585,
+      "min_ns": 31949824,
+      "max_ns": 47666019,
+      "output_bytes": 1160,
+      "output_sha256": "d5323959c309206729a26c6cc91da1bb049531faa644ba6459ef6895e2460101"
+    },
+    "candidate.prompt.literal-regex-64": {
+      "samples_ns": [
+        30927729,
+        31313718,
+        37396313,
+        39921921,
+        30532912
+      ],
+      "median_ns": 31313718,
+      "min_ns": 30532912,
+      "max_ns": 39921921,
+      "output_bytes": 1106,
+      "output_sha256": "6ea0e74652b7e261eb7f92e7ebd52430e733935a62e866e6954607e66802b540"
+    },
+    "baseline.prompt.literal-regex-64": {
+      "samples_ns": [
+        35078470,
+        32150716,
+        41264327,
+        36883005,
+        33153971
+      ],
+      "median_ns": 35078470,
+      "min_ns": 32150716,
+      "max_ns": 41264327,
+      "output_bytes": 1106,
+      "output_sha256": "6ea0e74652b7e261eb7f92e7ebd52430e733935a62e866e6954607e66802b540"
+    },
+    "candidate.prompt.distinct-macros-2048": {
+      "samples_ns": [
+        227613878,
+        214846366,
+        225962992,
+        216206632,
+        217421699
+      ],
+      "median_ns": 217421699,
+      "min_ns": 214846366,
+      "max_ns": 227613878,
+      "output_bytes": 39868,
+      "output_sha256": "548828a513d2fec0921ec313cd7f2620cf855b262cbc7ec0e3479ffe4ed37995"
+    },
+    "baseline.prompt.distinct-macros-2048": {
+      "samples_ns": [
+        223362853,
+        221195557,
+        228443445,
+        224834949,
+        226756181
+      ],
+      "median_ns": 224834949,
+      "min_ns": 221195557,
+      "max_ns": 228443445,
+      "output_bytes": 39868,
+      "output_sha256": "548828a513d2fec0921ec313cd7f2620cf855b262cbc7ec0e3479ffe4ed37995"
+    },
+    "candidate.prompt.literal-regex-2048": {
+      "samples_ns": [
+        120408838,
+        114622767,
+        122036481,
+        113062988,
+        112972953
+      ],
+      "median_ns": 114622767,
+      "min_ns": 112972953,
+      "max_ns": 122036481,
+      "output_bytes": 34834,
+      "output_sha256": "e1ebe0440c4784cb126539b7499d82960ba2e2f20dac9404d4ef308c2519f9c4"
+    },
+    "baseline.prompt.literal-regex-2048": {
+      "samples_ns": [
+        212816359,
+        214242924,
+        218987414,
+        208411870,
+        208048426
+      ],
+      "median_ns": 212816359,
+      "min_ns": 208048426,
+      "max_ns": 218987414,
+      "output_bytes": 34834,
+      "output_sha256": "e1ebe0440c4784cb126539b7499d82960ba2e2f20dac9404d4ef308c2519f9c4"
+    },
+    "candidate.pack.assets-1": {
+      "samples_ns": [
+        26392822,
+        26435774,
+        28920363,
+        26509820,
+        26630689
+      ],
+      "median_ns": 26509820,
+      "min_ns": 26392822,
+      "max_ns": 28920363,
+      "bytes": 65664,
+      "members": 1,
+      "sha256": "9d6bde9fe5e02e78e93f0f12e9eecbc3f07f7ffc04ed69d9539a7130d3c57f89"
+    },
+    "candidate.pack.assets-64": {
+      "samples_ns": [
+        62760456,
+        54511442,
+        55946717,
+        57894211,
+        54741749
+      ],
+      "median_ns": 55946717,
+      "min_ns": 54511442,
+      "max_ns": 62760456,
+      "bytes": 4201110,
+      "members": 64,
+      "sha256": "6da9d2eb7ce5359f2db9b0e8501a9caddafb6abf057397de8332ddae63676d2b"
+    },
+    "candidate.pack.assets-512": {
+      "samples_ns": [
+        230111628,
+        226989604,
+        228884484,
+        228650145,
+        235638803
+      ],
+      "median_ns": 228884484,
+      "min_ns": 226989604,
+      "max_ns": 235638803,
+      "bytes": 33608726,
+      "members": 512,
+      "sha256": "d5ca52e1b78e625f669790f8d69c0eaca03db921fb324fef2593e160d55aef6e"
+    },
+    "candidate.pack.distinct-includes-1": {
+      "samples_ns": [
+        30148974,
+        29872949,
+        32996028,
+        32973709,
+        30404775
+      ],
+      "median_ns": 30404775,
+      "min_ns": 29872949,
+      "max_ns": 32996028,
+      "bytes": 208,
+      "members": 1,
+      "sha256": "3e60a2c96712992587881c00bcc3fdf1a4671cda1ed438d65255e5f130018e74"
+    },
+    "candidate.pack.distinct-includes-64": {
+      "samples_ns": [
+        121562804,
+        117590327,
+        117100241,
+        120420927,
+        119311496
+      ],
+      "median_ns": 119311496,
+      "min_ns": 117100241,
+      "max_ns": 121562804,
+      "bytes": 11980,
+      "members": 64,
+      "sha256": "cb5bd742153060145338a51394865ea4083f4e16e274fcec465cd42b401462a8"
+    },
+    "candidate.pack.distinct-includes-512": {
+      "samples_ns": [
+        798652213,
+        773683268,
+        756516391,
+        753109446,
+        749860950
+      ],
+      "median_ns": 756516391,
+      "min_ns": 749860950,
+      "max_ns": 798652213,
+      "bytes": 96168,
+      "members": 512,
+      "sha256": "ece28970e4789e47bb567f4b5b3aa3c656a6ab708209f285aabbaceb535c1964"
+    },
+    "candidate.sopack.macro-reuse-1": {
+      "samples_ns": [
+        31349850,
+        40051939,
+        31088271,
+        31250919,
+        34121579
+      ],
+      "median_ns": 31349850,
+      "min_ns": 31088271,
+      "max_ns": 40051939,
+      "bytes": 65664,
+      "members": 1,
+      "sha256": "9d6bde9fe5e02e78e93f0f12e9eecbc3f07f7ffc04ed69d9539a7130d3c57f89"
+    },
+    "candidate.sopack.macro-reuse-64": {
+      "samples_ns": [
+        69448916,
+        64625359,
+        64365348,
+        66263616,
+        63581513
+      ],
+      "median_ns": 64625359,
+      "min_ns": 63581513,
+      "max_ns": 69448916,
+      "bytes": 4201110,
+      "members": 64,
+      "sha256": "6da9d2eb7ce5359f2db9b0e8501a9caddafb6abf057397de8332ddae63676d2b"
+    },
+    "candidate.sopack.macro-reuse-512": {
+      "samples_ns": [
+        251382014,
+        253142285,
+        254658182,
+        252604364,
+        246750779
+      ],
+      "median_ns": 252604364,
+      "min_ns": 246750779,
+      "max_ns": 254658182,
+      "bytes": 33608726,
+      "members": 512,
+      "sha256": "d5ca52e1b78e625f669790f8d69c0eaca03db921fb324fef2593e160d55aef6e"
+    }
+  },
+  "status": "success",
+  "paired_candidate_over_baseline": {
+    "startup": {
+      "samples_ratio": [
+        1.0208538394121216,
+        0.8884825601806279,
+        1.0080784247668804,
+        0.9810534767142772,
+        0.9269054180410577
+      ],
+      "median_ratio": 0.9810534767142772,
+      "min_ratio": 0.8884825601806279,
+      "max_ratio": 1.0208538394121216
+    },
+    "tiny.cold": {
+      "samples_ratio": [
+        1.0204987528758962,
+        1.004097768332528,
+        1.0888375267220136,
+        1.0272526525290313,
+        0.9879544985713005
+      ],
+      "median_ratio": 1.0204987528758962,
+      "min_ratio": 0.9879544985713005,
+      "max_ratio": 1.0888375267220136
+    },
+    "tiny.warm": {
+      "samples_ratio": [
+        0.9703810566336529,
+        1.4474184656100222,
+        1.0878668438162162,
+        1.026285407002564,
+        0.6751933870715614
+      ],
+      "median_ratio": 1.026285407002564,
+      "min_ratio": 0.6751933870715614,
+      "max_ratio": 1.4474184656100222
+    },
+    "prompt.distinct-macros-1": {
+      "samples_ratio": [
+        0.9878787932351966,
+        1.0045894761586565,
+        1.3687378828705077,
+        1.0936837887610371,
+        0.9652782530783334
+      ],
+      "median_ratio": 1.0045894761586565,
+      "min_ratio": 0.9652782530783334,
+      "max_ratio": 1.3687378828705077
+    },
+    "prompt.literal-regex-1": {
+      "samples_ratio": [
+        0.9914221463901599,
+        1.011017938805873,
+        0.9306230460848793,
+        0.9066768063978353,
+        1.0180182777150601
+      ],
+      "median_ratio": 0.9914221463901599,
+      "min_ratio": 0.9066768063978353,
+      "max_ratio": 1.0180182777150601
+    },
+    "prompt.distinct-macros-64": {
+      "samples_ratio": [
+        1.0309246582806295,
+        0.9200927009075147,
+        0.8242223459022244,
+        0.9930194429882495,
+        0.9707665056308291
+      ],
+      "median_ratio": 0.9707665056308291,
+      "min_ratio": 0.8242223459022244,
+      "max_ratio": 1.0309246582806295
+    },
+    "prompt.literal-regex-64": {
+      "samples_ratio": [
+        0.8816726898294025,
+        0.9739664273728772,
+        0.9062625206513122,
+        1.0823933950067246,
+        0.9209428336653851
+      ],
+      "median_ratio": 0.9209428336653851,
+      "min_ratio": 0.8816726898294025,
+      "max_ratio": 1.0823933950067246
+    },
+    "prompt.distinct-macros-2048": {
+      "samples_ratio": [
+        1.0190319247041495,
+        0.9712960283374951,
+        0.9891419383909221,
+        0.961623773179498,
+        0.9588347186002396
+      ],
+      "median_ratio": 0.9712960283374951,
+      "min_ratio": 0.9588347186002396,
+      "max_ratio": 1.0190319247041495
+    },
+    "prompt.literal-regex-2048": {
+      "samples_ratio": [
+        0.5657875107242109,
+        0.5350130816922569,
+        0.5572762323226484,
+        0.5424978337366293,
+        0.5430127743432195
+      ],
+      "median_ratio": 0.5430127743432195,
+      "min_ratio": 0.5350130816922569,
+      "max_ratio": 0.5657875107242109
+    }
+  },
+  "untimed_pipeline_trace": [
+    {
+      "data": {
+        "operation": "Build",
+        "unix_ms": 1790802704314,
+        "version": "1.2.0"
+      },
+      "elapsed_us": 2,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "command_start",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "name": "bootstrap"
+      },
+      "elapsed_us": 16,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "span_start",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "name": "discover"
+      },
+      "elapsed_us": 74,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "span_start",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "duration_us": 141,
+        "name": "discover"
+      },
+      "elapsed_us": 218,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "span_finish",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "name": "config"
+      },
+      "elapsed_us": 220,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "span_start",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "duration_us": 47,
+        "name": "config"
+      },
+      "elapsed_us": 269,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "span_finish",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "name": "compose"
+      },
+      "elapsed_us": 270,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "span_start",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "duration_us": 403,
+        "name": "compose"
+      },
+      "elapsed_us": 675,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "span_finish",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "duration_us": 660,
+        "name": "bootstrap"
+      },
+      "elapsed_us": 677,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "span_finish",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "name": "dispatch"
+      },
+      "elapsed_us": 679,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "span_start",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374"
+            },
+            "type": "planning_started"
+          },
+          "sequence": 0,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 703,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "locate",
+              "step": "locate"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 1,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 721,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "step": "locate",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 2,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 869,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "recover",
+              "step": "recover"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 3,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 875,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "step": "recover",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 4,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 983,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "recover",
+              "step": "open-build-runtime"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 5,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 988,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "step": "open-build-runtime",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 6,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 1007,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "recover",
+              "step": "recover-build-catalog"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 7,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 1013,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "step": "recover-build-catalog",
+              "timing": {
+                "elapsed_ms": 2
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 8,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 3902,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "snapshot",
+              "step": "snapshot-initial"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 9,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 3910,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "step": "snapshot-initial",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 10,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4067,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "fetch",
+              "step": "fetch-locked"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 11,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4073,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "step": "fetch-locked",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 12,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4353,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "snapshot",
+              "step": "snapshot-materialized"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 13,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4362,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "step": "snapshot-materialized",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 14,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4479,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "resolve",
+              "step": "validate-skill-lock"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 15,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4498,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "step": "validate-skill-lock",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 16,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4510,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "resolve",
+              "step": "resolve"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 17,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4515,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "step": "resolve",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 18,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4581,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "resolve",
+              "step": "validate-resolved-skill-lock"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 19,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4587,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "step": "validate-resolved-skill-lock",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 20,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4591,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "reconcile_lock",
+              "step": "reconcile-lock"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 21,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4596,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "step": "reconcile-lock",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 22,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4600,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "snapshot",
+              "step": "snapshot-authoritative"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 23,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4604,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "step": "snapshot-authoritative",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 24,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4739,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "scan",
+              "step": "scan"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 25,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4745,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "step": "scan",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 26,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4878,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "validate_plan",
+              "step": "validate-plan"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 27,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4883,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "step": "validate-plan",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 28,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4926,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "recover",
+              "step": "open-build-state"
+            },
+            "type": "planning_step_started"
+          },
+          "sequence": 29,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4951,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "attempt": "attempt-1",
+              "job": "build-cli-10658-1790802704313949374",
+              "step": "open-build-state",
+              "timing": {
+                "elapsed_ms": 0
+              }
+            },
+            "type": "planning_step_succeeded"
+          },
+          "sequence": 30,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4956,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "actions": 5,
+              "attempt": "attempt-1",
+              "digest": {
+                "algorithm": {
+                  "type": "blake3"
+                },
+                "hex": "73e153f993bad6772df79205907021b372a75c3f5a4d60edf425913bae9d02e8"
+              },
+              "issues": 0,
+              "job": "build-cli-10658-1790802704313949374",
+              "mode": "execute",
+              "plan": "build-cli-10658-1790802704313949374:attempt-1:73e153f993bad677"
+            },
+            "type": "plan_ready"
+          },
+          "sequence": 31,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 4986,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "action": "build:compile:7ef0b65ca5392ee8266042a4885b134bd502123a86e255a85ed88edeb3961019",
+              "dependencies": [],
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "compile",
+              "plan": "build-cli-10658-1790802704313949374:attempt-1:73e153f993bad677"
+            },
+            "type": "action_declared"
+          },
+          "sequence": 32,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 5017,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "action": "build:link:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "dependencies": [
+                "build:compile:7ef0b65ca5392ee8266042a4885b134bd502123a86e255a85ed88edeb3961019"
+              ],
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "link",
+              "plan": "build-cli-10658-1790802704313949374:attempt-1:73e153f993bad677"
+            },
+            "type": "action_declared"
+          },
+          "sequence": 33,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 5026,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "action": "build:instantiate:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "dependencies": [
+                "build:link:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51"
+              ],
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "instantiate",
+              "plan": "build-cli-10658-1790802704313949374:attempt-1:73e153f993bad677"
+            },
+            "type": "action_declared"
+          },
+          "sequence": 34,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 5034,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "action": "build:backend:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "dependencies": [
+                "build:instantiate:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+                "build:link:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51"
+              ],
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "backend",
+              "plan": "build-cli-10658-1790802704313949374:attempt-1:73e153f993bad677"
+            },
+            "type": "action_declared"
+          },
+          "sequence": 35,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 5046,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "action": "build:publish:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "dependencies": [
+                "build:backend:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51"
+              ],
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "publish",
+              "plan": "build-cli-10658-1790802704313949374:attempt-1:73e153f993bad677"
+            },
+            "type": "action_declared"
+          },
+          "sequence": 36,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 5059,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "action": "build:compile:7ef0b65ca5392ee8266042a4885b134bd502123a86e255a85ed88edeb3961019",
+              "job": "build-cli-10658-1790802704313949374",
+              "plan": "build-cli-10658-1790802704313949374:attempt-1:73e153f993bad677"
+            },
+            "type": "action_started"
+          },
+          "sequence": 37,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 5102,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "action": "build:compile:7ef0b65ca5392ee8266042a4885b134bd502123a86e255a85ed88edeb3961019",
+              "artifacts": [],
+              "job": "build-cli-10658-1790802704313949374",
+              "plan": "build-cli-10658-1790802704313949374:attempt-1:73e153f993bad677",
+              "timing": {
+                "elapsed_ms": 3
+              }
+            },
+            "type": "action_succeeded"
+          },
+          "sequence": 38,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 8999,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "action": "build:link:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "job": "build-cli-10658-1790802704313949374",
+              "plan": "build-cli-10658-1790802704313949374:attempt-1:73e153f993bad677"
+            },
+            "type": "action_started"
+          },
+          "sequence": 39,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 9024,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "action": "build:link:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "artifacts": [],
+              "job": "build-cli-10658-1790802704313949374",
+              "plan": "build-cli-10658-1790802704313949374:attempt-1:73e153f993bad677",
+              "timing": {
+                "elapsed_ms": 2
+              }
+            },
+            "type": "action_succeeded"
+          },
+          "sequence": 40,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 11422,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "action": "build:instantiate:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "job": "build-cli-10658-1790802704313949374",
+              "plan": "build-cli-10658-1790802704313949374:attempt-1:73e153f993bad677"
+            },
+            "type": "action_started"
+          },
+          "sequence": 41,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 11448,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "action": "build:instantiate:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "artifacts": [],
+              "job": "build-cli-10658-1790802704313949374",
+              "plan": "build-cli-10658-1790802704313949374:attempt-1:73e153f993bad677",
+              "timing": {
+                "elapsed_ms": 1
+              }
+            },
+            "type": "action_succeeded"
+          },
+          "sequence": 42,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 13075,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "action": "build:backend:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "job": "build-cli-10658-1790802704313949374",
+              "plan": "build-cli-10658-1790802704313949374:attempt-1:73e153f993bad677"
+            },
+            "type": "action_started"
+          },
+          "sequence": 43,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 13101,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "action": "build:backend:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "artifacts": [],
+              "job": "build-cli-10658-1790802704313949374",
+              "plan": "build-cli-10658-1790802704313949374:attempt-1:73e153f993bad677",
+              "timing": {
+                "elapsed_ms": 1
+              }
+            },
+            "type": "action_succeeded"
+          },
+          "sequence": 44,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 14906,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "action": "build:publish:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "job": "build-cli-10658-1790802704313949374",
+              "plan": "build-cli-10658-1790802704313949374:attempt-1:73e153f993bad677"
+            },
+            "type": "action_started"
+          },
+          "sequence": 45,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 14932,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "action": "build:publish:b9d171da44784105c22d26a3c9e997a59843eb3e46b0cc511efe2b96f0599f51",
+              "artifacts": [
+                {
+                  "digest": {
+                    "algorithm": {
+                      "type": "blake3"
+                    },
+                    "hex": "9a3190f0f1d3ebb9fce9dcd8716aa2820cab566efd57b2192e5a70a8d32e871d"
+                  },
+                  "id": "perf-prompt:prompt:target-record",
+                  "kind": {
+                    "type": "metadata"
+                  },
+                  "size": 481,
+                  "uri": "target/xmlsquish/artifacts/prompt.build.json"
+                },
+                {
+                  "digest": {
+                    "algorithm": {
+                      "type": "blake3"
+                    },
+                    "hex": "7e36f98fa44759e8c2d20342341c052cbd222a0c7125d062be7216af92acd1e9"
+                  },
+                  "id": "perf-prompt:prompt:prompt",
+                  "kind": {
+                    "type": "prompt"
+                  },
+                  "size": 35,
+                  "uri": "target/xmlsquish/artifacts/prompt.prompt"
+                },
+                {
+                  "digest": {
+                    "algorithm": {
+                      "type": "blake3"
+                    },
+                    "hex": "1ad48f49627079d806b802c74f40c39d55fe1d78b3faf0f8017aec62cec42122"
+                  },
+                  "id": "perf-prompt:prompt:static-link-map",
+                  "kind": {
+                    "name": "static-link-map",
+                    "type": "other"
+                  },
+                  "size": 2,
+                  "uri": "target/xmlsquish/artifacts/prompt.xsmap"
+                }
+              ],
+              "job": "build-cli-10658-1790802704313949374",
+              "plan": "build-cli-10658-1790802704313949374:attempt-1:73e153f993bad677",
+              "timing": {
+                "elapsed_ms": 6
+              }
+            },
+            "type": "action_succeeded"
+          },
+          "sequence": 46,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 22004,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "job": "build-cli-10658-1790802704313949374",
+              "plan": "build-cli-10658-1790802704313949374:attempt-1:73e153f993bad677",
+              "reason": "executed"
+            },
+            "type": "plan_closed"
+          },
+          "sequence": 47,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 22056,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "id": "persist-build-catalog",
+              "job": "build-cli-10658-1790802704313949374",
+              "kind": "persist_build_catalog"
+            },
+            "type": "finalization_started"
+          },
+          "sequence": 48,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 22077,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "id": "persist-build-catalog",
+              "job": "build-cli-10658-1790802704313949374",
+              "timing": {
+                "elapsed_ms": 3
+              }
+            },
+            "type": "finalization_succeeded"
+          },
+          "sequence": 49,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 25964,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "job": "build-cli-10658-1790802704313949374",
+              "result": {
+                "result": {
+                  "build_record": {
+                    "digest": {
+                      "algorithm": {
+                        "type": "blake3"
+                      },
+                      "hex": "be1ecf34397bdc0cf36665fa20ad16626351c56fe9ea449822e797903d7b9e4f"
+                    },
+                    "id": "build-record-v3",
+                    "kind": {
+                      "type": "metadata"
+                    },
+                    "size": 5801,
+                    "uri": "build-record-v3.json"
+                  },
+                  "published": [
+                    {
+                      "artifacts": [
+                        {
+                          "digest": {
+                            "algorithm": {
+                              "type": "blake3"
+                            },
+                            "hex": "9a3190f0f1d3ebb9fce9dcd8716aa2820cab566efd57b2192e5a70a8d32e871d"
+                          },
+                          "id": "perf-prompt:prompt:target-record",
+                          "kind": {
+                            "type": "metadata"
+                          },
+                          "locator": "target/xmlsquish/artifacts/prompt.build.json",
+                          "size": 481
+                        },
+                        {
+                          "digest": {
+                            "algorithm": {
+                              "type": "blake3"
+                            },
+                            "hex": "7e36f98fa44759e8c2d20342341c052cbd222a0c7125d062be7216af92acd1e9"
+                          },
+                          "id": "perf-prompt:prompt:prompt",
+                          "kind": {
+                            "type": "prompt"
+                          },
+                          "locator": "target/xmlsquish/artifacts/prompt.prompt",
+                          "size": 35
+                        },
+                        {
+                          "digest": {
+                            "algorithm": {
+                              "type": "blake3"
+                            },
+                            "hex": "1ad48f49627079d806b802c74f40c39d55fe1d78b3faf0f8017aec62cec42122"
+                          },
+                          "id": "perf-prompt:prompt:static-link-map",
+                          "kind": {
+                            "name": "static-link-map",
+                            "type": "other"
+                          },
+                          "locator": "target/xmlsquish/artifacts/prompt.xsmap",
+                          "size": 2
+                        }
+                      ],
+                      "generation_id": "d4620405d27a41c72fd97f946d56b6bbcce7d8fbbacf86f6fb6ca4e01576e10e",
+                      "target": "prompt",
+                      "target_id": "perf-prompt:prompt"
+                    }
+                  ]
+                },
+                "type": "build"
+              }
+            },
+            "type": "operation_completed"
+          },
+          "sequence": 50,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 26019,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "event": {
+          "invocation": "cli-10658-1790802704313949374",
+          "payload": {
+            "data": {
+              "cache_hits": 0,
+              "job": "build-cli-10658-1790802704313949374",
+              "root_failures": 0,
+              "status": "success",
+              "timing": {
+                "elapsed_ms": 25
+              },
+              "totals": {
+                "blocked": 0,
+                "cancelled": 0,
+                "failed": 0,
+                "succeeded": 5
+              }
+            },
+            "type": "job_finished"
+          },
+          "sequence": 51,
+          "version": {
+            "major": 3,
+            "minor": 2
+          }
+        }
+      },
+      "elapsed_us": 26063,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "event",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "duration_us": 26221,
+        "name": "dispatch"
+      },
+      "elapsed_us": 26902,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "span_finish",
+      "schema": "xmlsquish.trace.v1"
+    },
+    {
+      "data": {
+        "exit_code": 0,
+        "status": "success"
+      },
+      "elapsed_us": 26905,
+      "invocation": "cli-10658-1790802704313949374",
+      "kind": "command_finish",
+      "schema": "xmlsquish.trace.v1"
+    }
+  ]
+}
