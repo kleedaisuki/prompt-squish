@@ -1270,7 +1270,7 @@ fn flatten(
     Ok(Flattened {
         document: LinkedDocumentIr {
             schema: image.schema,
-            document_abi: squish_ir::AbiId("xmlsquish-document-v1".into()),
+            document_abi: squish_ir::AbiId(squish_ir::DOCUMENT_ABI.into()),
             root: DocumentRegionId(0),
             regions,
             items,
@@ -1428,7 +1428,7 @@ mod archive_fragment_tests {
     fn empty_fragment() -> LinkedDocumentIr {
         LinkedDocumentIr {
             schema: Version { major: 1, minor: 0 },
-            document_abi: AbiId("xmlsquish.document.v1".into()),
+            document_abi: AbiId(squish_ir::DOCUMENT_ABI.into()),
             root: DocumentRegionId(0),
             regions: vec![DocumentRegion {
                 id: DocumentRegionId(0),

@@ -6,6 +6,12 @@
 
 #![forbid(unsafe_code)]
 
+/// Authoritative ABI for backend-neutral document event tapes.
+///
+/// Evaluators and backends must use this identity directly. Orchestrators must not need
+/// to repair a document ABI between instantiation and emission.
+pub const DOCUMENT_ABI: &str = "xmlsquish.document.v1";
+
 mod codec;
 mod debug_bundle;
 mod digest;

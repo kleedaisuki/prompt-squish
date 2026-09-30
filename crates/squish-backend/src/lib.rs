@@ -23,7 +23,7 @@ pub const SQUISH_BACKEND_ID: &str = "xmlsquish.squish";
 /// 改变产品字节语义时必须改变的 ABI。 / ABI changed whenever product-byte semantics change.
 pub const SQUISH_BACKEND_ABI: &str = "xmlsquish.squish.v1";
 /// 当前后端接受的文档 ABI。 / Document ABI accepted by the current backend.
-pub const DOCUMENT_ABI: &str = "xmlsquish.document.v1";
+pub const DOCUMENT_ABI: &str = squish_ir::DOCUMENT_ABI;
 
 /// 后端的缓存身份。 / Cache identity of a backend invocation.
 ///
