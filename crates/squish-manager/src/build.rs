@@ -1900,28 +1900,40 @@ impl BuildExecutor {
                 budgets(&target.resolved),
             )
             .map_err(|e| error("MGB073", Phase::Instantiate, e))?;
+        let archive = is_archive_backend(&target.resolved.backend);
+        if !archive && !instantiated.directives.is_empty() {
+            return Err(ManagerError::new(
+                "MGB150",
+                Phase::Emit,
+                "prompt targets cannot emit asset/include members; select the pack backend",
+            ));
+        }
         let mut document = instantiated.document.clone();
         document.document_abi =
             squish_ir::AbiId(self.prepared.runtime_descriptor.document_abi.clone());
         let document_bytes = encode_linked_document(&document);
         let trace_bytes = encode_expansion_trace(&instantiated.trace);
-        let directive_bytes = squish_link::encode_archive_directives(&instantiated.directives);
         self.store_blob(&document_bytes, "MGB074", Phase::Cache)?;
         self.store_blob(&trace_bytes, "MGB075", Phase::Cache)?;
-        self.store_blob(&directive_bytes, "MGB075", Phase::Cache)?;
+        let mut outputs = vec![
+            produced("document", ArtifactKind::Metadata, &document_bytes),
+            produced("trace", ArtifactKind::DebugInfo, &trace_bytes),
+        ];
+        if archive {
+            let directive_bytes = squish_link::encode_archive_directives(&instantiated.directives);
+            self.store_blob(&directive_bytes, "MGB075", Phase::Cache)?;
+            outputs.push(produced(
+                "directives",
+                ArtifactKind::Metadata,
+                &directive_bytes,
+            ));
+        }
         self.state
             .lock()
             .expect("build state mutex is not poisoned")
             .instantiated
             .insert(target_name.into(), (document, instantiated));
-        Ok((
-            vec![
-                produced("document", ArtifactKind::Metadata, &document_bytes),
-                produced("trace", ArtifactKind::DebugInfo, &trace_bytes),
-                produced("directives", ArtifactKind::Metadata, &directive_bytes),
-            ],
-            Vec::new(),
-        ))
+        Ok((outputs, Vec::new()))
     }
 
     fn backend(
@@ -2279,11 +2291,16 @@ impl BuildExecutor {
                     .map_err(|e| error("MGB125", Phase::Cache, e))?;
                 let trace = decode_expansion_trace(&self.cached_bytes(record, "trace")?)
                     .map_err(|e| error("MGB126", Phase::Cache, e))?;
-                let directives = squish_link::decode_archive_directives(
-                    &self.cached_bytes(record, "directives")?,
-                )
-                .map_err(|e| error("MGB126", Phase::Cache, e))?;
-                archive_build::validate_directives(&directives, &trace)?;
+                let directives = if is_archive_backend(&self.target(target)?.resolved.backend) {
+                    let directives = squish_link::decode_archive_directives(
+                        &self.cached_bytes(record, "directives")?,
+                    )
+                    .map_err(|e| error("MGB126", Phase::Cache, e))?;
+                    archive_build::validate_directives(&directives, &trace)?;
+                    directives
+                } else {
+                    Vec::new()
+                };
                 if document.document_abi.0 != self.prepared.runtime_descriptor.document_abi {
                     return Err(ManagerError::new(
                         "MGB125",
@@ -2865,6 +2882,22 @@ fn build_plan(
             action: link.clone(),
             output: output_name("image"),
         })];
+        let mut instantiate_outputs = vec![
+            Output {
+                name: output_name("document"),
+                kind: ArtifactKind::Metadata,
+            },
+            Output {
+                name: output_name("trace"),
+                kind: ArtifactKind::DebugInfo,
+            },
+        ];
+        if is_archive_backend(&target.resolved.backend) {
+            instantiate_outputs.push(Output {
+                name: output_name("directives"),
+                kind: ArtifactKind::Metadata,
+            });
+        }
         add_action(
             &mut actions,
             &mut work,
@@ -2873,20 +2906,7 @@ fn build_plan(
                 target: identity.clone(),
             },
             vec![link.clone()],
-            vec![
-                Output {
-                    name: output_name("document"),
-                    kind: ArtifactKind::Metadata,
-                },
-                Output {
-                    name: output_name("trace"),
-                    kind: ArtifactKind::DebugInfo,
-                },
-                Output {
-                    name: output_name("directives"),
-                    kind: ArtifactKind::Metadata,
-                },
-            ],
+            instantiate_outputs,
             (instantiate_inputs, instantiate_options(target, descriptor)),
         )?;
         let backend = action_id("backend", &identity);
@@ -2900,10 +2920,12 @@ fn build_plan(
                 output: output_name("trace"),
             }),
         ];
-        backend_inputs.push(InputRef::Output(OutputRef {
-            action: instantiate.clone(),
-            output: output_name("directives"),
-        }));
+        if is_archive_backend(&target.resolved.backend) {
+            backend_inputs.push(InputRef::Output(OutputRef {
+                action: instantiate.clone(),
+                output: output_name("directives"),
+            }));
+        }
         backend_inputs.push(InputRef::Output(OutputRef {
             action: link.clone(),
             output: output_name("image"),
@@ -3792,6 +3814,11 @@ fn archive_and_origins(
 fn unit_kind(unit: &RelocatableUnitIr) -> UnitKind {
     unit.kind()
 }
+/// Archive distribution requires persistent directives; prompt distribution forbids them.
+fn is_archive_backend(backend: &str) -> bool {
+    matches!(backend, "pack" | "sopack")
+}
+
 /// Reports backend distribution truthfully while keeping internal output names stable.
 fn product_kind(backend: &str) -> ArtifactKind {
     match backend {

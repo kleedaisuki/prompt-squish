@@ -256,3 +256,36 @@ literals after the centralized document ABI correction. Frontend uses its declar
 FRONTEND_ABI; linker validates schema/language/regex compatibility; manager action
 recipe namespaces include 1.2.0 to invalidate stale internal schemas. Hosted rerun
 is still required to establish success of the fixes.
+
+## Final bounded performance-change verification
+
+Scope: shared IncludeIndex and prompt-only removal of the empty persistent archive
+sidechannel. Source inspection only; final hosted execution remains authoritative.
+
+- `IncludeIndex` borrows revision rows and import bindings from the per-pack frozen
+  ResolutionSnapshot, whose owner outlives all child operations. Project traversal
+  uses visited source keys, terminates legal import cycles, copies exact reachable
+  revisions/bindings, and sorts both output collections canonically. Missing owners,
+  targets or selected compiled payloads fail. The child linker still validates the
+  projected snapshot and payloads; global parent validation is not removed.
+- A nonarchive target producing any directive receives MGB150/Emit immediately
+  after runtime instantiation, before serialization, blob storage, successful state
+  insertion or action-output production. It cannot cache a falsely successful
+  directive-free prompt instantiation.
+- Ordinary prompt instantiation declares document/trace (2 outputs); archive
+  instantiation also declares directives (3 outputs). `KeyRecipe::resolve` hashes
+  the output schema count, names and artifact kinds, so previous 3-output caches
+  cannot collide with the new 2-output prompt recipe. Runtime lookup is keyed by
+  that resolved action key; scheduler separately enforces output schema equality.
+- Prompt cached hydration creates an empty directive vector only for the 2-output
+  prompt schema. Changed source operations affect linked image input and arguments
+  enter instantiate options; an invalid directive-producing prompt cannot acquire
+  an old successful result by retaining the same document bytes.
+- Archive backend recipes still reference directives and compiled XSiR evidence.
+  Cached archive instantiation must load the named directives output and decode it;
+  missing/corrupt payloads return an error, not an empty fallback. Decoded directives
+  retain safe-name and companion-frame validation.
+
+No substantive defect found in these bounded changes. ThinLTO/codegen-units policy
+was not independently rebenchmarked here; the root's paired hosted measurement and
+final CI evidence own that performance decision.
