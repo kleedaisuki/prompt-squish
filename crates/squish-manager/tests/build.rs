@@ -408,19 +408,19 @@ fn runtime_descriptor_identity_changes_the_sealed_plan() {
 
     for descriptor in [
         squish_manager::BuildRuntimeDescriptor {
-            frontend_abi: "xmlsquish.xml/1".into(),
+            frontend_abi: squish_xml_front::FRONTEND_ABI.into(),
             linker_abi: "xmlsquish.link/2-test".into(),
             evaluator_abi: "xmlsquish.instantiate/1".into(),
             document_abi: squish_backend::DOCUMENT_ABI.into(),
         },
         squish_manager::BuildRuntimeDescriptor {
-            frontend_abi: "xmlsquish.xml/1".into(),
+            frontend_abi: squish_xml_front::FRONTEND_ABI.into(),
             linker_abi: "xmlsquish.link/1".into(),
             evaluator_abi: "xmlsquish.instantiate/2-test".into(),
             document_abi: squish_backend::DOCUMENT_ABI.into(),
         },
         squish_manager::BuildRuntimeDescriptor {
-            frontend_abi: "xmlsquish.xml/1".into(),
+            frontend_abi: squish_xml_front::FRONTEND_ABI.into(),
             linker_abi: "xmlsquish.link/1".into(),
             evaluator_abi: "xmlsquish.instantiate/1".into(),
             document_abi: "xmlsquish.document.v2-test".into(),
@@ -439,7 +439,7 @@ fn runtime_descriptor_identity_changes_the_sealed_plan() {
         assert_ne!(baseline, digest);
     }
 
-    descriptor.frontend_abi = "xmlsquish.xml/1".into();
+    descriptor.frontend_abi = squish_xml_front::FRONTEND_ABI.into();
     let restored = build::prepare(
         &request,
         &MemoryServices {

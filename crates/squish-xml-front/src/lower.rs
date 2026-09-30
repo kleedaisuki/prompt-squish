@@ -81,7 +81,7 @@ pub(crate) fn lower(
     let header = UnitHeader {
         ir_schema: Version { major: 1, minor: 0 },
         language_abi: AbiId("xmlsquish.dsl/0.4".into()),
-        frontend_abi: AbiId("xmlsquish.xml/2".into()),
+        frontend_abi: AbiId(crate::FRONTEND_ABI.into()),
         regex_abi: AbiId("rust-regex/1.13.1".into()),
         source: source_key.clone(),
         imports: unit

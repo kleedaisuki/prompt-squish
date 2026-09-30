@@ -22,6 +22,9 @@ use squish_source::SourceBlob;
 /// 当前 XML DSL 命名空间。 / Current XML DSL namespace.
 pub const DSL_NAMESPACE: &str = "https://xmlsquish.moesegfault.dev/ns";
 
+/// Semantic frontend ABI shared by emitted objects and frozen runtime descriptors.
+pub const FRONTEND_ABI: &str = "xmlsquish.xml/2";
+
 /// 前端成功产物。 / Successful frontend product.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FrontendOutput {

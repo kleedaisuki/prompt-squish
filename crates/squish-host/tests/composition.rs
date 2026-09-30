@@ -99,7 +99,7 @@ fn production_runtime_uses_one_cas_and_isolated_generation_spaces() {
     let reopened = Services::open_build_runtime(&host, host.project_root()).unwrap();
     assert!(Arc::ptr_eq(&runtime, &reopened));
     let descriptor = runtime.descriptor();
-    assert_eq!(descriptor.frontend_abi, "xmlsquish.xml/1");
+    assert_eq!(descriptor.frontend_abi, squish_xml_front::FRONTEND_ABI);
     assert_eq!(descriptor.linker_abi, "xmlsquish.link/1");
     assert_eq!(descriptor.evaluator_abi, "xmlsquish.instantiate/1");
     assert_eq!(descriptor.document_abi, squish_backend::DOCUMENT_ABI);

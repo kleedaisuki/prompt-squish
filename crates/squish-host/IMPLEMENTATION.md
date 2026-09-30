@@ -46,13 +46,17 @@ The descriptor currently freezes these semantic identities before plan sealing:
 
 | Stage | Identity |
 | --- | --- |
-| XML frontend | `xmlsquish.xml/1` |
+| XML frontend | `squish_xml_front::FRONTEND_ABI` (`xmlsquish.xml/2`) |
 | static linker | `xmlsquish.link/1` |
 | evaluator | `xmlsquish.instantiate/1` |
 | linked document | `xmlsquish.document.v1` |
 
 Changing implementation semantics requires changing the corresponding identity so an older
-action-cache entry cannot be reused by a different toolchain.
+action-cache entry cannot be reused by a different toolchain. The XML frontend owns its public
+`FRONTEND_ABI` constant; lowering, production runtime descriptors and representative test
+fixtures reference that one authority. A duplicated version literal can compile successfully
+while rejecting every real frontend output at the frozen-ABI boundary, so composition tests
+assert descriptor identity against the exported constant.
 
 Runtime errors retain their causal category. CAS, SQLite, publisher-store, and publisher-I/O
 availability failures are `Storage`; malformed journals, invalid or aliased destinations,

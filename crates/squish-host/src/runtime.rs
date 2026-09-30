@@ -189,7 +189,7 @@ impl ProductionBuildRuntime {
 impl BuildRuntime for ProductionBuildRuntime {
     fn descriptor(&self) -> BuildRuntimeDescriptor {
         BuildRuntimeDescriptor {
-            frontend_abi: "xmlsquish.xml/1".into(),
+            frontend_abi: squish_xml_front::FRONTEND_ABI.into(),
             linker_abi: "xmlsquish.link/1".into(),
             evaluator_abi: "xmlsquish.instantiate/1".into(),
             document_abi: squish_backend::DOCUMENT_ABI.into(),
