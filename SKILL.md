@@ -1,6 +1,6 @@
 ---
 name: prompt-squish
-description: Author, configure, build, format, inspect, and clean xmlsquish prompt projects; manage project Agent Skills. Use when working with the XML macro DSL, xmlsquish.toml packages/workspaces/dependencies/skills/targets, .agents/skills, or the xmlsquish CLI.
+description: Author, configure, build, format, inspect, and clean xmlsquish prompt, pack, and SOPack projects; manage project Agent Skills. Use when working with the XML macro DSL, xmlsquish.toml packages/workspaces/dependencies/skills/targets, .agents/skills, or the xmlsquish CLI.
 ---
 
 # xmlsquish Agent Guide
@@ -66,6 +66,68 @@ not execute scripts, and refuses to overwrite unmanaged or locally modified
 skill directories. Verify third-party content before enabling it: a lock digest
 is integrity evidence, not a trust or safety certificate.
 
+## Packs, libraries, and asset ownership (v1.2.0)
+
+Choose a source root by intent: `xs:entry` constructs one prompt; `xs:module`
+provides macro definitions; `xs:pack` collects deliverables; `xs:sopack`
+exports a reusable compiled library. Set target `backend` to `pack` or `sopack`
+and use the matching `.pack` or `.sopack` output suffix. Ordinary prompt targets
+keep `squish` (or `prompt`).
+
+```xml
+<xs:pack xmlns:xs="https://xmlsquish.moesegfault.dev/ns">
+  <xs:include path="instructions.xml" name="instructions.prompt"/>
+  <xs:asset path="scripts/check.py" name="scripts/check.py"/>
+</xs:pack>
+```
+
+- `xs:include path="..."` accepts an entry only, never a module. Its default
+  member name is the source stem plus `.prompt`.
+- `xs:asset path="..."` stores the complete original file bytes. Its default
+  member name retains the relative path; `name` overrides the archive name.
+  Do not parse binary assets or rewrite code/asset whitespace.
+- SOPack accepts module `xs:import src="..."`, macro declarations and assets;
+  it forbids include, including inside its macros. It contains IR, compiled
+  modules and metadata, not final prompts or packs.
+- Macros may expand assets. Their paths belong to the defining source, not
+  the invocation source. Keep that ownership when refactoring modules.
+- Both archives are reproducible ZIP containers. Distribute `.sopack`, not
+  private cache state, for cross-device reuse. Source identities relocate
+  with the library for references and diagnostics.
+
+```toml
+[dependencies]
+common = { sopack = "vendor/common.sopack" }
+```
+
+```bash
+xmlsquish add common --path vendor/common.sopack
+xmlsquish remove common --dry-run
+```
+
+A SOPack is immutable: update the dependency intentionally rather than editing
+its contents under an existing lock pin. Existing `pkg:common/export` import
+syntax remains the consumer interface. Telemetry/tracing are opt-in and stored
+as project metadata across runs, not embedded in deterministic products.
+Treat trace data as potentially private. v1.2 may invalidate old derived caches;
+`clean` and rebuild instead of attempting to migrate private cache schemas.
+
+
+```console
+xmlsquish --trace=summary build
+xmlsquish --trace=events build
+xmlsquish --trace=off build
+```
+
+`--trace` without a value means `events`; values require `=`.
+`XMLSQUISH_TRACE=summary|events|1|true` is the environment fallback; explicit
+`--trace=off` overrides it. Summary records command and stage spans; events
+also records lifecycle events and diagnostics. JSONL records use
+`xmlsquish.trace.v1` and persist at
+`<target-dir>/metadata/traces/<invocation>.jsonl`. There is no outbound
+transmission. Trace write failures emit `TRACE001` warnings without changing
+the command result; review paths and diagnostic payloads before sharing.
+
 ## `xmlsquish.toml` quick reference
 
 ```toml
@@ -124,7 +186,7 @@ args = { locale = "zh-CN" }
 features = ["release"]
 ```
 
-Unknown keys are errors. XML package names use ASCII letters, digits, `-`, or `_`; Agent Skill names instead use lowercase ASCII letters, digits, and interior hyphens, with a maximum of 64 characters. Paths are manifest-relative and may not escape their owning roots; outputs must end in `.prompt`. A dependency may additionally use `package`, `optional`, `features`, and `default-features`. Consumers import only declared exports of direct dependencies:
+Unknown keys are errors. XML package names use ASCII letters, digits, `-`, or `_`; Agent Skill names instead use lowercase ASCII letters, digits, and interior hyphens, with a maximum of 64 characters. Paths are manifest-relative and may not escape their owning roots; outputs must match the backend: `.prompt` for `squish`/`prompt`, `.pack` for `pack`, or `.sopack` for `sopack`. A dependency may additionally use `package`, `optional`, `features`, and `default-features`. Consumers import only declared exports of direct dependencies:
 
 ```xml
 <xs:import src="pkg:common/macros"/>

@@ -2,7 +2,7 @@
  * 一条公共 DSL 指令的语言无关身份。
  */
 export type Directive = {
-  readonly name: "module" | "entry" | "import" | "macro" | "param" | "expand" | "arg" | "fill" | "slot" | "insert" | "ifr";
+  readonly name: "pack" | "sopack" | "asset" | "include" | "module" | "entry" | "import" | "macro" | "param" | "expand" | "arg" | "fill" | "slot" | "insert" | "ifr";
   readonly group: "project" | "composition" | "values" | "control";
   readonly attributes: readonly { readonly name: string; readonly requirement: "required" | "optional" | "exclusive"; readonly default?: string }[];
   readonly syntax: string;
@@ -16,6 +16,16 @@ export type Directive = {
  * one source of truth. / 每个名称只出现一次，使导航、搜索和稳定片段共享单一事实来源。
  */
 export const directives = [
+  { name: "pack", group: "project", attributes: [], syntax: `<xs:pack xmlns:xs="https://xmlsquish.moesegfault.dev/ns">
+  <xs:include path="instructions.xml"/>
+  <xs:asset path="scripts/check.py"/>
+</xs:pack>`, relatedChapter: "build-and-artifacts" },
+  { name: "sopack", group: "project", attributes: [], syntax: `<xs:sopack xmlns:xs="https://xmlsquish.moesegfault.dev/ns">
+  <xs:import src="macros.xml"/>
+  <xs:asset path="schema.json"/>
+</xs:sopack>`, relatedChapter: "build-and-artifacts" },
+  { name: "asset", group: "composition", attributes: [{ name: "path", requirement: "required" }, { name: "name", requirement: "optional" }], syntax: `<xs:asset path="scripts/check.py" name="scripts/check.py"/>`, relatedChapter: "build-and-artifacts" },
+  { name: "include", group: "composition", attributes: [{ name: "path", requirement: "required" }, { name: "name", requirement: "optional" }], syntax: `<xs:include path="instructions.xml" name="instructions.prompt"/>`, relatedChapter: "build-and-artifacts" },
   { name: "entry", group: "project", attributes: [], syntax: `<xs:entry xmlns:xs="https://xmlsquish.moesegfault.dev/ns">\n  <Prompt>Hello</Prompt>\n</xs:entry>`, relatedChapter: "getting-started" },
   { name: "module", group: "project", attributes: [], syntax: `<xs:module xmlns:xs="https://xmlsquish.moesegfault.dev/ns"\n           xmlns:app="urn:example:app">\n  <xs:macro name="app:hello"/>\n</xs:module>`, relatedChapter: "source-model" },
   { name: "import", group: "project", attributes: [{ name: "src", requirement: "required" }], syntax: `<xs:import src="./macros.xml"/>`, relatedChapter: "source-model" },

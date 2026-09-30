@@ -6,6 +6,28 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-10-01
+
+完整发布说明与安装方法 / Full release notes and installation: [1.2.0](docs/releases/1.2.0.md).
+
+### 编译单元与分发 / Compilation units and distribution
+
+- 新增顶层 `xs:pack` 与 `xs:sopack`，以及字节保真的 `xs:asset` 和仅面向入口的 `xs:include`。`.pack` 是交付产品，`.sopack` 是不包含成品的可复用编译库。
+  Add `xs:pack`, `xs:sopack`, byte-preserving `xs:asset`, and entry-only `xs:include`. A `.pack` is a deliverable; a `.sopack` is a reusable compiled library without final products.
+- pack 与 SOPack 使用可复现 ZIP；SOPack 保存可重定位的源码身份、中间表示、编译模块、宏和资源，使跨设备复用不依赖原机器路径。
+  Use reproducible ZIP containers and relocatable source identities, IR, compiled modules, macros, and assets for cross-device SOPack reuse.
+- SOPack 可由包依赖的 `add` / `remove` 生命周期管理。链接器消费统一编译单元，而不区分本地源码与 SOPack 来源。
+  Manage SOPack through the package dependency `add` / `remove` lifecycle; the linker consumes uniform compilation units regardless of origin.
+
+### 编译管线与运行证据 / Compiler pipeline and runtime evidence
+
+- 显式划分前端、中端优化、链接及链接时优化、后端分发；prompt 后端处理空白，pack 与 SOPack 后端负责归档。
+  Separate front-end lowering, middle-end optimization, linking/link-time optimization, and backend distribution.
+- 新增默认关闭的端到端遥测与 tracing，选择性记录到项目元数据，跨运行保留证据而不污染确定性产品。
+  Add opt-in end-to-end telemetry and tracing stored in project metadata across runs, outside deterministic products.
+- 更新用户手册、双语发布页和自带 `SKILL.md`。旧派生缓存不提供兼容迁移；缓存仍由项目拥有。
+  Update the manual, bilingual release pages, and bundled `SKILL.md`. Old derived caches are intentionally not migrated; cache ownership remains project-local.
+
 ## [1.1.0] — 2026-09-29
 
 完整发布说明与安装方法 / Full release notes and installation: [1.1.0](docs/releases/1.1.0.md).

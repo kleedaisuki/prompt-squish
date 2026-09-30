@@ -90,6 +90,46 @@ const en: ReleaseUiCopy = {
     allReleases: "All releases",
   },
   versions: {
+    "1.2.0": {
+      "title": "Reproducible packs and relocatable libraries",
+      "description": "xmlsquish 1.2.0 adds pack and SOPack units, raw assets, an explicit compiler pipeline, and opt-in persistent tracing.",
+      "date": "October 1, 2026",
+      "summary": "Deliver prompts together with code and static assets, or distribute an immutable compiled library across devices. The compiler now separates frontend, middle-end optimization, linking and backend distribution.",
+      "changes": [
+        {
+          "id": "units",
+          "title": "Four source roots, three product roles",
+          "items": [
+            "xs:pack aggregates entry-only includes and byte-preserving assets into a reproducible ZIP .pack.",
+            "xs:sopack imports modules, defines macros and assets, and preserves IR, compiled units and metadata without final products.",
+            "Archive names, order and timestamps are deterministic; raw assets are not parsed as XML or whitespace-squished."
+          ]
+        },
+        {
+          "id": "libraries",
+          "title": "SOPack is a library, not a cache",
+          "items": [
+            "Declare { sopack = \"vendor/common.sopack\" } or use add common --path vendor/common.sopack; remove uses the existing dependency lifecycle.",
+            "Source identities relocate with the library, preserving diagnostic positions and defining-source asset ownership.",
+            "The linker consumes uniform compilation units regardless of whether they originated locally or in a SOPack."
+          ]
+        },
+        {
+          "id": "pipeline",
+          "title": "Explicit stages and opt-in evidence",
+          "items": [
+            "Frontend lowering, middle-end evaluation, linking/link-time optimization and backend distribution have explicit responsibilities.",
+            "Telemetry and tracing are disabled by default and persist across runs in project metadata when enabled.",
+            "The bundled Agent Skill and manual document the new unit and product boundaries."
+          ]
+        }
+      ],
+      "compatibility": [
+        "Projects using pack, SOPack, asset or include require 1.2.0; the namespace URI remains unchanged.",
+        "Old derived caches are intentionally invalidated. Clean and rebuild; keep dependencies available before an offline rebuild.",
+        "Use SOPack for cross-device reuse, not copies of private cache directories. Trace metadata is not part of reproducible products."
+      ]
+    },
     "1.1.0": {
       title: "Agent Skills become locked project dependencies",
       description: "xmlsquish 1.1.0 manages Agent Skills in .agents/skills and adds a bundled guide installer, with machine protocol 3.2.",
@@ -216,6 +256,46 @@ const zh: ReleaseUiCopy = {
     allReleases: "全部发布",
   },
   versions: {
+    "1.2.0": {
+      "title": "可复现打包与可重定位编译库",
+      "description": "xmlsquish 1.2.0 新增 pack、SOPack、原始资源、显式编译管线与可选的跨运行跟踪。",
+      "date": "2026 年 10 月 1 日",
+      "summary": "将提示词、代码和静态资源一同交付，或把不可变编译库跨设备复用。编译器显式分离前端、中端优化、链接与后端分发。",
+      "changes": [
+        {
+          "id": "units",
+          "title": "四种源码根，三种产品角色",
+          "items": [
+            "xs:pack 聚合只面向 entry 的 include 和字节保真的 asset，得到可复现 ZIP 格式的 .pack。",
+            "xs:sopack 导入模块、声明宏与资源，保存 IR、编译单元和元信息，不包含最终成品。",
+            "归档名称、顺序和时间戳采用确定性策略；原始资源不解析成 XML，也不压缩空白。"
+          ]
+        },
+        {
+          "id": "libraries",
+          "title": "SOPack 是库，不是缓存",
+          "items": [
+            "声明 { sopack = \"vendor/common.sopack\" }，或执行 add common --path vendor/common.sopack；remove 复用既有依赖生命周期。",
+            "库内源码身份重定位（Relocation），诊断位置与宏定义位置的资源归属随库移动。",
+            "链接器（Linker）消费统一编译单元，不区分本地文件和 SOPack 来源。"
+          ]
+        },
+        {
+          "id": "pipeline",
+          "title": "显式阶段，按需记录证据",
+          "items": [
+            "前端（Front end）降低、中端（Middle end）求值、链接及链接时优化（Link-time Optimization）、后端（Backend）分发具有明确职责。",
+            "遥测（Telemetry）与跟踪（Tracing）默认关闭，开启后在项目元数据中跨运行保存。",
+            "自带 Agent Skill 和用户手册同步说明新的源码与产品边界。"
+          ]
+        }
+      ],
+      "compatibility": [
+        "使用 pack、SOPack、asset 或 include 的项目需要 1.2.0；XML 命名空间 URI 不变。",
+        "旧派生缓存有意失效。清理后重建；离线重建前确保仍具备依赖输入。",
+        "跨设备复用请分发 SOPack，而不是复制内部 cache 目录。跟踪元数据不属于可复现产品。"
+      ]
+    },
     "1.1.0": {
       title: "Agent Skills 成为可锁定的项目依赖",
       description: "xmlsquish 1.1.0 管理 .agents/skills 中的 Agent Skills，提供内置指南安装命令，并将机器协议升级至 3.2。",

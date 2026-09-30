@@ -3,9 +3,14 @@
 - Status: Implemented normative design
 - Implementation authority: `crates/squish-ir`, `crates/squish-xml-front`,
   `crates/squish-link`, `crates/squish-backend`, and the manager build pipeline
-- Scope: XML front end, relocatable IR, linker, evaluator, provenance, cache identity, and backend contract
+- Scope: XML front end, relocatable IR, middle-end optimization, linker, evaluator, provenance, cache identity, and backend contract
 - Related language specification: [`docs/dsl.md`](../dsl.md)
-- Product artifact suffix: `*.prompt`
+- Product artifact suffixes: `*.prompt`, `*.pack`, `*.sopack`
+- v1.2 normative extensions: [compiler and portable units](v1.2-compiler.md),
+  [source-preserving middle end](v1.2-middle-end.md), and
+  [reproducible archives and relocation](v1.2-archives.md). These extensions
+  govern the additional unit/operation kinds and archive backend inputs;
+  prompt-specific document contracts below remain scoped to prompt products.
 
 ## 1. Decision summary
 
@@ -16,14 +21,16 @@ exact XML bytes
   |-- LosslessXmlTape -------------------------------> fmt
   |
   `-- XML front end
-        -> RelocatableUnitIR (module or entry object)
-        -> link(entry, resolved module closure)
+        -> RelocatableUnitIR (module, entry, pack, or sopack object)
+        -> source-preserving middle-end optimization
+        -> link(selected root, resolved compilation-unit closure)
+        -> linked optimization facts + archive directives where applicable
         -> non-executable LinkedImage metadata + LinkTrace
         -> reconstruct session-only LinkedProgram from semantic unit blobs
         -> evaluate(arguments, budgets)
         -> LinkedDocumentIR + ExpansionTrace
         -> Backend
-        -> <target>.prompt
+        -> <target>.prompt | reproducible <target>.pack | portable <target>.sopack
 ```
 
 The architecture has four representation boundaries:
@@ -35,7 +42,7 @@ The architecture has four representation boundaries:
 | `LinkTrace` + `ExpansionTrace` | Explain resolution and dynamic execution | Import resolutions, symbol bindings, definition/call sites, every invocation frame, parentage, output-origin mappings, and diagnostics | Affect successful product bytes |
 | `LinkedDocumentIR` | Backend-independent result of linking and expansion | Ordered document structure and data after every DSL control operation has executed, with references into the trace | Contain unresolved symbols, macro operations, or XML serialization policy |
 
-`LinkedImage` is the persistable, non-executable metadata result of linking. It is an internal companion to the link trace, not a fifth source representation: it contains direct portable definition references and the entry region, but no unit bodies or process-local indexes. A session reconstructs the executable `LinkedProgram` from the image and its referenced semantic unit blobs. `LinkedProgram` is never serialized, and `LinkedDocumentIR` is the only normal backend input.
+`LinkedImage` is the persistable, non-executable metadata result of linking. It is an internal companion to the link trace, not a fifth source representation: it contains direct portable definition references and the selected root region, but no unit bodies or process-local indexes. A session reconstructs the executable `LinkedProgram` from the image and its referenced semantic unit blobs. `LinkedProgram` is never serialized. `LinkedDocumentIR` is the prompt backend input; archive backends additionally require defining-source archive directives and frozen asset bytes, while SOPack preserves portable unit IR rather than final products, as specified by the v1.2 extensions.
 
 This separation is mandatory. In particular:
 
@@ -46,10 +53,10 @@ This separation is mandatory. In particular:
 5. A backend never observes XML source control elements such as `xs:expand`.
 6. The initial `squish` backend is one backend implementation, not the definition of the core IR.
 
-The final product is a plain `*.prompt` artifact. Canonical IR, source blobs, traces, and build records live in the project artifact store and may be materialized as debug bundles; they are not injected into the prompt.
+The prompt product is a plain `*.prompt` artifact. Pack delivers entry products and opaque assets in reproducible ZIP; SOPack distributes portable IR, compiled modules, assets, sources and metadata without final products. Private caches and runtime telemetry are not portable libraries or product inputs. Canonical IR, source blobs, traces, and build records live in the project artifact store and may be materialized as debug bundles; they are not injected into the prompt.
 
 In the typed core, `RelocatableUnitIr` exposes read-only access to the fields shared by
-entry and module objects (header, operation and region arenas, origins, and external
+entry, module, pack and sopack objects (header, operation and region arenas, origins, and external
 symbol summary). Consumers branch on the unit kind only when the language actually
 does—for example, an entry has a root region while a module owns definitions. This
 keeps persistence, linking, and evaluation from each maintaining an independent
@@ -62,7 +69,9 @@ they do not alter the canonical wire format or validation contract.
 
 The IR must preserve the current DSL primitives and their semantics:
 
-- source units are explicit `xs:module` or `xs:entry` documents;
+- source units are explicit `xs:module`, `xs:entry`, `xs:pack`, or `xs:sopack` documents;
+- asset operations preserve opaque file bytes and defining-source ownership;
+- include operations address entries only; SOPack forbids includes, even inside macros;
 - macro symbols are XML expanded names `(namespace URI, local name)`;
 - `xs:import` is static source discovery, not execution;
 - `xs:expand` is a statically named macro call;
@@ -163,7 +172,7 @@ The following identities are different and must never be substituted for one ano
 | `ObjectDigest` | `D_object(complete canonical container)` | Content-addressed storage key for a complete object |
 | `LinkedImageDigest` | `D_linked(canonical linked-image section)` | Identifies the metadata needed to reconstruct the resolved executable program |
 | `DocumentDigest` | `D_document(canonical LinkedDocumentIR)` | Identifies backend-independent expanded content |
-| `ArtifactDigest` | `D_artifact(product bytes)` | Identifies a final `*.prompt` byte sequence |
+| `ArtifactDigest` | `D_artifact(product bytes)` | Identifies the selected backend's `*.prompt`, `*.pack`, or `*.sopack` byte sequence |
 
 Hash equality is a practical collision-resistant identity, not a proof of mathematical equality. Cache implementations must retain object length and verify the digest when reading untrusted or corrupted storage.
 
@@ -851,7 +860,7 @@ Debug data remains in the build record:
 ```text
 BuildRecord {
     product: ArtifactDigest,
-    product_path: *.prompt,
+    product_path: *.prompt | *.pack | *.sopack,
     backend: { id: BackendId, abi: BackendAbiId, media_type: UString },
     unit_objects: vector<ObjectDigest>,
     linked_image: LinkedImageDigest,

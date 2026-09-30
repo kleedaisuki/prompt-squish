@@ -117,12 +117,14 @@ q=(\text{NamespaceURI},\text{LocalName})
 
 每个源码资源形成一个不可变的源码单元（SourceUnit）：
 
-源码单元具有两种互斥种类，由 XML 根元素显式区分：
+源码单元具有四种互斥种类，由 XML 根元素显式区分：
 
 | 根元素 | 职责 | 内容 |
 |---|---|---|
 | `xs:module` | 组织可复用宏定义 | `xs:import` 与零个或多个 `xs:macro` |
 | `xs:entry` | 构造一个产品文档 | 声明区的 `xs:import`、可选 `xs:param`，随后是输出构造正文 |
+| `xs:pack` | 聚合交付产品 | 模块导入、入口 include 和原始文件 asset；可展开资源宏 |
+| `xs:sopack` | 分发可复用编译库 | 模块导入、宏声明、asset；不得 include entry |
 
 模块示例 `macros.xml`：
 
@@ -151,7 +153,7 @@ q=(\text{NamespaceURI},\text{LocalName})
 
 入口不是宏，不注册符号，不拥有 `MacroDefId`，不能被 `expand` 引用。入口正文在独立的构造上下文（Construction Context）中求值：`file.*` 来自入口源码，`arg.*` 来自显式命令行参数，初始匹配作用域为空。`xs:param` 声明必需字符串参数，规则与宏参数相同；`--arg` 只提供入口参数，不隐式传给宏。入口声明必须在正文之前；入口不得定义宏，也不得声明根 slot，因为命令行不提供 fill。正文允许普通 XML、`expand`、`insert` 和 `ifr`，并按后续章节相同规则组合结果。
 
-`import` 的目标只能是模块，不能是入口。入口只能作为编译根使用；直接指定模块进行编译必须报错，目录或 glob 批量发现时跳过合法模块。不得根据文件名、宏个数或声明顺序猜测入口，不接受旧的模块 `entry` 属性。
+`import` 的目标只能是模块，不能是入口。入口可以作为编译根或 pack 的 include 目标使用；直接指定模块进行编译必须报错，目录或 glob 批量发现时跳过合法模块。不得根据文件名、宏个数或声明顺序猜测入口，不接受旧的模块 `entry` 属性。
 
 宏可以前向引用，也可以直接或相互递归，不依赖文本声明顺序。根 invocation 的最终结果必须是一个格式良好的 XML 文档；宏和内部展开过程可以暂时产生 XML 节点序列。
 
@@ -664,20 +666,20 @@ XML DSL 是项目管理器的前端语言；文件名和命令行模式不定义
 ```text
 xmlsquish.toml target
   ↓ resolve dependencies + freeze source snapshot
-xs:entry link root + xs:module closure
+xs:entry / xs:pack / xs:sopack link root + xs:module closure
   ↓ XML frontend
 relocatable, reusable binary IR (.xsir when materialized)
-  ↓ static link + entry instantiation
-backend-neutral linked document + provenance traces
-  ↓ squish backend
-.prompt product (+ optional self-contained .psdbg)
+  ↓ middle-end optimization + static link / link-time optimization
+backend-neutral linked units + source/asset ownership
+  ↓ prompt / pack / sopack backend
+.prompt / reproducible .pack / relocatable .sopack (+ optional evidence)
 ```
 
 ### 11.1 Source snapshot 与 frontend
 
 构建阶段：
 
-1. 从目标声明取得唯一 `xs:entry`；入口是链接根（link root），不是宏或隐式 `main`；
+1. 从目标声明取得唯一 `xs:entry`、`xs:pack` 或 `xs:sopack`；所选单元是链接根（link root），不是宏或隐式 `main`；
 2. 在已解析的包图中静态解析入口与模块声明区中每个 `import`；
 3. 按 SourceId intern 并冻结完整源码闭包；
 4. 把每个源码单元独立降低为可重定位 IR，并按 Expanded Name 注册 MacroDef；
@@ -864,7 +866,59 @@ MacroDef 不复制，Frame 随执行增长；SourceUnit 的装载闭包与运行
 8. **Relative references bind at definition site.** 同一 MacroDef 在不同 caller 下具有一致的源码解析语义。
 9. **Cycles are legal.** Source loading 通过 interning 终止；execution cycle 表示递归。
 10. **Abstract semantics are unbounded.** 资源 guard 属于实现预算，不属于语言表达能力上限。
-11. **Final output contains only user XML.** 所有控制结构和 provenance 在 lowering 阶段消失。
+11. **Prompt output contains only user XML.** 提示词不包含控制结构和 provenance；pack / SOPack 另按第 17 节分发资源或编译库。
 12. **Errors are explicit.** 不存在隐式 fallback、猜测性解析或静默覆盖。
 
 这组不变量共同定义 xmlsquish 的风格：它不是一门把 XML 重新包装成通用编程语言的 DSL，而是一个以 XML 结构组合为中心、拥有最小但完整宏计算核的预处理系统。
+
+
+## 17. 打包单元、资源和可重定位库（v1.2.0）
+
+### 17.1 pack
+
+`xs:pack` 是独立的顶层编译单元（Compilation Unit），不是 module 的属性或 entry 的文件名约定。
+
+```xml
+<xs:pack xmlns:xs="https://xmlsquish.moesegfault.dev/ns">
+    <xs:include path="instructions.xml" name="instructions.prompt"/>
+    <xs:asset path="scripts/check.py" name="scripts/check.py"/>
+</xs:pack>
+```
+
+`xs:include` 的必需 `path` 指向一个 entry，不能指向 module；可选 `name` 指定归档成员名，默认是源文件 stem 加 `.prompt`。
+包含的入口按入口语义编译，而不是把 XML 源文件 bytes 原样放进包。
+`xs:asset` 的必需 `path` 指向一个完整文件；可选 `name` 指定归档成员名，默认保留相对路径。
+asset 的 bytes 不解析为 XML、不转码、不压缩提示词空白。安全的归档成员名不得是绝对路径，也不得通过 `..` 逃出归档根；冲突成员不得静默覆盖。
+
+### 17.2 SOPack
+
+```xml
+<xs:sopack xmlns:xs="https://xmlsquish.moesegfault.dev/ns"
+           xmlns:app="urn:example:app">
+    <xs:import src="macros.xml"/>
+    <xs:asset path="schema.json"/>
+    <xs:macro name="app:script">
+        <xs:asset path="scripts/check.py" name="scripts/check.py"/>
+    </xs:macro>
+</xs:sopack>
+```
+
+SOPack 是不包含最终产品的可复用编译库。根可以导入模块、声明宏和资源；不得使用 include，宏正文也不得绕过此限制。
+归档保存中间表示（Intermediate Representation, IR）、已编译模块、宏、资源、源码及元信息。
+消费者将 `.sopack` 作为不可变包依赖，通过既有 `pkg:` 导出接口 import 模块；链接器（Linker）消费统一编译单元，不因来源为本地或 SOPack 而改变符号语义。
+
+SOPack 内所有源码身份必须重定位（Relocation），不能把生产者的绝对路径作为消费设备上的身份。
+诊断仍应包含可读的库内位置。宏内 asset 的路径始终相对于**定义该宏的源码**，不是调用者的 `file.*` 或工作目录；库迁移到另一设备后，展开仍取得相同 bytes。
+
+### 17.3 编译阶段与确定性
+
+```text
+DSL → front end → IR → middle-end optimization
+                       → linker / link-time optimization
+                       → prompt | pack | sopack backend
+```
+
+前端（Front end）负责解析和降低；中端（Middle end）尽可能执行编译期计算和宏展开；链接阶段聚合被引用的单元并执行链接时优化（Link-time Optimization）；后端（Backend）决定分发格式。
+多级 IR 必须保留下一阶段仍需的来源、引用、宏与资源信息，不得过早把不透明资源转成字符串或把库压平成成品。
+prompt 后端处理输出空白；pack 与 SOPack 后端写可复现 ZIP（Reproducible ZIP），使用固定时间戳、确定条目顺序和无主机权限差异的归档记录。
+相同有效输入必须产生相同 ZIP bytes，而非仅要求解压内容相同。运行遥测（Telemetry）与跟踪（Tracing）默认关闭，选择性启用后写项目元数据，不参与产品归档身份。

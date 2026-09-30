@@ -18,17 +18,17 @@ type ManualMessages = {
 
 const en: ManualMessages = {
   title: "xmlsquish user manual", description: "Learn the xmlsquish XML DSL, project builds and artifacts, and Agent Skills dependency management.",
-  eyebrow: "XML DSL & project guide", heading: "Compose structured prompts with a small XML language.", lead: "Start with a working entry, split reusable behavior into modules, and build deterministic .prompt artifacts. Then manage Agent Skills as separate project dependencies. This guide follows your tasks—not compiler internals.",
+  eyebrow: "XML DSL & project guide", heading: "Compose structured prompts with a small XML language.", lead: "Start with a working entry, split reusable behavior into modules, and distribute .prompt, reproducible .pack or relocatable .sopack artifacts. Then manage Agent Skills as separate project dependencies. This guide follows your tasks—not compiler internals.",
   status: "Stable, unversioned identity", uriLabel: "Exact XML namespace URI", copy: "Copy URI", copied: "URI copied", denied: "Clipboard unavailable; the URI is selected for manual copy.",
   onThisPage: "Manual chapters", jump: "Jump to a chapter", filter: "Filter directives", searchPlaceholder: "Name, attribute, or purpose…", empty: "No directives match.",
   chapters: {
     "getting-started": { nav: "Getting started", title: "Create your first entry", intro: "Bind the exact namespace URI on xs:entry. Ordinary XML becomes output; xs:* elements control composition." },
-    "source-model": { nav: "Source model", title: "Separate products from libraries", intro: "An entry builds one product. A module publishes macros. Imports make module definitions visible without executing them." },
+    "source-model": { nav: "Source model", title: "Separate products from libraries", intro: "An entry builds a prompt; pack delivers entries and assets; SOPack distributes a compiled library. A module publishes macros. Imports make module definitions visible without executing them." },
     composition: { nav: "Macros & expansion", title: "Define contracts, then expand them", intro: "Macros have namespace-qualified names and explicit parameters. Expansion resolves a fixed target and creates an isolated invocation frame." },
     "control-and-scope": { nav: "Control & scope", title: "Match strings without leaking scope", intro: "xs:ifr provides regular-expression matching and lexical named captures. Scalar and XML content remain separate throughout evaluation." },
-    "build-and-artifacts": { nav: "Build & artifacts", title: "Build through a frozen source closure", intro: "The manager resolves imports, validates the whole project, lowers canonical XSIR, links symbols, and publishes inspectable artifacts." },
+    "build-and-artifacts": { nav: "Build & artifacts", title: "Build through a frozen source closure", intro: "Lower DSL to IR, optimize compile-time work, link referenced units, then distribute prompt, pack or SOPack products." },
     "skill-dependencies": { nav: "Agent Skills", title: "Manage Agent Skills as project dependencies", intro: "Declare a local or Git skill at the workspace root, lock its complete tree, and reconcile a safe copy into .agents/skills. These instructions do not change the XML language." },
-    reference: { nav: "Directive reference", title: "All eleven directives", intro: "Use the filter as a shortcut. Every contract remains present in the HTML and addressable by a stable fragment." },
+    reference: { nav: "Directive reference", title: "All fifteen directives", intro: "Use the filter as a shortcut. Every contract remains present in the HTML and addressable by a stable fragment." },
     "limits-and-invariants": { nav: "Limits & invariants", title: "Know the boundaries that keep builds predictable", intro: "Recursive programs run within explicit budgets, while stable identity and language invariants keep projects auditable." },
   },
   notes: {
@@ -39,12 +39,17 @@ const en: ManualMessages = {
     values: "Use xs:insert to emit a scalar as escaped text. It never reparses <, >, or & as markup. Use xs:fill/xs:slot when structure must remain XML.",
     control: "A failed match emits nothing. A successful match exposes match.* captures inside the xs:ifr body only; sibling blocks cannot observe them.",
     limits: "Recursive expansion is legal, but not free: depth, steps, nodes, bytes, and regular-expression work are bounded. Treat a budget error as a program design signal.",
-    build: "Typical outputs are the final .prompt plus optional .xsir intermediate representation and .psdbg provenance/debug evidence.",
+    build: "Product backends emit .prompt, .pack or .sopack, plus optional .xsir intermediate representation and .psdbg provenance/debug evidence.",
     version: "Never append a version or trailing slash to the namespace URI. Use snapshots only when auditing the contract implemented by an older release.",
   },
   groups: { project: "Project structure", composition: "Definitions and calls", values: "Values and XML content", control: "Control" },
   referenceLabels: { context: "Allowed in", children: "Allowed content", attributes: "Attributes", constraints: "Constraints", syntax: "Valid syntax", related: "Read the chapter", required: "required", optional: "optional", exclusive: "exclusive choice", default: "default" },
   directives: {
+    pack: {"summary": "Final distributable archive root.", "detail": "Collects compiled entry products and complete asset bytes into a reproducible ZIP .pack.", "context": "Document root of a pack target.", "children": "Module imports, asset/include directives and macro expansion.", "attributes": {}, "constraints": ["An include must target an entry, never a module.", "Archive member names must remain inside the archive root and cannot silently collide."]},
+    sopack: {"summary": "Relocatable compiled library root.", "detail": "Preserves IR, compiled modules, macros, assets and metadata, without final products.", "context": "Document root of a SOPack target.", "children": "Module imports, macro declarations and assets.", "attributes": {}, "constraints": ["No include, including inside macros.", "Consumers treat the archive as immutable; source identities relocate on loading."]},
+    asset: {"summary": "Preserve one complete file as bytes.", "detail": "Carries code or static resources without XML parsing, transcoding or prompt whitespace processing.", "context": "Pack or SOPack resource construction, including macro bodies.", "children": "Empty.", "attributes": {"path": "File path relative to the defining source.", "name": "Archive member name; defaults to the relative path."}, "constraints": ["Macro asset paths belong to the definition, not the caller.", "Unsafe member paths or conflicting names are errors."]},
+    include: {"summary": "Compile and include one entry.", "detail": "Adds an entry product to a pack rather than copying its XML source.", "context": "Pack construction only; not SOPack.", "children": "Empty.", "attributes": {"path": "Entry path relative to the defining source.", "name": "Archive member name; defaults to the source stem plus .prompt."}, "constraints": ["Target must be an entry, not a module.", "SOPack cannot include final products."]},
+
     entry: { summary: "Build root for one output document.", detail: "Accepts declarations, then constructs the final document.", context: "The document root of a build target; never an import target.", children: "Leading xs:import and xs:param declarations, then ordinary XML, xs:expand, xs:insert, and xs:ifr.", attributes: {}, constraints: ["Declarations must precede the construction body.", "Cannot define macros or root slots, and cannot be expanded as a macro."] },
     module: { summary: "Reusable macro library.", detail: "Registers definitions but has no executable body.", context: "The document root of an imported source unit.", children: "xs:import and xs:macro only; they may be interleaved.", attributes: {}, constraints: ["Ordinary XML, non-whitespace text, top-level xs:param, and expansion are invalid.", "A module cannot be built as an entry and has no implicit main."] },
     import: { summary: "Load definitions from a module.", detail: "Freezes another source unit into the symbol closure without executing it.", context: "Direct child of xs:module, or the declaration region of xs:entry.", children: "Empty.", attributes: { src: "Static source reference resolved relative to the declaring file." }, constraints: ["The target must be a module, never an entry.", "Produces no output, frame, arg, or fill; each source identity is loaded once."] },
@@ -63,25 +68,30 @@ const en: ManualMessages = {
 
 const zh: ManualMessages = {
   title: "xmlsquish 用户手册", description: "学习 xmlsquish XML DSL、项目构建与产物，以及 Agent Skills 依赖管理。",
-  eyebrow: "XML DSL 与项目指南", heading: "用一门小型 XML 语言组合结构化提示词。", lead: "先写一个可工作的 entry，再把复用逻辑拆进 module，构建确定性的 .prompt 产物；随后把 Agent Skills 作为独立的项目依赖管理。本手册按用户任务组织，而不是照搬编译器内部设计。",
+  eyebrow: "XML DSL 与项目指南", heading: "用一门小型 XML 语言组合结构化提示词。", lead: "先写一个可工作的 entry，再把复用逻辑拆进 module，分发 .prompt、可复现 .pack 或可重定位 .sopack；随后把 Agent Skills 作为独立的项目依赖管理。本手册按用户任务组织，而不是照搬编译器内部设计。",
   status: "稳定、无版本号的身份", uriLabel: "精确 XML 命名空间 URI", copy: "复制 URI", copied: "URI 已复制", denied: "无法访问剪贴板；URI 已选中，请手动复制。",
   onThisPage: "手册章节", jump: "跳转到章节", filter: "筛选指令", searchPlaceholder: "名称、属性或用途…", empty: "没有匹配的指令。",
   chapters: {
     "getting-started": { nav: "快速开始", title: "创建第一个 entry", intro: "在 xs:entry 上绑定精确命名空间 URI。普通 XML 成为输出，xs:* 元素控制组合过程。" },
-    "source-model": { nav: "源码模型", title: "把产品与库分开", intro: "entry 构建一个产品；module 发布宏；import 只让模块定义可见，并不会执行模块。" },
+    "source-model": { nav: "源码模型", title: "把产品与库分开", intro: "entry 构建提示词，pack 交付入口与资源，SOPack 分发编译库；module 发布宏；import 只让模块定义可见，并不会执行模块。" },
     composition: { nav: "宏、参数与展开", title: "先定义契约，再执行展开", intro: "宏拥有命名空间限定名称与显式参数。展开解析固定目标，并创建隔离的调用帧。" },
     "control-and-scope": { nav: "控制与作用域", title: "匹配字符串而不泄漏作用域", intro: "xs:ifr 提供正则匹配与词法命名捕获；标量与 XML 内容在整个求值过程中保持分离。" },
-    "build-and-artifacts": { nav: "构建与产物", title: "基于冻结的源码闭包构建", intro: "管理器解析导入、验证完整项目、降低为规范 XSIR、链接符号并发布可检查产物。" },
+    "build-and-artifacts": { nav: "构建与产物", title: "基于冻结的源码闭包构建", intro: "将 DSL 降低为 IR，优化编译期计算，链接引用单元，再由后端分发 prompt、pack 或 SOPack。" },
     "skill-dependencies": { nav: "Agent Skills", title: "将 Agent Skills 作为项目依赖管理", intro: "在工作区根声明本地或 Git skill，锁定完整目录树，再安全地同步到 .agents/skills；这些指令不会改变 XML 语言。" },
-    reference: { nav: "指令参考", title: "全部十一条指令", intro: "筛选框只是快捷入口；每条契约都完整存在于 HTML 中，并拥有稳定片段链接。" },
+    reference: { nav: "指令参考", title: "全部十五条指令", intro: "筛选框只是快捷入口；每条契约都完整存在于 HTML 中，并拥有稳定片段链接。" },
     "limits-and-invariants": { nav: "限制与不变量", title: "理解让构建保持可预测的边界", intro: "递归程序在显式预算内运行，稳定身份与语言不变量则让项目保持可审计。" },
   },
   notes: {
-    exactUri: "比较严格区分大小写。该地址只标识词汇；构建过程绝不会通过网络获取它。", roots: "xs:module 只能包含 import 与 macro。xs:entry 先声明、后构造输出；entry 不能被导入。", imports: "相对导入路径以声明它的文件为基准。管理器按源码身份只装载一次，并在展开前冻结导入闭包。", evaluation: "调用时先在调用方求值 arg 与 fill；随后宏体在定义位置运行，只能看到显式输入。", values: "用 xs:insert 把标量作为转义文本输出；它绝不会把 <、> 或 & 重新解析成标记。需要保留结构时使用 xs:fill/xs:slot。", control: "匹配失败不产生输出；成功时只在 xs:ifr 正文内暴露 match.* 捕获，兄弟区块不可见。", limits: "递归展开合法但并非无限：深度、步数、节点、字节与正则工作量都有预算。预算错误应被视为程序设计信号。", build: "典型输出是最终 .prompt，以及可选的 .xsir 中间表示和 .psdbg 溯源/调试证据。", version: "命名空间 URI 后不要追加版本号或末尾斜线。只有审计旧版本实现的语言契约时才使用快照。",
+    exactUri: "比较严格区分大小写。该地址只标识词汇；构建过程绝不会通过网络获取它。", roots: "xs:module 只能包含 import 与 macro。xs:entry 先声明、后构造输出；entry 不能被导入。", imports: "相对导入路径以声明它的文件为基准。管理器按源码身份只装载一次，并在展开前冻结导入闭包。", evaluation: "调用时先在调用方求值 arg 与 fill；随后宏体在定义位置运行，只能看到显式输入。", values: "用 xs:insert 把标量作为转义文本输出；它绝不会把 <、> 或 & 重新解析成标记。需要保留结构时使用 xs:fill/xs:slot。", control: "匹配失败不产生输出；成功时只在 xs:ifr 正文内暴露 match.* 捕获，兄弟区块不可见。", limits: "递归展开合法但并非无限：深度、步数、节点、字节与正则工作量都有预算。预算错误应被视为程序设计信号。", build: "后端输出 .prompt、.pack 或 .sopack，以及可选的 .xsir 中间表示和 .psdbg 溯源/调试证据。", version: "命名空间 URI 后不要追加版本号或末尾斜线。只有审计旧版本实现的语言契约时才使用快照。",
   },
   groups: { project: "项目结构", composition: "定义与调用", values: "值与 XML 内容", control: "控制" },
   referenceLabels: { context: "允许位置", children: "允许内容", attributes: "属性", constraints: "约束", syntax: "有效语法", related: "阅读章节", required: "必需", optional: "可选", exclusive: "互斥选择", default: "默认值" },
   directives: {
+    pack: {"summary": "最终交付归档的源码根。", "detail": "聚合编译后的入口与完整资源 bytes，输出可复现 ZIP 格式的 .pack。", "context": "pack 构建目标的文档根。", "children": "模块导入、asset/include 和宏展开。", "attributes": {}, "constraints": ["include 必须面向 entry，不能面向 module。", "归档路径不得逃出根，也不得静默覆盖同名成员。"]},
+    sopack: {"summary": "可重定位编译库的源码根。", "detail": "保存 IR、编译模块、宏、资源和元信息，不包含最终成品。", "context": "SOPack 目标的文档根。", "children": "模块导入、宏声明和资源。", "attributes": {}, "constraints": ["不能 include；宏正文也不能绕过限制。", "消费者按不可变库使用；装载时重定位源码身份。"]},
+    asset: {"summary": "保存一个完整文件的原始 bytes。", "detail": "代码与静态资源不解析成 XML、不转码、不做提示词空白处理。", "context": "pack 或 SOPack 的资源构造，包括宏正文。", "children": "空。", "attributes": {"path": "相对于定义源码的文件路径。", "name": "归档成员名；默认保留相对路径。"}, "constraints": ["宏内资源路径属于定义位置，不属于调用者。", "不安全路径或冲突成员名必须报错。"]},
+    include: {"summary": "编译并包含一个入口。", "detail": "向 pack 添加入口产品，而不是原样复制 XML 源码。", "context": "仅 pack 构造；不能用于 SOPack。", "children": "空。", "attributes": {"path": "相对于定义源码的 entry 路径。", "name": "归档成员名；默认是源文件 stem 加 .prompt。"}, "constraints": ["目标必须是 entry，不能是 module。", "SOPack 不能包含最终产品。"]},
+
     entry: { summary: "一个输出文档的构建根。", detail: "先接受声明，再构造最终文档。", context: "构建目标的文档根；绝不能作为导入目标。", children: "开头的 xs:import 与 xs:param 声明，随后是普通 XML、xs:expand、xs:insert 与 xs:ifr。", attributes: {}, constraints: ["所有声明必须位于构造正文之前。", "不能定义宏或根 slot，也不能像宏一样被展开。"] },
     module: { summary: "可复用宏库。", detail: "注册定义，但没有可执行正文。", context: "被导入 SourceUnit 的文档根。", children: "只能是 xs:import 与 xs:macro，两者可以交错。", attributes: {}, constraints: ["普通 XML、非空白文本、顶层 xs:param 与展开均非法。", "module 不能作为 entry 构建，也没有隐式 main。"] },
     import: { summary: "从模块装载定义。", detail: "把另一个 SourceUnit 冻结进符号闭包，但不执行它。", context: "xs:module 的直接子元素，或 xs:entry 的声明区。", children: "空。", attributes: { src: "相对声明文件解析的静态源码引用。" }, constraints: ["目标必须是 module，绝不能是 entry。", "不产生输出、frame、arg 或 fill；每个源码身份只装载一次。"] },

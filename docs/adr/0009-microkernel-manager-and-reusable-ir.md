@@ -7,7 +7,12 @@
 - Preserves: [ADR 0007](0007-unified-macro-expansion.md) and the DSL primitives
   and semantics it defines
 - Extended by: [ADR 0010](0010-transactional-new-project-creation.md) for the
-  prospective-project bootstrap and recoverable `new` operation
+  prospective-project bootstrap and recoverable `new` operation;
+  [v1.2 compiler](../design/v1.2-compiler.md),
+  [middle end](../design/v1.2-middle-end.md), and
+  [archive contract](../design/v1.2-archives.md) for module/entry/pack/sopack
+  roots, source-preserving optimization before linking, and reproducible
+  prompt/pack/SOPack distribution
 
 ## Reconciliation note
 
@@ -21,6 +26,12 @@ session-only executable `LinkedProgram`. The change aligns the decision record
 with the implemented types and does not change ADR 0007 language semantics.
 ADR 0010 subsequently adds project creation without changing this ADR's
 microkernel, IR, or existing-project ownership decisions.
+The v1.2 extensions retain those ownership boundaries but add explicit pack
+and SOPack units, middle-end optimization before linking, and archive backend
+inputs that preserve defining-source asset ownership. Source-unit roots are
+module/entry/pack/sopack; selected product roots are entry/pack/sopack. Modules
+remain dependencies, not standalone final products. Historical prompt-only examples below do not
+restrict the v1.2 product set or replace its archive/relocation contract.
 
 ## Context
 
@@ -74,7 +85,9 @@ budgets remain the semantic contract.
 7. Immutable blobs live in a content-addressed store (CAS). SQLite in WAL mode
    stores transactional indexes, action results, leases, and garbage-collection
    metadata; it is not the semantic source of truth for blob identity.
-8. The first backend is `squish`. Products use `*.prompt`; complete debugging
+8. The prompt backend is `squish` (`prompt` alias); archive backends produce
+   reproducible `*.pack` and portable `*.sopack`. SOPack contains compiled
+   units, assets and metadata, not final products. Complete debugging
    data is published as a versioned `.psdbg` companion when requested by the
    selected profile.
 9. Human terminal output is colored and interactive when appropriate. NDJSON
@@ -100,7 +113,7 @@ argv / environment / terminal capabilities
        v                            |
 +----------------------------------------------------+
 | project | resolver | build | format | presentation |
-| source  | frontend | IR    | link   | backend      |
+| source  | frontend | IR | middle | link | backend  |
 | store   | artifact | diagnostic | scheduler        |
 +----------------------------------------------------+
 ```
@@ -144,6 +157,7 @@ ProjectRepository    load/edit manifest and workspace intent
 DependencyResolver   resolve intent to an exact graph
 SourceProvider       resolve SourceRef and load immutable SourceEnvelope
 Frontend             lower one source to relocatable ModuleIR
+MiddleEnd            preserve source ownership while computing unbound optimization facts
 IrCodec              validate/encode/decode versioned IR containers
 Linker                relocate a frozen module closure
 Instantiator          evaluate one entry and produce document plus trace
@@ -300,11 +314,14 @@ used to avoid recording provenance that is available.
 The semantic path is:
 
 ```text
-SourceEnvelope --XML frontend--> ModuleIR
-ModuleIR closure --relocate/verify--> StaticLinkMap + LinkedImage metadata
+SourceEnvelope (module/entry/pack/sopack) --XML frontend--> RelocatableUnitIR
+RelocatableUnitIR --source-preserving middle end--> IR + optimization facts
+IR closure --relocate/verify + linked optimization--> StaticLinkMap + LinkedImage metadata
 ModuleIR closure + LinkedImage --reconstruct--> session-only LinkedProgram
 LinkedProgram + entry + args --instantiate--> LinkedDocumentIR + ExpansionTrace
-LinkedDocumentIR --squish backend--> *.prompt
+LinkedDocumentIR --squish/prompt backend--> *.prompt
+Archive directives + frozen assets + included entry products --pack backend--> *.pack
+Portable unit IR + sources/assets + metadata --sopack backend--> *.sopack
 ```
 
 `StaticLinkMap` and `LinkedImage` are persistable. `LinkedImage` contains only
@@ -1165,7 +1182,8 @@ silently reported as wholly complete.
     and debug bundles are versioned interfaces; scripts need not scrape prose.
 17. **Semantic formatting.** Formatting is idempotent and frontend-equivalent;
     uncertain whitespace is preserved.
-18. **Product contract.** Build products are `*.prompt`; complete optional debug
+18. **Product contract.** Build products are `*.prompt`, reproducible `*.pack`,
+    or portable `*.sopack`; SOPack excludes final products. Complete optional debug
     companions are `.psdbg`; intermediate XML is not a compiler interface.
 19. **Truthful phase boundary.** Resolve, fetch, lock reconciliation, source
     sealing, and scan events describe the real calls while they happen. None is

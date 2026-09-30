@@ -52,7 +52,7 @@ const pipelineArtifacts = demo.artifacts.filter((item) => item.kind !== "source"
       <p class="hero-footnote">{m.hero.footnote}</p>
     </div>
     <figure class="build-graph" aria-label={m.hero.caption}>
-      <div class="graph-toolbar"><span class="graph-dot" aria-hidden="true"></span><code>build / site-demo:agent</code><span class="graph-status">XML → XSIR → prompt</span></div>
+      <div class="graph-toolbar"><span class="graph-dot" aria-hidden="true"></span><code>build / site-demo:agent</code><span class="graph-status">DSL → IR → optimize → link → backend</span></div>
       <div class="graph-sources">
         <div class="graph-label"><span>01</span>{m.hero.source}</div>
         <div class="entry-file"><span class="file-symbol" aria-hidden="true">&lt;/&gt;</span><strong>agent.xml</strong><code>xs:arg</code></div>
@@ -143,6 +143,18 @@ $ xmlsquish install-skill --project`}</code></pre>
   </section>
 
   <section class="closing page-width"><img src="/favicon.svg" alt="" width="58" height="58" loading="lazy"/><h2>{m.footer.tagline}</h2><div class="closing-actions"><a class="action primary" href={repo}>{m.footer.source}<span aria-hidden="true">↗</span></a><a class="action secondary" href={paths[locale].releases}>{m.reference.nav.releases}<span aria-hidden="true">→</span></a><a class="action secondary" href={paths[locale].namespace}>{m.reference.nav.namespace}<span aria-hidden="true">→</span></a></div></section>
+
+  <section class="product-formats page-width" aria-labelledby="product-formats-title">
+    <p class="eyebrow">v1.2 · DISTRIBUTION</p>
+    <h2 id="product-formats-title">{locale === "zh-CN" ? "一个编译器，三种分发角色。" : "One compiler. Three distribution roles."}</h2>
+    <div class="format-grid">
+      <a class="format-card prompt-format" href={`${paths[locale].namespace.replace(/\/$/, "")}/build-and-artifacts/`}><span>01 · PROMPT</span><h3><code>.prompt</code></h3><p>{locale === "zh-CN" ? "从 entry 构造紧凑提示词。保持现有工作流，无需为了打包而改写每个入口。" : "Build compact prompts from entries. Keep the existing workflow without rewriting every entry for packaging."}</p><b>{locale === "zh-CN" ? "面向调用" : "For invocation"} →</b></a>
+      <a class="format-card pack-format" href={`${paths[locale].namespace.replace(/\/$/, "")}/build-and-artifacts/#packs`}><span>02 · PACK</span><h3><code>.pack</code></h3><p>{locale === "zh-CN" ? "提示词、代码和静态资源一起交付。资源 bytes 不变，ZIP 成品可复现。" : "Deliver prompts, code and static assets together. Original asset bytes, reproducible ZIP products."}</p><b>{locale === "zh-CN" ? "面向交付" : "For delivery"} →</b></a>
+      <a class="format-card sopack-format" href={`${paths[locale].namespace.replace(/\/$/, "")}/build-and-artifacts/#sopack`}><span>03 · SOPACK</span><h3><code>.sopack</code></h3><p>{locale === "zh-CN" ? "分发 IR、模块、宏和资源，不夹带成品。不可变库跨设备复用，来源身份随库重定位。" : "Share IR, modules, macros and assets—not final products. Immutable libraries relocate across devices."}</p><b>{locale === "zh-CN" ? "面向复用" : "For reuse"} →</b></a>
+    </div>
+    <p class="format-note">{locale === "zh-CN" ? "遥测默认关闭；按需记录在项目元数据，不影响可复现产物。" : "Telemetry is off by default. Opt-in evidence stays in project metadata, outside reproducible products."}</p>
+  </section>
+
 </main>
 
 <style>
@@ -1183,4 +1195,26 @@ $ xmlsquish install-skill --project`}</code></pre>
       transform: none;
     }
   }
+</style>
+
+<style>
+  .product-formats { padding-block: 4.5rem; }
+  .product-formats h2 { font-size: clamp(1.8rem, 3vw, 2.8rem); letter-spacing: -.04em; margin-block: .8rem 2rem; }
+  .format-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; }
+  .format-card { display: flex; flex-direction: column; padding: 1.6rem; border: 1px solid var(--xs-line); border-top: 4px solid var(--format-accent); border-radius: 1rem; background: var(--moe-surface); text-decoration: none; transition: transform .16s ease; }
+  .format-card:hover { transform: translateY(-3px); }
+  .format-card:focus-visible { outline: 3px solid var(--format-accent); outline-offset: 4px; }
+  .format-card span { font: 600 .75rem var(--font-mono, monospace); letter-spacing: .1em; color: var(--format-accent); }
+  .format-card h3 { font-size: 1.8rem; margin-block: 1rem; }
+  .format-card p { line-height: 1.8; margin: 0 0 1.5rem; }
+  .format-card b { margin-top: auto; font-size: .85rem; }
+  .prompt-format { --format-accent: #b85426; }
+  .pack-format { --format-accent: #197f73; }
+  .sopack-format { --format-accent: #7954be; }
+  .format-note { font-size: .9rem; line-height: 1.7; margin-top: 1.5rem; }
+  :global(:root[data-moe-theme="dark"]) .prompt-format { --format-accent: #edaa7c; }
+  :global(:root[data-moe-theme="dark"]) .pack-format { --format-accent: #77cebb; }
+  :global(:root[data-moe-theme="dark"]) .sopack-format { --format-accent: #c0a4ed; }
+  @media (max-width: 760px) { .format-grid { grid-template-columns: 1fr; } .product-formats { padding-block: 2.5rem; } }
+  @media (prefers-reduced-motion: reduce) { .format-card { transition: none; } .format-card:hover { transform: none; } }
 </style>
