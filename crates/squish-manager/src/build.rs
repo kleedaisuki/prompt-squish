@@ -1797,7 +1797,10 @@ impl BuildExecutor {
                 self.runtime
                     .compile(
                         &source.blob,
-                        &FrontendSourceContext::new(source.package.clone()),
+                        &FrontendSourceContext::new_with_source_package(
+                            source.package.clone(),
+                            source.blob.id().package().clone(),
+                        ),
                     )
                     .map_err(|cause| {
                         ManagerError::new(cause.code(), Phase::Analyze, cause.message())

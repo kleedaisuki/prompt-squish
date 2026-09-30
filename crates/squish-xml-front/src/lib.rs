@@ -41,13 +41,43 @@ pub struct FrontendOutput {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FrontendSourceContext {
     package_instance: PackageInstanceId,
+    /// Explicit resolver-bound source authority; absent means the undisambiguated package name.
+    source_package: Option<squish_source::PackageId>,
 }
 
 impl FrontendSourceContext {
     /// 包装 resolver 已选定的精确包实例。 / Wraps the exact resolver-selected package instance.
     #[must_use]
     pub const fn new(package_instance: PackageInstanceId) -> Self {
-        Self { package_instance }
+        Self {
+            package_instance,
+            source_package: None,
+        }
+    }
+
+    /// Binds an exact resolved package instance to its source-snapshot authority.
+    ///
+    /// A resolver may disambiguate same-name package instances with distinct `PackageId`s.
+    /// This mapping is supplied by the trusted frozen-source adapter, never inferred from
+    /// spelling prefixes. Compilation rejects any blob whose authority is not this exact ID.
+    #[must_use]
+    pub const fn new_with_source_package(
+        package_instance: PackageInstanceId,
+        source_package: squish_source::PackageId,
+    ) -> Self {
+        Self {
+            package_instance,
+            source_package: Some(source_package),
+        }
+    }
+
+    /// Returns the exact source authority expected by this compilation context.
+    #[must_use]
+    pub fn source_package(&self) -> &str {
+        self.source_package.as_ref().map_or(
+            self.package_instance.package_name.as_str(),
+            squish_source::PackageId::as_str,
+        )
     }
 
     /// 返回精确包实例。 / Returns the exact package instance.
@@ -72,7 +102,7 @@ pub fn compile(
     source: &SourceBlob,
     context: &FrontendSourceContext,
 ) -> Result<FrontendOutput, Box<Diagnostic>> {
-    if context.package_instance.package_name != source.id().package().as_str() {
+    if context.source_package() != source.id().package().as_str() {
         return Err(Box::new(Diagnostic {
             id: DiagnosticId::new("xml-front-source-context")
                 .expect("static diagnostic id is valid"),
@@ -80,7 +110,8 @@ pub fn compile(
             severity: Severity::Error,
             phase: Phase::Analyze,
             message: format!(
-                "resolved package {:?} does not own source package {:?}",
+                "resolved source authority {:?} for package {:?} does not own source package {:?}",
+                context.source_package(),
                 context.package_instance.package_name,
                 source.id().package().as_str()
             ),

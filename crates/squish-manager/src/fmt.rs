@@ -599,7 +599,10 @@ fn candidate(
             error,
         )
     })?;
-    let context = FrontendSourceContext::new(source.package.clone());
+    let context = FrontendSourceContext::new_with_source_package(
+        source.package.clone(),
+        source.id.package().clone(),
+    );
     let before = runtime.compile(blob, &context).map_err(|error| {
         manager_error(
             "XS3107",

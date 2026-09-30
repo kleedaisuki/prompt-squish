@@ -474,7 +474,10 @@ impl<'a> Machine<'a> {
         document.validate().map_err(|e| {
             InstantiateError::new("RUN007", format!("invalid document produced: {e}"))
         })?;
-        validate_document_shape(&document)?;
+        let root_kind = self.program.image().units
+            [self.program.image().entry.root_region.unit_slot as usize]
+            .kind;
+        validate_document_shape(&document, root_kind)?;
         trace.validate_against_document(&document).map_err(|e| {
             InstantiateError::new("RUN008", format!("invalid expansion trace produced: {e}"))
         })?;
@@ -1346,7 +1349,19 @@ impl TempItem {
     }
 }
 
-fn validate_document_shape(document: &LinkedDocumentIr) -> Result<(), InstantiateError> {
+fn validate_document_shape(
+    document: &LinkedDocumentIr,
+    root_kind: squish_ir::UnitKind,
+) -> Result<(), InstantiateError> {
+    // Archive units produce member directives, not XML documents. Their neutral event
+    // tape may be an empty/trivia fragment; the manager separately enforces archive
+    // content policy. Prompt entries retain their strict single-document contract.
+    if matches!(
+        root_kind,
+        squish_ir::UnitKind::Pack | squish_ir::UnitKind::Sopack
+    ) {
+        return Ok(());
+    }
     let mut depth = 0usize;
     let mut roots = 0usize;
     for item in &document.items {
@@ -1402,5 +1417,65 @@ fn canonicalize_scalars(
         if let OriginNode::ExternalArgument { value, .. } = origin {
             remap(value);
         }
+    }
+}
+
+#[cfg(test)]
+mod archive_fragment_tests {
+    use super::*;
+    use squish_ir::{AbiId, DocumentRegion, FeatureBits, UnitKind, Version};
+
+    fn empty_fragment() -> LinkedDocumentIr {
+        LinkedDocumentIr {
+            schema: Version { major: 1, minor: 0 },
+            document_abi: AbiId("xmlsquish.document.v1".into()),
+            root: DocumentRegionId(0),
+            regions: vec![DocumentRegion {
+                id: DocumentRegionId(0),
+                start: 0,
+                end: 0,
+            }],
+            items: Vec::new(),
+            strings: Vec::new(),
+            qnames: Vec::new(),
+            feature_bits: FeatureBits(0),
+        }
+    }
+    #[test]
+    fn archive_empty_fragments_do_not_weaken_prompt_entry_shape() {
+        let document = empty_fragment();
+        document.validate().unwrap();
+        assert!(validate_document_shape(&document, UnitKind::Pack).is_ok());
+        assert!(validate_document_shape(&document, UnitKind::Sopack).is_ok());
+        assert_eq!(
+            validate_document_shape(&document, UnitKind::Entry)
+                .unwrap_err()
+                .code,
+            "RUN029"
+        );
+    }
+    #[test]
+    fn archive_trivia_fragments_remain_valid_neutral_ir() {
+        let mut document = empty_fragment();
+        document.strings.push(" \n".into());
+        document
+            .items
+            .push(DocumentItem::Text { value: StringId(0) });
+        document.regions[0].end = 1;
+        document.validate().unwrap();
+        assert!(validate_document_shape(&document, UnitKind::Pack).is_ok());
+        assert_eq!(
+            validate_document_shape(&document, UnitKind::Entry)
+                .unwrap_err()
+                .code,
+            "RUN029"
+        );
+        document.strings[0] = "not a document".into();
+        assert_eq!(
+            validate_document_shape(&document, UnitKind::Entry)
+                .unwrap_err()
+                .code,
+            "RUN028"
+        );
     }
 }

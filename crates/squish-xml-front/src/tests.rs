@@ -361,3 +361,48 @@ fn include_import_kind_is_cross_validated_after_wire_decode() {
     let bytes = squish_ir::encode_relocatable_unit(&output.unit);
     assert!(squish_ir::decode_relocatable_unit(&bytes).is_err());
 }
+
+#[test]
+fn source_authority_is_an_exact_resolver_binding_not_a_package_name_prefix() {
+    let mut snapshot = SnapshotBuilder::new(Memory(wrap("pack", "").into_bytes()));
+    let authority = PackageId::new("library.abcdef").unwrap();
+    let source = snapshot
+        .load(
+            SourceId::new(authority.clone(), LogicalPath::new("src/root.xml").unwrap()),
+            SourceLocator::file("unused"),
+        )
+        .unwrap();
+    let resolved = PackageInstanceId {
+        source_kind: 1,
+        canonical_source: "workspace:library-instance".into(),
+        package_name: "library".into(),
+        exact_revision: "manifest:library@1".into(),
+    };
+    assert_eq!(
+        compile(&source, &FrontendSourceContext::new(resolved.clone()))
+            .unwrap_err()
+            .code,
+        "XS1700"
+    );
+    let bound = FrontendSourceContext::new_with_source_package(resolved.clone(), authority);
+    let unit = compile(&source, &bound).unwrap().unit;
+    assert!(
+        matches!(&unit.header().source, squish_ir::SourceKey::Project {package, ..} if package == &resolved)
+    );
+    for incorrect in [
+        "library",
+        "library.abc",
+        "library.abcdef.extra",
+        "unrelated",
+    ] {
+        let context = FrontendSourceContext::new_with_source_package(
+            resolved.clone(),
+            PackageId::new(incorrect).unwrap(),
+        );
+        assert_eq!(
+            compile(&source, &context).unwrap_err().code,
+            "XS1700",
+            "{incorrect}"
+        );
+    }
+}

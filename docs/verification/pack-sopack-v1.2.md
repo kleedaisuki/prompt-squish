@@ -85,6 +85,32 @@ must therefore not collapse merely because names and versions are equal.
 The SOPack archive-local representation must preserve that distinction without
 requiring producer checkout paths at consumption time.
 
+## Hosted integration findings
+
+The hosted checkpoint at commit `f01cf61` ran the complete native workspace
+suite with `--no-fail-fast`: Linux reported 41 test binaries, 676 passing
+tests and eight failing tests, all in the new pack process suite. The MSRV,
+strict Clippy, architecture, release metadata and documentation gates passed.
+Evidence: [Actions run 36769251446](https://github.com/kleedaisuki/prompt-squish/actions/runs/36769251446).
+This is a diagnostic checkpoint, **not** a release approval.
+
+The process tests revealed three integration assumptions that must not return:
+
+1. XML single-document-element validation belongs to entry/prompt semantics,
+   not to directive-only archive assembly. Archive evaluation still needs full
+   arena and provenance validation, even when it produces no document element.
+2. A SOPack's executable root needs its own source origin even when its body is
+   empty or follows macro definition regions. Definition origins cannot stand
+   in for the actual packaging root.
+3. A resolved package's display name is not its source-provider identity.
+   Disambiguated same-name providers need an explicit exact source identity in
+   the frontend context; accepting string prefixes is not an ownership check.
+
+An earlier hosted checkpoint also exposed duplicated frontend ABI strings in
+production and test runtime descriptors. The frontend now exports the ABI
+authority rather than requiring adapters to copy its spelling. These fixes
+must be exercised by a later full hosted suite before the final verdict.
+
 ## Coverage limits
 
 Cross-device portability is approximated by separate absolute project roots

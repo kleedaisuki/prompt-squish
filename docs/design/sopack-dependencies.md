@@ -144,3 +144,14 @@ package it contains. Local XML source-root discovery retains its previous suffix
 and derived-directory rules. Exact archive/source-byte verification remains the
 authority; adding an undeclared file to the materialized tree is rejected rather
 than silently compiled.
+
+
+### Frontend context binding for disambiguated providers
+
+A diagnostic `PackageId` is not the public package name when distinct locked
+providers share that name. Manager compilation and format candidates bind
+`FrontendSourceContext::new_with_source_package` using the exact `ProjectSource`
+or `FrozenSource` diagnostic package ID alongside its authoritative
+`PackageInstanceId`. The frontend checks exact equality against that typed source
+package ID. No package-name prefix heuristic or hashed-name exemption is used;
+the repository's resolved mapping remains the authority for source ownership.
