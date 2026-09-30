@@ -565,7 +565,10 @@ fn validate_ir_bytes(bytes: &[u8]) -> Result<(), ManagerError> {
     let container = decode_container(bytes)
         .map_err(|error| manager_error("XS3422", Phase::Analyze, "invalid IR container", error))?;
     match container.kind() {
-        ContainerKind::Module | ContainerKind::Entry => {
+        ContainerKind::Module
+        | ContainerKind::Entry
+        | ContainerKind::Pack
+        | ContainerKind::Sopack => {
             decode_unit_container(bytes).map_err(|error| {
                 manager_error("XS3422", Phase::Analyze, "invalid unit IR", error)
             })?;
