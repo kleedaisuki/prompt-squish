@@ -3,6 +3,7 @@
 use super::*;
 use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
 use sha2::Digest as _;
+use squish_backend::BackendRequest;
 use squish_backend::archive::{ArchiveLimits, SharedSopackPayload, logical_source_path};
 use std::io::Read;
 
@@ -247,7 +248,11 @@ pub(super) fn identity(target: &TargetBuild) -> BackendCacheIdentity {
     };
     BackendCacheIdentity {
         backend_id,
-        backend_version: "reproducible-stored-zip/1",
+        backend_version: if target.resolved.backend == "sopack" {
+            "reproducible-stored-zip/sopack-scc-v3"
+        } else {
+            "reproducible-stored-zip/1"
+        },
         canonical_options: options,
     }
 }

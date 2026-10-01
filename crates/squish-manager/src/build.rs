@@ -27,7 +27,7 @@ use squish_ir::{
     SourceArchiveReference, SourceKey, UnitKind, UnitRevision, ValidatedUnit,
     decode_expansion_trace, decode_linked_document, decode_linked_image, decode_static_link_map,
     decode_unit_container, encode_debug_bundle, encode_expansion_trace, encode_link_trace,
-    encode_linked_document, encode_linked_image, encode_static_link_map, encode_unit_container,
+    encode_linked_document, encode_linked_image, encode_static_link_map,
 };
 use squish_link::{
     Budgets, InstantiateOutput, LinkKeyProjection, LinkOutput, PreparedUnit, PreparedUnitClosure,
@@ -1910,21 +1910,23 @@ impl BuildExecutor {
                 "frontend returned an output with a different frozen ABI",
             ));
         }
-        let validated = match &source.precompiled_validated {
-            Some(validated) => validated.clone(),
-            None => ValidatedUnit::new(Arc::clone(&unit))
-                .map_err(|e| error("MGB041", Phase::Analyze, e))?,
+        let (validated, bytes) = match (&source.precompiled_validated, &source.precompiled_blob) {
+            (Some(validated), Some(bytes)) => (validated.clone(), bytes.clone()),
+            (None, None) => {
+                let (validated, bytes) = ValidatedUnit::encode_new(Arc::clone(&unit))
+                    .map_err(|e| error("MGB041", Phase::Analyze, e))?;
+                (validated, VerifiedBlob::from_owned(bytes))
+            }
+            _ => {
+                return Err(ManagerError::new(
+                    "MGB041",
+                    Phase::Analyze,
+                    "compiled archive proof and encoded bytes must be frozen together",
+                ));
+            }
         };
         let revision = validated.revision().clone();
         let debug = validated.debug_digest();
-        let bytes = match &source.precompiled_blob {
-            Some(bytes) => bytes.clone(),
-            None => VerifiedBlob::from_owned(
-                validated
-                    .encode()
-                    .map_err(|e| error("MGB041", Phase::Analyze, e))?,
-            ),
-        };
         self.store_verified(&bytes, "MGB042", Phase::Cache)?;
         let prepared = PreparedUnit::from_validated(validated);
         let output = produced_verified("xsir", ArtifactKind::BinaryIr, &bytes);
@@ -2845,13 +2847,9 @@ fn freeze_sources(
     archive_reachability::prune(snapshot, locations, &mut sources)?;
     for source in &mut sources {
         if let Some(unit) = &source.precompiled {
-            let validated = ValidatedUnit::new(Arc::clone(unit))
+            let (validated, bytes) = ValidatedUnit::encode_new(Arc::clone(unit))
                 .map_err(|e| error("MGB142", Phase::Analyze, e))?;
-            source.precompiled_blob = Some(VerifiedBlob::from_owned(
-                validated
-                    .encode()
-                    .map_err(|e| error("MGB142", Phase::Analyze, e))?,
-            ));
+            source.precompiled_blob = Some(VerifiedBlob::from_owned(bytes));
             source.precompiled_validated = Some(validated);
         }
     }
@@ -3040,7 +3038,7 @@ fn build_plan(
                 BTreeMap::from([
                     ("source-key".into(), canonical_source_key(&key)),
                     ("frontend-abi".into(), descriptor.frontend_abi.clone()),
-                    ("manager-schema".into(), "v1.2.0".into()),
+                    ("manager-schema".into(), "v1.2.1".into()),
                 ]),
             ),
         )?;
@@ -3245,7 +3243,7 @@ fn add_action(
     } else {
         ResourceClass::Cpu
     };
-    let key = KeyRecipe::new(format!("manager/{kind:?}/1.2.0"), key_parts.0, key_parts.1)
+    let key = KeyRecipe::new(format!("manager/{kind:?}/1.2.1"), key_parts.0, key_parts.1)
         .map_err(|e| error("MGB022", Phase::Manage, e))?;
     actions.push(Action {
         id: id.clone(),
@@ -3671,7 +3669,7 @@ fn debug_bundle(
         .iter()
         .map(|source| (source_key(source), source.blob.bytes()))
         .collect();
-    let archives: BTreeMap<_, _> = sources
+    let archive_index: BTreeMap<_, _> = sources
         .iter()
         .filter_map(|source| {
             source
@@ -3680,7 +3678,7 @@ fn debug_bundle(
                 .map(|archive| (&source.package, archive))
         })
         .collect();
-    for archive in archives.values() {
+    for archive in archive_index.values() {
         for (key, bytes) in &archive.sources {
             source_bytes.entry(key.clone()).or_insert(bytes.as_ref());
         }
