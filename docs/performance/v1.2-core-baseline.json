@@ -1,0 +1,2655 @@
+{
+  "schema": "xmlsquish.core.mechanism.baseline.v1",
+  "source_commit": "54fe53f6275b004266cf946fb8fe2a352f196fa7",
+  "run_id": "36812006015",
+  "sampling": {
+    "samples": 5,
+    "warmup": 2,
+    "target_us": 3000,
+    "max_iterations": 256
+  },
+  "binaries": {
+    "core_latency": {
+      "sha256": "70e3acb8ebf0c9556d84585d5b633a20c691a0518883ec8b6f1ebefc06f823f6",
+      "bytes": 3651376
+    },
+    "core_allocations": {
+      "sha256": "efabf3d8e291b19b7f572b5a9d4f15ca3aece5d7f0dcea7ae146100fd4af050e",
+      "bytes": 3856752
+    }
+  },
+  "summary": [
+    {
+      "suite": "core",
+      "mode": "latency",
+      "workload": "tiny-document",
+      "mechanism": "link_prepared_input",
+      "dimensions": {
+        "actual_definitions": 0,
+        "compiled_regexes": 0,
+        "definitions": 0,
+        "document_items": 3,
+        "expansions": 0,
+        "frames": 1,
+        "origin_scan_comparison_floor": 6,
+        "origins": 3,
+        "persisted_unit_bytes": 992,
+        "regions": 2,
+        "scalar_values": 0,
+        "semantic_string_bytes": 1,
+        "source_bytes": 103,
+        "static_scalars": 0,
+        "trace_origins": 2,
+        "unit_ops": 2,
+        "units": 1
+      },
+      "drop_included": false,
+      "timing": "segmented_operation",
+      "setup_excluded": true,
+      "elapsed_ns_per_operation": {
+        "samples": [
+          1759.54296875,
+          1736.1015625,
+          1742.41015625,
+          1706.84765625,
+          1715.70703125
+        ],
+        "median": 1736.1015625,
+        "min": 1706.84765625,
+        "max": 1759.54296875
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "latency",
+      "workload": "tiny-document",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 0,
+        "compiled_regexes": 0,
+        "definitions": 0,
+        "document_items": 3,
+        "expansions": 0,
+        "frames": 1,
+        "origin_scan_comparison_floor": 6,
+        "origins": 3,
+        "persisted_unit_bytes": 992,
+        "regions": 2,
+        "scalar_values": 0,
+        "semantic_string_bytes": 1,
+        "source_bytes": 103,
+        "static_scalars": 0,
+        "trace_origins": 2,
+        "unit_ops": 2,
+        "units": 1
+      },
+      "drop_included": false,
+      "timing": "segmented_operation",
+      "setup_excluded": true,
+      "elapsed_ns_per_operation": {
+        "samples": [
+          851.84375,
+          870.65234375,
+          900.1796875,
+          866.26953125,
+          865.12109375
+        ],
+        "median": 866.26953125,
+        "min": 851.84375,
+        "max": 900.1796875
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "latency",
+      "workload": "macro-d1-e64-last0-payload0",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 1,
+        "called_last": 0,
+        "compiled_regexes": 0,
+        "definitions": 1,
+        "document_items": 66,
+        "expansions": 64,
+        "frames": 65,
+        "origin_scan_comparison_floor": 2469,
+        "origins": 69,
+        "persisted_unit_bytes": 1076,
+        "regions": 3,
+        "scalar_values": 0,
+        "semantic_string_bytes": 1,
+        "source_bytes": 1988,
+        "static_scalars": 0,
+        "trace_origins": 129,
+        "unit_ops": 66,
+        "units": 2,
+        "unused_payload_bytes": 0
+      },
+      "drop_included": false,
+      "timing": "segmented_operation",
+      "setup_excluded": true,
+      "elapsed_ns_per_operation": {
+        "samples": [
+          24134.7734375,
+          23797.90625,
+          23732.453125,
+          24010.6796875,
+          23918.8828125
+        ],
+        "median": 23918.8828125,
+        "min": 23732.453125,
+        "max": 24134.7734375
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "latency",
+      "workload": "macro-d128-e64-last0-payload0",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 128,
+        "called_last": 0,
+        "compiled_regexes": 0,
+        "definitions": 128,
+        "document_items": 66,
+        "expansions": 64,
+        "frames": 65,
+        "origin_scan_comparison_floor": 10597,
+        "origins": 323,
+        "persisted_unit_bytes": 30678,
+        "regions": 130,
+        "scalar_values": 0,
+        "semantic_string_bytes": 1,
+        "source_bytes": 6814,
+        "static_scalars": 0,
+        "trace_origins": 129,
+        "unit_ops": 193,
+        "units": 2,
+        "unused_payload_bytes": 0
+      },
+      "drop_included": false,
+      "timing": "segmented_operation",
+      "setup_excluded": true,
+      "elapsed_ns_per_operation": {
+        "samples": [
+          27054.09375,
+          27034.265625,
+          26998.03125,
+          27073.1015625,
+          27108.9375
+        ],
+        "median": 27054.09375,
+        "min": 26998.03125,
+        "max": 27108.9375
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "latency",
+      "workload": "macro-d128-e64-last1-payload0",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 128,
+        "called_last": 1,
+        "compiled_regexes": 0,
+        "definitions": 128,
+        "document_items": 66,
+        "expansions": 64,
+        "frames": 65,
+        "origin_scan_comparison_floor": 26853,
+        "origins": 323,
+        "persisted_unit_bytes": 30678,
+        "regions": 130,
+        "scalar_values": 0,
+        "semantic_string_bytes": 1,
+        "source_bytes": 6814,
+        "static_scalars": 0,
+        "trace_origins": 129,
+        "unit_ops": 193,
+        "units": 2,
+        "unused_payload_bytes": 0
+      },
+      "drop_included": false,
+      "timing": "segmented_operation",
+      "setup_excluded": true,
+      "elapsed_ns_per_operation": {
+        "samples": [
+          36030.984375,
+          36421.65625,
+          36183.109375,
+          35642.515625,
+          36041.5546875
+        ],
+        "median": 36041.5546875,
+        "min": 35642.515625,
+        "max": 36421.65625
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "latency",
+      "workload": "macro-d1024-e64-last0-payload0",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 1024,
+        "called_last": 0,
+        "compiled_regexes": 0,
+        "definitions": 1024,
+        "document_items": 66,
+        "expansions": 64,
+        "frames": 65,
+        "origin_scan_comparison_floor": 67941,
+        "origins": 2115,
+        "persisted_unit_bytes": 254678,
+        "regions": 1026,
+        "scalar_values": 0,
+        "semantic_string_bytes": 1,
+        "source_bytes": 40862,
+        "static_scalars": 0,
+        "trace_origins": 129,
+        "unit_ops": 1089,
+        "units": 2,
+        "unused_payload_bytes": 0
+      },
+      "drop_included": false,
+      "timing": "segmented_operation",
+      "setup_excluded": true,
+      "elapsed_ns_per_operation": {
+        "samples": [
+          46604.8203125,
+          46233.796875,
+          46027.9296875,
+          45758.03125,
+          46598.234375
+        ],
+        "median": 46233.796875,
+        "min": 45758.03125,
+        "max": 46604.8203125
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "latency",
+      "workload": "macro-d1024-e64-last1-payload0",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 1024,
+        "called_last": 1,
+        "compiled_regexes": 0,
+        "definitions": 1024,
+        "document_items": 66,
+        "expansions": 64,
+        "frames": 65,
+        "origin_scan_comparison_floor": 198885,
+        "origins": 2115,
+        "persisted_unit_bytes": 254678,
+        "regions": 1026,
+        "scalar_values": 0,
+        "semantic_string_bytes": 1,
+        "source_bytes": 40862,
+        "static_scalars": 0,
+        "trace_origins": 129,
+        "unit_ops": 1089,
+        "units": 2,
+        "unused_payload_bytes": 0
+      },
+      "drop_included": false,
+      "timing": "segmented_operation",
+      "setup_excluded": true,
+      "elapsed_ns_per_operation": {
+        "samples": [
+          110519.34375,
+          109789.0,
+          109912.78125,
+          110413.625,
+          110353.09375
+        ],
+        "median": 110353.09375,
+        "min": 109789.0,
+        "max": 110519.34375
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "latency",
+      "workload": "macro-d4096-e64-last0-payload0",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 4096,
+        "called_last": 0,
+        "compiled_regexes": 0,
+        "definitions": 4096,
+        "document_items": 66,
+        "expansions": 64,
+        "frames": 65,
+        "origin_scan_comparison_floor": 264549,
+        "origins": 8259,
+        "persisted_unit_bytes": 1022678,
+        "regions": 4098,
+        "scalar_values": 0,
+        "semantic_string_bytes": 1,
+        "source_bytes": 157598,
+        "static_scalars": 0,
+        "trace_origins": 129,
+        "unit_ops": 4161,
+        "units": 2,
+        "unused_payload_bytes": 0
+      },
+      "drop_included": false,
+      "timing": "segmented_operation",
+      "setup_excluded": true,
+      "elapsed_ns_per_operation": {
+        "samples": [
+          97483.875,
+          98093.15625,
+          98053.9375,
+          98009.625,
+          100936.8125
+        ],
+        "median": 98053.9375,
+        "min": 97483.875,
+        "max": 100936.8125
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "latency",
+      "workload": "macro-d4096-e64-last1-payload0",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 4096,
+        "called_last": 1,
+        "compiled_regexes": 0,
+        "definitions": 4096,
+        "document_items": 66,
+        "expansions": 64,
+        "frames": 65,
+        "origin_scan_comparison_floor": 788709,
+        "origins": 8259,
+        "persisted_unit_bytes": 1022678,
+        "regions": 4098,
+        "scalar_values": 0,
+        "semantic_string_bytes": 1,
+        "source_bytes": 157598,
+        "static_scalars": 0,
+        "trace_origins": 129,
+        "unit_ops": 4161,
+        "units": 2,
+        "unused_payload_bytes": 0
+      },
+      "drop_included": false,
+      "timing": "segmented_operation",
+      "setup_excluded": true,
+      "elapsed_ns_per_operation": {
+        "samples": [
+          345732.0,
+          343090.125,
+          344042.0625,
+          345765.5625,
+          342504.9375
+        ],
+        "median": 344042.0625,
+        "min": 342504.9375,
+        "max": 345765.5625
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "latency",
+      "workload": "macro-d1-e16-last0-payload4194304",
+      "mechanism": "link_prepared_input",
+      "dimensions": {
+        "actual_definitions": 2,
+        "called_last": 0,
+        "compiled_regexes": 0,
+        "definitions": 1,
+        "document_items": 18,
+        "expansions": 16,
+        "frames": 17,
+        "origin_scan_comparison_floor": 253,
+        "origins": 23,
+        "persisted_unit_bytes": 8389930,
+        "regions": 4,
+        "scalar_values": 0,
+        "semantic_string_bytes": 4194305,
+        "source_bytes": 4195034,
+        "static_scalars": 0,
+        "trace_origins": 33,
+        "unit_ops": 19,
+        "units": 2,
+        "unused_payload_bytes": 4194304
+      },
+      "drop_included": false,
+      "timing": "segmented_operation",
+      "setup_excluded": true,
+      "elapsed_ns_per_operation": {
+        "samples": [
+          7022.83984375,
+          6925.13671875,
+          7116.3125,
+          6989.40625,
+          6953.125
+        ],
+        "median": 6989.40625,
+        "min": 6925.13671875,
+        "max": 7116.3125
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "latency",
+      "workload": "macro-d1-e16-last0-payload4194304",
+      "mechanism": "link_clone_plus_call",
+      "dimensions": {
+        "actual_definitions": 2,
+        "called_last": 0,
+        "compiled_regexes": 0,
+        "definitions": 1,
+        "document_items": 18,
+        "expansions": 16,
+        "frames": 17,
+        "origin_scan_comparison_floor": 253,
+        "origins": 23,
+        "persisted_unit_bytes": 8389930,
+        "regions": 4,
+        "scalar_values": 0,
+        "semantic_string_bytes": 4194305,
+        "source_bytes": 4195034,
+        "static_scalars": 0,
+        "trace_origins": 33,
+        "unit_ops": 19,
+        "units": 2,
+        "unused_payload_bytes": 4194304
+      },
+      "drop_included": false,
+      "timing": "segmented_operation",
+      "setup_excluded": true,
+      "elapsed_ns_per_operation": {
+        "samples": [
+          81126.046875,
+          81013.09375,
+          78161.15625,
+          78346.921875,
+          79535.734375
+        ],
+        "median": 79535.734375,
+        "min": 78161.15625,
+        "max": 81126.046875
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "latency",
+      "workload": "macro-d1-e16-last0-payload4194304",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 2,
+        "called_last": 0,
+        "compiled_regexes": 0,
+        "definitions": 1,
+        "document_items": 18,
+        "expansions": 16,
+        "frames": 17,
+        "origin_scan_comparison_floor": 253,
+        "origins": 23,
+        "persisted_unit_bytes": 8389930,
+        "regions": 4,
+        "scalar_values": 0,
+        "semantic_string_bytes": 4194305,
+        "source_bytes": 4195034,
+        "static_scalars": 0,
+        "trace_origins": 33,
+        "unit_ops": 19,
+        "units": 2,
+        "unused_payload_bytes": 4194304
+      },
+      "drop_included": false,
+      "timing": "segmented_operation",
+      "setup_excluded": true,
+      "elapsed_ns_per_operation": {
+        "samples": [
+          7274.84375,
+          7272.0,
+          7290.45703125,
+          7280.8515625,
+          7308.125
+        ],
+        "median": 7280.8515625,
+        "min": 7272.0,
+        "max": 7308.125
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "latency",
+      "workload": "reused-scalar-e256-bytes4096-static0",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 2,
+        "compiled_regexes": 0,
+        "definitions": 2,
+        "document_items": 258,
+        "expansions": 256,
+        "frames": 513,
+        "origin_scan_comparison_floor": 39559,
+        "origins": 267,
+        "persisted_unit_bytes": 1728,
+        "regions": 5,
+        "scalar_bytes": 4096,
+        "scalar_is_static": 0,
+        "scalar_values": 1,
+        "semantic_string_bytes": 0,
+        "shared_scalar_regions": 1,
+        "source_bytes": 20971,
+        "static_scalars": 0,
+        "trace_origins": 1026,
+        "unit_ops": 260,
+        "units": 2
+      },
+      "drop_included": false,
+      "timing": "segmented_operation",
+      "setup_excluded": true,
+      "elapsed_ns_per_operation": {
+        "samples": [
+          1917259.5,
+          1931596.0,
+          1929337.5,
+          1915757.5,
+          1926514.0
+        ],
+        "median": 1926514.0,
+        "min": 1915757.5,
+        "max": 1931596.0
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "latency",
+      "workload": "reused-scalar-e256-bytes4096-static1",
+      "mechanism": "deep_clone_static_scalar",
+      "dimensions": {
+        "actual_definitions": 2,
+        "compiled_regexes": 0,
+        "definitions": 2,
+        "document_items": 258,
+        "expansions": 256,
+        "frames": 513,
+        "origin_scan_comparison_floor": 39559,
+        "origins": 267,
+        "persisted_unit_bytes": 9905,
+        "regions": 5,
+        "scalar_bytes": 4096,
+        "scalar_is_static": 1,
+        "scalar_values": 1,
+        "semantic_string_bytes": 4096,
+        "shared_scalar_regions": 1,
+        "source_bytes": 25037,
+        "static_scalars": 1,
+        "trace_origins": 1026,
+        "unit_ops": 260,
+        "units": 2
+      },
+      "drop_included": false,
+      "timing": "segmented_operation",
+      "setup_excluded": true,
+      "elapsed_ns_per_operation": {
+        "samples": [
+          65.25390625,
+          70.45703125,
+          73.61328125,
+          71.28515625,
+          70.49609375
+        ],
+        "median": 70.49609375,
+        "min": 65.25390625,
+        "max": 73.61328125
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "latency",
+      "workload": "reused-scalar-e256-bytes4096-static1",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 2,
+        "compiled_regexes": 0,
+        "definitions": 2,
+        "document_items": 258,
+        "expansions": 256,
+        "frames": 513,
+        "origin_scan_comparison_floor": 39559,
+        "origins": 267,
+        "persisted_unit_bytes": 9905,
+        "regions": 5,
+        "scalar_bytes": 4096,
+        "scalar_is_static": 1,
+        "scalar_values": 1,
+        "semantic_string_bytes": 4096,
+        "shared_scalar_regions": 1,
+        "source_bytes": 25037,
+        "static_scalars": 1,
+        "trace_origins": 1026,
+        "unit_ops": 260,
+        "units": 2
+      },
+      "drop_included": false,
+      "timing": "segmented_operation",
+      "setup_excluded": true,
+      "elapsed_ns_per_operation": {
+        "samples": [
+          1178222.0,
+          1181154.0,
+          1186124.25,
+          1188295.0,
+          1186654.75
+        ],
+        "median": 1186124.25,
+        "min": 1178222.0,
+        "max": 1188295.0
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "latency",
+      "workload": "unused-regex-pool-256",
+      "mechanism": "middle_prepared_input",
+      "dimensions": {
+        "actual_definitions": 257,
+        "compiled_regexes": 256,
+        "definitions": 257,
+        "document_items": 3,
+        "expansions": 1,
+        "frames": 2,
+        "origin_scan_comparison_floor": 268,
+        "origins": 774,
+        "persisted_unit_bytes": 122260,
+        "regions": 515,
+        "scalar_values": 0,
+        "semantic_string_bytes": 5633,
+        "source_bytes": 25883,
+        "static_scalars": 0,
+        "trace_origins": 3,
+        "unit_ops": 515,
+        "units": 2,
+        "unused_patterns": 256
+      },
+      "drop_included": false,
+      "timing": "segmented_operation",
+      "setup_excluded": true,
+      "elapsed_ns_per_operation": {
+        "samples": [
+          1868631.5,
+          1872607.5,
+          1877199.5,
+          1872226.5,
+          1889663.0
+        ],
+        "median": 1872607.5,
+        "min": 1868631.5,
+        "max": 1889663.0
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "latency",
+      "workload": "scalar-values-e2048-unique0-bytes8",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 1,
+        "compiled_regexes": 0,
+        "definitions": 1,
+        "document_items": 2050,
+        "expansions": 2048,
+        "frames": 2049,
+        "origin_scan_comparison_floor": 2112517,
+        "origins": 2054,
+        "persisted_unit_bytes": 473140,
+        "regions": 3,
+        "scalar_bytes": 8,
+        "scalar_values": 1,
+        "semantic_string_bytes": 9,
+        "source_bytes": 151833,
+        "static_scalars": 0,
+        "trace_origins": 4097,
+        "unique_values": 1,
+        "unit_ops": 2050,
+        "units": 2
+      },
+      "drop_included": false,
+      "timing": "segmented_operation",
+      "setup_excluded": true,
+      "elapsed_ns_per_operation": {
+        "samples": [
+          1656043.5,
+          1647521.5,
+          1661927.5,
+          1650094.5,
+          1652388.0
+        ],
+        "median": 1652388.0,
+        "min": 1647521.5,
+        "max": 1661927.5
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "latency",
+      "workload": "scalar-values-e2048-unique1-bytes8",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 1,
+        "compiled_regexes": 0,
+        "definitions": 1,
+        "document_items": 2050,
+        "expansions": 2048,
+        "frames": 2049,
+        "origin_scan_comparison_floor": 2112517,
+        "origins": 2054,
+        "persisted_unit_bytes": 513828,
+        "regions": 3,
+        "scalar_bytes": 8,
+        "scalar_values": 2048,
+        "semantic_string_bytes": 16385,
+        "source_bytes": 151833,
+        "static_scalars": 0,
+        "trace_origins": 4097,
+        "unique_values": 2048,
+        "unit_ops": 2050,
+        "units": 2
+      },
+      "drop_included": false,
+      "timing": "segmented_operation",
+      "setup_excluded": true,
+      "elapsed_ns_per_operation": {
+        "samples": [
+          4863308.0,
+          4848146.0,
+          4822387.0,
+          4800404.0,
+          4788415.0
+        ],
+        "median": 4822387.0,
+        "min": 4788415.0,
+        "max": 4863308.0
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "allocations",
+      "workload": "tiny-document",
+      "mechanism": "link_prepared_input",
+      "dimensions": {
+        "actual_definitions": 0,
+        "compiled_regexes": 0,
+        "definitions": 0,
+        "document_items": 3,
+        "expansions": 0,
+        "frames": 1,
+        "origin_scan_comparison_floor": 6,
+        "origins": 3,
+        "persisted_unit_bytes": 992,
+        "regions": 2,
+        "scalar_values": 0,
+        "semantic_string_bytes": 1,
+        "source_bytes": 103,
+        "static_scalars": 0,
+        "trace_origins": 2,
+        "unit_ops": 2,
+        "units": 1
+      },
+      "drop_included": false,
+      "timing": "batch",
+      "setup_excluded": true,
+      "allocation_calls_per_operation": {
+        "samples": [
+          70.0,
+          70.0,
+          70.0,
+          70.0,
+          70.0
+        ],
+        "median": 70.0,
+        "min": 70.0,
+        "max": 70.0
+      },
+      "allocated_bytes_per_operation": {
+        "samples": [
+          16892.0,
+          16892.0,
+          16892.0,
+          16892.0,
+          16892.0
+        ],
+        "median": 16892.0,
+        "min": 16892.0,
+        "max": 16892.0
+      },
+      "deallocation_calls_per_operation": {
+        "samples": [
+          55.0,
+          55.0,
+          55.0,
+          55.0,
+          55.0
+        ],
+        "median": 55.0,
+        "min": 55.0,
+        "max": 55.0
+      },
+      "reallocation_calls_per_operation": {
+        "samples": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "peak_live_delta_bytes": {
+        "samples": [
+          15046,
+          15046,
+          15046,
+          15046,
+          15046
+        ],
+        "median": 15046,
+        "min": 15046,
+        "max": 15046
+      },
+      "retained_live_delta_bytes": {
+        "samples": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "median": 0,
+        "min": 0,
+        "max": 0
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "allocations",
+      "workload": "tiny-document",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 0,
+        "compiled_regexes": 0,
+        "definitions": 0,
+        "document_items": 3,
+        "expansions": 0,
+        "frames": 1,
+        "origin_scan_comparison_floor": 6,
+        "origins": 3,
+        "persisted_unit_bytes": 992,
+        "regions": 2,
+        "scalar_values": 0,
+        "semantic_string_bytes": 1,
+        "source_bytes": 103,
+        "static_scalars": 0,
+        "trace_origins": 2,
+        "unit_ops": 2,
+        "units": 1
+      },
+      "drop_included": false,
+      "timing": "batch",
+      "setup_excluded": true,
+      "allocation_calls_per_operation": {
+        "samples": [
+          34.0,
+          34.0,
+          34.0,
+          34.0,
+          34.0
+        ],
+        "median": 34.0,
+        "min": 34.0,
+        "max": 34.0
+      },
+      "allocated_bytes_per_operation": {
+        "samples": [
+          5671.0,
+          5671.0,
+          5671.0,
+          5671.0,
+          5671.0
+        ],
+        "median": 5671.0,
+        "min": 5671.0,
+        "max": 5671.0
+      },
+      "deallocation_calls_per_operation": {
+        "samples": [
+          20.0,
+          20.0,
+          20.0,
+          20.0,
+          20.0
+        ],
+        "median": 20.0,
+        "min": 20.0,
+        "max": 20.0
+      },
+      "reallocation_calls_per_operation": {
+        "samples": [
+          4.0,
+          4.0,
+          4.0,
+          4.0,
+          4.0
+        ],
+        "median": 4.0,
+        "min": 4.0,
+        "max": 4.0
+      },
+      "peak_live_delta_bytes": {
+        "samples": [
+          3961,
+          3961,
+          3961,
+          3961,
+          3961
+        ],
+        "median": 3961,
+        "min": 3961,
+        "max": 3961
+      },
+      "retained_live_delta_bytes": {
+        "samples": [
+          1514,
+          1514,
+          1514,
+          1514,
+          1514
+        ],
+        "median": 1514,
+        "min": 1514,
+        "max": 1514
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "allocations",
+      "workload": "macro-d1-e64-last0-payload0",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 1,
+        "called_last": 0,
+        "compiled_regexes": 0,
+        "definitions": 1,
+        "document_items": 66,
+        "expansions": 64,
+        "frames": 65,
+        "origin_scan_comparison_floor": 2469,
+        "origins": 69,
+        "persisted_unit_bytes": 1076,
+        "regions": 3,
+        "scalar_values": 0,
+        "semantic_string_bytes": 1,
+        "source_bytes": 1988,
+        "static_scalars": 0,
+        "trace_origins": 129,
+        "unit_ops": 66,
+        "units": 2,
+        "unused_payload_bytes": 0
+      },
+      "drop_included": false,
+      "timing": "batch",
+      "setup_excluded": true,
+      "allocation_calls_per_operation": {
+        "samples": [
+          781.0,
+          781.0,
+          781.0,
+          781.0,
+          781.0
+        ],
+        "median": 781.0,
+        "min": 781.0,
+        "max": 781.0
+      },
+      "allocated_bytes_per_operation": {
+        "samples": [
+          273061.0,
+          273061.0,
+          273061.0,
+          273061.0,
+          273061.0
+        ],
+        "median": 273061.0,
+        "min": 273061.0,
+        "max": 273061.0
+      },
+      "deallocation_calls_per_operation": {
+        "samples": [
+          720.0,
+          720.0,
+          720.0,
+          720.0,
+          720.0
+        ],
+        "median": 720.0,
+        "min": 720.0,
+        "max": 720.0
+      },
+      "reallocation_calls_per_operation": {
+        "samples": [
+          51.0,
+          51.0,
+          51.0,
+          51.0,
+          51.0
+        ],
+        "median": 51.0,
+        "min": 51.0,
+        "max": 51.0
+      },
+      "peak_live_delta_bytes": {
+        "samples": [
+          117737,
+          117737,
+          117737,
+          117737,
+          117737
+        ],
+        "median": 117737,
+        "min": 117737,
+        "max": 117737
+      },
+      "retained_live_delta_bytes": {
+        "samples": [
+          60170,
+          60170,
+          60170,
+          60170,
+          60170
+        ],
+        "median": 60170,
+        "min": 60170,
+        "max": 60170
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "allocations",
+      "workload": "macro-d128-e64-last0-payload0",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 128,
+        "called_last": 0,
+        "compiled_regexes": 0,
+        "definitions": 128,
+        "document_items": 66,
+        "expansions": 64,
+        "frames": 65,
+        "origin_scan_comparison_floor": 10597,
+        "origins": 323,
+        "persisted_unit_bytes": 30678,
+        "regions": 130,
+        "scalar_values": 0,
+        "semantic_string_bytes": 1,
+        "source_bytes": 6814,
+        "static_scalars": 0,
+        "trace_origins": 129,
+        "unit_ops": 193,
+        "units": 2,
+        "unused_payload_bytes": 0
+      },
+      "drop_included": false,
+      "timing": "batch",
+      "setup_excluded": true,
+      "allocation_calls_per_operation": {
+        "samples": [
+          781.0,
+          781.0,
+          781.0,
+          781.0,
+          781.0
+        ],
+        "median": 781.0,
+        "min": 781.0,
+        "max": 781.0
+      },
+      "allocated_bytes_per_operation": {
+        "samples": [
+          273061.0,
+          273061.0,
+          273061.0,
+          273061.0,
+          273061.0
+        ],
+        "median": 273061.0,
+        "min": 273061.0,
+        "max": 273061.0
+      },
+      "deallocation_calls_per_operation": {
+        "samples": [
+          720.0,
+          720.0,
+          720.0,
+          720.0,
+          720.0
+        ],
+        "median": 720.0,
+        "min": 720.0,
+        "max": 720.0
+      },
+      "reallocation_calls_per_operation": {
+        "samples": [
+          51.0,
+          51.0,
+          51.0,
+          51.0,
+          51.0
+        ],
+        "median": 51.0,
+        "min": 51.0,
+        "max": 51.0
+      },
+      "peak_live_delta_bytes": {
+        "samples": [
+          117737,
+          117737,
+          117737,
+          117737,
+          117737
+        ],
+        "median": 117737,
+        "min": 117737,
+        "max": 117737
+      },
+      "retained_live_delta_bytes": {
+        "samples": [
+          60170,
+          60170,
+          60170,
+          60170,
+          60170
+        ],
+        "median": 60170,
+        "min": 60170,
+        "max": 60170
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "allocations",
+      "workload": "macro-d128-e64-last1-payload0",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 128,
+        "called_last": 1,
+        "compiled_regexes": 0,
+        "definitions": 128,
+        "document_items": 66,
+        "expansions": 64,
+        "frames": 65,
+        "origin_scan_comparison_floor": 26853,
+        "origins": 323,
+        "persisted_unit_bytes": 30678,
+        "regions": 130,
+        "scalar_values": 0,
+        "semantic_string_bytes": 1,
+        "source_bytes": 6814,
+        "static_scalars": 0,
+        "trace_origins": 129,
+        "unit_ops": 193,
+        "units": 2,
+        "unused_payload_bytes": 0
+      },
+      "drop_included": false,
+      "timing": "batch",
+      "setup_excluded": true,
+      "allocation_calls_per_operation": {
+        "samples": [
+          781.0,
+          781.0,
+          781.0,
+          781.0,
+          781.0
+        ],
+        "median": 781.0,
+        "min": 781.0,
+        "max": 781.0
+      },
+      "allocated_bytes_per_operation": {
+        "samples": [
+          273061.0,
+          273061.0,
+          273061.0,
+          273061.0,
+          273061.0
+        ],
+        "median": 273061.0,
+        "min": 273061.0,
+        "max": 273061.0
+      },
+      "deallocation_calls_per_operation": {
+        "samples": [
+          720.0,
+          720.0,
+          720.0,
+          720.0,
+          720.0
+        ],
+        "median": 720.0,
+        "min": 720.0,
+        "max": 720.0
+      },
+      "reallocation_calls_per_operation": {
+        "samples": [
+          51.0,
+          51.0,
+          51.0,
+          51.0,
+          51.0
+        ],
+        "median": 51.0,
+        "min": 51.0,
+        "max": 51.0
+      },
+      "peak_live_delta_bytes": {
+        "samples": [
+          117737,
+          117737,
+          117737,
+          117737,
+          117737
+        ],
+        "median": 117737,
+        "min": 117737,
+        "max": 117737
+      },
+      "retained_live_delta_bytes": {
+        "samples": [
+          60170,
+          60170,
+          60170,
+          60170,
+          60170
+        ],
+        "median": 60170,
+        "min": 60170,
+        "max": 60170
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "allocations",
+      "workload": "macro-d1024-e64-last0-payload0",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 1024,
+        "called_last": 0,
+        "compiled_regexes": 0,
+        "definitions": 1024,
+        "document_items": 66,
+        "expansions": 64,
+        "frames": 65,
+        "origin_scan_comparison_floor": 67941,
+        "origins": 2115,
+        "persisted_unit_bytes": 254678,
+        "regions": 1026,
+        "scalar_values": 0,
+        "semantic_string_bytes": 1,
+        "source_bytes": 40862,
+        "static_scalars": 0,
+        "trace_origins": 129,
+        "unit_ops": 1089,
+        "units": 2,
+        "unused_payload_bytes": 0
+      },
+      "drop_included": false,
+      "timing": "batch",
+      "setup_excluded": true,
+      "allocation_calls_per_operation": {
+        "samples": [
+          781.0,
+          781.0,
+          781.0,
+          781.0,
+          781.0
+        ],
+        "median": 781.0,
+        "min": 781.0,
+        "max": 781.0
+      },
+      "allocated_bytes_per_operation": {
+        "samples": [
+          273061.0,
+          273061.0,
+          273061.0,
+          273061.0,
+          273061.0
+        ],
+        "median": 273061.0,
+        "min": 273061.0,
+        "max": 273061.0
+      },
+      "deallocation_calls_per_operation": {
+        "samples": [
+          720.0,
+          720.0,
+          720.0,
+          720.0,
+          720.0
+        ],
+        "median": 720.0,
+        "min": 720.0,
+        "max": 720.0
+      },
+      "reallocation_calls_per_operation": {
+        "samples": [
+          51.0,
+          51.0,
+          51.0,
+          51.0,
+          51.0
+        ],
+        "median": 51.0,
+        "min": 51.0,
+        "max": 51.0
+      },
+      "peak_live_delta_bytes": {
+        "samples": [
+          117737,
+          117737,
+          117737,
+          117737,
+          117737
+        ],
+        "median": 117737,
+        "min": 117737,
+        "max": 117737
+      },
+      "retained_live_delta_bytes": {
+        "samples": [
+          60170,
+          60170,
+          60170,
+          60170,
+          60170
+        ],
+        "median": 60170,
+        "min": 60170,
+        "max": 60170
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "allocations",
+      "workload": "macro-d1024-e64-last1-payload0",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 1024,
+        "called_last": 1,
+        "compiled_regexes": 0,
+        "definitions": 1024,
+        "document_items": 66,
+        "expansions": 64,
+        "frames": 65,
+        "origin_scan_comparison_floor": 198885,
+        "origins": 2115,
+        "persisted_unit_bytes": 254678,
+        "regions": 1026,
+        "scalar_values": 0,
+        "semantic_string_bytes": 1,
+        "source_bytes": 40862,
+        "static_scalars": 0,
+        "trace_origins": 129,
+        "unit_ops": 1089,
+        "units": 2,
+        "unused_payload_bytes": 0
+      },
+      "drop_included": false,
+      "timing": "batch",
+      "setup_excluded": true,
+      "allocation_calls_per_operation": {
+        "samples": [
+          781.0,
+          781.0,
+          781.0,
+          781.0,
+          781.0
+        ],
+        "median": 781.0,
+        "min": 781.0,
+        "max": 781.0
+      },
+      "allocated_bytes_per_operation": {
+        "samples": [
+          273061.0,
+          273061.0,
+          273061.0,
+          273061.0,
+          273061.0
+        ],
+        "median": 273061.0,
+        "min": 273061.0,
+        "max": 273061.0
+      },
+      "deallocation_calls_per_operation": {
+        "samples": [
+          720.0,
+          720.0,
+          720.0,
+          720.0,
+          720.0
+        ],
+        "median": 720.0,
+        "min": 720.0,
+        "max": 720.0
+      },
+      "reallocation_calls_per_operation": {
+        "samples": [
+          51.0,
+          51.0,
+          51.0,
+          51.0,
+          51.0
+        ],
+        "median": 51.0,
+        "min": 51.0,
+        "max": 51.0
+      },
+      "peak_live_delta_bytes": {
+        "samples": [
+          117737,
+          117737,
+          117737,
+          117737,
+          117737
+        ],
+        "median": 117737,
+        "min": 117737,
+        "max": 117737
+      },
+      "retained_live_delta_bytes": {
+        "samples": [
+          60170,
+          60170,
+          60170,
+          60170,
+          60170
+        ],
+        "median": 60170,
+        "min": 60170,
+        "max": 60170
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "allocations",
+      "workload": "macro-d4096-e64-last0-payload0",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 4096,
+        "called_last": 0,
+        "compiled_regexes": 0,
+        "definitions": 4096,
+        "document_items": 66,
+        "expansions": 64,
+        "frames": 65,
+        "origin_scan_comparison_floor": 264549,
+        "origins": 8259,
+        "persisted_unit_bytes": 1022678,
+        "regions": 4098,
+        "scalar_values": 0,
+        "semantic_string_bytes": 1,
+        "source_bytes": 157598,
+        "static_scalars": 0,
+        "trace_origins": 129,
+        "unit_ops": 4161,
+        "units": 2,
+        "unused_payload_bytes": 0
+      },
+      "drop_included": false,
+      "timing": "batch",
+      "setup_excluded": true,
+      "allocation_calls_per_operation": {
+        "samples": [
+          781.0,
+          781.0,
+          781.0,
+          781.0,
+          781.0
+        ],
+        "median": 781.0,
+        "min": 781.0,
+        "max": 781.0
+      },
+      "allocated_bytes_per_operation": {
+        "samples": [
+          273061.0,
+          273061.0,
+          273061.0,
+          273061.0,
+          273061.0
+        ],
+        "median": 273061.0,
+        "min": 273061.0,
+        "max": 273061.0
+      },
+      "deallocation_calls_per_operation": {
+        "samples": [
+          720.0,
+          720.0,
+          720.0,
+          720.0,
+          720.0
+        ],
+        "median": 720.0,
+        "min": 720.0,
+        "max": 720.0
+      },
+      "reallocation_calls_per_operation": {
+        "samples": [
+          51.0,
+          51.0,
+          51.0,
+          51.0,
+          51.0
+        ],
+        "median": 51.0,
+        "min": 51.0,
+        "max": 51.0
+      },
+      "peak_live_delta_bytes": {
+        "samples": [
+          117737,
+          117737,
+          117737,
+          117737,
+          117737
+        ],
+        "median": 117737,
+        "min": 117737,
+        "max": 117737
+      },
+      "retained_live_delta_bytes": {
+        "samples": [
+          60170,
+          60170,
+          60170,
+          60170,
+          60170
+        ],
+        "median": 60170,
+        "min": 60170,
+        "max": 60170
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "allocations",
+      "workload": "macro-d4096-e64-last1-payload0",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 4096,
+        "called_last": 1,
+        "compiled_regexes": 0,
+        "definitions": 4096,
+        "document_items": 66,
+        "expansions": 64,
+        "frames": 65,
+        "origin_scan_comparison_floor": 788709,
+        "origins": 8259,
+        "persisted_unit_bytes": 1022678,
+        "regions": 4098,
+        "scalar_values": 0,
+        "semantic_string_bytes": 1,
+        "source_bytes": 157598,
+        "static_scalars": 0,
+        "trace_origins": 129,
+        "unit_ops": 4161,
+        "units": 2,
+        "unused_payload_bytes": 0
+      },
+      "drop_included": false,
+      "timing": "batch",
+      "setup_excluded": true,
+      "allocation_calls_per_operation": {
+        "samples": [
+          781.0,
+          781.0,
+          781.0,
+          781.0,
+          781.0
+        ],
+        "median": 781.0,
+        "min": 781.0,
+        "max": 781.0
+      },
+      "allocated_bytes_per_operation": {
+        "samples": [
+          273061.0,
+          273061.0,
+          273061.0,
+          273061.0,
+          273061.0
+        ],
+        "median": 273061.0,
+        "min": 273061.0,
+        "max": 273061.0
+      },
+      "deallocation_calls_per_operation": {
+        "samples": [
+          720.0,
+          720.0,
+          720.0,
+          720.0,
+          720.0
+        ],
+        "median": 720.0,
+        "min": 720.0,
+        "max": 720.0
+      },
+      "reallocation_calls_per_operation": {
+        "samples": [
+          51.0,
+          51.0,
+          51.0,
+          51.0,
+          51.0
+        ],
+        "median": 51.0,
+        "min": 51.0,
+        "max": 51.0
+      },
+      "peak_live_delta_bytes": {
+        "samples": [
+          117737,
+          117737,
+          117737,
+          117737,
+          117737
+        ],
+        "median": 117737,
+        "min": 117737,
+        "max": 117737
+      },
+      "retained_live_delta_bytes": {
+        "samples": [
+          60170,
+          60170,
+          60170,
+          60170,
+          60170
+        ],
+        "median": 60170,
+        "min": 60170,
+        "max": 60170
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "allocations",
+      "workload": "macro-d1-e16-last0-payload4194304",
+      "mechanism": "link_prepared_input",
+      "dimensions": {
+        "actual_definitions": 2,
+        "called_last": 0,
+        "compiled_regexes": 0,
+        "definitions": 1,
+        "document_items": 18,
+        "expansions": 16,
+        "frames": 17,
+        "origin_scan_comparison_floor": 253,
+        "origins": 23,
+        "persisted_unit_bytes": 8389930,
+        "regions": 4,
+        "scalar_values": 0,
+        "semantic_string_bytes": 4194305,
+        "source_bytes": 4195034,
+        "static_scalars": 0,
+        "trace_origins": 33,
+        "unit_ops": 19,
+        "units": 2,
+        "unused_payload_bytes": 4194304
+      },
+      "drop_included": false,
+      "timing": "batch",
+      "setup_excluded": true,
+      "allocation_calls_per_operation": {
+        "samples": [
+          207.0,
+          207.0,
+          207.0,
+          207.0,
+          207.0
+        ],
+        "median": 207.0,
+        "min": 207.0,
+        "max": 207.0
+      },
+      "allocated_bytes_per_operation": {
+        "samples": [
+          26612.0,
+          26612.0,
+          26612.0,
+          26612.0,
+          26612.0
+        ],
+        "median": 26612.0,
+        "min": 26612.0,
+        "max": 26612.0
+      },
+      "deallocation_calls_per_operation": {
+        "samples": [
+          172.0,
+          172.0,
+          172.0,
+          172.0,
+          172.0
+        ],
+        "median": 172.0,
+        "min": 172.0,
+        "max": 172.0
+      },
+      "reallocation_calls_per_operation": {
+        "samples": [
+          2.0,
+          2.0,
+          2.0,
+          2.0,
+          2.0
+        ],
+        "median": 2.0,
+        "min": 2.0,
+        "max": 2.0
+      },
+      "peak_live_delta_bytes": {
+        "samples": [
+          19781,
+          19781,
+          19781,
+          19781,
+          19781
+        ],
+        "median": 19781,
+        "min": 19781,
+        "max": 19781
+      },
+      "retained_live_delta_bytes": {
+        "samples": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "median": 0,
+        "min": 0,
+        "max": 0
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "allocations",
+      "workload": "macro-d1-e16-last0-payload4194304",
+      "mechanism": "link_clone_plus_call",
+      "dimensions": {
+        "actual_definitions": 2,
+        "called_last": 0,
+        "compiled_regexes": 0,
+        "definitions": 1,
+        "document_items": 18,
+        "expansions": 16,
+        "frames": 17,
+        "origin_scan_comparison_floor": 253,
+        "origins": 23,
+        "persisted_unit_bytes": 8389930,
+        "regions": 4,
+        "scalar_values": 0,
+        "semantic_string_bytes": 4194305,
+        "source_bytes": 4195034,
+        "static_scalars": 0,
+        "trace_origins": 33,
+        "unit_ops": 19,
+        "units": 2,
+        "unused_payload_bytes": 4194304
+      },
+      "drop_included": false,
+      "timing": "batch",
+      "setup_excluded": true,
+      "allocation_calls_per_operation": {
+        "samples": [
+          396.0,
+          396.0,
+          396.0,
+          396.0,
+          396.0
+        ],
+        "median": 396.0,
+        "min": 396.0,
+        "max": 396.0
+      },
+      "allocated_bytes_per_operation": {
+        "samples": [
+          4238146.0,
+          4238146.0,
+          4238146.0,
+          4238146.0,
+          4238146.0
+        ],
+        "median": 4238146.0,
+        "min": 4238146.0,
+        "max": 4238146.0
+      },
+      "deallocation_calls_per_operation": {
+        "samples": [
+          172.0,
+          172.0,
+          172.0,
+          172.0,
+          172.0
+        ],
+        "median": 172.0,
+        "min": 172.0,
+        "max": 172.0
+      },
+      "reallocation_calls_per_operation": {
+        "samples": [
+          2.0,
+          2.0,
+          2.0,
+          2.0,
+          2.0
+        ],
+        "median": 2.0,
+        "min": 2.0,
+        "max": 2.0
+      },
+      "peak_live_delta_bytes": {
+        "samples": [
+          4231315,
+          4231315,
+          4231315,
+          4231315,
+          4231315
+        ],
+        "median": 4231315,
+        "min": 4231315,
+        "max": 4231315
+      },
+      "retained_live_delta_bytes": {
+        "samples": [
+          4206510,
+          4206510,
+          4206510,
+          4206510,
+          4206510
+        ],
+        "median": 4206510,
+        "min": 4206510,
+        "max": 4206510
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "allocations",
+      "workload": "macro-d1-e16-last0-payload4194304",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 2,
+        "called_last": 0,
+        "compiled_regexes": 0,
+        "definitions": 1,
+        "document_items": 18,
+        "expansions": 16,
+        "frames": 17,
+        "origin_scan_comparison_floor": 253,
+        "origins": 23,
+        "persisted_unit_bytes": 8389930,
+        "regions": 4,
+        "scalar_values": 0,
+        "semantic_string_bytes": 4194305,
+        "source_bytes": 4195034,
+        "static_scalars": 0,
+        "trace_origins": 33,
+        "unit_ops": 19,
+        "units": 2,
+        "unused_payload_bytes": 4194304
+      },
+      "drop_included": false,
+      "timing": "batch",
+      "setup_excluded": true,
+      "allocation_calls_per_operation": {
+        "samples": [
+          235.0,
+          235.0,
+          235.0,
+          235.0,
+          235.0
+        ],
+        "median": 235.0,
+        "min": 235.0,
+        "max": 235.0
+      },
+      "allocated_bytes_per_operation": {
+        "samples": [
+          66469.0,
+          66469.0,
+          66469.0,
+          66469.0,
+          66469.0
+        ],
+        "median": 66469.0,
+        "min": 66469.0,
+        "max": 66469.0
+      },
+      "deallocation_calls_per_operation": {
+        "samples": [
+          192.0,
+          192.0,
+          192.0,
+          192.0,
+          192.0
+        ],
+        "median": 192.0,
+        "min": 192.0,
+        "max": 192.0
+      },
+      "reallocation_calls_per_operation": {
+        "samples": [
+          33.0,
+          33.0,
+          33.0,
+          33.0,
+          33.0
+        ],
+        "median": 33.0,
+        "min": 33.0,
+        "max": 33.0
+      },
+      "peak_live_delta_bytes": {
+        "samples": [
+          29753,
+          29753,
+          29753,
+          29753,
+          29753
+        ],
+        "median": 29753,
+        "min": 29753,
+        "max": 29753
+      },
+      "retained_live_delta_bytes": {
+        "samples": [
+          15242,
+          15242,
+          15242,
+          15242,
+          15242
+        ],
+        "median": 15242,
+        "min": 15242,
+        "max": 15242
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "allocations",
+      "workload": "reused-scalar-e256-bytes4096-static0",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 2,
+        "compiled_regexes": 0,
+        "definitions": 2,
+        "document_items": 258,
+        "expansions": 256,
+        "frames": 513,
+        "origin_scan_comparison_floor": 39559,
+        "origins": 267,
+        "persisted_unit_bytes": 1728,
+        "regions": 5,
+        "scalar_bytes": 4096,
+        "scalar_is_static": 0,
+        "scalar_values": 1,
+        "semantic_string_bytes": 0,
+        "shared_scalar_regions": 1,
+        "source_bytes": 20971,
+        "static_scalars": 0,
+        "trace_origins": 1026,
+        "unit_ops": 260,
+        "units": 2
+      },
+      "drop_included": false,
+      "timing": "batch",
+      "setup_excluded": true,
+      "allocation_calls_per_operation": {
+        "samples": [
+          12418.0,
+          12418.0,
+          12418.0,
+          12418.0,
+          12418.0
+        ],
+        "median": 12418.0,
+        "min": 12418.0,
+        "max": 12418.0
+      },
+      "allocated_bytes_per_operation": {
+        "samples": [
+          7659257.0,
+          7659257.0,
+          7659257.0,
+          7659257.0,
+          7659257.0
+        ],
+        "median": 7659257.0,
+        "min": 7659257.0,
+        "max": 7659257.0
+      },
+      "deallocation_calls_per_operation": {
+        "samples": [
+          10783.0,
+          10783.0,
+          10783.0,
+          10783.0,
+          10783.0
+        ],
+        "median": 10783.0,
+        "min": 10783.0,
+        "max": 10783.0
+      },
+      "reallocation_calls_per_operation": {
+        "samples": [
+          343.0,
+          343.0,
+          343.0,
+          343.0,
+          343.0
+        ],
+        "median": 343.0,
+        "min": 343.0,
+        "max": 343.0
+      },
+      "peak_live_delta_bytes": {
+        "samples": [
+          2853275,
+          2853275,
+          2853275,
+          2853275,
+          2853275
+        ],
+        "median": 2853275,
+        "min": 2853275,
+        "max": 2853275
+      },
+      "retained_live_delta_bytes": {
+        "samples": [
+          488048,
+          488048,
+          488048,
+          488048,
+          488048
+        ],
+        "median": 488048,
+        "min": 488048,
+        "max": 488048
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "allocations",
+      "workload": "reused-scalar-e256-bytes4096-static1",
+      "mechanism": "deep_clone_static_scalar",
+      "dimensions": {
+        "actual_definitions": 2,
+        "compiled_regexes": 0,
+        "definitions": 2,
+        "document_items": 258,
+        "expansions": 256,
+        "frames": 513,
+        "origin_scan_comparison_floor": 39559,
+        "origins": 267,
+        "persisted_unit_bytes": 9905,
+        "regions": 5,
+        "scalar_bytes": 4096,
+        "scalar_is_static": 1,
+        "scalar_values": 1,
+        "semantic_string_bytes": 4096,
+        "shared_scalar_regions": 1,
+        "source_bytes": 25037,
+        "static_scalars": 1,
+        "trace_origins": 1026,
+        "unit_ops": 260,
+        "units": 2
+      },
+      "drop_included": false,
+      "timing": "batch",
+      "setup_excluded": true,
+      "allocation_calls_per_operation": {
+        "samples": [
+          2.0,
+          2.0,
+          2.0,
+          2.0,
+          2.0
+        ],
+        "median": 2.0,
+        "min": 2.0,
+        "max": 2.0
+      },
+      "allocated_bytes_per_operation": {
+        "samples": [
+          4120.0,
+          4120.0,
+          4120.0,
+          4120.0,
+          4120.0
+        ],
+        "median": 4120.0,
+        "min": 4120.0,
+        "max": 4120.0
+      },
+      "deallocation_calls_per_operation": {
+        "samples": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "reallocation_calls_per_operation": {
+        "samples": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "peak_live_delta_bytes": {
+        "samples": [
+          4120,
+          4120,
+          4120,
+          4120,
+          4120
+        ],
+        "median": 4120,
+        "min": 4120,
+        "max": 4120
+      },
+      "retained_live_delta_bytes": {
+        "samples": [
+          4120,
+          4120,
+          4120,
+          4120,
+          4120
+        ],
+        "median": 4120,
+        "min": 4120,
+        "max": 4120
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "allocations",
+      "workload": "reused-scalar-e256-bytes4096-static1",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 2,
+        "compiled_regexes": 0,
+        "definitions": 2,
+        "document_items": 258,
+        "expansions": 256,
+        "frames": 513,
+        "origin_scan_comparison_floor": 39559,
+        "origins": 267,
+        "persisted_unit_bytes": 9905,
+        "regions": 5,
+        "scalar_bytes": 4096,
+        "scalar_is_static": 1,
+        "scalar_values": 1,
+        "semantic_string_bytes": 4096,
+        "shared_scalar_regions": 1,
+        "source_bytes": 25037,
+        "static_scalars": 1,
+        "trace_origins": 1026,
+        "unit_ops": 260,
+        "units": 2
+      },
+      "drop_included": false,
+      "timing": "batch",
+      "setup_excluded": true,
+      "allocation_calls_per_operation": {
+        "samples": [
+          12418.0,
+          12418.0,
+          12418.0,
+          12418.0,
+          12418.0
+        ],
+        "median": 12418.0,
+        "min": 12418.0,
+        "max": 12418.0
+      },
+      "allocated_bytes_per_operation": {
+        "samples": [
+          8655865.0,
+          8655865.0,
+          8655865.0,
+          8655865.0,
+          8655865.0
+        ],
+        "median": 8655865.0,
+        "min": 8655865.0,
+        "max": 8655865.0
+      },
+      "deallocation_calls_per_operation": {
+        "samples": [
+          10783.0,
+          10783.0,
+          10783.0,
+          10783.0,
+          10783.0
+        ],
+        "median": 10783.0,
+        "min": 10783.0,
+        "max": 10783.0
+      },
+      "reallocation_calls_per_operation": {
+        "samples": [
+          343.0,
+          343.0,
+          343.0,
+          343.0,
+          343.0
+        ],
+        "median": 343.0,
+        "min": 343.0,
+        "max": 343.0
+      },
+      "peak_live_delta_bytes": {
+        "samples": [
+          2853275,
+          2853275,
+          2853275,
+          2853275,
+          2853275
+        ],
+        "median": 2853275,
+        "min": 2853275,
+        "max": 2853275
+      },
+      "retained_live_delta_bytes": {
+        "samples": [
+          488048,
+          488048,
+          488048,
+          488048,
+          488048
+        ],
+        "median": 488048,
+        "min": 488048,
+        "max": 488048
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "allocations",
+      "workload": "unused-regex-pool-256",
+      "mechanism": "middle_prepared_input",
+      "dimensions": {
+        "actual_definitions": 257,
+        "compiled_regexes": 256,
+        "definitions": 257,
+        "document_items": 3,
+        "expansions": 1,
+        "frames": 2,
+        "origin_scan_comparison_floor": 268,
+        "origins": 774,
+        "persisted_unit_bytes": 122260,
+        "regions": 515,
+        "scalar_values": 0,
+        "semantic_string_bytes": 5633,
+        "source_bytes": 25883,
+        "static_scalars": 0,
+        "trace_origins": 3,
+        "unit_ops": 515,
+        "units": 2,
+        "unused_patterns": 256
+      },
+      "drop_included": false,
+      "timing": "batch",
+      "setup_excluded": true,
+      "allocation_calls_per_operation": {
+        "samples": [
+          40584.0,
+          40584.0,
+          40584.0,
+          40584.0,
+          40584.0
+        ],
+        "median": 40584.0,
+        "min": 40584.0,
+        "max": 40584.0
+      },
+      "allocated_bytes_per_operation": {
+        "samples": [
+          5404982.0,
+          5404982.0,
+          5404982.0,
+          5404982.0,
+          5404982.0
+        ],
+        "median": 5404982.0,
+        "min": 5404982.0,
+        "max": 5404982.0
+      },
+      "deallocation_calls_per_operation": {
+        "samples": [
+          19031.0,
+          19031.0,
+          19031.0,
+          19031.0,
+          19031.0
+        ],
+        "median": 19031.0,
+        "min": 19031.0,
+        "max": 19031.0
+      },
+      "reallocation_calls_per_operation": {
+        "samples": [
+          7430.0,
+          7430.0,
+          7430.0,
+          7430.0,
+          7430.0
+        ],
+        "median": 7430.0,
+        "min": 7430.0,
+        "max": 7430.0
+      },
+      "peak_live_delta_bytes": {
+        "samples": [
+          2546536,
+          2546536,
+          2546536,
+          2546536,
+          2546536
+        ],
+        "median": 2546536,
+        "min": 2546536,
+        "max": 2546536
+      },
+      "retained_live_delta_bytes": {
+        "samples": [
+          2546480,
+          2546480,
+          2546480,
+          2546480,
+          2546480
+        ],
+        "median": 2546480,
+        "min": 2546480,
+        "max": 2546480
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "allocations",
+      "workload": "scalar-values-e2048-unique0-bytes8",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 1,
+        "compiled_regexes": 0,
+        "definitions": 1,
+        "document_items": 2050,
+        "expansions": 2048,
+        "frames": 2049,
+        "origin_scan_comparison_floor": 2112517,
+        "origins": 2054,
+        "persisted_unit_bytes": 473140,
+        "regions": 3,
+        "scalar_bytes": 8,
+        "scalar_values": 1,
+        "semantic_string_bytes": 9,
+        "source_bytes": 151833,
+        "static_scalars": 0,
+        "trace_origins": 4097,
+        "unique_values": 1,
+        "unit_ops": 2050,
+        "units": 2
+      },
+      "drop_included": false,
+      "timing": "batch",
+      "setup_excluded": true,
+      "allocation_calls_per_operation": {
+        "samples": [
+          41087.0,
+          41087.0,
+          41087.0,
+          41087.0,
+          41087.0
+        ],
+        "median": 41087.0,
+        "min": 41087.0,
+        "max": 41087.0
+      },
+      "allocated_bytes_per_operation": {
+        "samples": [
+          10983213.0,
+          10983213.0,
+          10983213.0,
+          10983213.0,
+          10983213.0
+        ],
+        "median": 10983213.0,
+        "min": 10983213.0,
+        "max": 10983213.0
+      },
+      "deallocation_calls_per_operation": {
+        "samples": [
+          36883.0,
+          36883.0,
+          36883.0,
+          36883.0,
+          36883.0
+        ],
+        "median": 36883.0,
+        "min": 36883.0,
+        "max": 36883.0
+      },
+      "reallocation_calls_per_operation": {
+        "samples": [
+          96.0,
+          96.0,
+          96.0,
+          96.0,
+          96.0
+        ],
+        "median": 96.0,
+        "min": 96.0,
+        "max": 96.0
+      },
+      "peak_live_delta_bytes": {
+        "samples": [
+          4075804,
+          4075804,
+          4075804,
+          4075804,
+          4075804
+        ],
+        "median": 4075804,
+        "min": 4075804,
+        "max": 4075804
+      },
+      "retained_live_delta_bytes": {
+        "samples": [
+          2187634,
+          2187634,
+          2187634,
+          2187634,
+          2187634
+        ],
+        "median": 2187634,
+        "min": 2187634,
+        "max": 2187634
+      }
+    },
+    {
+      "suite": "core",
+      "mode": "allocations",
+      "workload": "scalar-values-e2048-unique1-bytes8",
+      "mechanism": "instantiate_complete_provenance",
+      "dimensions": {
+        "actual_definitions": 1,
+        "compiled_regexes": 0,
+        "definitions": 1,
+        "document_items": 2050,
+        "expansions": 2048,
+        "frames": 2049,
+        "origin_scan_comparison_floor": 2112517,
+        "origins": 2054,
+        "persisted_unit_bytes": 513828,
+        "regions": 3,
+        "scalar_bytes": 8,
+        "scalar_values": 2048,
+        "semantic_string_bytes": 16385,
+        "source_bytes": 151833,
+        "static_scalars": 0,
+        "trace_origins": 4097,
+        "unique_values": 2048,
+        "unit_ops": 2050,
+        "units": 2
+      },
+      "drop_included": false,
+      "timing": "batch",
+      "setup_excluded": true,
+      "allocation_calls_per_operation": {
+        "samples": [
+          45191.0,
+          45191.0,
+          45191.0,
+          45191.0,
+          45191.0
+        ],
+        "median": 45191.0,
+        "min": 45191.0,
+        "max": 45191.0
+      },
+      "allocated_bytes_per_operation": {
+        "samples": [
+          11212357.0,
+          11212357.0,
+          11212357.0,
+          11212357.0,
+          11212357.0
+        ],
+        "median": 11212357.0,
+        "min": 11212357.0,
+        "max": 11212357.0
+      },
+      "deallocation_calls_per_operation": {
+        "samples": [
+          38931.0,
+          38931.0,
+          38931.0,
+          38931.0,
+          38931.0
+        ],
+        "median": 38931.0,
+        "min": 38931.0,
+        "max": 38931.0
+      },
+      "reallocation_calls_per_operation": {
+        "samples": [
+          105.0,
+          105.0,
+          105.0,
+          105.0,
+          105.0
+        ],
+        "median": 105.0,
+        "min": 105.0,
+        "max": 105.0
+      },
+      "peak_live_delta_bytes": {
+        "samples": [
+          4141236,
+          4141236,
+          4141236,
+          4141236,
+          4141236
+        ],
+        "median": 4141236,
+        "min": 4141236,
+        "max": 4141236
+      },
+      "retained_live_delta_bytes": {
+        "samples": [
+          2253066,
+          2253066,
+          2253066,
+          2253066,
+          2253066
+        ],
+        "median": 2253066,
+        "min": 2253066,
+        "max": 2253066
+      }
+    }
+  ],
+  "provenance": {
+    "source_commit": "54fe53f6275b004266cf946fb8fe2a352f196fa7",
+    "released_v1_2_tag_commit": "85b68c04c88b6a6b8bce12f1b4e3e10a5a218366",
+    "source_version": "1.2.0",
+    "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+    "cpu_models": [
+      "AMD EPYC 9V45 96-Core Processor"
+    ],
+    "logical_cpus": 4,
+    "python": "3.12.3",
+    "rustc": "rustc 1.88.0 (6b00bc388 2025-06-23)\nbinary: rustc\ncommit-hash: 6b00bc3880198600130e1cf62b8f8a93494488cc\ncommit-date: 2025-06-23\nhost: x86_64-unknown-linux-gnu\nrelease: 1.88.0\nLLVM version: 20.1.5",
+    "profile_name": "bench (inherits release unless explicitly overridden)",
+    "release_profile": {
+      "lto": "thin",
+      "codegen-units": 1
+    },
+    "bench_profile_overrides": {},
+    "profile_env": {},
+    "rustflags": "",
+    "sampling_env": {
+      "MECHANISM_WARMUP": "2",
+      "MECHANISM_ALLOCATION_ITERATIONS": "1",
+      "MECHANISM_SAMPLES": "5",
+      "MECHANISM_MAX_ITERATIONS": "256",
+      "MECHANISM_TARGET_US": "3000"
+    },
+    "github_run_id": "36812006015"
+  },
+  "cargo_artifact_profiles": {
+    "core_latency": {
+      "opt_level": "3",
+      "debuginfo": 0,
+      "debug_assertions": false,
+      "overflow_checks": false,
+      "test": true
+    },
+    "core_allocations": {
+      "opt_level": "3",
+      "debuginfo": 0,
+      "debug_assertions": false,
+      "overflow_checks": false,
+      "test": true
+    }
+  }
+}
