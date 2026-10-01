@@ -467,7 +467,14 @@ impl<'a> Machine<'a> {
                                 Some(call.op_ref),
                             ));
                         };
-                        text.push_str(&value);
+                        // Empty prefixes have no bytes to preserve. Move the first nonempty
+                        // owned fragment rather than copying it; all occurrences still retain
+                        // their validation, substitution ordering and earlier budget charges.
+                        if text.is_empty() {
+                            text = value;
+                        } else {
+                            text.push_str(&value);
+                        }
                         substitutions.extend(occurrence.trace.substitution_chain);
                     }
                     substitutions.push(SubstitutionStep {
@@ -1343,12 +1350,7 @@ fn flatten(
         }
     }
     regions[0].end = items.len() as u32;
-    let mut strings: Vec<_> = items.iter().flat_map(TempItem::strings).collect();
-    strings.sort();
-    strings.dedup();
-    let mut qnames: Vec<_> = items.iter().flat_map(TempItem::qnames).collect();
-    qnames.sort();
-    qnames.dedup();
+    let (strings, qnames) = canonical_pools(&items);
     let items = items
         .into_iter()
         .map(|x| x.finish(&strings, &qnames))
@@ -1391,21 +1393,28 @@ enum TempItem {
     End,
 }
 impl TempItem {
-    fn strings(&self) -> Vec<String> {
-        match self {
-            Self::Text(x) | Self::Comment(x) => vec![x.clone()],
-            Self::Pi(a, b) => vec![a.clone(), b.clone()],
-            Self::Start(_, a, _) => a.iter().map(|x| x.1.clone()).collect(),
-            Self::End => vec![],
-        }
+    /// Borrows string candidates without allocating a per-occurrence temporary vector.
+    fn strings(&self) -> impl Iterator<Item = &String> {
+        let (first, second, attributes) = match self {
+            Self::Text(text) | Self::Comment(text) => (Some(text), None, &[][..]),
+            Self::Pi(target, data) => (Some(target), Some(data), &[][..]),
+            Self::Start(_, attributes, _) => (None, None, attributes.as_slice()),
+            Self::End => (None, None, &[][..]),
+        };
+        first
+            .into_iter()
+            .chain(second)
+            .chain(attributes.iter().map(|attribute| &attribute.1))
     }
-    fn qnames(&self) -> Vec<squish_ir::ExpandedName> {
-        match self {
-            Self::Start(n, a, _) => std::iter::once(n.clone())
-                .chain(a.iter().map(|x| x.0.clone()))
-                .collect(),
-            _ => vec![],
-        }
+
+    /// Borrows element/attribute names; only canonical unique names become pool owners.
+    fn qnames(&self) -> impl Iterator<Item = &squish_ir::ExpandedName> {
+        let (name, attributes) = match self {
+            Self::Start(name, attributes, _) => (Some(name), attributes.as_slice()),
+            _ => (None, &[][..]),
+        };
+        name.into_iter()
+            .chain(attributes.iter().map(|attribute| &attribute.0))
     }
     fn finish(self, strings: &[String], qnames: &[squish_ir::ExpandedName]) -> DocumentItem {
         match self {
@@ -1433,6 +1442,23 @@ impl TempItem {
             Self::End => DocumentItem::ElementEnd,
         }
     }
+}
+
+/// Canonicalizes borrowed candidates before cloning only the unique output pool payloads.
+///
+/// Temporary items retain their owned occurrence strings until IDs are resolved. Reference
+/// sorting/deduplication compares values, not addresses, preserving the previous wire ordering.
+/// No fragment or occurrence is discarded: only the document's interned pools are deduplicated.
+fn canonical_pools(items: &[TempItem]) -> (Vec<String>, Vec<squish_ir::ExpandedName>) {
+    let mut strings: Vec<_> = items.iter().flat_map(TempItem::strings).collect();
+    strings.sort();
+    strings.dedup();
+    let strings = strings.into_iter().cloned().collect();
+    let mut qnames: Vec<_> = items.iter().flat_map(TempItem::qnames).collect();
+    qnames.sort();
+    qnames.dedup();
+    let qnames = qnames.into_iter().cloned().collect();
+    (strings, qnames)
 }
 
 fn validate_document_shape(
@@ -1635,5 +1661,103 @@ mod scalar_index_tests {
         assert!(index.large.is_some());
         assert_eq!(index.intern(&mut values, "after"), text.len() as u32);
         assert_eq!(index.intern(&mut values, "after"), text.len() as u32);
+    }
+}
+
+#[cfg(test)]
+mod canonical_pool_tests {
+    use super::*;
+    use squish_ir::{Attribute, ExpandedName, QNameId};
+
+    /// Builds names with intentionally non-sorted input positions and repeated identities.
+    fn name(local_name: &str) -> ExpandedName {
+        ExpandedName {
+            namespace_uri: "urn:test".into(),
+            local_name: local_name.into(),
+        }
+    }
+
+    #[test]
+    fn borrowed_candidates_keep_unique_unicode_pi_attribute_and_comment_pools() {
+        let long = "猫<&>".repeat(16384);
+        let mut items: Vec<_> = (0..32).map(|_| TempItem::Text(long.clone())).collect();
+        items.extend([
+            TempItem::Comment(long.clone()),
+            TempItem::Pi("target".into(), String::new()),
+            TempItem::Start(
+                name("z"),
+                vec![(name("a"), long.clone()), (name("z"), "alpha".into())],
+                DocumentRegionId(1),
+            ),
+            TempItem::Text("alpha".into()),
+            TempItem::End,
+        ]);
+        let (strings, qnames) = canonical_pools(&items);
+        assert_eq!(
+            strings,
+            [String::new(), "alpha".into(), "target".into(), long]
+        );
+        assert_eq!(qnames, [name("a"), name("z")]);
+        let finished: Vec<_> = items
+            .into_iter()
+            .map(|item| item.finish(&strings, &qnames))
+            .collect();
+        assert!(
+            finished[..32]
+                .iter()
+                .all(|item| *item == DocumentItem::Text { value: StringId(3) })
+        );
+        assert_eq!(finished[32], DocumentItem::Comment { value: StringId(3) });
+        assert_eq!(
+            finished[33],
+            DocumentItem::ProcessingInstruction {
+                target: StringId(2),
+                data: StringId(0)
+            }
+        );
+        assert_eq!(
+            finished[34],
+            DocumentItem::ElementStart {
+                expanded_name: QNameId(1),
+                attributes: vec![
+                    Attribute {
+                        name: QNameId(0),
+                        value: StringId(3)
+                    },
+                    Attribute {
+                        name: QNameId(1),
+                        value: StringId(1)
+                    }
+                ],
+                children: DocumentRegionId(1),
+            }
+        );
+        assert_eq!(finished[35], DocumentItem::Text { value: StringId(1) });
+        assert_eq!(finished[36], DocumentItem::ElementEnd);
+    }
+
+    #[test]
+    fn empty_and_all_distinct_candidates_remain_exactly_sorted_without_dropping_items() {
+        assert_eq!(canonical_pools(&[]), (Vec::new(), Vec::new()));
+        let items = [
+            TempItem::Text("猫".into()),
+            TempItem::Text("z".into()),
+            TempItem::Text(String::new()),
+        ];
+        let (strings, qnames) = canonical_pools(&items);
+        assert_eq!(strings, ["", "z", "猫"]);
+        assert!(qnames.is_empty());
+        let finished: Vec<_> = items
+            .into_iter()
+            .map(|item| item.finish(&strings, &qnames))
+            .collect();
+        assert_eq!(
+            finished,
+            [
+                DocumentItem::Text { value: StringId(2) },
+                DocumentItem::Text { value: StringId(1) },
+                DocumentItem::Text { value: StringId(0) },
+            ]
+        );
     }
 }

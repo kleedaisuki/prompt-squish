@@ -1496,6 +1496,122 @@ fn borrowed_static_scalar_matches_task_evaluation_with_exact_budget_errors() {
 }
 
 #[test]
+fn scalar_fragment_moves_preserve_long_empty_and_unicode_occurrence_evidence() {
+    let long = "猫<&>".repeat(16384);
+    for fragments in [
+        vec![],
+        vec![String::new()],
+        vec![String::new(), String::new(), String::new()],
+        vec![String::new(), String::new(), long.clone()],
+        vec![long.clone()],
+        vec![long.clone(), String::new(), long.clone()],
+        vec![String::new(), long.clone(), "tail".into()],
+    ] {
+        let fixture = linked();
+        let (mut units, objects) = shared_reconstruction_parts(&fixture);
+        let entry_source = fixture.image.entry.source.clone();
+        let RelocatableUnitIr::Entry(entry) = Arc::make_mut(units.get_mut(&entry_source).unwrap())
+        else {
+            panic!("entry fixture")
+        };
+        let Op::Call { args, .. } = &mut entry.ops[1].op else {
+            panic!("call fixture")
+        };
+        args[0].value = ScalarExpr::RenderText(RegionId(4));
+        entry.header.semantic_strings = fragments.clone();
+        entry.header.semantic_strings.push("X".into());
+        entry.header.semantic_strings.sort();
+        entry.header.semantic_strings.dedup();
+        entry.ops[3].op = Op::EmitText {
+            value: StringId(
+                entry
+                    .header
+                    .semantic_strings
+                    .binary_search(&"X".into())
+                    .unwrap() as u32,
+            ),
+        };
+        let body_ops: Vec<_> = fragments
+            .iter()
+            .map(|fragment| {
+                let op = OpId(entry.ops.len() as u32);
+                entry.ops.push(OpRecord {
+                    id: op,
+                    op: Op::EmitText {
+                        value: StringId(
+                            entry
+                                .header
+                                .semantic_strings
+                                .binary_search(fragment)
+                                .unwrap() as u32,
+                        ),
+                    },
+                });
+                op
+            })
+            .collect();
+        entry.regions.push(Region {
+            id: RegionId(4),
+            ops: body_ops,
+        });
+        let (origins, sources, attachment) = debug(entry_source, entry.ops.len(), 5, 0);
+        entry.origins = origins;
+        entry.sources = sources;
+        entry.attachment = attachment;
+        let program = LinkedProgram::reconstruct_shared(
+            fixture.image.clone(),
+            units.clone(),
+            objects.clone(),
+        )
+        .unwrap();
+        let optimized = units
+            .into_iter()
+            .map(|(source, unit)| {
+                let mut optimized = MiddleEnd.optimize_shared(unit).unwrap();
+                optimized.static_scalars.clear();
+                (
+                    source,
+                    Arc::new(crate::middle::ExecutableUnit::from(optimized)),
+                )
+            })
+            .collect();
+        let image =
+            crate::program::ValidatedImage::new(fixture.image, "LNK001", "test image").unwrap();
+        let dynamic = LinkedProgram::reconstruct_optimized(image, optimized, objects).unwrap();
+        for max_output_bytes in [
+            0,
+            64,
+            4096,
+            65536,
+            262144,
+            Budgets::default().max_output_bytes,
+        ] {
+            let budget = Budgets {
+                max_output_bytes,
+                ..Budgets::default()
+            };
+            assert_eq!(
+                Instantiator.instantiate(&program, BTreeMap::new(), budget),
+                Instantiator.instantiate(&dynamic, BTreeMap::new(), budget),
+                "{} fragments, budget {max_output_bytes}",
+                fragments.len(),
+            );
+        }
+        let result = Instantiator
+            .instantiate(&program, BTreeMap::new(), Budgets::default())
+            .unwrap();
+        assert_eq!(
+            result.trace.scalar_values[result.trace.frames[1].args[0].1.0 as usize],
+            fragments.concat(),
+        );
+        result
+            .trace
+            .validate_against_document(&result.document)
+            .unwrap();
+    }
+}
+
+#[test]
 fn prepared_shared_regex_pool_compiles_once_across_independent_entries_and_hydration() {
     let symbol = ExpandedName {
         namespace_uri: "urn:test".into(),
