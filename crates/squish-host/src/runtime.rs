@@ -383,8 +383,10 @@ impl BuildRuntime for ProductionBuildRuntime {
         source: &SourceBlob,
         context: &FrontendSourceContext,
     ) -> Result<FrontendOutput, BuildRuntimeError> {
-        squish_xml_front::compile(source, context)
-            .map_err(|error| BuildRuntimeError::new("host_frontend_compile", error.message))
+        squish_xml_front::compile(source, context).map_err(|error| {
+            BuildRuntimeError::new("host_frontend_compile", error.message.clone())
+                .with_diagnostic(*error)
+        })
     }
 
     fn link(
@@ -392,9 +394,7 @@ impl BuildRuntime for ProductionBuildRuntime {
         entry: &SourceKey,
         closure: UnitClosure,
     ) -> Result<LinkOutput, BuildRuntimeError> {
-        StaticLinker
-            .link(entry, closure)
-            .map_err(|error| tool_error("host_static_link", error))
+        self.link_shared(entry, closure.into())
     }
 
     fn link_shared(
@@ -402,9 +402,10 @@ impl BuildRuntime for ProductionBuildRuntime {
         entry: &SourceKey,
         closure: squish_link::SharedUnitClosure,
     ) -> Result<LinkOutput, BuildRuntimeError> {
+        let evidence = closure.units.values().cloned().collect::<Vec<_>>();
         StaticLinker
             .link_shared(entry, closure)
-            .map_err(|error| tool_error("host_static_link", error))
+            .map_err(|error| link_error(error, &evidence))
     }
 
     fn link_prepared(
@@ -412,9 +413,14 @@ impl BuildRuntime for ProductionBuildRuntime {
         entry: &SourceKey,
         closure: squish_link::PreparedUnitClosure,
     ) -> Result<LinkOutput, BuildRuntimeError> {
+        let evidence = closure
+            .units
+            .values()
+            .map(|unit| unit.unit().clone())
+            .collect::<Vec<_>>();
         StaticLinker
             .link_prepared(entry, closure)
-            .map_err(|error| tool_error("host_static_link", error))
+            .map_err(|error| link_error(error, &evidence))
     }
 
     fn instantiate(
@@ -424,8 +430,8 @@ impl BuildRuntime for ProductionBuildRuntime {
         budgets: Budgets,
     ) -> Result<InstantiateOutput, BuildRuntimeError> {
         Instantiator
-            .instantiate(program, arguments, budgets)
-            .map_err(|error| tool_error("host_instantiate", error))
+            .instantiate_with_diagnostics(program, arguments, budgets)
+            .map_err(|failure| instantiation_error(program, failure))
     }
 
     fn render(&self, request: BackendRequest) -> Result<BackendOutput, BuildRuntimeError> {
@@ -512,6 +518,210 @@ fn protocol_digest(digest: BlobDigest) -> Digest {
         .expect("BLAKE3 digest has the protocol's canonical length")
 }
 
+/// Projects exact linker evidence only on failure; successful linking retains Arc handles only.
+fn link_error(
+    error: squish_link::LinkError,
+    units: &[Arc<squish_ir::RelocatableUnitIr>],
+) -> BuildRuntimeError {
+    use squish_ir::{EntityKind, UnitEncodingOverrides, VerifiedUnitEncoding};
+    use squish_protocol::{Diagnostic, DiagnosticId, Phase, Severity};
+    let origin_span = error.origin.as_ref().and_then(|qualified| {
+        let mut found = None;
+        let mut matched = false;
+        for unit in units {
+            let proof = VerifiedUnitEncoding::new(unit).ok()?;
+            if proof.object_digest(UnitEncodingOverrides::default()).ok()? != qualified.object {
+                continue;
+            }
+            // Ambiguous asserted object identities must never select a guessed provider.
+            if matched {
+                return None;
+            }
+            matched = true;
+            let origin = &unit
+                .origins()
+                .entries
+                .get(qualified.local.0 as usize)?
+                .origin;
+            found = source_origin_span(unit, origin);
+        }
+        found
+    });
+    let definition_span = || {
+        // Only duplicate-definition errors identify the declaration as the failure
+        // site. Argument/fill errors concern a call, not the target declaration.
+        if error.code != "LNK023" {
+            return None;
+        }
+        let source = error.source.as_deref()?;
+        let symbol = error.symbol.as_deref()?;
+        let unit = units.iter().find(|unit| &unit.header().source == source)?;
+        VerifiedUnitEncoding::new(unit).ok()?;
+        let definition = unit
+            .definitions()
+            .iter()
+            .find(|definition| &definition.symbol == symbol)?;
+        let origin = &unit
+            .origins()
+            .entries
+            .iter()
+            .find(|entry| {
+                entry.entity_kind == EntityKind::Definition && entry.local_id == definition.id.0
+            })?
+            .origin;
+        source_origin_span(unit, origin)
+    };
+    let precise = origin_span.or_else(definition_span);
+    let primary = precise.clone().or_else(|| {
+        error.source.as_deref().and_then(|key| {
+            squish_protocol::Span::new(protocol_source_key(key.clone())?, 0, 0).ok()
+        })
+    });
+    let symbol = error
+        .symbol
+        .as_deref()
+        .map(|symbol| format!(" {{{}}}{}", symbol.namespace_uri, symbol.local_name))
+        .unwrap_or_default();
+    let help = if precise.is_some() {
+        format!(
+            "Linker {}{}; location resolved from the exact source attachment.",
+            error.code, symbol
+        )
+    } else {
+        format!(
+            "Linker {}{}; a source-only position denotes byte 0, not a precise declaration span.",
+            error.code, symbol
+        )
+    };
+    let diagnostic = Diagnostic {
+        id: DiagnosticId::new(format!("linker-{}", error.code))
+            .expect("nonempty diagnostic identity"),
+        code: error.code.to_owned(),
+        severity: Severity::Error,
+        phase: Phase::Link,
+        message: error.message.clone(),
+        primary,
+        related: Vec::new(),
+        help: Some(help),
+    };
+    BuildRuntimeError::new("host_static_link", error.to_string()).with_diagnostic(diagnostic)
+}
+
+/// Resolves an origin's attached source and checks its declared byte bounds.
+fn source_origin_span(
+    unit: &squish_ir::RelocatableUnitIr,
+    origin: &squish_ir::Origin,
+) -> Option<squish_protocol::Span> {
+    let source = unit.sources().records.get(origin.source.0 as usize)?;
+    let length = source
+        .exact_bytes
+        .byte_len
+        .checked_sub(u64::from(source.bom_len))?;
+    if origin.span.start > origin.span.end || origin.span.end > length {
+        return None;
+    }
+    squish_protocol::Span::new(
+        protocol_source_key(source.key.clone())?,
+        origin.span.start,
+        origin.span.end,
+    )
+    .ok()
+}
+
+/// Converts compiler-owned object-qualified provenance at the host protocol boundary.
+fn instantiation_error(
+    program: &LinkedProgram,
+    failure: squish_link::InstantiationFailure,
+) -> BuildRuntimeError {
+    use squish_protocol::{Diagnostic, DiagnosticId, Phase, RelatedSpan, Severity};
+    let primary = failure
+        .error
+        .origin
+        .as_ref()
+        .and_then(|origin| diagnostic_span(program, origin))
+        .or_else(|| {
+            failure.frames.last().and_then(|frame| {
+                frame
+                    .call_origin
+                    .as_ref()
+                    .and_then(|origin| diagnostic_span(program, origin))
+                    .or_else(|| diagnostic_span(program, &frame.definition_origin))
+            })
+        });
+    let mut related = Vec::with_capacity(failure.frames.len() * 2);
+    for (depth, frame) in failure.frames.iter().enumerate() {
+        let kind = match &frame.identity {
+            squish_ir::FrameIdentity::Entry => "entry",
+            squish_ir::FrameIdentity::Macro(_) => "macro",
+        };
+        if let Some(span) = frame
+            .call_origin
+            .as_ref()
+            .and_then(|origin| diagnostic_span(program, origin))
+        {
+            related.push(RelatedSpan {
+                span,
+                label: format!("expansion frame {}: {kind} call", depth),
+            });
+        }
+        if let Some(span) = diagnostic_span(program, &frame.definition_origin) {
+            related.push(RelatedSpan {
+                span,
+                label: format!("expansion frame {}: {kind} definition", depth),
+            });
+        }
+    }
+    let diagnostic = Diagnostic {
+        id: DiagnosticId::new(format!("evaluator-{}", failure.error.code))
+            .expect("nonempty diagnostic identity"),
+        code: failure.error.code.to_owned(),
+        severity: Severity::Error,
+        phase: Phase::Instantiate,
+        message: failure.error.message.clone(),
+        primary,
+        related,
+        help: Some(format!(
+            "Evaluator {} failed; expansion context lists {} frames from entry to failure.",
+            failure.error.code,
+            failure.error.frame_chain.len()
+        )),
+    };
+    BuildRuntimeError::new("host_instantiate", failure.error.to_string())
+        .with_diagnostic(diagnostic)
+}
+
+/// Resolves exactly the referenced source attachment, never a same-name provider guess.
+fn diagnostic_span(
+    program: &LinkedProgram,
+    origin: &squish_ir::QualifiedOriginRef,
+) -> Option<squish_protocol::Span> {
+    let (key, span) = program.resolve_origin(origin)?;
+    squish_protocol::Span::new(protocol_source_key(key)?, span.start, span.end).ok()
+}
+
+/// Maps logical identity, not a physical checkout locator, to an opaque diagnostic URI.
+fn protocol_source_key(key: SourceKey) -> Option<squish_protocol::OpaqueSourceId> {
+    use squish_source::{LogicalPath, PackageId, SourceId};
+    match key {
+        SourceKey::AdHoc { uri } => squish_protocol::OpaqueSourceId::new(uri).ok(),
+        SourceKey::Project { package, path } => {
+            let logical = LogicalPath::new(path.join("/")).ok()?;
+            let source = SourceId::new(PackageId::new(package.package_name).ok()?, logical);
+            if package.source_kind == 5 {
+                // Both provider namespace and UTF-8 path are canonical logical identity.
+                let suffix = source.uri().strip_prefix("xmlsquish://")?;
+                squish_protocol::OpaqueSourceId::new(format!(
+                    "sopack://{}/{suffix}",
+                    package.exact_revision
+                ))
+                .ok()
+            } else {
+                Some(source.to_protocol())
+            }
+        }
+    }
+}
+
 fn tool_error(code: &'static str, error: impl std::fmt::Display) -> BuildRuntimeError {
     BuildRuntimeError::new(code, error.to_string())
 }
@@ -585,6 +795,139 @@ mod tests {
             Arc::new(squish_publish::NoopObserver),
             Arc::new(squish_publish::NoopObserver),
         )
+    }
+
+    #[test]
+    fn frontend_and_linker_errors_preserve_authoritative_source_spans() {
+        std::fs::create_dir_all(".temp").unwrap();
+        let temporary = tempfile::tempdir_in(".temp").unwrap();
+        let runtime = runtime(layout(temporary.path()));
+        let context = FrontendSourceContext::new(PackageInstanceId {
+            source_kind: 5,
+            canonical_source: "sopack:archive".into(),
+            package_name: "library".into(),
+            exact_revision: "archive".into(),
+        });
+        let source = |xml: String| {
+            SnapshotBuilder::new(MemorySource(xml.into_bytes()))
+                .load(
+                    SourceId::new(
+                        PackageId::new("library").unwrap(),
+                        LogicalPath::new("providers/p/lib.xml").unwrap(),
+                    ),
+                    SourceLocator::file("unused"),
+                )
+                .unwrap()
+        };
+        let invalid = source(format!(
+            r#"<xs:module xmlns:xs="{}"><xs:macro/></xs:module>"#,
+            squish_xml_front::DSL_NAMESPACE
+        ));
+        let expected = squish_xml_front::compile(&invalid, &context).unwrap_err();
+        let error = runtime.compile(&invalid, &context).unwrap_err();
+        assert_eq!(error.diagnostic(), Some(expected.as_ref()));
+
+        let valid = source(format!(
+            r#"<xs:module xmlns:xs="{}" xmlns:m="urn:macro"><xs:macro name="m:conflict"><Text/></xs:macro></xs:module>"#,
+            squish_xml_front::DSL_NAMESPACE
+        ));
+        let unit = Arc::new(runtime.compile(&valid, &context).unwrap().unit);
+        let definition = &unit.definitions()[0];
+        let error = squish_link::LinkError {
+            code: "LNK023",
+            message: "duplicate macro symbol in linked closure".into(),
+            source: Some(Box::new(unit.header().source.clone())),
+            symbol: Some(Box::new(definition.symbol.clone())),
+            origin: None,
+        };
+        let mapped = link_error(error, std::slice::from_ref(&unit));
+        let diagnostic = mapped.diagnostic().unwrap();
+        let primary = diagnostic.primary.as_ref().unwrap();
+        assert_eq!(
+            primary.source().as_str(),
+            "sopack://archive/library/providers/p/lib.xml"
+        );
+        assert!(primary.bytes().end > primary.bytes().start);
+        assert!(
+            diagnostic
+                .help
+                .as_ref()
+                .unwrap()
+                .contains("{urn:macro}conflict")
+        );
+        let call_error = link_error(
+            squish_link::LinkError {
+                code: "LNK027",
+                message: "invalid argument or fill".into(),
+                source: Some(Box::new(unit.header().source.clone())),
+                symbol: Some(Box::new(definition.symbol.clone())),
+                origin: None,
+            },
+            std::slice::from_ref(&unit),
+        );
+        assert_eq!(
+            call_error
+                .diagnostic()
+                .unwrap()
+                .primary
+                .as_ref()
+                .unwrap()
+                .bytes(),
+            0..0
+        );
+        let qualified = squish_ir::QualifiedOriginRef {
+            object: squish_ir::VerifiedUnitEncoding::new(&unit)
+                .unwrap()
+                .object_digest(squish_ir::UnitEncodingOverrides::default())
+                .unwrap(),
+            local: squish_ir::OriginId(
+                unit.origins()
+                    .entries
+                    .iter()
+                    .position(|entry| {
+                        entry.entity_kind == squish_ir::EntityKind::Definition
+                            && entry.local_id == definition.id.0
+                    })
+                    .unwrap() as u32,
+            ),
+        };
+        let exact = link_error(
+            squish_link::LinkError {
+                code: "LNK030",
+                message: "regexpool".into(),
+                source: None,
+                symbol: None,
+                origin: Some(qualified),
+            },
+            &[unit],
+        );
+        assert_eq!(exact.diagnostic().unwrap().primary, diagnostic.primary);
+    }
+
+    #[test]
+    fn source_only_link_failure_uses_honest_zero_width_location() {
+        let key = SourceKey::AdHoc {
+            uri: "sopack://archive/library/lib.xml".into(),
+        };
+        let mapped = link_error(
+            squish_link::LinkError {
+                code: "LNK030",
+                message: "regexpool".into(),
+                source: Some(Box::new(key)),
+                symbol: None,
+                origin: None,
+            },
+            &[],
+        );
+        let diagnostic = mapped.diagnostic().unwrap();
+        assert_eq!(diagnostic.primary.as_ref().unwrap().bytes(), 0..0);
+        assert!(
+            diagnostic
+                .help
+                .as_ref()
+                .unwrap()
+                .contains("not a precise declaration span")
+        );
     }
 
     #[test]
@@ -705,5 +1048,30 @@ mod snapshot_tests {
         assert!(store.copy_to(blob.digest(), &mut bytes).unwrap());
         assert_eq!(bytes, blob.bytes());
         assert_eq!(session.stats().acquisition_reads, 0);
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_identity_tests {
+    use super::*;
+
+    #[test]
+    fn archived_diagnostics_keep_namespace_and_encode_logical_paths() {
+        let key = |revision: &str| SourceKey::Project {
+            package: squish_ir::PackageInstanceId {
+                source_kind: 5,
+                canonical_source: format!("sopack:{revision}"),
+                package_name: "library".into(),
+                exact_revision: revision.into(),
+            },
+            path: vec!["providers".into(), "provider".into(), "lib file.xml".into()],
+        };
+        let first = protocol_source_key(key("archive-one")).unwrap();
+        let second = protocol_source_key(key("archive-two")).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            first.as_str(),
+            "sopack://archive-one/library/providers/provider/lib%20file.xml"
+        );
     }
 }

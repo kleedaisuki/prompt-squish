@@ -36,10 +36,10 @@ use squish_project::{
     Lockfile, Manifest, MutationFile, MutationKind, MutationPlanner, ResolutionMode, TransactionId,
 };
 use squish_protocol::{
-    ActionId, Artifact, ArtifactId, ArtifactKind, BuildRequest, BuildResult, DigestAlgorithm,
-    EmitKind, FinalizationId, FinalizationKind, JobId, OperationKind, OperationResult, Phase,
-    PlanMode, PlanningAttemptId, PlanningStepId, PlanningStepKind, PublishedArtifact,
-    PublishedTarget, TargetName, WorkspaceScope,
+    ActionId, Artifact, ArtifactId, ArtifactKind, BuildRequest, BuildResult, DiagnosticId,
+    DigestAlgorithm, EmitKind, FinalizationId, FinalizationKind, JobId, OperationKind,
+    OperationResult, Phase, PlanMode, PlanningAttemptId, PlanningStepId, PlanningStepKind,
+    PublishedArtifact, PublishedTarget, TargetName, WorkspaceScope,
 };
 use squish_repository::{Discovery, ProjectRepository, ProjectSnapshot, ResolvedTarget};
 use squish_source::{FileSourceProvider, LogicalPath, SnapshotBuilder, SourceBlob};
@@ -1904,9 +1904,7 @@ impl BuildExecutor {
                             source.blob.id().package().clone(),
                         ),
                     )
-                    .map_err(|cause| {
-                        ManagerError::new(cause.code(), Phase::Analyze, cause.message())
-                    })?
+                    .map_err(|cause| runtime_error(cause.code().to_owned(), Phase::Analyze, cause))?
                     .unit,
             ),
         };
@@ -1987,7 +1985,7 @@ impl BuildExecutor {
                     units: payloads,
                 },
             )
-            .map_err(|e| error("MGB070", Phase::Link, e))?;
+            .map_err(|e| runtime_error("MGB070", Phase::Link, e))?;
         let image = VerifiedBlob::from_owned(encode_linked_image(&linked.image));
         let map = VerifiedBlob::from_owned(encode_static_link_map(&linked.map));
         self.store_verified(&image, "MGB071", Phase::Cache)?;
@@ -2025,7 +2023,7 @@ impl BuildExecutor {
                 target.arguments.clone(),
                 budgets(&target.resolved),
             )
-            .map_err(|e| error("MGB073", Phase::Instantiate, e))?;
+            .map_err(|e| runtime_error("MGB073", Phase::Instantiate, e))?;
         let archive = is_archive_backend(&target.resolved.backend);
         if !archive && !instantiated.directives.is_empty() {
             return Err(ManagerError::new(
@@ -2102,7 +2100,7 @@ impl BuildExecutor {
                     max_output_bytes: budgets(&target.resolved).max_output_bytes,
                 },
             )
-            .map_err(|e| error("MGB076", Phase::Emit, e))?;
+            .map_err(|e| runtime_error("MGB076", Phase::Emit, e))?;
         let expected_identity = self
             .prepared
             .backend_identities
@@ -2650,7 +2648,18 @@ impl WorkExecutor<BuildWork> for BuildExecutor {
                 outputs,
                 events,
             },
-            Err(error) => ActionResult::failure(error.code(), error.message()),
+            Err(error) => {
+                let mut result = ActionResult::failure(error.code(), error.message());
+                if error.source_diagnostic().is_some() {
+                    let id =
+                        DiagnosticId::new(format!("manager-source-failure-{}", dispatch.action.id))
+                            .expect("non-empty action diagnostic identity");
+                    result
+                        .events
+                        .push(ActionEvent::Diagnostic(error.diagnostic(id)));
+                }
+                result
+            }
         };
         result.into()
     }
@@ -4135,6 +4144,15 @@ fn produced_verified(name: &str, kind: ArtifactKind, blob: &VerifiedBlob) -> Pro
         size: blob.bytes().len() as u64,
     }
 }
+/// Preserves compiler source/frame evidence across the manager runtime boundary.
+fn runtime_error(code: impl Into<String>, phase: Phase, value: BuildRuntimeError) -> ManagerError {
+    let error = ManagerError::new(code, phase, value.to_string());
+    match value.diagnostic() {
+        Some(diagnostic) => error.with_diagnostic(diagnostic.clone()),
+        None => error,
+    }
+}
+
 fn error(code: &'static str, phase: Phase, value: impl std::fmt::Display) -> ManagerError {
     ManagerError::new(code, phase, value.to_string())
 }

@@ -1755,3 +1755,255 @@ fn prepared_closure_rejects_forged_snapshot_object_and_retains_original_arc_afte
     assert_ne!(changed.revision().object, original.revision().object);
     assert_eq!(original.unit().header().semantic_strings[0], "X");
 }
+
+/// Relocates a real recursive unit into a portable library identity before independent binding.
+fn linked_relocated_recursive_library() -> LinkOutput {
+    let original = linked_non_tail_reverse();
+    let entry_source = original.image.entry.source.clone();
+    let library_source = SourceKey::Project {
+        package: PackageInstanceId {
+            source_kind: 5,
+            canonical_source: "sopack:library/frozen-example".into(),
+            package_name: "library".into(),
+            exact_revision: "frozen-unit-v1".into(),
+        },
+        path: vec![
+            "_providers".into(),
+            "frozen-provider".into(),
+            "lib.xml".into(),
+        ],
+    };
+    let mut units = BTreeMap::new();
+    for slot in 0..original.image.units.len() as u32 {
+        let mut unit = original.program.unit(slot).unwrap().clone();
+        if unit.kind() == UnitKind::Module {
+            let old_source = unit.header().source.clone();
+            unit.header_mut().source = library_source.clone();
+            unit.attachment_mut().source = library_source.clone();
+            for record in &mut unit.sources_mut().records {
+                if record.key == old_source {
+                    record.key = library_source.clone();
+                }
+            }
+        }
+        let source = unit.header().source.clone();
+        units.insert(source, PreparedUnit::new(Arc::new(unit)).unwrap());
+    }
+    let closure = PreparedUnitClosure {
+        snapshot: Arc::new(ResolutionSnapshot {
+            units: units
+                .iter()
+                .map(|(source, unit)| (source.clone(), unit.revision().clone()))
+                .collect(),
+            imports: vec![ImportBinding {
+                importer: entry_source.clone(),
+                import: ImportId(0),
+                target: library_source,
+            }],
+        }),
+        units,
+    };
+    StaticLinker.link_prepared(&entry_source, closure).unwrap()
+}
+
+#[test]
+fn diagnostic_failure_retains_actual_archived_call_chain_and_unchanged_budget_error() {
+    let linked = linked_relocated_recursive_library();
+    let budgets = Budgets {
+        max_depth: 100,
+        max_expansions: 3,
+        max_output_bytes: 1_000_000,
+    };
+    let legacy = Instantiator
+        .instantiate(&linked.program, BTreeMap::new(), budgets)
+        .unwrap_err();
+    let failure = Instantiator
+        .instantiate_with_diagnostics(&linked.program, BTreeMap::new(), budgets)
+        .unwrap_err();
+    assert_eq!(failure.error, legacy);
+    assert_eq!(failure.error.code, "RUN013");
+    assert_eq!(
+        failure
+            .frames
+            .iter()
+            .map(|frame| frame.id)
+            .collect::<Vec<_>>(),
+        legacy.frame_chain
+    );
+    assert_eq!(failure.frames.len(), 3);
+    assert_eq!(failure.frames[0].identity, FrameIdentity::Entry);
+    assert!(failure.frames[0].call_origin.is_none());
+    let entry = linked.image.entry.source.clone();
+    let (primary_source, primary_span) = linked
+        .program
+        .resolve_origin(failure.error.origin.as_ref().unwrap())
+        .unwrap();
+    let SourceKey::Project { package, path } = &primary_source else {
+        panic!("library origin")
+    };
+    assert_eq!(package.source_kind, 5);
+    assert_eq!(path.last().unwrap(), "lib.xml");
+    assert_eq!(primary_span, Span { start: 0, end: 1 });
+    assert_eq!(
+        linked
+            .program
+            .resolve_origin(failure.frames[1].call_origin.as_ref().unwrap())
+            .unwrap()
+            .0,
+        entry
+    );
+    assert_eq!(
+        linked
+            .program
+            .resolve_origin(failure.frames[2].call_origin.as_ref().unwrap())
+            .unwrap()
+            .0,
+        primary_source
+    );
+    for frame in &failure.frames[1..] {
+        assert!(matches!(frame.identity, FrameIdentity::Macro(_)));
+        assert_eq!(
+            linked
+                .program
+                .resolve_origin(&frame.definition_origin)
+                .unwrap()
+                .0,
+            primary_source
+        );
+    }
+    assert_ne!(failure.frames[1].id, failure.frames[2].id);
+    assert_eq!(
+        failure.frames[1].definition_origin, failure.frames[2].definition_origin,
+        "recursive occurrences keep distinct frames, not fabricated declaration identities"
+    );
+}
+
+#[test]
+fn diagnostic_entry_point_preserves_success_depth_output_and_pre_machine_failures() {
+    let fixture = linked_non_tail_reverse();
+    let success = Instantiator
+        .instantiate(&fixture.program, BTreeMap::new(), Budgets::default())
+        .unwrap();
+    assert_eq!(
+        Instantiator
+            .instantiate_with_diagnostics(&fixture.program, BTreeMap::new(), Budgets::default())
+            .unwrap(),
+        success
+    );
+    for budgets in [
+        Budgets {
+            max_depth: 2,
+            ..Budgets::default()
+        },
+        Budgets {
+            max_output_bytes: 1,
+            ..Budgets::default()
+        },
+        Budgets {
+            max_depth: 0,
+            ..Budgets::default()
+        },
+    ] {
+        let legacy = Instantiator
+            .instantiate(&fixture.program, BTreeMap::new(), budgets)
+            .unwrap_err();
+        let failure = Instantiator
+            .instantiate_with_diagnostics(&fixture.program, BTreeMap::new(), budgets)
+            .unwrap_err();
+        assert_eq!(failure.error, legacy);
+        assert_eq!(
+            failure
+                .frames
+                .iter()
+                .map(|frame| frame.id)
+                .collect::<Vec<_>>(),
+            legacy.frame_chain
+        );
+        for frame in failure.frames.iter() {
+            assert!(
+                fixture
+                    .program
+                    .resolve_origin(&frame.definition_origin)
+                    .is_some()
+            );
+            if let Some(origin) = &frame.call_origin {
+                assert!(fixture.program.resolve_origin(origin).is_some());
+            }
+        }
+    }
+    let arguments = BTreeMap::from([("unexpected".into(), "x".into())]);
+    let legacy = Instantiator
+        .instantiate(&fixture.program, arguments.clone(), Budgets::default())
+        .unwrap_err();
+    let failure = Instantiator
+        .instantiate_with_diagnostics(&fixture.program, arguments, Budgets::default())
+        .unwrap_err();
+    assert_eq!(failure.error, legacy);
+    assert_eq!(failure.error.code, "RUN002");
+    assert!(failure.frames.is_empty());
+}
+
+#[test]
+fn origin_resolution_uses_exact_object_table_and_source_archive_without_guesses() {
+    let fixture = linked();
+    for slot in 0..fixture.image.units.len() as u32 {
+        let origin = fixture
+            .program
+            .origin(slot, EntityKind::Operation, 0)
+            .unwrap();
+        let (key, span) = fixture.program.resolve_origin(&origin).unwrap();
+        assert_eq!(
+            key,
+            fixture.program.unit(slot).unwrap().sources().records[0].key
+        );
+        assert_eq!(span, Span { start: 0, end: 1 });
+        assert!(
+            fixture
+                .program
+                .resolve_origin(&QualifiedOriginRef {
+                    object: origin.object,
+                    local: OriginId(u32::MAX)
+                })
+                .is_none()
+        );
+    }
+    assert!(
+        fixture
+            .program
+            .resolve_origin(&QualifiedOriginRef {
+                object: ObjectDigest::of(b"unknown object"),
+                local: OriginId(0)
+            })
+            .is_none()
+    );
+    let archived_source = source("z-included.xml");
+    let program = reconstruct_with_origins(|_, unit| {
+        if unit.kind() == UnitKind::Module {
+            let mut record = unit.sources().records[0].clone();
+            record.key = archived_source.clone();
+            record.bom_len = 3;
+            unit.sources_mut().records.push(record);
+            let origin = test_origins_mut(unit)
+                .entries
+                .iter_mut()
+                .find(|entry| entry.entity_kind == EntityKind::Operation && entry.local_id == 0)
+                .unwrap();
+            origin.origin.source = SourceRef(1);
+            origin.origin.span = Span { start: 6, end: 7 };
+        }
+    })
+    .unwrap();
+    let origin = program.origin(1, EntityKind::Operation, 0).unwrap();
+    assert_eq!(
+        program.resolve_origin(&origin),
+        Some((archived_source, Span { start: 6, end: 7 })),
+        "sourceRef, not unit header or caller URI, owns payload-relative BOM spans"
+    );
+    let (units, mut objects) = shared_reconstruction_parts(&fixture);
+    for digest in objects.values_mut() {
+        *digest = ObjectDigest::of(b"duplicated asserted object");
+    }
+    let ambiguous = LinkedProgram::reconstruct_shared(fixture.image, units, objects).unwrap();
+    let reference = ambiguous.origin(0, EntityKind::Operation, 0).unwrap();
+    assert!(ambiguous.resolve_origin(&reference).is_none());
+}

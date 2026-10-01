@@ -18,7 +18,7 @@ mod middle;
 mod program;
 
 pub use directives::{ArchiveDirective, decode_archive_directives, encode_archive_directives};
-pub use error::{InstantiateError, LinkError};
+pub use error::{InstantiateError, InstantiationFailure, InstantiationFrame, LinkError};
 pub use instantiate::{Budgets, InstantiateOutput, Instantiator};
 pub use key::{InstantiateKeyProjection, LinkKeyProjection};
 pub use linker::{LinkOutput, PreparedUnitClosure, SharedUnitClosure, StaticLinker, UnitClosure};

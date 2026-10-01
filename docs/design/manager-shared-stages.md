@@ -12,8 +12,11 @@ Each invocation owns one sealed local/source snapshot and immutable acquired arc
 handles. A compiled unit retains its raw `Arc<RelocatableUnitIr>`, one sealed encoded
 `VerifiedBlob`, exact object/semantic/debug identities, and a `PreparedUnit` capability.
 IR-owned `ValidatedUnit` is the sole structural proof and identity authority: fresh
-raw units mint it once, cached bytes decode directly into it once, and encoded output
-uses the retained proof rather than decoding its own wire bytes. PreparedUnit consumes
+raw units use `encode_new` to validate, write output and mint internally derived
+identities in one operation; cached bytes decode directly into the proof once. The
+encoder's private section receipt replaces identity-before-output rehash passes and
+decoding its own wire bytes. IR-only preparation can still use `new` without encoding.
+PreparedUnit consumes
 the proof without revalidation or caller-supplied digest labels. Regex/static facts are
 lazy at whole-unit granularity: the first canonical reachable link prepares them once,
 including every pattern inside that unit, and shares the result (or deterministic
@@ -101,7 +104,9 @@ cloning bodies into temporary member/payload maps.
 Manager private tests cover complete companion alias identities, shared IR/assets/facts
 handles, true include closure selection, diagnostic attachment corruption and bounded
 streaming freeze drift/deletion/oversize. Integration tests inject wrong cache manifest
-keys/handle counts and require MGB110 before successful compile hydration. Independent
+keys/handle counts after proving healthy warm reuse. Invalid adapter results must emit
+an MGB110 warning, never hydrate or count a cache hit, and safely execute fresh work;
+lookup/index failures retain the established advisory-cache policy. Independent
 process tests cover colliding empty pack documents, same-name archive providers, large
 library/small export action counts and local malformed-unreachable source rejection.
 
@@ -109,3 +114,64 @@ No local Cargo/npm was run under the user's resource constraint. Rustfmt/source 
 are not a substitute for hosted compilation and actual workflows. Source ownership
 repairs are not measured speedup claims; same-runner mechanism and end-to-end results
 must separately quantify costs, preserve exact outputs/provenance and reveal regressions.
+
+## Patch cache migration
+
+Manager recipe and option schema epochs advance to **1.2.1**, preventing previously
+cached stage products from bypassing correctness repairs. Storage remains project-owned;
+old CAS blobs are harmless, discardable content, not shared machine-wide authority.
+Cleaning old private cache bytes is optional and does not replace any dependency archive.
+
+SOPack's new SCC provider fingerprints change freshly emitted multi-provider archive
+bytes. Its backend cache identity is `reproducible-stored-zip/sopack-scc-v3`; pack's
+unchanged stored ZIP codec stays `reproducible-stored-zip/1`. Imported schema1 SOPack
+bytes remain readable and their SHA-256 lock pins immutable. No migration silently
+rewrites acquired libraries, existing lock identities or the released v1.2 tag.
+
+## Committed publication versus disposable cache authority
+
+Hosted native acceptance exposed a corruption-repair blocker: catalog recovery required
+all historical action-output CAS blobs even though those are derived, reproducible cache.
+A quarantined product prevented fresh work before verified cache lookup could miss safely.
+
+The repaired boundary validates the canonical BuildRecord/generation membership,
+actual published bytes against declared digest and size, artifact schemas, and exact
+target-record coverage. A runtime claiming `ArtifactRead::Verified` is not sufficient:
+the manager seals the returned bytes and compares their actual identity. Invalid committed
+metadata, missing/changed published files, and true storage errors remain fatal.
+Historical action outputs are inspected only by their own verified cache-reuse boundary,
+not eagerly loaded by catalog recovery.
+
+Inspection is read-only and performs zero CAS reads/writes. Build recovery may restore
+missing/quarantined CAS only from independently verified committed file buffers. Private
+invocation-owned generation receipts retain those buffers one target at a time: the base
+read verifies the canonical catalog record, and inspection/recovery then verify each target
+sequentially. An unchanged current generation is not reread/rehashed/revalidated after its
+receipt was minted; restoring a missing current pointer publishes those same snapshots.
+Buffers are consumed/released before the next target, keeping peak retention proportional
+to the largest target, not the sum of all committed targets. A genuinely newer committed generation is validated
+separately before adoption. No catalog structure is skipped and no unverified bytes are used
+for repair. Receipts are dropped with recovery, not placed in an unbounded process cache.
+
+Memory-port regression counters require exactly one generation-member read per base
+recovery (including the catalog file), zero CAS activity for inspection, and repair after
+clearing all disposable blobs while keeping committed snapshots independent. These are
+contract counters, not measured latency/I/O speedups. Independent fresh-process corruption
+and previous-generation atomicity tests remain the hosted acceptance authority.
+
+## Failure source evidence through manager orchestration
+
+Runtime errors can retain structured compiler diagnostics without changing public
+WorkerFailure literals. ManagerError preserves manager code/phase/message and copies
+upstream primary/related spans and help. Frontend, main/include link, instantiate and render
+conversions retain that evidence. Build execution uses the existing ActionEvent::Diagnostic
+carrier with a private `manager-source-failure-` identity convention. EventMapping associates
+it with the terminal ActionFailed event and normalizes per-action diagnostic IDs; the
+separate event is suppressed to avoid duplicate error rendering. Singleflight followers
+receive the leader's source evidence through invocation-local leader/member associations.
+Other worker diagnostic events retain their established forwarding behavior.
+
+Focused tests require relocated source spans and call/definition-related evidence to survive
+ManagerError conversion and leader/follower terminal mapping, while stable manager codes and
+WorkerFailure shapes remain unchanged. Actual archived recursion/duplicate-symbol and local
+parse process fixtures must still verify host source resolution and CLI output end to end.

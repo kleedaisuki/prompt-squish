@@ -1,6 +1,8 @@
 //! ADR 0007 宏展开机。 / ADR 0007 macro-expansion machine.
 
-use crate::{ArchiveDirective, InstantiateError, LinkedProgram};
+use crate::{
+    ArchiveDirective, InstantiateError, InstantiationFailure, InstantiationFrame, LinkedProgram,
+};
 use regex::Regex;
 use squish_ir::{
     BindingRef, DefAddr, DocumentItem, DocumentItemId, DocumentRegion, DocumentRegionId,
@@ -64,6 +66,31 @@ impl Instantiator {
         budgets: Budgets,
     ) -> Result<InstantiateOutput, InstantiateError> {
         Machine::new(program, args, budgets)?.run()
+    }
+
+    /// Instantiates with actual failure-frame provenance for structured diagnostic rendering.
+    ///
+    /// Successful output and budget/error semantics are identical to `instantiate`. Only an
+    /// error copies the selected parent-chain call/declaration origins while the machine still
+    /// owns its frames. This avoids interpreting frame IDs after their provenance was dropped.
+    ///
+    /// ```ignore
+    /// let failure = Instantiator.instantiate_with_diagnostics(&program, args, budgets)
+    ///     .expect_err("the recursive fixture exhausts its budget");
+    /// let primary = failure.error.origin.as_ref()
+    ///     .and_then(|origin| program.resolve_origin(origin));
+    /// ```
+    pub fn instantiate_with_diagnostics(
+        &self,
+        program: &LinkedProgram,
+        args: BTreeMap<LocalName, String>,
+        budgets: Budgets,
+    ) -> Result<InstantiateOutput, InstantiationFailure> {
+        let mut machine = Machine::new(program, args, budgets)?;
+        match machine.run() {
+            Ok(output) => Ok(output),
+            Err(error) => Err(machine.failure_context(error)),
+        }
     }
 }
 
@@ -265,7 +292,7 @@ impl<'a> Machine<'a> {
         })
     }
 
-    fn run(mut self) -> Result<InstantiateOutput, InstantiateError> {
+    fn run(&mut self) -> Result<InstantiateOutput, InstantiateError> {
         while let Some(task) = self.tasks.pop() {
             match task {
                 Task::Region { at, env, output } => {
@@ -471,11 +498,11 @@ impl<'a> Machine<'a> {
         canonicalize_document(&mut document);
         canonicalize_scalars(&mut self.scalar_values, &mut self.frames, &mut self.origins);
         let trace = ExpansionTrace {
-            frames: self.frames,
-            scalar_values: self.scalar_values,
-            sequences: self.sequences,
+            frames: std::mem::take(&mut self.frames),
+            scalar_values: std::mem::take(&mut self.scalar_values),
+            sequences: std::mem::take(&mut self.sequences),
             debug_strings: Vec::new(),
-            origins: self.origins,
+            origins: std::mem::take(&mut self.origins),
             document_items: document_trace,
         };
         document.validate().map_err(|e| {
@@ -491,7 +518,7 @@ impl<'a> Machine<'a> {
         Ok(InstantiateOutput {
             document,
             trace,
-            directives: self.directives,
+            directives: std::mem::take(&mut self.directives),
         })
     }
 
@@ -1007,6 +1034,22 @@ impl<'a> Machine<'a> {
             origin: op.and_then(|x| origin_for_op(self.program, x)),
             frame_chain: chain,
         }
+    }
+
+    /// Copies only witnessed failure-chain origins; successful execution does no extra work.
+    fn failure_context(&self, error: InstantiateError) -> InstantiationFailure {
+        let frames = error
+            .frame_chain
+            .iter()
+            .filter_map(|id| self.frames.get(id.0 as usize))
+            .map(|frame| InstantiationFrame {
+                id: frame.id,
+                identity: frame.identity.clone(),
+                call_origin: frame.call_origin.clone(),
+                definition_origin: frame.definition_origin.clone(),
+            })
+            .collect();
+        InstantiationFailure { error, frames }
     }
 }
 

@@ -255,6 +255,42 @@ impl LinkedProgram {
     pub(crate) fn object(&self, slot: u32) -> Option<ObjectDigest> {
         self.data.objects.get(slot as usize).copied()
     }
+
+    /// Resolves an exact object-qualified origin to its retained logical source and payload span.
+    ///
+    /// The local ID indexes that object's original origin table, then its source archive. No
+    /// provider name, current caller source or host filesystem location is guessed. Unknown,
+    /// ambiguous or out-of-range references return `None`. Spans remain half-open UTF-8 byte
+    /// ranges relative to the source payload after its optional BOM, without offset shifting.
+    pub fn resolve_origin(
+        &self,
+        origin: &QualifiedOriginRef,
+    ) -> Option<(SourceKey, squish_ir::Span)> {
+        let mut matches = self
+            .data
+            .objects
+            .iter()
+            .enumerate()
+            .filter(|(_, object)| **object == origin.object);
+        let (slot, _) = matches.next()?;
+        // Legacy raw reconstruction can receive asserted digest labels. Do not guess which
+        // unit owns a duplicated label; prepared objects derive exact identities internally.
+        if matches.next().is_some() {
+            return None;
+        }
+        let unit = &self.data.units.get(slot)?.unit;
+        let entry = unit.origins().entries.get(origin.local.0 as usize)?;
+        let source = unit.sources().records.get(entry.origin.source.0 as usize)?;
+        let payload_bytes = source
+            .exact_bytes
+            .byte_len
+            .checked_sub(u64::from(source.bom_len))?;
+        let span = entry.origin.span;
+        if span.start > span.end || span.end > payload_bytes {
+            return None;
+        }
+        Some((source.key.clone(), span))
+    }
 }
 
 /// Verifies relationships that individual image/unit validators cannot establish alone.

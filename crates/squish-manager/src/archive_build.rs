@@ -475,11 +475,11 @@ fn include_bytes(
     let linked = executor
         .runtime
         .link_prepared(entry, index.closure(entry, compiled)?)
-        .map_err(|e| error("MGB162", Phase::Link, e))?;
+        .map_err(|e| runtime_error("MGB162", Phase::Link, e))?;
     let instantiated = executor
         .runtime
         .instantiate(&linked.program, BTreeMap::new(), budgets(&target.resolved))
-        .map_err(|e| error("MGB163", Phase::Instantiate, e))?;
+        .map_err(|e| runtime_error("MGB163", Phase::Instantiate, e))?;
     if !instantiated.directives.is_empty() {
         return Err(ManagerError::new(
             "MGB164",
@@ -497,7 +497,7 @@ fn include_bytes(
             },
         })
         .map(|output| output.bytes)
-        .map_err(|e| error("MGB165", Phase::Emit, e))
+        .map_err(|e| runtime_error("MGB165", Phase::Emit, e))
 }
 
 /// Packages the linked library closure, preserving reusable IR and definition-relative resources.

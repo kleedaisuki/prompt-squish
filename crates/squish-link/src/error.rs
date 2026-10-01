@@ -1,6 +1,6 @@
 //! 链接和求值错误。 / Link and evaluation errors.
 
-use squish_ir::{FrameId, QualifiedOriginRef, SourceKey, SymbolKey};
+use squish_ir::{FrameId, FrameIdentity, QualifiedOriginRef, SourceKey, SymbolKey};
 use std::{error::Error, fmt};
 
 /// 结构化链接错误；`code` 是稳定的机器识别值。 / Structured link error with a stable machine code.
@@ -85,5 +85,57 @@ impl InstantiateError {
     #[must_use]
     pub fn phase(&self) -> squish_protocol::Phase {
         squish_protocol::Phase::Instantiate
+    }
+}
+
+/// Source-qualified provenance of one actual invocation on a failed expansion's parent chain.
+///
+/// These are dynamic frames, not a static symbol walk: repeated recursive invocations retain
+/// distinct frame IDs even when their definition and call-site origins are equal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstantiationFrame {
+    /// Actual dynamic frame ID, matching the corresponding legacy error chain entry.
+    pub id: FrameId,
+    /// Entry or exact linked macro address invoked by this frame.
+    pub identity: FrameIdentity,
+    /// Actual caller operation origin; the entry has no call site.
+    pub call_origin: Option<QualifiedOriginRef>,
+    /// Source origin of the entry root or macro declaration that owns this invocation.
+    pub definition_origin: QualifiedOriginRef,
+}
+
+/// Additive failure evidence for diagnostic-aware consumers, without changing legacy errors.
+///
+/// `frames` follows the actual entry-to-failure parent chain in `error.frame_chain`. It is
+/// empty when a failure occurs before a machine/frame exists or has no dynamic frame context.
+/// No successful trace, partial document or fabricated source origin is returned on failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstantiationFailure {
+    /// The unchanged public error, including its stable code, primary origin and frame IDs.
+    pub error: InstantiateError,
+    /// Immutable dense invocation snapshot needed to explain call and declaration sites.
+    /// A boxed slice keeps the additive failure small without boxing the legacy error itself.
+    pub frames: Box<[InstantiationFrame]>,
+}
+
+impl From<InstantiateError> for InstantiationFailure {
+    /// Wraps a pre-machine or context-free error without inventing invocation provenance.
+    fn from(error: InstantiateError) -> Self {
+        Self {
+            error,
+            frames: Box::default(),
+        }
+    }
+}
+
+impl fmt::Display for InstantiationFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.error, f)
+    }
+}
+
+impl std::error::Error for InstantiationFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
     }
 }

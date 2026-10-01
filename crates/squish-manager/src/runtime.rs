@@ -54,6 +54,7 @@ pub struct BuildRuntimeError {
     kind: BuildRuntimeErrorKind,
     code: &'static str,
     message: String,
+    diagnostic: Option<Arc<squish_protocol::Diagnostic>>,
 }
 
 impl BuildRuntimeError {
@@ -64,6 +65,7 @@ impl BuildRuntimeError {
             kind: BuildRuntimeErrorKind::Tool,
             code,
             message: message.into(),
+            diagnostic: None,
         }
     }
 
@@ -73,6 +75,7 @@ impl BuildRuntimeError {
             kind: BuildRuntimeErrorKind::Storage,
             code,
             message: message.into(),
+            diagnostic: None,
         }
     }
 
@@ -82,7 +85,20 @@ impl BuildRuntimeError {
             kind: BuildRuntimeErrorKind::Corrupt,
             code,
             message: message.into(),
+            diagnostic: None,
         }
+    }
+
+    /// Retains compiler-owned source locations and expansion context without flattening them.
+    #[must_use]
+    pub fn with_diagnostic(mut self, diagnostic: squish_protocol::Diagnostic) -> Self {
+        self.diagnostic = Some(Arc::new(diagnostic));
+        self
+    }
+
+    /// Returns structured diagnostic evidence; absence preserves legacy runtime behavior.
+    pub fn diagnostic(&self) -> Option<&squish_protocol::Diagnostic> {
+        self.diagnostic.as_deref()
     }
 
     /// 返回失败类别。 / Returns the failure category.
@@ -413,6 +429,39 @@ mod tests {
             },
             blob,
         )
+    }
+
+    #[test]
+    fn structured_diagnostic_does_not_change_legacy_runtime_error_identity() {
+        let diagnostic = squish_protocol::Diagnostic {
+            id: squish_protocol::DiagnosticId::new("evaluation").unwrap(),
+            code: "RUN013".into(),
+            severity: squish_protocol::Severity::Error,
+            phase: squish_protocol::Phase::Instantiate,
+            message: "max-expansions budget exceeded".into(),
+            primary: Some(
+                squish_protocol::Span::new(
+                    squish_protocol::OpaqueSourceId::new("sopack://digest/library/lib.xml")
+                        .unwrap(),
+                    3,
+                    9,
+                )
+                .unwrap(),
+            ),
+            related: Vec::new(),
+            help: None,
+        };
+        let error =
+            BuildRuntimeError::new("host_instantiate", "RUN013: max-expansions budget exceeded")
+                .with_diagnostic(diagnostic.clone());
+        assert_eq!(error.code(), "host_instantiate");
+        assert_eq!(error.kind(), BuildRuntimeErrorKind::Tool);
+        assert_eq!(error.diagnostic(), Some(&diagnostic));
+        assert!(
+            BuildRuntimeError::new("legacy", "legacy error")
+                .diagnostic()
+                .is_none()
+        );
     }
 
     #[test]
