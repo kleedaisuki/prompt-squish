@@ -563,34 +563,38 @@ pub fn read_sopack_shared(
     if serde_json::to_vec(&manifest).map_err(|e| fail(e.to_string()))? != manifest_bytes {
         return Err(fail("noncanonical SOPack manifest"));
     }
+    if manifest.assets.len() > limits.max_entries || manifest.imports.len() > limits.max_entries {
+        return Err(fail("SOPack binding limit exceeded"));
+    }
     let digest = content_digest(bytes);
+    let root_source = manifest
+        .root_path
+        .as_ref()
+        .map(|path| source_key(&digest, path, &manifest.package_name));
     let mut payload = SharedSopackPayload {
-        package_name: manifest.package_name.clone(),
-        package_version: manifest.package_version.clone(),
-        metadata: manifest.metadata.clone(),
-        root_source: manifest
-            .root_path
-            .as_ref()
-            .map(|path| source_key(&digest, path, &manifest.package_name)),
+        package_name: manifest.package_name,
+        package_version: manifest.package_version,
+        metadata: manifest.metadata,
+        root_source,
         ..Default::default()
     };
     let mut relocation = BTreeMap::new();
-    for (path, expected) in &manifest.sources {
-        validate_archive_path(path)?;
+    for (path, expected) in manifest.sources {
+        validate_archive_path(&path)?;
         let source = files
             .remove(&format!("sources/{path}"))
             .ok_or_else(|| fail("SOPack source missing"))?;
-        if content_digest(source) != *expected {
+        if content_digest(source) != expected {
             return Err(fail("SOPack source digest mismatch"));
         }
-        let key = source_key(&digest, path, &payload.package_name);
+        let key = source_key(&digest, &path, &payload.package_name);
         relocation.insert(
-            source_key("internal", path, &payload.package_name),
+            source_key("internal", &path, &payload.package_name),
             key.clone(),
         );
         payload.sources.insert(key, Arc::from(source));
     }
-    for path in &manifest.units {
+    for path in manifest.units {
         let bytes = files
             .remove(&format!("units/{path}.xsir"))
             .ok_or_else(|| fail("SOPack compiled module missing"))?;
@@ -598,7 +602,7 @@ pub fn read_sopack_shared(
         if !matches!(
             unit.kind(),
             squish_ir::UnitKind::Module | squish_ir::UnitKind::Sopack
-        ) || unit.header().source != source_key("internal", path, &payload.package_name)
+        ) || unit.header().source != source_key("internal", &path, &payload.package_name)
         {
             return Err(fail("invalid SOPack module identity"));
         }
@@ -607,11 +611,13 @@ pub fn read_sopack_shared(
             .units
             .insert(unit.header().source.clone(), Arc::new(unit));
     }
-    for (from, slot, to) in &manifest.imports {
+    // Every decoded unit owns its relocated keys; the translation index is now scratch.
+    drop(relocation);
+    for (from, slot, to) in manifest.imports {
         payload.imports.push(ImportBinding {
-            importer: source_key(&digest, from, &payload.package_name),
-            import: ImportId(*slot),
-            target: source_key(&digest, to, &payload.package_name),
+            importer: source_key(&digest, &from, &payload.package_name),
+            import: ImportId(slot),
+            target: source_key(&digest, &to, &payload.package_name),
         });
     }
     let mut expanded_bytes = payload
@@ -619,9 +625,7 @@ pub fn read_sopack_shared(
         .values()
         .map(|b| b.len() as u64)
         .sum::<u64>();
-    if manifest.assets.len() > limits.max_entries || manifest.imports.len() > limits.max_entries {
-        return Err(fail("SOPack binding limit exceeded"));
-    }
+
     let mut shared_assets: BTreeMap<String, Arc<[u8]>> = BTreeMap::new();
     for (source, name, asset_digest) in &manifest.assets {
         let bytes = files
@@ -651,6 +655,10 @@ pub fn read_sopack_shared(
     for (_, _, digest) in &manifest.assets {
         files.remove(&format!("assets/{digest}"));
     }
+    // Payload asset bindings retain their Arc handles; decode cache and manifest rows can go.
+    drop(shared_assets);
+    drop(manifest.assets);
+    drop(manifest.root_path);
     for (name, path) in manifest.exports {
         payload
             .exports
@@ -661,16 +669,39 @@ pub fn read_sopack_shared(
             "SOPack contains undeclared content or finished products",
         ));
     }
-    validate_payload(&payload.as_ref())?;
+    validate_payload_maps(
+        &payload.units,
+        &payload.imports,
+        &payload.assets,
+        &payload.sources,
+    )?;
     Ok(payload)
 }
 
 /// Verifies closure completeness and exact diagnostic source attachments.
 fn validate_payload(payload: &SopackPayloadRef<'_>) -> Result<(), ArchiveError> {
+    validate_payload_maps(
+        &payload.units,
+        &payload.imports,
+        &payload.assets,
+        &payload.sources,
+    )
+}
+/// Validates either shared or borrowed payload storage without cloning identity indexes.
+fn validate_payload_maps<U, B>(
+    units: &BTreeMap<SourceKey, U>,
+    import_bindings: &[ImportBinding],
+    assets: &BTreeMap<(SourceKey, String), B>,
+    sources: &BTreeMap<SourceKey, B>,
+) -> Result<(), ArchiveError>
+where
+    U: std::ops::Deref<Target = RelocatableUnitIr>,
+    B: AsRef<[u8]>,
+{
     let mut bindings = BTreeMap::new();
-    for binding in &payload.imports {
-        if !payload.units.contains_key(&binding.importer)
-            || !payload.units.contains_key(&binding.target)
+    for binding in import_bindings {
+        if !units.contains_key(&binding.importer)
+            || !units.contains_key(&binding.target)
             || bindings
                 .insert((&binding.importer, binding.import), &binding.target)
                 .is_some()
@@ -679,7 +710,8 @@ fn validate_payload(payload: &SopackPayloadRef<'_>) -> Result<(), ArchiveError> 
         }
     }
     let mut imports = 0;
-    for (key, unit) in &payload.units {
+    for (key, unit) in units {
+        let unit = std::ops::Deref::deref(unit);
         if !matches!(
             unit.kind(),
             squish_ir::UnitKind::Module | squish_ir::UnitKind::Sopack
@@ -702,19 +734,18 @@ fn validate_payload(payload: &SopackPayloadRef<'_>) -> Result<(), ArchiveError> 
                     .semantic_strings
                     .get(path.0 as usize)
                     .ok_or_else(|| fail("invalid SOPack asset path"))?;
-                if !payload.assets.contains_key(&(key.clone(), name.clone())) {
+                if !assets.contains_key(&(key.clone(), name.clone())) {
                     return Err(fail("SOPack asset binding missing"));
                 }
             }
         }
         for record in &unit.sources().records {
-            let bytes = payload
-                .sources
+            let bytes = sources
                 .get(&record.key)
                 .ok_or_else(|| fail("SOPack diagnostic source missing"))?;
-            if squish_ir::SourceDigest::of(bytes) != record.digest
+            if squish_ir::SourceDigest::of(bytes.as_ref()) != record.digest
                 || record.exact_bytes.digest != record.digest.0
-                || record.exact_bytes.byte_len != bytes.len() as u64
+                || record.exact_bytes.byte_len != bytes.as_ref().len() as u64
             {
                 return Err(fail("SOPack diagnostic source identity mismatch"));
             }
@@ -982,6 +1013,29 @@ mod sopack_tests {
         };
         assert!(read_reproducible_zip_ref(&encoded, tight).is_ok());
         assert!(read_sopack_shared(&encoded, tight).is_err());
+    }
+    #[test]
+    fn shared_and_borrowed_validation_have_identical_source_contracts() {
+        let encoded = write_sopack(&fixture("workspace"), ArchiveLimits::default()).unwrap();
+        let mut shared = read_sopack_shared(&encoded, ArchiveLimits::default()).unwrap();
+        assert_eq!(
+            validate_payload_maps(
+                &shared.units,
+                &shared.imports,
+                &shared.assets,
+                &shared.sources
+            ),
+            validate_payload(&shared.as_ref())
+        );
+        shared.sources.clear();
+        let direct = validate_payload_maps(
+            &shared.units,
+            &shared.imports,
+            &shared.assets,
+            &shared.sources,
+        );
+        assert!(direct.is_err());
+        assert_eq!(direct, validate_payload(&shared.as_ref()));
     }
     #[test]
     fn borrowed_writer_does_not_modify_input_ir_or_source_identities() {
