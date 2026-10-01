@@ -237,8 +237,35 @@ pub trait BuildRuntime: Send + Sync {
         space: GenerationSpace,
         target: &PublicationTargetId,
         publications: &[Publication],
-        _blobs: &[VerifiedBlob],
+        blobs: &[VerifiedBlob],
     ) -> Result<CommittedGeneration, BuildRuntimeError> {
+        // Validate the complete handoff before creating any derived CAS state.
+        // Duplicate content may serve several destinations; persist it only once.
+        let supplied = blobs
+            .iter()
+            .map(|blob| (blob.digest(), blob))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut needed = std::collections::HashSet::with_capacity(publications.len());
+        for publication in publications {
+            needed.insert(&publication.output.digest);
+            if let Some(blob) = supplied.get(&publication.output.digest) {
+                if blob.bytes().len() as u64 != publication.output.size {
+                    return Err(BuildRuntimeError::corrupt(
+                        "runtime_publication_size",
+                        "publication size does not match its verified snapshot",
+                    ));
+                }
+            }
+        }
+        if supplied.keys().any(|digest| !needed.contains(digest)) {
+            return Err(BuildRuntimeError::corrupt(
+                "runtime_publication_blob",
+                "publication supplied an unrelated verified snapshot",
+            ));
+        }
+        for blob in supplied.values() {
+            self.write_verified_blob(blob)?;
+        }
         self.publish_generation(space, target, publications)
     }
     /// 使用选定前端编译冻结源。 / Compiles a frozen source with the selected frontend.
@@ -349,6 +376,7 @@ mod tests {
         bytes: Option<Vec<u8>>,
         written_digest: Digest,
         record: Option<ActionRecord>,
+        writes: std::sync::Mutex<Vec<Vec<u8>>>,
     }
 
     impl BuildRuntime for LegacyRuntime {
@@ -364,7 +392,8 @@ mod tests {
         fn read_blob(&self, _: &Digest) -> Result<Option<Vec<u8>>, BuildRuntimeError> {
             Ok(self.bytes.clone())
         }
-        fn write_blob(&self, _: &[u8]) -> Result<Digest, BuildRuntimeError> {
+        fn write_blob(&self, bytes: &[u8]) -> Result<Digest, BuildRuntimeError> {
+            self.writes.lock().unwrap().push(bytes.to_vec());
             Ok(self.written_digest.clone())
         }
         fn lookup_action(&self, _: &ActionKey) -> Result<Option<ActionRecord>, BuildRuntimeError> {
@@ -391,10 +420,23 @@ mod tests {
         fn publish_generation(
             &self,
             _: GenerationSpace,
-            _: &PublicationTargetId,
-            _: &[Publication],
+            target: &PublicationTargetId,
+            publications: &[Publication],
         ) -> Result<CommittedGeneration, BuildRuntimeError> {
-            unimplemented!()
+            let writes = self.writes.lock().unwrap();
+            for publication in publications {
+                assert!(writes.iter().any(|bytes| {
+                    VerifiedBlob::from_shared(Arc::from(bytes.as_slice())).digest()
+                        == &publication.output.digest
+                }));
+            }
+            Ok(CommittedGeneration {
+                identity: squish_build::GenerationRef {
+                    target: target.clone(),
+                    generation: squish_build::GenerationId::from_hex(&"00".repeat(32)).unwrap(),
+                },
+                artifacts: Vec::new(),
+            })
         }
         fn compile(
             &self,
@@ -426,9 +468,90 @@ mod tests {
                 bytes: Some(blob.bytes().to_vec()),
                 written_digest: blob.digest().clone(),
                 record: None,
+                writes: std::sync::Mutex::new(Vec::new()),
             },
             blob,
         )
+    }
+
+    fn publication(blob: &VerifiedBlob, name: &str) -> Publication {
+        Publication {
+            output: ProducedOutput {
+                name: OutputName::new(name).unwrap(),
+                kind: ArtifactKind::Other("test".into()),
+                digest: blob.digest().clone(),
+                size: blob.bytes().len() as u64,
+            },
+            name: squish_build::LogicalArtifactName::new(name).unwrap(),
+            destination: PublicationPath::new(name).unwrap(),
+        }
+    }
+
+    #[test]
+    fn legacy_verified_publication_restores_explicit_snapshots_once() {
+        let (mut runtime, blob) = fixture();
+        runtime.bytes = None;
+        let target = PublicationTargetId::new("restore").unwrap();
+        let publications = [publication(&blob, "first"), publication(&blob, "second")];
+        runtime
+            .publish_generation_verified(
+                GenerationSpace::BuildCatalog,
+                &target,
+                &publications,
+                &[blob.clone(), blob.clone()],
+            )
+            .unwrap();
+        assert_eq!(*runtime.writes.lock().unwrap(), vec![blob.bytes().to_vec()]);
+    }
+
+    #[test]
+    fn legacy_verified_publication_rejects_bad_handoff_and_wrong_write_identity() {
+        let (mut runtime, blob) = fixture();
+        let target = PublicationTargetId::new("restore").unwrap();
+        let mut declared = publication(&blob, "first");
+        declared.output.size += 1;
+        assert_eq!(
+            runtime
+                .publish_generation_verified(
+                    GenerationSpace::BuildCatalog,
+                    &target,
+                    &[declared],
+                    std::slice::from_ref(&blob)
+                )
+                .unwrap_err()
+                .code(),
+            "runtime_publication_size"
+        );
+        assert!(runtime.writes.lock().unwrap().is_empty());
+        let unrelated = VerifiedBlob::from_owned(b"unrelated".to_vec());
+        assert_eq!(
+            runtime
+                .publish_generation_verified(
+                    GenerationSpace::BuildCatalog,
+                    &target,
+                    &[publication(&blob, "first")],
+                    &[unrelated]
+                )
+                .unwrap_err()
+                .code(),
+            "runtime_publication_blob"
+        );
+        assert!(runtime.writes.lock().unwrap().is_empty());
+        runtime.written_digest = VerifiedBlob::from_owned(b"wrong identity".to_vec())
+            .digest()
+            .clone();
+        assert_eq!(
+            runtime
+                .publish_generation_verified(
+                    GenerationSpace::BuildCatalog,
+                    &target,
+                    &[publication(&blob, "first")],
+                    &[blob]
+                )
+                .unwrap_err()
+                .code(),
+            "runtime_blob_digest"
+        );
     }
 
     #[test]
