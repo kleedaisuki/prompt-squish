@@ -9,7 +9,7 @@
 /// Reproducible product and immutable library archive transport.
 pub mod archive;
 
-use std::{error::Error, fmt};
+use std::{borrow::Cow, error::Error, fmt};
 
 use squish_ir::{
     AbiId, ArtifactByteMap, ArtifactMapEntry, DebugStringId, DocumentItem, ExpansionTrace,
@@ -90,6 +90,39 @@ pub struct BackendRequest {
     pub options: SquishOptions,
 }
 
+/// A backend request borrowing immutable pipeline state.
+///
+/// The document and incoming trace remain unchanged. An implementation may copy the
+/// trace when its owned output extends provenance, but need not copy the document.
+///
+/// ```no_run
+/// # use squish_backend::{Backend, BackendRequest, BackendRequestRef, SquishBackend};
+/// # fn example(request: &BackendRequest) -> Result<(), squish_backend::BackendError> {
+/// let output = SquishBackend.emit_ref(BackendRequestRef::from(request))?;
+/// assert_eq!(output.metrics.output_bytes, output.bytes.len() as u64);
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackendRequestRef<'a> {
+    /// Fully expanded structured document; no ownership transfer is required.
+    pub document: &'a LinkedDocumentIr,
+    /// Complete incoming provenance aligned with the document items.
+    pub trace: &'a ExpansionTrace,
+    /// Emission budget and semantic options.
+    pub options: SquishOptions,
+}
+
+impl<'a> From<&'a BackendRequest> for BackendRequestRef<'a> {
+    fn from(request: &'a BackendRequest) -> Self {
+        Self {
+            document: &request.document,
+            trace: &request.trace,
+            options: request.options,
+        }
+    }
+}
+
 /// 可持久化的后端度量。 / Persistable backend metrics.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BackendMetrics {
@@ -128,6 +161,17 @@ pub trait Backend {
     fn negotiate(&self, document: &LinkedDocumentIr) -> Result<(), BackendError>;
     /// 验证并发射产品。 / Validates and emits a product.
     fn emit(&self, request: BackendRequest) -> Result<BackendOutput, BackendError>;
+    /// Validates and emits from borrowed immutable pipeline state.
+    ///
+    /// The default bridge preserves existing backend implementations. Backends with
+    /// native borrowed emission should override it to avoid cloning the document.
+    fn emit_ref(&self, request: BackendRequestRef<'_>) -> Result<BackendOutput, BackendError> {
+        self.emit(BackendRequest {
+            document: request.document.clone(),
+            trace: request.trace.clone(),
+            options: request.options,
+        })
+    }
 }
 
 /// 后端失败类别。 / Backend failure category.
@@ -225,30 +269,56 @@ impl Backend for SquishBackend {
         Ok(())
     }
 
-    fn emit(&self, mut request: BackendRequest) -> Result<BackendOutput, BackendError> {
-        request.document.validate().map_err(|error| {
+    fn emit(&self, request: BackendRequest) -> Result<BackendOutput, BackendError> {
+        self.emit_parts(
+            &request.document,
+            Cow::Owned(request.trace),
+            request.options,
+        )
+    }
+
+    fn emit_ref(&self, request: BackendRequestRef<'_>) -> Result<BackendOutput, BackendError> {
+        self.emit_parts(
+            request.document,
+            Cow::Borrowed(request.trace),
+            request.options,
+        )
+    }
+}
+
+impl SquishBackend {
+    /// Validates the immutable inputs before owning the trace needed by the result.
+    /// Owned callers transfer their trace; borrowed callers copy it exactly once.
+    fn emit_parts(
+        &self,
+        document: &LinkedDocumentIr,
+        trace: Cow<'_, ExpansionTrace>,
+        options: SquishOptions,
+    ) -> Result<BackendOutput, BackendError> {
+        document.validate().map_err(|error| {
             BackendError::new(BackendErrorKind::InvalidIr, None, error.to_string())
         })?;
-        request.trace.validate().map_err(|error| {
+        trace.validate().map_err(|error| {
             BackendError::new(BackendErrorKind::InvalidIr, None, error.to_string())
         })?;
-        if request.trace.document_items.len() != request.document.items.len() {
+        if trace.document_items.len() != document.items.len() {
             return Err(BackendError::new(
                 BackendErrorKind::InvalidIr,
                 None,
                 "trace/document item counts differ",
             ));
         }
-        self.negotiate(&request.document)?;
-        validate_product_xml(&request.document)?;
+        self.negotiate(document)?;
+        validate_product_xml(document)?;
 
-        let cache_identity = self.cache_identity(request.options);
-        let mut emitter = Emitter::new(request.options.max_output_bytes, &mut request.trace);
+        let mut trace = trace.into_owned();
+        let cache_identity = self.cache_identity(options);
+        let mut emitter = Emitter::new(options.max_output_bytes, &mut trace);
         let mut element_names = Vec::new();
-        for (index, item) in request.document.items.iter().enumerate() {
+        for (index, item) in document.items.iter().enumerate() {
             let serialized = match item {
                 DocumentItem::ElementStart { expanded_name, .. } => {
-                    let name = &request.document.qnames[expanded_name.0 as usize].local_name;
+                    let name = &document.qnames[expanded_name.0 as usize].local_name;
                     element_names.push(name.as_str());
                     format!("<{name}>")
                 }
@@ -262,23 +332,23 @@ impl Backend for SquishBackend {
                     })?;
                     format!("</{name}>")
                 }
-                _ => serialize_data_item(&request.document, item),
+                _ => serialize_data_item(document, item),
             };
             emitter.push_serialized(index, serialized.as_bytes())?;
         }
         let (bytes, byte_map, metrics) = emitter.finish()?;
-        request.trace.validate().map_err(|error| {
+        trace.validate().map_err(|error| {
             BackendError::new(BackendErrorKind::InvalidIr, None, error.to_string())
         })?;
         byte_map
-            .validate_against(&request.trace, bytes.len() as u64)
+            .validate_against(&trace, bytes.len() as u64)
             .map_err(|error| {
                 BackendError::new(BackendErrorKind::InvalidIr, None, error.to_string())
             })?;
         Ok(BackendOutput {
             bytes,
             byte_map,
-            trace: request.trace,
+            trace,
             cache_identity,
             metrics,
         })

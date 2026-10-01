@@ -1,14 +1,19 @@
 //! Canonical, bounded ZIP transport for products and relocatable SOPack libraries.
 
+mod provider_graph;
+mod zip;
+pub use zip::{ArchiveEntryRef, read_reproducible_zip_ref, write_reproducible_zip_ref};
+
 use serde::{Deserialize, Serialize};
 use squish_ir::{
-    ImportBinding, ImportId, RelocatableUnitIr, SourceKey, decode_unit_container,
-    encode_unit_container,
+    ImportBinding, ImportId, RelocatableUnitIr, SourceKey, UnitEncodingOverrides,
+    VerifiedUnitEncoding, decode_unit_container,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
+    sync::{Arc, OnceLock},
 };
 
 /// One regular file; paths use portable, relative UTF-8 slash separators.
@@ -77,174 +82,35 @@ pub fn validate_archive_path(path: &str) -> Result<(), ArchiveError> {
     }
     Ok(())
 }
-fn put16(out: &mut Vec<u8>, value: u16) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-fn put32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-fn word(bytes: &[u8], offset: usize) -> Result<u16, ArchiveError> {
-    let data = bytes
-        .get(offset..offset + 2)
-        .ok_or_else(|| fail("truncated ZIP"))?;
-    Ok(u16::from_le_bytes([data[0], data[1]]))
-}
-fn dword(bytes: &[u8], offset: usize) -> Result<u32, ArchiveError> {
-    let data = bytes
-        .get(offset..offset + 4)
-        .ok_or_else(|| fail("truncated ZIP"))?;
-    Ok(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
-}
-/// Writes classic stored ZIP with sorted names, CRC32, UTF-8, 1980-01-01 and mode 0644.
-///
-/// Input order is irrelevant. ZIP64, compression, directory entries, extra fields and
-/// comments are deliberately absent, avoiding platform and compressor variability.
+/// Compatibility ZIP writer; member content is borrowed, not copied into staging.
 pub fn write_reproducible_zip(
     entries: &[ArchiveEntry],
     limits: ArchiveLimits,
 ) -> Result<Vec<u8>, ArchiveError> {
-    if entries.len() > limits.max_entries || entries.len() > u16::MAX as usize {
-        return Err(fail("ZIP entry limit exceeded"));
-    }
-    let mut sorted: Vec<_> = entries.iter().collect();
-    sorted.sort_by(|a, b| a.path.cmp(&b.path));
-    let mut names = BTreeSet::new();
-    let mut content = 0u64;
-    let mut size = 22u64;
-    for entry in &sorted {
-        validate_archive_path(&entry.path)?;
-        if !names.insert(entry.path.to_lowercase()) {
-            return Err(fail("duplicate ZIP member"));
-        }
-        content = content
-            .checked_add(entry.bytes.len() as u64)
-            .ok_or_else(|| fail("ZIP size overflow"))?;
-        size = size
-            .checked_add(76 + 2 * entry.path.len() as u64 + entry.bytes.len() as u64)
-            .ok_or_else(|| fail("ZIP size overflow"))?;
-        if entry.bytes.len() > u32::MAX as usize {
-            return Err(fail("ZIP64 is unsupported"));
-        }
-    }
-    for name in &names {
-        for (offset, _) in name.match_indices('/') {
-            if names.contains(&name[..offset]) {
-                return Err(fail("ZIP file/directory collision"));
-            }
-        }
-    }
-    if content > limits.max_content_bytes
-        || size > limits.max_archive_bytes
-        || size > u32::MAX as u64
-    {
-        return Err(fail("ZIP byte limit exceeded"));
-    }
-    let mut out = Vec::with_capacity(size as usize);
-    let mut central = Vec::new();
-    for entry in sorted {
-        let offset = out.len() as u32;
-        let crc = crc32fast::hash(&entry.bytes);
-        put32(&mut out, 0x04034b50);
-        for n in [20, 0x800, 0, 0, 33] {
-            put16(&mut out, n);
-        }
-        put32(&mut out, crc);
-        put32(&mut out, entry.bytes.len() as u32);
-        put32(&mut out, entry.bytes.len() as u32);
-        put16(&mut out, entry.path.len() as u16);
-        put16(&mut out, 0);
-        out.extend_from_slice(entry.path.as_bytes());
-        out.extend_from_slice(&entry.bytes);
-        put32(&mut central, 0x02014b50);
-        for n in [0x314, 20, 0x800, 0, 0, 33] {
-            put16(&mut central, n);
-        }
-        put32(&mut central, crc);
-        put32(&mut central, entry.bytes.len() as u32);
-        put32(&mut central, entry.bytes.len() as u32);
-        for n in [entry.path.len() as u16, 0, 0, 0, 0] {
-            put16(&mut central, n);
-        }
-        put32(&mut central, 0o100644 << 16);
-        put32(&mut central, offset);
-        central.extend_from_slice(entry.path.as_bytes());
-    }
-    let offset = out.len() as u32;
-    let central_len = central.len() as u32;
-    out.extend_from_slice(&central);
-    put32(&mut out, 0x06054b50);
-    for n in [0, 0, entries.len() as u16, entries.len() as u16] {
-        put16(&mut out, n);
-    }
-    put32(&mut out, central_len);
-    put32(&mut out, offset);
-    put16(&mut out, 0);
-    Ok(out)
+    let refs: Vec<_> = entries
+        .iter()
+        .map(|entry| ArchiveEntryRef {
+            path: &entry.path,
+            bytes: &entry.bytes,
+        })
+        .collect();
+    write_reproducible_zip_ref(&refs, limits)
 }
-/// Reads only canonical stored ZIP; bounds and CRC are checked before accepting it.
-///
-/// Re-encoding is an intentional strict validation of both ZIP indexes, timestamps,
-/// flags, modes, ordering and absence of hidden/trailing data. General third-party
-/// ZIPs must first be normalized by a trusted producer.
+/// Compatibility ZIP reader; use the borrowed reader to avoid materializing file bodies.
 pub fn read_reproducible_zip(
     bytes: &[u8],
     limits: ArchiveLimits,
 ) -> Result<Vec<ArchiveEntry>, ArchiveError> {
-    if bytes.len() as u64 > limits.max_archive_bytes || bytes.len() > u32::MAX as usize {
-        return Err(fail("ZIP byte limit exceeded"));
-    }
-    let mut entries = Vec::new();
-    let mut offset = 0usize;
-    let mut total = 0u64;
-    while bytes.get(offset..offset + 4) == Some(&0x04034b50u32.to_le_bytes()) {
-        if entries.len() >= limits.max_entries || entries.len() >= u16::MAX as usize {
-            return Err(fail("ZIP entry limit exceeded"));
-        }
-        if word(bytes, offset + 8)? != 0 || word(bytes, offset + 6)? != 0x800 {
-            return Err(fail("unsupported ZIP encoding"));
-        }
-        let size = dword(bytes, offset + 22)? as usize;
-        if dword(bytes, offset + 18)? as usize != size || word(bytes, offset + 28)? != 0 {
-            return Err(fail("unsupported ZIP size or extra fields"));
-        }
-        total = total
-            .checked_add(size as u64)
-            .ok_or_else(|| fail("ZIP size overflow"))?;
-        if total > limits.max_content_bytes {
-            return Err(fail("ZIP content limit exceeded"));
-        }
-        let start = offset + 30;
-        let end = start
-            .checked_add(word(bytes, offset + 26)? as usize)
-            .ok_or_else(|| fail("ZIP size overflow"))?;
-        let next = end
-            .checked_add(size)
-            .ok_or_else(|| fail("ZIP size overflow"))?;
-        let path = std::str::from_utf8(
-            bytes
-                .get(start..end)
-                .ok_or_else(|| fail("truncated ZIP name"))?,
-        )
-        .map_err(|_| fail("invalid ZIP UTF-8"))?;
-        validate_archive_path(path)?;
-        let data = bytes
-            .get(end..next)
-            .ok_or_else(|| fail("truncated ZIP file"))?;
-        if crc32fast::hash(data) != dword(bytes, offset + 14)? {
-            return Err(fail("ZIP checksum mismatch"));
-        }
-        entries.push(ArchiveEntry {
-            path: path.into(),
-            bytes: data.to_vec(),
-        });
-        offset = next;
-    }
-    if write_reproducible_zip(&entries, limits)? != bytes {
-        return Err(fail("noncanonical or damaged ZIP directory"));
-    }
-    Ok(entries)
+    read_reproducible_zip_ref(bytes, limits).map(|entries| {
+        entries
+            .into_iter()
+            .map(|entry| ArchiveEntry {
+                path: entry.path.to_owned(),
+                bytes: entry.bytes.to_vec(),
+            })
+            .collect()
+    })
 }
-
 /// Portable library content, never containing finished prompt or pack products.
 #[derive(Clone, Debug, Default)]
 pub struct SopackPayload {
@@ -266,6 +132,121 @@ pub struct SopackPayload {
     pub sources: BTreeMap<SourceKey, Vec<u8>>,
     /// Public export name to module source identity.
     pub exports: BTreeMap<String, SourceKey>,
+}
+/// Immutable decoded library; identical asset digests share one byte allocation.
+#[derive(Clone, Debug, Default)]
+pub struct SharedSopackPayload {
+    /// Logical package name.
+    pub package_name: String,
+    /// Logical package version.
+    pub package_version: String,
+    /// Stable package metadata.
+    pub metadata: BTreeMap<String, String>,
+    /// Actual packaging root identity.
+    pub root_source: Option<SourceKey>,
+    /// Immutable compiled units shared by every consumer.
+    pub units: BTreeMap<SourceKey, Arc<RelocatableUnitIr>>,
+    /// Frozen immutable import closure.
+    pub imports: Vec<ImportBinding>,
+    /// Defining-source/path bindings to shared exact asset bytes.
+    pub assets: BTreeMap<(SourceKey, String), Arc<[u8]>>,
+    /// Exact diagnostic source bytes.
+    pub sources: BTreeMap<SourceKey, Arc<[u8]>>,
+    /// Public module exports.
+    pub exports: BTreeMap<String, SourceKey>,
+}
+/// Lightweight write view; identities may be copied, bodies and compiled arenas are borrowed.
+pub struct SopackPayloadRef<'a> {
+    /// Logical package name.
+    pub package_name: &'a str,
+    /// Logical package version.
+    pub package_version: &'a str,
+    /// Stable package metadata.
+    pub metadata: &'a BTreeMap<String, String>,
+    /// Actual packaging root identity.
+    pub root_source: Option<&'a SourceKey>,
+    /// Borrowed immutable compiled units.
+    pub units: BTreeMap<SourceKey, &'a RelocatableUnitIr>,
+    /// Frozen import closure; only identity metadata is owned.
+    pub imports: Vec<ImportBinding>,
+    /// Borrowed source-owned asset bytes.
+    pub assets: BTreeMap<(SourceKey, String), &'a [u8]>,
+    /// Borrowed exact diagnostic source bytes.
+    pub sources: BTreeMap<SourceKey, &'a [u8]>,
+    /// Public module exports.
+    pub exports: BTreeMap<String, SourceKey>,
+}
+impl Default for SopackPayloadRef<'_> {
+    fn default() -> Self {
+        static EMPTY: OnceLock<BTreeMap<String, String>> = OnceLock::new();
+        Self {
+            package_name: "",
+            package_version: "",
+            metadata: EMPTY.get_or_init(BTreeMap::new),
+            root_source: None,
+            units: BTreeMap::new(),
+            imports: Vec::new(),
+            assets: BTreeMap::new(),
+            sources: BTreeMap::new(),
+            exports: BTreeMap::new(),
+        }
+    }
+}
+impl SopackPayload {
+    /// Borrows all large bodies; conversion copies only path and binding metadata.
+    pub fn as_ref(&self) -> SopackPayloadRef<'_> {
+        SopackPayloadRef {
+            package_name: &self.package_name,
+            package_version: &self.package_version,
+            metadata: &self.metadata,
+            root_source: self.root_source.as_ref(),
+            units: self
+                .units
+                .iter()
+                .map(|(key, unit)| (key.clone(), unit))
+                .collect(),
+            imports: self.imports.clone(),
+            assets: self
+                .assets
+                .iter()
+                .map(|(key, bytes)| (key.clone(), bytes.as_slice()))
+                .collect(),
+            sources: self
+                .sources
+                .iter()
+                .map(|(key, bytes)| (key.clone(), bytes.as_slice()))
+                .collect(),
+            exports: self.exports.clone(),
+        }
+    }
+}
+impl SharedSopackPayload {
+    /// Borrows immutable arenas and bytes without expanding shared asset aliases.
+    pub fn as_ref(&self) -> SopackPayloadRef<'_> {
+        SopackPayloadRef {
+            package_name: &self.package_name,
+            package_version: &self.package_version,
+            metadata: &self.metadata,
+            root_source: self.root_source.as_ref(),
+            units: self
+                .units
+                .iter()
+                .map(|(key, unit)| (key.clone(), unit.as_ref()))
+                .collect(),
+            imports: self.imports.clone(),
+            assets: self
+                .assets
+                .iter()
+                .map(|(key, bytes)| (key.clone(), bytes.as_ref()))
+                .collect(),
+            sources: self
+                .sources
+                .iter()
+                .map(|(key, bytes)| (key.clone(), bytes.as_ref()))
+                .collect(),
+            exports: self.exports.clone(),
+        }
+    }
 }
 /// Stable content identity used in all imported source URIs.
 pub fn content_digest(bytes: &[u8]) -> String {
@@ -326,9 +307,23 @@ fn relocate(
     }
     Ok(())
 }
-/// Encodes a closed, immutable module library with normalized internal source identities.
+/// Compatibility writer; large bodies are borrowed rather than cloned into staging.
 pub fn write_sopack(
     payload: &SopackPayload,
+    limits: ArchiveLimits,
+) -> Result<Vec<u8>, ArchiveError> {
+    write_sopack_ref(&payload.as_ref(), limits)
+}
+/// Writes an immutable shared payload without expanding byte aliases.
+pub fn write_sopack_shared(
+    payload: &SharedSopackPayload,
+    limits: ArchiveLimits,
+) -> Result<Vec<u8>, ArchiveError> {
+    write_sopack_ref(&payload.as_ref(), limits)
+}
+/// Encodes a closed, immutable module library with normalized internal source identities.
+pub fn write_sopack_ref(
+    payload: &SopackPayloadRef<'_>,
     limits: ArchiveLimits,
 ) -> Result<Vec<u8>, ArchiveError> {
     validate_payload(payload)?;
@@ -344,7 +339,14 @@ pub fn write_sopack(
     {
         return Err(fail("SOPack expanded content limit exceeded"));
     }
-    let paths = portable_paths(payload)?;
+    let verified: BTreeMap<_, _> = payload
+        .units
+        .iter()
+        .map(|(key, unit)| VerifiedUnitEncoding::new(unit).map(|verified| (key.clone(), verified)))
+        .collect::<Result<_, _>>()
+        .map_err(|e| fail(e.to_string()))?;
+    let mut hash_cache = BTreeMap::new();
+    let paths = portable_paths(payload, &verified, &mut hash_cache)?;
     let map: BTreeMap<_, _> = paths
         .iter()
         .map(|(key, path)| {
@@ -362,24 +364,24 @@ pub fn write_sopack(
     };
     let mut manifest = Manifest {
         schema: 1,
-        package_name: payload.package_name.clone(),
-        package_version: payload.package_version.clone(),
-        metadata: payload.metadata.clone(),
-        root_path: payload.root_source.as_ref().map(path_of).transpose()?,
+        package_name: payload.package_name.to_owned(),
+        package_version: payload.package_version.to_owned(),
+        metadata: (*payload.metadata).clone(),
+        root_path: payload.root_source.map(path_of).transpose()?,
         sources: BTreeMap::new(),
         units: Vec::new(),
         imports: Vec::new(),
         assets: Vec::new(),
         exports: BTreeMap::new(),
     };
-    let mut entries = Vec::new();
+    let mut borrowed_entries: Vec<(String, &[u8])> = Vec::new();
+    let mut owned_entries: Vec<(String, Vec<u8>)> = Vec::new();
     for (key, bytes) in &payload.sources {
         let path = path_of(key)?;
-        manifest.sources.insert(path.clone(), content_digest(bytes));
-        entries.push(ArchiveEntry {
-            path: format!("sources/{path}"),
-            bytes: bytes.clone(),
-        });
+        manifest
+            .sources
+            .insert(path.clone(), cached_content_digest(bytes, &mut hash_cache));
+        borrowed_entries.push((format!("sources/{path}"), *bytes));
     }
     let bindings: BTreeMap<_, _> = payload
         .imports
@@ -395,22 +397,25 @@ pub fn write_sopack(
             return Err(fail("SOPack only contains keyed modules"));
         }
         let path = path_of(key)?;
-        let mut unit = unit.clone();
-        for import in &mut unit.header_mut().imports {
+        let mut imports = unit.header().imports.clone();
+        for import in &mut imports {
             let target = bindings
                 .get(&(key, import.local_id))
                 .ok_or_else(|| fail("SOPack import binding missing"))?;
             import.spec =
                 squish_ir::ImportSpec::RelativeUri(format!("sopack:{}", path_of(target)?));
         }
-        normalize_producer(&mut unit)?;
-        relocate(&mut unit, &map)?;
-        let bytes = encode_unit_container(&unit).map_err(|e| fail(e.to_string()))?;
+        let producer = canonical_producer();
+        let bytes = verified[key]
+            .encode(UnitEncodingOverrides {
+                imports: Some(&imports),
+                source_keys: Some(&map),
+                producer: Some(&producer),
+                ..Default::default()
+            })
+            .map_err(|e| fail(e.to_string()))?;
         manifest.units.push(path.clone());
-        entries.push(ArchiveEntry {
-            path: format!("units/{path}.xsir"),
-            bytes,
-        });
+        owned_entries.push((format!("units/{path}.xsir"), bytes));
     }
     manifest.units.sort();
     for binding in &payload.imports {
@@ -423,16 +428,13 @@ pub fn write_sopack(
     manifest.imports.sort();
     let mut asset_blobs = BTreeSet::new();
     for ((key, name), bytes) in &payload.assets {
-        let digest = content_digest(bytes);
+        let digest = cached_content_digest(bytes, &mut hash_cache);
         manifest
             .assets
             .push((path_of(key)?, name.clone(), digest.clone()));
         let path = format!("assets/{digest}");
         if asset_blobs.insert(path.clone()) {
-            entries.push(ArchiveEntry {
-                path,
-                bytes: bytes.clone(),
-            });
+            borrowed_entries.push((path, *bytes));
         }
     }
     manifest.assets.sort();
@@ -444,11 +446,17 @@ pub fn write_sopack(
     if manifest_bytes.len() > 8 * 1024 * 1024 {
         return Err(fail("SOPack manifest byte limit exceeded"));
     }
-    entries.push(ArchiveEntry {
-        path: "sopack.json".into(),
-        bytes: manifest_bytes,
-    });
-    write_reproducible_zip(&entries, limits)
+    owned_entries.push(("sopack.json".into(), manifest_bytes));
+    let entries: Vec<_> = borrowed_entries
+        .iter()
+        .map(|(path, bytes)| ArchiveEntryRef { path, bytes })
+        .chain(
+            owned_entries
+                .iter()
+                .map(|(path, bytes)| ArchiveEntryRef { path, bytes }),
+        )
+        .collect();
+    write_reproducible_zip_ref(&entries, limits)
 }
 fn validate_manifest(manifest: &Manifest) -> Result<(), ArchiveError> {
     if manifest.schema != 1
@@ -495,12 +503,53 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), ArchiveError> {
     }
     Ok(())
 }
-/// Decodes a library and relocates every source identity into its content-addressed namespace.
+/// Compatibility reader that explicitly materializes owned bodies from shared storage.
 pub fn read_sopack(bytes: &[u8], limits: ArchiveLimits) -> Result<SopackPayload, ArchiveError> {
-    let entries = read_reproducible_zip(bytes, limits)?;
+    let payload = read_sopack_shared(bytes, limits)?;
+    Ok(SopackPayload {
+        package_name: payload.package_name,
+        package_version: payload.package_version,
+        metadata: payload.metadata,
+        root_source: payload.root_source,
+        imports: payload.imports,
+        exports: payload.exports,
+        units: payload
+            .units
+            .into_iter()
+            .map(|(key, unit)| {
+                (
+                    key,
+                    Arc::try_unwrap(unit).unwrap_or_else(|unit| (*unit).clone()),
+                )
+            })
+            .collect(),
+        sources: payload
+            .sources
+            .into_iter()
+            .map(|(key, bytes)| (key, bytes.to_vec()))
+            .collect(),
+        assets: payload
+            .assets
+            .into_iter()
+            .map(|(key, bytes)| (key, bytes.to_vec()))
+            .collect(),
+    })
+}
+fn cached_content_digest(bytes: &[u8], cache: &mut BTreeMap<(usize, usize), String>) -> String {
+    cache
+        .entry((bytes.as_ptr() as usize, bytes.len()))
+        .or_insert_with(|| content_digest(bytes))
+        .clone()
+}
+/// Decodes a library and relocates every source identity into its content-addressed namespace.
+pub fn read_sopack_shared(
+    bytes: &[u8],
+    limits: ArchiveLimits,
+) -> Result<SharedSopackPayload, ArchiveError> {
+    let entries = read_reproducible_zip_ref(bytes, limits)?;
     let mut files: BTreeMap<_, _> = entries
         .into_iter()
-        .map(|entry| (entry.path, entry.bytes))
+        .map(|entry| (entry.path.to_owned(), entry.bytes))
         .collect();
     let manifest_bytes = files
         .remove("sopack.json")
@@ -515,7 +564,7 @@ pub fn read_sopack(bytes: &[u8], limits: ArchiveLimits) -> Result<SopackPayload,
         return Err(fail("noncanonical SOPack manifest"));
     }
     let digest = content_digest(bytes);
-    let mut payload = SopackPayload {
+    let mut payload = SharedSopackPayload {
         package_name: manifest.package_name.clone(),
         package_version: manifest.package_version.clone(),
         metadata: manifest.metadata.clone(),
@@ -539,7 +588,7 @@ pub fn read_sopack(bytes: &[u8], limits: ArchiveLimits) -> Result<SopackPayload,
             source_key("internal", path, &payload.package_name),
             key.clone(),
         );
-        payload.sources.insert(key, source);
+        payload.sources.insert(key, Arc::from(source));
     }
     for path in &manifest.units {
         let bytes = files
@@ -554,7 +603,9 @@ pub fn read_sopack(bytes: &[u8], limits: ArchiveLimits) -> Result<SopackPayload,
             return Err(fail("invalid SOPack module identity"));
         }
         relocate(&mut unit, &relocation)?;
-        payload.units.insert(unit.header().source.clone(), unit);
+        payload
+            .units
+            .insert(unit.header().source.clone(), Arc::new(unit));
     }
     for (from, slot, to) in &manifest.imports {
         payload.imports.push(ImportBinding {
@@ -571,11 +622,12 @@ pub fn read_sopack(bytes: &[u8], limits: ArchiveLimits) -> Result<SopackPayload,
     if manifest.assets.len() > limits.max_entries || manifest.imports.len() > limits.max_entries {
         return Err(fail("SOPack binding limit exceeded"));
     }
+    let mut shared_assets: BTreeMap<String, Arc<[u8]>> = BTreeMap::new();
     for (source, name, asset_digest) in &manifest.assets {
         let bytes = files
             .get(&format!("assets/{asset_digest}"))
             .ok_or_else(|| fail("SOPack asset missing"))?;
-        if content_digest(bytes) != *asset_digest {
+        if !shared_assets.contains_key(asset_digest) && content_digest(bytes) != *asset_digest {
             return Err(fail("SOPack asset digest mismatch"));
         }
         expanded_bytes = expanded_bytes
@@ -589,7 +641,10 @@ pub fn read_sopack(bytes: &[u8], limits: ArchiveLimits) -> Result<SopackPayload,
                 source_key(&digest, source, &payload.package_name),
                 name.clone(),
             ),
-            bytes.clone(),
+            shared_assets
+                .entry(asset_digest.clone())
+                .or_insert_with(|| Arc::from(*bytes))
+                .clone(),
         );
     }
     // Remove shared asset blobs only after every owner has been restored.
@@ -606,12 +661,12 @@ pub fn read_sopack(bytes: &[u8], limits: ArchiveLimits) -> Result<SopackPayload,
             "SOPack contains undeclared content or finished products",
         ));
     }
-    validate_payload(&payload)?;
+    validate_payload(&payload.as_ref())?;
     Ok(payload)
 }
 
 /// Verifies closure completeness and exact diagnostic source attachments.
-fn validate_payload(payload: &SopackPayload) -> Result<(), ArchiveError> {
+fn validate_payload(payload: &SopackPayloadRef<'_>) -> Result<(), ArchiveError> {
     let mut bindings = BTreeMap::new();
     for binding in &payload.imports {
         if !payload.units.contains_key(&binding.importer)
@@ -899,6 +954,84 @@ mod sopack_tests {
         );
     }
     #[test]
+    fn shared_assets_alias_one_allocation_without_weakening_expanded_limits() {
+        let mut payload = fixture("workspace");
+        let owner = payload.units.keys().next().unwrap().clone();
+        payload
+            .assets
+            .insert((owner.clone(), "first.bin".into()), vec![7; 64 * 1024]);
+        payload
+            .assets
+            .insert((owner, "second.bin".into()), vec![7; 64 * 1024]);
+        let encoded = write_sopack(&payload, ArchiveLimits::default()).unwrap();
+        let shared = read_sopack_shared(&encoded, ArchiveLimits::default()).unwrap();
+        let mut assets = shared.assets.values();
+        assert!(Arc::ptr_eq(assets.next().unwrap(), assets.next().unwrap()));
+        assert_eq!(
+            write_sopack_shared(&shared, ArchiveLimits::default()).unwrap(),
+            encoded
+        );
+        let physical = read_reproducible_zip_ref(&encoded, ArchiveLimits::default())
+            .unwrap()
+            .iter()
+            .map(|entry| entry.bytes.len() as u64)
+            .sum();
+        let tight = ArchiveLimits {
+            max_content_bytes: physical,
+            ..ArchiveLimits::default()
+        };
+        assert!(read_reproducible_zip_ref(&encoded, tight).is_ok());
+        assert!(read_sopack_shared(&encoded, tight).is_err());
+    }
+    #[test]
+    fn borrowed_writer_does_not_modify_input_ir_or_source_identities() {
+        let payload = fixture("workspace");
+        let original = payload.units.values().next().unwrap().clone();
+        let view = payload.as_ref();
+        let bytes = write_sopack_ref(&view, ArchiveLimits::default()).unwrap();
+        assert_eq!(payload.units.values().next().unwrap(), &original);
+        assert_eq!(
+            bytes,
+            write_sopack(&payload, ArchiveLimits::default()).unwrap()
+        );
+    }
+    #[test]
+    fn explicit_root_anchors_equal_content_provider_cycle() {
+        let mut payload = fixture("root-device");
+        let mut provider = fixture("provider-device");
+        let root = payload.units.keys().next().unwrap().clone();
+        let foreign = provider.units.keys().next().unwrap().clone();
+        payload.root_source = Some(root.clone());
+        payload.sources.extend(provider.sources);
+        payload.units.append(&mut provider.units);
+        for (from, to) in [(root.clone(), foreign.clone()), (foreign, root)] {
+            payload
+                .units
+                .get_mut(&from)
+                .unwrap()
+                .header_mut()
+                .imports
+                .push(ImportDecl {
+                    local_id: ImportId(0),
+                    spec: ImportSpec::RelativeUri("library.xml".into()),
+                    expected_kind: UnitKind::Module,
+                });
+            payload.imports.push(ImportBinding {
+                importer: from,
+                import: ImportId(0),
+                target: to,
+            });
+        }
+        let encoded = write_sopack(&payload, ArchiveLimits::default()).unwrap();
+        assert_eq!(
+            read_sopack_shared(&encoded, ArchiveLimits::default())
+                .unwrap()
+                .units
+                .len(),
+            2
+        );
+    }
+    #[test]
     fn source_checksum_mismatch_rejected() {
         let mut payload = fixture("workspace");
         payload.sources.values_mut().next().unwrap().push(0);
@@ -1070,15 +1203,19 @@ fn hash_field(hash: &mut blake3::Hasher, bytes: &[u8]) {
     hash.update(bytes);
 }
 /// Fingerprints frozen provider content and graph without physical checkout paths.
-/// G graph-color rounds cover every simple provider path, including cyclic closures.
-fn portable_paths(payload: &SopackPayload) -> Result<BTreeMap<SourceKey, String>, ArchiveError> {
+/// SCC condensation fingerprints each acyclic component once and preserves cyclic topology.
+fn portable_paths(
+    payload: &SopackPayloadRef<'_>,
+    verified: &BTreeMap<SourceKey, VerifiedUnitEncoding<'_>>,
+    hash_cache: &mut BTreeMap<(usize, usize), String>,
+) -> Result<BTreeMap<SourceKey, String>, ArchiveError> {
     let mut groups: BTreeMap<SourceGroup, Vec<&SourceKey>> = BTreeMap::new();
     let mut logical = BTreeMap::new();
     for key in payload.sources.keys() {
         logical.insert(key.clone(), logical_source_path(key)?);
         groups.entry(source_group(key)).or_default().push(key);
     }
-    let explicit = payload.root_source.as_ref();
+    let explicit = payload.root_source;
     if explicit.is_some_and(|key| !payload.units.contains_key(key)) {
         return Err(fail("SOPack packaging root is missing"));
     }
@@ -1114,6 +1251,13 @@ fn portable_paths(payload: &SopackPayload) -> Result<BTreeMap<SourceKey, String>
             "SOPack root_source is required for multiple providers",
         ));
     };
+    if groups.len() == 1 {
+        let names: BTreeSet<_> = logical.values().collect();
+        if names.len() != logical.len() {
+            return Err(fail("duplicate path inside SOPack provider"));
+        }
+        return Ok(logical);
+    }
     let normalized: BTreeMap<_, _> = logical
         .iter()
         .map(|(key, path)| (key.clone(), source_key("provider-seed", path, "seed")))
@@ -1123,15 +1267,19 @@ fn portable_paths(payload: &SopackPayload) -> Result<BTreeMap<SourceKey, String>
         .iter()
         .map(|b| ((&b.importer, b.import), &b.target))
         .collect();
-    let mut owned_assets: BTreeMap<&SourceKey, Vec<(&String, &Vec<u8>)>> = BTreeMap::new();
+    let mut owned_assets: BTreeMap<&SourceKey, Vec<(&String, &[u8])>> = BTreeMap::new();
     for ((owner, name), bytes) in &payload.assets {
-        owned_assets.entry(owner).or_default().push((name, bytes));
+        owned_assets.entry(owner).or_default().push((name, *bytes));
     }
     let mut base = BTreeMap::new();
     for (group, keys) in &mut groups {
         keys.sort_by(|a, b| logical[*a].cmp(&logical[*b]));
         let mut hash = blake3::Hasher::new();
-        hash_field(&mut hash, b"sopack-provider-v2");
+        hash_field(&mut hash, b"sopack-provider-seed-v3");
+        hash_field(
+            &mut hash,
+            if *group == root { b"root" } else { b"provider" },
+        );
         if let SourceGroup::Project(package) = group {
             hash_field(&mut hash, &package.source_kind.to_le_bytes());
             hash_field(&mut hash, package.package_name.as_bytes());
@@ -1144,26 +1292,36 @@ fn portable_paths(payload: &SopackPayload) -> Result<BTreeMap<SourceKey, String>
                 return Err(fail("duplicate path inside SOPack provider"));
             }
             hash_field(&mut hash, path.as_bytes());
-            hash_field(&mut hash, &payload.sources[*key]);
+            hash_field(
+                &mut hash,
+                cached_content_digest(payload.sources[*key], hash_cache).as_bytes(),
+            );
             if let Some(unit) = payload.units.get(*key) {
-                let mut unit = unit.clone();
-                for import in &mut unit.header_mut().imports {
+                let mut imports = unit.header().imports.clone();
+                for import in &mut imports {
                     let target = bindings
                         .get(&(*key, import.local_id))
                         .ok_or_else(|| fail("SOPack import binding missing"))?;
                     import.spec =
                         squish_ir::ImportSpec::RelativeUri(format!("sopack:{}", logical[*target]));
                 }
-                normalize_producer(&mut unit)?;
-                relocate(&mut unit, &normalized)?;
-                hash_field(
-                    &mut hash,
-                    &encode_unit_container(&unit).map_err(|e| fail(e.to_string()))?,
-                );
+                let producer = canonical_producer();
+                let semantic = verified[*key]
+                    .semantic_digest(UnitEncodingOverrides {
+                        imports: Some(&imports),
+                        source_keys: Some(&normalized),
+                        producer: Some(&producer),
+                        ..Default::default()
+                    })
+                    .map_err(|e| fail(e.to_string()))?;
+                hash_field(&mut hash, &semantic.0.bytes);
             }
             for (name, bytes) in owned_assets.get(*key).into_iter().flatten() {
                 hash_field(&mut hash, name.as_bytes());
-                hash_field(&mut hash, bytes);
+                hash_field(
+                    &mut hash,
+                    cached_content_digest(bytes, hash_cache).as_bytes(),
+                );
             }
         }
         base.insert(group.clone(), hash.finalize().to_hex().to_string());
@@ -1180,29 +1338,43 @@ fn portable_paths(payload: &SopackPayload) -> Result<BTreeMap<SourceKey, String>
                 logical[&binding.target].clone(),
             ));
     }
-    let mut colors = base.clone();
-    for _ in 0..groups.len() {
-        let mut next = BTreeMap::new();
-        for (group, seed) in &base {
-            let mut hash = blake3::Hasher::new();
-            hash_field(&mut hash, seed.as_bytes());
-            let mut ordered: Vec<_> = edges
+    let ids: BTreeMap<_, _> = base
+        .keys()
+        .enumerate()
+        .map(|(id, key)| (key.clone(), id))
+        .collect();
+    let nodes: Vec<_> = base
+        .iter()
+        .map(|(group, seed)| {
+            let mut graph_edges: Vec<_> = edges
                 .get(group)
                 .into_iter()
                 .flatten()
-                .map(|(from, slot, target, path)| (from, *slot, &colors[target], path))
+                .map(|(from, slot, target, path)| {
+                    let mut label = Vec::new();
+                    label.extend_from_slice(&(from.len() as u64).to_le_bytes());
+                    label.extend_from_slice(from.as_bytes());
+                    label.extend_from_slice(&slot.to_le_bytes());
+                    label.extend_from_slice(&(path.len() as u64).to_le_bytes());
+                    label.extend_from_slice(path.as_bytes());
+                    provider_graph::ProviderEdge {
+                        label,
+                        target: ids[target],
+                    }
+                })
                 .collect();
-            ordered.sort();
-            for (from, slot, target, path) in ordered {
-                hash_field(&mut hash, from.as_bytes());
-                hash_field(&mut hash, &slot.to_le_bytes());
-                hash_field(&mut hash, target.as_bytes());
-                hash_field(&mut hash, path.as_bytes());
+            graph_edges.sort_by(|a, b| a.label.cmp(&b.label));
+            provider_graph::ProviderNode {
+                seed: seed.clone(),
+                edges: graph_edges,
             }
-            next.insert(group.clone(), hash.finalize().to_hex().to_string());
-        }
-        colors = next;
-    }
+        })
+        .collect();
+    let fingerprints = provider_graph::fingerprints(&nodes)?;
+    let colors: BTreeMap<_, _> = ids
+        .into_iter()
+        .map(|(group, id)| (group, fingerprints[id].clone()))
+        .collect();
     let mut paths = BTreeMap::new();
     let mut unique = BTreeSet::new();
     for (key, path) in logical {
@@ -1221,14 +1393,10 @@ fn portable_paths(payload: &SopackPayload) -> Result<BTreeMap<SourceKey, String>
     }
     Ok(paths)
 }
-/// Removes non-semantic producer machine information before hashing or encoding.
-fn normalize_producer(unit: &mut RelocatableUnitIr) -> Result<(), ArchiveError> {
-    let module = match unit {
-        RelocatableUnitIr::Module(module) => module,
-        RelocatableUnitIr::Sopack(root) => &mut root.module,
-        _ => return Err(fail("invalid SOPack unit kind")),
-    };
-    module.producer.tool_version = "xmlsquish/1.2.0".into();
-    module.producer.build_fingerprint = "sopack-v1".into();
-    Ok(())
+/// Fixed producer metadata keeps machine-specific fingerprints out of library identities.
+fn canonical_producer() -> squish_ir::Producer {
+    squish_ir::Producer {
+        tool_version: "xmlsquish/1.2.0".into(),
+        build_fingerprint: "sopack-v1".into(),
+    }
 }

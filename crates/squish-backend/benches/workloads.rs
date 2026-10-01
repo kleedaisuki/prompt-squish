@@ -1,9 +1,13 @@
 //! Production public API probes with orthogonal payload, metadata and graph axes.
 
+#[path = "../../../scripts/perf/archive_oracle.rs"]
+mod archive_oracle;
+
 use crate::support;
 use squish_backend::archive::{
-    ArchiveEntry, ArchiveLimits, SopackPayload, read_reproducible_zip, read_sopack,
-    write_reproducible_zip, write_sopack,
+    ArchiveEntry, ArchiveEntryRef, ArchiveLimits, SopackPayload, read_reproducible_zip,
+    read_reproducible_zip_ref, read_sopack, read_sopack_shared, write_reproducible_zip,
+    write_reproducible_zip_ref, write_sopack, write_sopack_ref, write_sopack_shared,
 };
 use squish_ir::*;
 use std::{collections::BTreeMap, hint::black_box};
@@ -86,6 +90,9 @@ pub fn run(mode: Mode) {
             sopack_case(mode, topology.name(), &library(128, groups, topology), 0);
         }
     }
+    for size in [64, 128, 512] {
+        uniform_seed_ring_case(mode, size);
+    }
     for (workload, topology) in [
         ("provider_tail_512_isolated", Topology::Isolated),
         ("provider_tail_512_cycle", Topology::Cycle),
@@ -106,7 +113,7 @@ fn zip_entries(members: usize, bytes: usize) -> Vec<ArchiveEntry> {
         .collect()
 }
 
-/// Reader includes its canonical writer rebuild; the writer is a cost control, not subtraction.
+/// Borrowed reader validates records directly; owned reads remain an explicit compatibility control.
 fn zip_case(mode: Mode, workload: &str, members: usize, bytes: usize) {
     let limits = ArchiveLimits::default();
     let entries = zip_entries(members, bytes);
@@ -129,6 +136,20 @@ fn zip_case(mode: Mode, workload: &str, members: usize, bytes: usize) {
             entries.iter().map(|entry| entry.path.len() as u64).sum(),
         ),
     ];
+    archive_oracle::zip(workload, &dimensions, &encoded, &decoded);
+    let refs: Vec<_> = entries
+        .iter()
+        .map(|entry| ArchiveEntryRef {
+            path: &entry.path,
+            bytes: &entry.bytes,
+        })
+        .collect();
+    mode.measure(workload, "zip_write_direct_borrowed", &dimensions, || {
+        write_reproducible_zip_ref(black_box(&refs), limits).unwrap()
+    });
+    mode.measure(workload, "zip_read_direct_borrowed", &dimensions, || {
+        read_reproducible_zip_ref(black_box(&encoded), limits).unwrap()
+    });
     mode.measure(workload, "zip_write_borrowed_entries", &dimensions, || {
         write_reproducible_zip(black_box(&entries), limits).unwrap()
     });
@@ -328,9 +349,11 @@ fn sopack_case(mode: Mode, workload: &str, payload: &SopackPayload, unique_asset
                     && bytes == restored_bytes)
         );
     }
-    // Group collapse on read changes namespace ownership: write(read(x)) need not be x
-    // for multi-provider libraries, so reproducibility checks use identical producer IR.
+    // Loaded provider spelling is immutable, including namespaces from earlier algorithms.
     assert_eq!(write_sopack(payload, limits).unwrap(), encoded);
+    let shared = read_sopack_shared(&encoded, limits).unwrap();
+    assert_eq!(write_sopack_shared(&shared, limits).unwrap(), encoded);
+    let view = payload.as_ref();
     let groups = payload
         .units
         .keys()
@@ -343,7 +366,7 @@ fn sopack_case(mode: Mode, workload: &str, payload: &SopackPayload, unique_asset
     let dimensions = [
         ("units", payload.units.len() as u64),
         ("providers", groups as u64),
-        ("graph_rounds", groups as u64),
+        ("whole_graph_rounds", 0),
         ("import_edges", payload.imports.len() as u64),
         (
             "source_bytes",
@@ -372,9 +395,24 @@ fn sopack_case(mode: Mode, workload: &str, payload: &SopackPayload, unique_asset
                 .sum(),
         ),
         ("archive_bytes", encoded.len() as u64),
-        ("group_round_visits", (groups * groups) as u64),
-        ("edge_round_visits", (groups * payload.imports.len()) as u64),
+        ("provider_nodes", groups as u64),
     ];
+    archive_oracle::sopack(workload, &dimensions, &restored);
+    mode.measure(
+        workload,
+        "sopack_write_borrowed_producer_graph",
+        &dimensions,
+        || write_sopack_ref(black_box(&view), limits).unwrap(),
+    );
+    mode.measure(workload, "sopack_read_shared_relocate", &dimensions, || {
+        read_sopack_shared(black_box(&encoded), limits).unwrap()
+    });
+    mode.measure(
+        workload,
+        "sopack_payload_shared_handle_clone",
+        &dimensions,
+        || black_box(&shared).clone(),
+    );
     mode.measure(
         workload,
         "sopack_write_normalize_and_transport",
@@ -390,4 +428,60 @@ fn sopack_case(mode: Mode, workload: &str, payload: &SopackPayload, unique_asset
     mode.measure(workload, "sopack_payload_deep_clone", &dimensions, || {
         black_box(payload).clone()
     });
+}
+
+/// Candidate-only adversarial tied seeds; old producer rejected this multi-provider closure.
+fn uniform_seed_ring_case(mode: Mode, units: usize) {
+    let keys: Vec<_> = (0..units)
+        .map(|index| SourceKey::Project {
+            package: PackageInstanceId {
+                source_kind: 4,
+                canonical_source: format!("uniform/group-{index}"),
+                package_name: "same-provider".into(),
+                exact_revision: "1.0.0".into(),
+            },
+            path: vec!["same.xml".into()],
+        })
+        .collect();
+    let mut payload = SopackPayload {
+        package_name: "uniform-ring".into(),
+        package_version: "1.0.0".into(),
+        root_source: Some(keys[0].clone()),
+        exports: BTreeMap::from([("main".into(), keys[0].clone())]),
+        ..Default::default()
+    };
+    for (index, key) in keys.iter().enumerate() {
+        let bytes = vec![b' '; 64];
+        let mut unit = module(key, &bytes);
+        unit.header_mut().imports.push(ImportDecl {
+            local_id: ImportId(0),
+            spec: ImportSpec::RelativeUri("same.xml".into()),
+            expected_kind: UnitKind::Module,
+        });
+        payload.imports.push(ImportBinding {
+            importer: key.clone(),
+            import: ImportId(0),
+            target: keys[(index + 1) % units].clone(),
+        });
+        payload.units.insert(key.clone(), unit);
+        payload.sources.insert(key.clone(), bytes);
+    }
+    let view = payload.as_ref();
+    let limits = ArchiveLimits::default();
+    let encoded = write_sopack_ref(&view, limits).unwrap();
+    let read = read_sopack_shared(&encoded, limits).unwrap();
+    assert_eq!(read.units.len(), units);
+    assert_eq!(read.imports.len(), units);
+    let dimensions = [
+        ("units", units as u64),
+        ("providers", units as u64),
+        ("import_edges", units as u64),
+        ("source_bytes", (units * 64) as u64),
+    ];
+    mode.measure(
+        "provider_uniform_seed_root_ring",
+        "sopack_write_borrowed_producer_graph",
+        &dimensions,
+        || write_sopack_ref(black_box(&view), limits).unwrap(),
+    );
 }
