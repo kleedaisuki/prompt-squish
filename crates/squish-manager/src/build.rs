@@ -2,31 +2,36 @@
 
 #[path = "archive_build.rs"]
 mod archive_build;
+#[path = "archive_reachability.rs"]
+mod archive_reachability;
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     path::{Component, Path},
     sync::{Arc, Mutex},
 };
 
-use squish_backend::{BackendCacheIdentity, BackendOutput, BackendRequest, SquishOptions};
+use squish_backend::{BackendCacheIdentity, SquishOptions};
 use squish_build::{
     Action, ActionEvent, ActionKind, ActionRecord, ActionResult, ArtifactDescriptor, ArtifactRead,
     BuildPlan, CommittedGeneration, Dispatch, GenerationArtifact, GenerationId, GenerationRef,
     InputRef, KeyRecipe, LogicalArtifactName, Output, OutputName, OutputRef, ProducedOutput,
     Publication, PublicationPath, PublicationTargetId, ResourceClass, Resources, ResultSource,
+    VerifiedAction, VerifiedBlob,
 };
 use squish_ir::{
     ArtifactDigest, ArtifactIdentity, BundledSourceBlob, DebugBundle, DebugDigest, DocumentDigest,
     EntityKind, ImportBinding, ImportSpec, LinkImportRecord, LinkTrace, LinkedImageDigest,
     ObjectDigest, OriginId, QualifiedOriginRef, RelocatableUnitIr, ResolutionSnapshot,
-    SourceArchiveReference, SourceKey, UnitKind, UnitRevision, decode_container,
+    SourceArchiveReference, SourceKey, UnitKind, UnitRevision, ValidatedUnit,
     decode_expansion_trace, decode_linked_document, decode_linked_image, decode_static_link_map,
     decode_unit_container, encode_debug_bundle, encode_expansion_trace, encode_link_trace,
     encode_linked_document, encode_linked_image, encode_static_link_map, encode_unit_container,
 };
-use squish_link::{Budgets, InstantiateOutput, LinkKeyProjection, LinkOutput, UnitClosure};
+use squish_link::{
+    Budgets, InstantiateOutput, LinkKeyProjection, LinkOutput, PreparedUnit, PreparedUnitClosure,
+};
 use squish_project::{
     Lockfile, Manifest, MutationFile, MutationKind, MutationPlanner, ResolutionMode, TransactionId,
 };
@@ -41,7 +46,7 @@ use squish_source::{FileSourceProvider, LogicalPath, SnapshotBuilder, SourceBlob
 use squish_xml_front::FrontendSourceContext;
 
 use crate::{
-    BuildRuntime, BuildRuntimeDescriptor, BuildRuntimeError, BuildRuntimeErrorKind,
+    AcquiredSopack, BuildRuntime, BuildRuntimeDescriptor, BuildRuntimeError, BuildRuntimeErrorKind,
     DurabilityPorts, Effect, GenerationSpace, InvocationSettings, ManagerError, PlannedWork,
     PreparedPlan, ResolveRequest, Services,
     orchestrator::{
@@ -572,15 +577,15 @@ fn verify_catalog_blob(
     subject: &str,
 ) -> Result<Vec<u8>, BuildCatalogError> {
     let stored = runtime
-        .read_blob(digest)
+        .read_verified(digest)
         .map_err(runtime_catalog_error)?
         .ok_or_else(|| BuildCatalogError::Corrupt(format!("{subject} is absent from CAS")))?;
-    if stored.len() as u64 != size || protocol_blake3(&stored) != *digest {
+    if stored.bytes().len() as u64 != size || stored.digest() != digest {
         Err(BuildCatalogError::Corrupt(format!(
             "{subject} differs from its catalog identity"
         )))
     } else {
-        Ok(stored)
+        Ok(stored.bytes().to_vec())
     }
 }
 
@@ -1089,6 +1094,7 @@ pub struct PreparedBuild {
     repository: ProjectRepository,
     snapshot: ProjectSnapshot,
     sources: Vec<FrozenSource>,
+    source_indices: BTreeMap<SourceKey, usize>,
     targets: Vec<TargetBuild>,
     emit: Vec<EmitKind>,
     locations: Vec<squish_repository::PackageLocation>,
@@ -1110,11 +1116,15 @@ struct FrozenSource {
     blob: Arc<SourceBlob>,
     package: squish_ir::PackageInstanceId,
     /// Imported archives preserve their relocated identity and immutable compiled object.
-    precompiled: Option<RelocatableUnitIr>,
+    precompiled: Option<Arc<RelocatableUnitIr>>,
+    /// Cached once after archive reachability; recipe/execution share exact relocated object bytes.
+    precompiled_blob: Option<VerifiedBlob>,
+    /// IR-owned proof binds relocated arenas to actual canonical identities without caller labels.
+    precompiled_validated: Option<ValidatedUnit>,
     /// Frozen resource bytes are explicit action inputs, never worker filesystem reads.
-    assets: BTreeMap<String, Vec<u8>>,
+    assets: BTreeMap<String, Arc<[u8]>>,
     /// Archive-local resolved imports are immutable and source-neutral to the linker.
-    archive: Option<Arc<squish_backend::archive::SopackPayload>>,
+    archive: Option<Arc<squish_backend::archive::SharedSopackPayload>>,
 }
 
 struct TargetBuild {
@@ -1127,8 +1137,10 @@ struct TargetBuild {
 
 #[derive(Clone)]
 struct CompiledUnit {
-    unit: RelocatableUnitIr,
-    bytes: Vec<u8>,
+    unit: Arc<RelocatableUnitIr>,
+    /// Validated immutable specialization reused by every independently bound target/include.
+    prepared: PreparedUnit,
+    bytes: VerifiedBlob,
     object: ObjectDigest,
     semantic: squish_ir::SemanticUnitDigest,
     debug: DebugDigest,
@@ -1136,8 +1148,10 @@ struct CompiledUnit {
 
 #[derive(Clone)]
 struct BackendStage {
-    output: BackendOutput,
-    debug: Vec<u8>,
+    /// Only immutable publication bytes survive emission; provenance was sealed in debug.
+    product: VerifiedBlob,
+    debug: VerifiedBlob,
+    kind: ArtifactKind,
 }
 
 /// 完成 resolve、权威 repository snapshot 与一次性 source sealing，并生成封闭执行图。
@@ -1214,7 +1228,7 @@ fn prepare_excluding(
     let snapshot = repository
         .snapshot_with_locations(&resolved.packages)
         .map_err(|e| error("MGB004", Phase::Discover, e))?;
-    let sources = freeze_sources(&snapshot, &resolved.packages)?;
+    let sources = freeze_sources(&snapshot, &resolved.packages, &resolved.sopacks)?;
     let targets = select_targets(request, &snapshot, &sources, excluded, &resolved.packages)?;
     let backend_identities = freeze_backend_identities(&targets, runtime.as_ref())?;
     let plan = build_plan(
@@ -1229,6 +1243,11 @@ fn prepare_excluding(
         plan,
         repository,
         snapshot,
+        source_indices: sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| (source_key(source), index))
+            .collect(),
         sources,
         targets,
         emit: request.emit.clone(),
@@ -1352,7 +1371,7 @@ fn prepare_recorded(
     )?;
     let (sources, targets) = planning.step(step("scan"), PlanningStepKind::Scan, || {
         planning_not_cancelled(context)?;
-        let sources = freeze_sources(&snapshot, &resolved.packages)?;
+        let sources = freeze_sources(&snapshot, &resolved.packages, &resolved.sopacks)?;
         let targets = select_targets(request, &snapshot, &sources, excluded, &resolved.packages)?;
         Ok((sources, targets))
     })?;
@@ -1377,6 +1396,11 @@ fn prepare_recorded(
         plan,
         repository,
         snapshot,
+        source_indices: sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| (source_key(source), index))
+            .collect(),
         sources,
         targets,
         emit: request.emit.clone(),
@@ -1566,14 +1590,67 @@ struct BuildExecutor {
     state: Mutex<BuildExecutionState>,
 }
 
+/// All companion evidence participates in alias identity; equal documents can have different assets.
+type InstantiationIdentity = (
+    squish_protocol::Digest,
+    squish_protocol::Digest,
+    Option<squish_protocol::Digest>,
+);
+
 #[derive(Default)]
 struct BuildExecutionState {
-    compiled: BTreeMap<SourceKey, CompiledUnit>,
-    linked: BTreeMap<String, (LinkOutput, ResolutionSnapshot)>,
-    instantiated: BTreeMap<String, (squish_ir::LinkedDocumentIr, InstantiateOutput)>,
-    backend: BTreeMap<String, BackendStage>,
+    compiled: BTreeMap<SourceKey, Arc<CompiledUnit>>,
+    linked: BTreeMap<String, (Arc<LinkOutput>, Arc<ResolutionSnapshot>)>,
+    /// Encoded maps are sealed once and shared with publication, including aliases.
+    link_maps: BTreeMap<String, VerifiedBlob>,
+    link_maps_by_digest: HashMap<squish_protocol::Digest, VerifiedBlob>,
+    instantiated: BTreeMap<String, Arc<InstantiateOutput>>,
+    backend: BTreeMap<String, Arc<BackendStage>>,
+    /// Content aliases resolve without serializing or hashing existing stage payloads.
+    linked_by_digest: HashMap<squish_protocol::Digest, (Arc<LinkOutput>, Arc<ResolutionSnapshot>)>,
+    instantiated_by_digest: HashMap<InstantiationIdentity, Arc<InstantiateOutput>>,
+    backend_by_digest: HashMap<(squish_protocol::Digest, squish_protocol::Digest), String>,
     published: Vec<PublishedTarget>,
     generations: Vec<RecordedGeneration>,
+}
+
+impl BuildExecutionState {
+    /// Record both stable target identity and exact verified image identity atomically.
+    fn insert_linked(
+        &mut self,
+        target: String,
+        digest: squish_protocol::Digest,
+        linked: Arc<LinkOutput>,
+        resolution: Arc<ResolutionSnapshot>,
+        map: VerifiedBlob,
+    ) {
+        self.link_maps_by_digest.insert(digest.clone(), map.clone());
+        self.link_maps.insert(target.clone(), map);
+        self.linked_by_digest
+            .insert(digest, (Arc::clone(&linked), Arc::clone(&resolution)));
+        self.linked.insert(target, (linked, resolution));
+    }
+
+    /// Register a normalized document once; consumers clone only the immutable handle.
+    fn insert_instantiated(
+        &mut self,
+        target: String,
+        digest: InstantiationIdentity,
+        output: Arc<InstantiateOutput>,
+    ) {
+        self.instantiated_by_digest
+            .insert(digest, Arc::clone(&output));
+        self.instantiated.insert(target, output);
+    }
+
+    /// Index the complete product/debug pair without rehashing publication bytes.
+    fn insert_backend(&mut self, target: String, stage: BackendStage) {
+        self.backend_by_digest.insert(
+            (stage.product.digest().clone(), stage.debug.digest().clone()),
+            target.clone(),
+        );
+        self.backend.insert(target, Arc::new(stage));
+    }
 }
 
 impl BuildExecutor {
@@ -1636,13 +1713,14 @@ impl BuildExecutor {
         };
         let bytes = encode_build_record(&record)
             .map_err(|error| ManagerError::new("MGB121", Phase::Publish, error.to_string()))?;
-        let digest = self.store_blob(&bytes, "MGB122", Phase::Cache)?;
+        let bytes = VerifiedBlob::from_owned(bytes);
+        let digest = self.store_verified(&bytes, "MGB122", Phase::Cache)?;
         let publication = Publication {
             output: ProducedOutput {
                 name: output_name("build-record-v3"),
                 kind: ArtifactKind::Metadata,
                 digest,
-                size: bytes.len() as u64,
+                size: bytes.bytes().len() as u64,
             },
             name: LogicalArtifactName::new("build-record-v3").expect("static logical name"),
             destination: PublicationPath::new("build-record-v3.json").expect("static catalog path"),
@@ -1651,12 +1729,16 @@ impl BuildExecutor {
             PublicationTargetId::new(BUILD_CATALOG_TARGET).expect("static catalog target");
         let generation = self
             .runtime
-            .publish_generation(
+            .publish_generation_verified(
                 GenerationSpace::BuildCatalog,
                 &catalog_target,
                 &[publication],
+                &[bytes],
             )
             .map_err(|cause| ManagerError::new(cause.code(), Phase::Publish, cause.message()))?;
+        self.runtime
+            .flush_advisory()
+            .map_err(|cause| ManagerError::new(cause.code(), Phase::Cache, cause.message()))?;
         generation
             .artifacts
             .into_iter()
@@ -1671,18 +1753,18 @@ impl BuildExecutor {
             })
     }
 
-    fn store_blob(
+    /// Preserve the runtime identity check without rehashing a sealed immutable buffer.
+    fn store_verified(
         &self,
-        bytes: &[u8],
+        blob: &VerifiedBlob,
         code: &'static str,
         phase: Phase,
     ) -> Result<squish_protocol::Digest, ManagerError> {
-        let expected = protocol_blake3(bytes);
         let actual = self
             .runtime
-            .write_blob(bytes)
+            .write_verified_blob(blob)
             .map_err(|cause| ManagerError::new(cause.code(), phase, cause.message()))?;
-        if actual != expected {
+        if &actual != blob.digest() {
             return Err(ManagerError::new(
                 code,
                 phase,
@@ -1706,25 +1788,25 @@ impl BuildExecutor {
             })
     }
 
+    /// Resolve invocation aliases by exact image digest, never by serialized payload scans.
     fn linked_for(
         &self,
         target: &str,
         inputs: &ResolvedInputs,
-    ) -> Result<LinkOutput, ManagerError> {
+    ) -> Result<Arc<LinkOutput>, ManagerError> {
         let mut state = self
             .state
             .lock()
             .expect("build state mutex is not poisoned");
         if let Some((linked, _)) = state.linked.get(target) {
-            return Ok(linked.clone());
+            return Ok(Arc::clone(linked));
         }
         let expected = expected_output(inputs, "image").ok_or_else(|| {
             ManagerError::new("MGB102", Phase::Instantiate, "linked image input is absent")
         })?;
         let value = state
-            .linked
-            .values()
-            .find(|(linked, _)| protocol_blake3(&encode_linked_image(&linked.image)) == expected)
+            .linked_by_digest
+            .get(&expected)
             .cloned()
             .ok_or_else(|| {
                 ManagerError::new(
@@ -1733,34 +1815,45 @@ impl BuildExecutor {
                     "linked program cannot be restored",
                 )
             })?;
-        let linked = value.0.clone();
+        let linked = Arc::clone(&value.0);
+        let map = state
+            .link_maps_by_digest
+            .get(&expected)
+            .cloned()
+            .ok_or_else(|| {
+                ManagerError::new(
+                    "MGB102",
+                    Phase::Instantiate,
+                    "linked map cannot be restored",
+                )
+            })?;
+        state.link_maps.insert(target.into(), map);
         state.linked.insert(target.into(), value);
         Ok(linked)
     }
 
+    /// Normalize once and share the exact document/trace/directive result between stages.
     fn instantiated_for(
         &self,
         target: &str,
         inputs: &ResolvedInputs,
-    ) -> Result<(squish_ir::LinkedDocumentIr, InstantiateOutput), ManagerError> {
+    ) -> Result<Arc<InstantiateOutput>, ManagerError> {
         let mut state = self
             .state
             .lock()
             .expect("build state mutex is not poisoned");
         if let Some(value) = state.instantiated.get(target) {
-            return Ok(value.clone());
+            return Ok(Arc::clone(value));
         }
-        let expected = expected_output(inputs, "document")
-            .ok_or_else(|| ManagerError::new("MGB103", Phase::Emit, "document input is absent"))?;
+        let expected = instantiation_identity(inputs)?;
         let value = state
-            .instantiated
-            .values()
-            .find(|(document, _)| protocol_blake3(&encode_linked_document(document)) == expected)
+            .instantiated_by_digest
+            .get(&expected)
             .cloned()
             .ok_or_else(|| {
                 ManagerError::new("MGB103", Phase::Emit, "document cannot be restored")
             })?;
-        state.instantiated.insert(target.into(), value.clone());
+        state.instantiated.insert(target.into(), Arc::clone(&value));
         Ok(value)
     }
 
@@ -1785,15 +1878,15 @@ impl BuildExecutor {
     ) -> Result<(Vec<ProducedOutput>, Vec<ActionEvent>), ManagerError> {
         let source = self
             .prepared
-            .sources
-            .iter()
-            .find(|source| source_key(source) == *key)
+            .source_indices
+            .get(key)
+            .and_then(|index| self.prepared.sources.get(*index))
             .ok_or_else(|| {
                 ManagerError::new("MGB101", Phase::Analyze, "planned source is absent")
             })?;
         let unit = match &source.precompiled {
             Some(unit) => unit.clone(),
-            None => {
+            None => Arc::new(
                 self.runtime
                     .compile(
                         &source.blob,
@@ -1805,33 +1898,50 @@ impl BuildExecutor {
                     .map_err(|cause| {
                         ManagerError::new(cause.code(), Phase::Analyze, cause.message())
                     })?
-                    .unit
-            }
+                    .unit,
+            ),
         };
-        if header(&unit).frontend_abi.0 != self.prepared.runtime_descriptor.frontend_abi {
+        if &header(&unit).source != key
+            || header(&unit).frontend_abi.0 != self.prepared.runtime_descriptor.frontend_abi
+        {
             return Err(ManagerError::new(
                 "MGB040",
                 Phase::Analyze,
                 "frontend returned an output with a different frozen ABI",
             ));
         }
-        let bytes = encode_unit_container(&unit).map_err(|e| error("MGB041", Phase::Analyze, e))?;
-        self.store_blob(&bytes, "MGB042", Phase::Cache)?;
-        let container = decode_container(&bytes).map_err(|e| error("MGB043", Phase::Analyze, e))?;
-        let output = produced("xsir", ArtifactKind::BinaryIr, &bytes);
+        let validated = match &source.precompiled_validated {
+            Some(validated) => validated.clone(),
+            None => ValidatedUnit::new(Arc::clone(&unit))
+                .map_err(|e| error("MGB041", Phase::Analyze, e))?,
+        };
+        let revision = validated.revision().clone();
+        let debug = validated.debug_digest();
+        let bytes = match &source.precompiled_blob {
+            Some(bytes) => bytes.clone(),
+            None => VerifiedBlob::from_owned(
+                validated
+                    .encode()
+                    .map_err(|e| error("MGB041", Phase::Analyze, e))?,
+            ),
+        };
+        self.store_verified(&bytes, "MGB042", Phase::Cache)?;
+        let prepared = PreparedUnit::from_validated(validated);
+        let output = produced_verified("xsir", ArtifactKind::BinaryIr, &bytes);
         self.state
             .lock()
             .expect("build state mutex is not poisoned")
             .compiled
             .insert(
                 key.clone(),
-                CompiledUnit {
+                Arc::new(CompiledUnit {
                     unit,
+                    prepared,
                     bytes,
-                    object: container.object_digest(),
-                    semantic: container.semantic_digest(),
-                    debug: container.debug_digest(),
-                },
+                    object: revision.object,
+                    semantic: revision.semantic,
+                    debug,
+                }),
             );
         Ok((vec![output], Vec::new()))
     }
@@ -1845,41 +1955,46 @@ impl BuildExecutor {
             .state
             .lock()
             .expect("build state mutex is not poisoned");
-        let resolution = bind_imports(
+        let resolution = Arc::new(bind_imports(
             &self.prepared.snapshot,
             &self.prepared.locations,
             &state.compiled,
             &self.prepared.sources,
-        )?;
+        )?);
         let payloads = state
             .compiled
             .iter()
-            .map(|(key, value)| (key.clone(), value.unit.clone()))
+            .map(|(key, value)| (key.clone(), value.prepared.clone()))
             .collect();
         drop(state);
         let linked = self
             .runtime
-            .link(
+            .link_prepared(
                 entry,
-                UnitClosure {
+                PreparedUnitClosure {
                     snapshot: resolution.clone(),
                     units: payloads,
                 },
             )
             .map_err(|e| error("MGB070", Phase::Link, e))?;
-        let image = encode_linked_image(&linked.image);
-        let map = encode_static_link_map(&linked.map);
-        self.store_blob(&image, "MGB071", Phase::Cache)?;
-        self.store_blob(&map, "MGB072", Phase::Cache)?;
+        let image = VerifiedBlob::from_owned(encode_linked_image(&linked.image));
+        let map = VerifiedBlob::from_owned(encode_static_link_map(&linked.map));
+        self.store_verified(&image, "MGB071", Phase::Cache)?;
+        self.store_verified(&map, "MGB072", Phase::Cache)?;
         self.state
             .lock()
             .expect("build state mutex is not poisoned")
-            .linked
-            .insert(target_name.into(), (linked, resolution));
+            .insert_linked(
+                target_name.into(),
+                image.digest().clone(),
+                Arc::new(linked),
+                resolution,
+                map.clone(),
+            );
         Ok((
             vec![
-                produced("image", ArtifactKind::Metadata, &image),
-                produced("map", ArtifactKind::Metadata, &map),
+                produced_verified("image", ArtifactKind::Metadata, &image),
+                produced_verified("map", ArtifactKind::Metadata, &map),
             ],
             Vec::new(),
         ))
@@ -1892,7 +2007,7 @@ impl BuildExecutor {
     ) -> Result<(Vec<ProducedOutput>, Vec<ActionEvent>), ManagerError> {
         let target = self.target(target_name)?;
         let linked = self.linked_for(target_name, inputs)?;
-        let instantiated = self
+        let mut instantiated = self
             .runtime
             .instantiate(
                 &linked.program,
@@ -1908,21 +2023,23 @@ impl BuildExecutor {
                 "prompt targets cannot emit asset/include members; select the pack backend",
             ));
         }
-        let mut document = instantiated.document.clone();
-        document.document_abi =
+        instantiated.document.document_abi =
             squish_ir::AbiId(self.prepared.runtime_descriptor.document_abi.clone());
-        let document_bytes = encode_linked_document(&document);
-        let trace_bytes = encode_expansion_trace(&instantiated.trace);
-        self.store_blob(&document_bytes, "MGB074", Phase::Cache)?;
-        self.store_blob(&trace_bytes, "MGB075", Phase::Cache)?;
+        let document_bytes =
+            VerifiedBlob::from_owned(encode_linked_document(&instantiated.document));
+        let trace_bytes = VerifiedBlob::from_owned(encode_expansion_trace(&instantiated.trace));
+        self.store_verified(&document_bytes, "MGB074", Phase::Cache)?;
+        self.store_verified(&trace_bytes, "MGB075", Phase::Cache)?;
         let mut outputs = vec![
-            produced("document", ArtifactKind::Metadata, &document_bytes),
-            produced("trace", ArtifactKind::DebugInfo, &trace_bytes),
+            produced_verified("document", ArtifactKind::Metadata, &document_bytes),
+            produced_verified("trace", ArtifactKind::DebugInfo, &trace_bytes),
         ];
         if archive {
-            let directive_bytes = squish_link::encode_archive_directives(&instantiated.directives);
-            self.store_blob(&directive_bytes, "MGB075", Phase::Cache)?;
-            outputs.push(produced(
+            let directive_bytes = VerifiedBlob::from_owned(squish_link::encode_archive_directives(
+                &instantiated.directives,
+            ));
+            self.store_verified(&directive_bytes, "MGB075", Phase::Cache)?;
+            outputs.push(produced_verified(
                 "directives",
                 ArtifactKind::Metadata,
                 &directive_bytes,
@@ -1931,8 +2048,18 @@ impl BuildExecutor {
         self.state
             .lock()
             .expect("build state mutex is not poisoned")
-            .instantiated
-            .insert(target_name.into(), (document, instantiated));
+            .insert_instantiated(
+                target_name.into(),
+                (
+                    document_bytes.digest().clone(),
+                    trace_bytes.digest().clone(),
+                    outputs
+                        .iter()
+                        .find(|output| output.name.as_str() == "directives")
+                        .map(|output| output.digest.clone()),
+                ),
+                Arc::new(instantiated),
+            );
         Ok((outputs, Vec::new()))
     }
 
@@ -1942,7 +2069,8 @@ impl BuildExecutor {
         inputs: &ResolvedInputs,
     ) -> Result<(Vec<ProducedOutput>, Vec<ActionEvent>), ManagerError> {
         let target = self.target(target_name)?;
-        let (document, instantiated) = self.instantiated_for(target_name, inputs)?;
+        let instantiated = self.instantiated_for(target_name, inputs)?;
+        let document = &instantiated.document;
         let linked = self.linked_for(target_name, inputs)?;
         if matches!(target.resolved.backend.as_str(), "pack" | "sopack") {
             return archive_build::emit(self, target_name, target, &linked, &instantiated);
@@ -1954,15 +2082,15 @@ impl BuildExecutor {
                 "prompt targets cannot emit asset/include members; select the pack backend",
             ));
         }
-        let output = self
+        let mut output = self
             .runtime
-            .render(BackendRequest {
-                document: document.clone(),
-                trace: instantiated.trace,
-                options: SquishOptions {
+            .render_shared(
+                document,
+                &instantiated.trace,
+                SquishOptions {
                     max_output_bytes: budgets(&target.resolved).max_output_bytes,
                 },
-            })
+            )
             .map_err(|e| error("MGB076", Phase::Emit, e))?;
         let expected_identity = self
             .prepared
@@ -1976,7 +2104,6 @@ impl BuildExecutor {
                 "backend returned an output with a different frozen cache identity",
             ));
         }
-        self.store_blob(&output.bytes, "MGB077", Phase::Cache)?;
         let state = self
             .state
             .lock()
@@ -1992,28 +2119,35 @@ impl BuildExecutor {
         drop(state);
         let link_trace = make_link_trace(&target.entry, &resolution, &compiled)?;
         let bundle = debug_bundle(
-            &document,
-            &output,
+            document,
+            &mut output,
             &linked.image,
             &link_trace,
             &compiled,
             &self.prepared.sources,
         );
-        let debug = encode_debug_bundle(&bundle).map_err(|e| error("MGB078", Phase::Emit, e))?;
-        self.store_blob(&debug, "MGB079", Phase::Cache)?;
+        let debug = VerifiedBlob::from_owned(
+            encode_debug_bundle(&bundle).map_err(|e| error("MGB078", Phase::Emit, e))?,
+        );
+        let product = VerifiedBlob::from_owned(output.bytes);
+        self.store_verified(&product, "MGB077", Phase::Cache)?;
+        self.store_verified(&debug, "MGB079", Phase::Cache)?;
+        let kind = product_kind(&target.resolved.backend);
         let produced = vec![
-            produced(
-                "prompt",
-                product_kind(&target.resolved.backend),
-                &output.bytes,
-            ),
-            produced("backend-result", ArtifactKind::DebugInfo, &debug),
+            produced_verified("prompt", kind.clone(), &product),
+            produced_verified("backend-result", ArtifactKind::DebugInfo, &debug),
         ];
         self.state
             .lock()
             .expect("build state mutex is not poisoned")
-            .backend
-            .insert(target_name.into(), BackendStage { output, debug });
+            .insert_backend(
+                target_name.into(),
+                BackendStage {
+                    product,
+                    debug,
+                    kind,
+                },
+            );
         Ok((produced, Vec::new()))
     }
 
@@ -2049,35 +2183,48 @@ impl BuildExecutor {
                         "complete backend output manifest is absent",
                     )
                 })?;
-            state
-                .backend
-                .iter()
-                .find_map(|(name, value)| {
-                    let actual = [
-                        produced(
-                            "prompt",
-                            product_kind(value.output.cache_identity.backend_id),
-                            &value.output.bytes,
-                        ),
-                        produced("backend-result", ArtifactKind::DebugInfo, &value.debug),
-                    ];
-                    (actual.as_slice() == expected).then(|| name.clone())
-                })
-                .ok_or_else(|| {
-                    ManagerError::new(
-                        "MGB104",
-                        Phase::Publish,
-                        "backend product cannot be restored",
-                    )
-                })?
+            let key = (
+                expected
+                    .iter()
+                    .find(|output| output.name.as_str() == "prompt")
+                    .unwrap()
+                    .digest
+                    .clone(),
+                expected
+                    .iter()
+                    .find(|output| output.name.as_str() == "backend-result")
+                    .unwrap()
+                    .digest
+                    .clone(),
+            );
+            let name = state.backend_by_digest.get(&key).ok_or_else(|| {
+                ManagerError::new(
+                    "MGB104",
+                    Phase::Publish,
+                    "backend product cannot be restored",
+                )
+            })?;
+            let stage = &state.backend[name];
+            let actual = [
+                produced_verified("prompt", stage.kind.clone(), &stage.product),
+                produced_verified("backend-result", ArtifactKind::DebugInfo, &stage.debug),
+            ];
+            if actual.as_slice() != expected {
+                return Err(ManagerError::new(
+                    "MGB104",
+                    Phase::Publish,
+                    "backend output schema disagrees with input evidence",
+                ));
+            }
+            name.clone()
         };
         let output = state.backend[&source_target].clone();
         let compiled = state.compiled.clone();
         let link_map = state
-            .linked
+            .link_maps
             .get(target_name)
-            .or_else(|| state.linked.get(&source_target))
-            .map(|(linked, _)| encode_static_link_map(&linked.map))
+            .or_else(|| state.link_maps.get(&source_target))
+            .cloned()
             .ok_or_else(|| {
                 ManagerError::new(
                     "MGB120",
@@ -2086,17 +2233,19 @@ impl BuildExecutor {
                 )
             })?;
         drop(state);
-        let prompt_digest = self.store_blob(&output.output.bytes, "MGB077", Phase::Cache)?;
+        let prompt_digest = output.product.digest().clone();
         let mut publications = Vec::new();
+        let mut publication_blobs = Vec::new();
         if has_emit(&self.prepared.emit, EmitKind::BinaryIr) {
             for (source, unit) in &compiled {
-                let digest = self.store_blob(&unit.bytes, "MGB077", Phase::Cache)?;
+                let digest = unit.bytes.digest().clone();
+                publication_blobs.push(unit.bytes.clone());
                 publications.push(publication(
                     &format!("{target_name}:ir-{}", publications.len()),
                     ArtifactKind::BinaryIr,
                     &ir_destination(&target.resolved.output, source),
                     digest,
-                    unit.bytes.len() as u64,
+                    unit.bytes.bytes().len() as u64,
                     self.prepared.repository.root(),
                 )?);
             }
@@ -2104,36 +2253,39 @@ impl BuildExecutor {
         if has_emit(&self.prepared.emit, EmitKind::Prompt)
             || has_emit(&self.prepared.emit, EmitKind::DebugInfo)
         {
+            publication_blobs.push(output.product.clone());
             publications.push(publication(
                 &format!("{target_name}:prompt"),
                 product_kind(&target.resolved.backend),
                 &target.resolved.output,
                 prompt_digest,
-                output.output.bytes.len() as u64,
+                output.product.bytes().len() as u64,
                 self.prepared.repository.root(),
             )?);
         }
         if has_emit(&self.prepared.emit, EmitKind::DebugInfo)
             && !matches!(target.resolved.backend.as_str(), "pack" | "sopack")
         {
-            let bytes = output.debug;
-            let digest = self.store_blob(&bytes, "MGB079", Phase::Cache)?;
+            let bytes = &output.debug;
+            let digest = bytes.digest().clone();
+            publication_blobs.push(bytes.clone());
             publications.push(publication(
                 &format!("{target_name}:debug"),
                 ArtifactKind::DebugInfo,
                 &target.resolved.output.with_extension("psdbg"),
                 digest,
-                bytes.len() as u64,
+                bytes.bytes().len() as u64,
                 self.prepared.repository.root(),
             )?);
         }
-        let link_map_digest = self.store_blob(&link_map, "MGB120", Phase::Cache)?;
+        let link_map_digest = link_map.digest().clone();
+        publication_blobs.push(link_map.clone());
         publications.push(publication(
             &format!("{target_name}:static-link-map"),
             ArtifactKind::Other("static-link-map".into()),
             &target.resolved.output.with_extension("xsmap"),
             link_map_digest,
-            link_map.len() as u64,
+            link_map.bytes().len() as u64,
             self.prepared.repository.root(),
         )?);
         let target_record = target_record_bytes(
@@ -2141,13 +2293,15 @@ impl BuildExecutor {
             self.prepared.snapshot.manifest_digest(),
             &publications,
         )?;
-        let record_digest = self.store_blob(&target_record, "MGB118", Phase::Cache)?;
+        let target_record = VerifiedBlob::from_owned(target_record);
+        let record_digest = self.store_verified(&target_record, "MGB118", Phase::Cache)?;
+        publication_blobs.push(target_record.clone());
         publications.push(publication(
             &format!("{target_name}:target-record"),
             ArtifactKind::Metadata,
             &target.resolved.output.with_extension("build.json"),
             record_digest,
-            target_record.len() as u64,
+            target_record.bytes().len() as u64,
             self.prepared.repository.root(),
         )?);
         publications.sort_by(|left, right| left.output.name.cmp(&right.output.name));
@@ -2160,7 +2314,12 @@ impl BuildExecutor {
         })?;
         let generation = self
             .runtime
-            .publish_generation(GenerationSpace::TargetArtifacts, &target_id, &publications)
+            .publish_generation_verified(
+                GenerationSpace::TargetArtifacts,
+                &target_id,
+                &publications,
+                &publication_blobs,
+            )
             .map_err(|cause| ManagerError::new(cause.code(), Phase::Publish, cause.message()))?;
         let published = PublishedTarget {
             target: TargetName::new(target.name.clone()).expect("validated target name"),
@@ -2203,41 +2362,46 @@ impl BuildExecutor {
         &self,
         work: &BuildWork,
         _inputs: &ResolvedInputs,
-        record: &ActionRecord,
+        verified: &VerifiedAction,
     ) -> Result<(), ManagerError> {
         match work {
             BuildWork::Compile { source } => {
-                let bytes = self.cached_bytes(record, "xsir")?;
-                let unit =
-                    decode_unit_container(&bytes).map_err(|e| error("MGB111", Phase::Cache, e))?;
-                if header(&unit).frontend_abi.0 != self.prepared.runtime_descriptor.frontend_abi {
+                let bytes = self.cached_bytes(verified, "xsir")?;
+                let validated = ValidatedUnit::decode(bytes.bytes())
+                    .map_err(|e| error("MGB111", Phase::Cache, e))?;
+                let unit = Arc::clone(validated.unit());
+                if &header(&unit).source != source
+                    || header(&unit).frontend_abi.0 != self.prepared.runtime_descriptor.frontend_abi
+                {
                     return Err(ManagerError::new(
                         "MGB111",
                         Phase::Cache,
-                        "cached unit was produced by a different frontend ABI",
+                        "cached unit identity or frontend ABI differs from the frozen snapshot",
                     ));
                 }
-                let container =
-                    decode_container(&bytes).map_err(|e| error("MGB112", Phase::Cache, e))?;
+                let revision = validated.revision().clone();
+                let debug = validated.debug_digest();
+                let prepared = PreparedUnit::from_validated(validated);
                 self.state
                     .lock()
                     .expect("build state mutex is not poisoned")
                     .compiled
                     .insert(
                         source.clone(),
-                        CompiledUnit {
+                        Arc::new(CompiledUnit {
                             unit,
+                            prepared,
                             bytes,
-                            object: container.object_digest(),
-                            semantic: container.semantic_digest(),
-                            debug: container.debug_digest(),
-                        },
+                            object: revision.object,
+                            semantic: revision.semantic,
+                            debug,
+                        }),
                     );
             }
             BuildWork::Link { target, .. } => {
-                let image = decode_linked_image(&self.cached_bytes(record, "image")?)
+                let image = decode_linked_image(self.cached_bytes(verified, "image")?.bytes())
                     .map_err(|e| error("MGB121", Phase::Cache, e))?;
-                let map = decode_static_link_map(&self.cached_bytes(record, "map")?)
+                let map = decode_static_link_map(self.cached_bytes(verified, "map")?.bytes())
                     .map_err(|e| error("MGB122", Phase::Cache, e))?;
                 if image.link_map != map {
                     return Err(ManagerError::new(
@@ -2253,12 +2417,7 @@ impl BuildExecutor {
                 let units = state
                     .compiled
                     .iter()
-                    .map(|(key, unit)| (key.clone(), unit.unit.clone()))
-                    .collect();
-                let objects = state
-                    .compiled
-                    .iter()
-                    .map(|(key, unit)| (key.clone(), unit.object))
+                    .map(|(key, unit)| (key.clone(), unit.prepared.clone()))
                     .collect();
                 let resolution = bind_imports(
                     &self.prepared.snapshot,
@@ -2268,32 +2427,32 @@ impl BuildExecutor {
                 )?;
                 drop(state);
                 let program =
-                    squish_link::LinkedProgram::reconstruct(image.clone(), units, objects)
+                    squish_link::LinkedProgram::reconstruct_prepared(image.clone(), units)
                         .map_err(|e| error("MGB124", Phase::Cache, e))?;
                 self.state
                     .lock()
                     .expect("build state mutex is not poisoned")
-                    .linked
-                    .insert(
+                    .insert_linked(
                         target.clone(),
-                        (
-                            LinkOutput {
-                                map,
-                                image,
-                                program,
-                            },
-                            resolution,
-                        ),
+                        self.cached_bytes(verified, "image")?.digest().clone(),
+                        Arc::new(LinkOutput {
+                            map,
+                            image,
+                            program,
+                        }),
+                        Arc::new(resolution),
+                        self.cached_bytes(verified, "map")?,
                     );
             }
             BuildWork::Instantiate { target } => {
-                let document = decode_linked_document(&self.cached_bytes(record, "document")?)
-                    .map_err(|e| error("MGB125", Phase::Cache, e))?;
-                let trace = decode_expansion_trace(&self.cached_bytes(record, "trace")?)
+                let document =
+                    decode_linked_document(self.cached_bytes(verified, "document")?.bytes())
+                        .map_err(|e| error("MGB125", Phase::Cache, e))?;
+                let trace = decode_expansion_trace(self.cached_bytes(verified, "trace")?.bytes())
                     .map_err(|e| error("MGB126", Phase::Cache, e))?;
                 let directives = if is_archive_backend(&self.target(target)?.resolved.backend) {
                     let directives = squish_link::decode_archive_directives(
-                        &self.cached_bytes(record, "directives")?,
+                        self.cached_bytes(verified, "directives")?.bytes(),
                     )
                     .map_err(|e| error("MGB126", Phase::Cache, e))?;
                     archive_build::validate_directives(&directives, &trace)?;
@@ -2308,35 +2467,42 @@ impl BuildExecutor {
                         "cached document was produced for a different document ABI",
                     ));
                 }
+                let identity = (
+                    self.cached_bytes(verified, "document")?.digest().clone(),
+                    self.cached_bytes(verified, "trace")?.digest().clone(),
+                    verified
+                        .record
+                        .outputs
+                        .iter()
+                        .find(|output| output.name.as_str() == "directives")
+                        .map(|output| output.digest.clone()),
+                );
                 self.state
                     .lock()
                     .expect("build state mutex is not poisoned")
-                    .instantiated
-                    .insert(
+                    .insert_instantiated(
                         target.clone(),
-                        (
-                            document.clone(),
-                            InstantiateOutput {
-                                document,
-                                trace,
-                                directives,
-                            },
-                        ),
+                        identity,
+                        Arc::new(InstantiateOutput {
+                            document,
+                            trace,
+                            directives,
+                        }),
                     );
             }
             BuildWork::Backend { target } => {
-                let bytes = self.cached_bytes(record, "prompt")?;
-                let debug = self.cached_bytes(record, "backend-result")?;
+                let bytes = self.cached_bytes(verified, "prompt")?;
+                let debug = self.cached_bytes(verified, "backend-result")?;
                 if matches!(
                     self.target(target)?.resolved.backend.as_str(),
                     "pack" | "sopack"
                 ) {
                     return archive_build::hydrate(self, target, bytes, debug);
                 }
-                let bundle = squish_ir::decode_debug_bundle(&debug)
+                let bundle = squish_ir::decode_debug_bundle(debug.bytes())
                     .map_err(|e| error("MGB127", Phase::Cache, e))?;
-                if bundle.artifact.digest != ArtifactDigest::of(&bytes)
-                    || bundle.artifact.byte_len != bytes.len() as u64
+                if bundle.artifact.digest != ArtifactDigest::of(bytes.bytes())
+                    || bundle.artifact.byte_len != bytes.bytes().len() as u64
                 {
                     return Err(ManagerError::new(
                         "MGB128",
@@ -2344,23 +2510,17 @@ impl BuildExecutor {
                         "cached prompt differs from backend evidence",
                     ));
                 }
-                let output = BackendOutput {
-                    bytes,
-                    byte_map: bundle.artifact_map,
-                    trace: bundle.expansion_trace,
-                    cache_identity: self
-                        .prepared
-                        .backend_identities
-                        .get(target)
-                        .expect("every planned target has a frozen backend identity")
-                        .clone(),
-                    metrics: Default::default(),
-                };
                 self.state
                     .lock()
                     .expect("build state mutex is not poisoned")
-                    .backend
-                    .insert(target.clone(), BackendStage { output, debug });
+                    .insert_backend(
+                        target.clone(),
+                        BackendStage {
+                            product: bytes,
+                            debug,
+                            kind: product_kind(&self.target(target)?.resolved.backend),
+                        },
+                    );
             }
             BuildWork::Publish { .. } => {
                 return Err(ManagerError::new(
@@ -2373,11 +2533,17 @@ impl BuildExecutor {
         Ok(())
     }
 
-    fn cached_bytes(&self, record: &ActionRecord, name: &str) -> Result<Vec<u8>, ManagerError> {
-        let output = record
+    /// Use lookup-owned verified buffers directly, including outputs larger than session caches.
+    fn cached_bytes(
+        &self,
+        verified: &VerifiedAction,
+        name: &str,
+    ) -> Result<VerifiedBlob, ManagerError> {
+        let index = verified
+            .record
             .outputs
             .iter()
-            .find(|output| output.name.as_str() == name)
+            .position(|output| output.name.as_str() == name)
             .ok_or_else(|| {
                 ManagerError::new(
                     "MGB108",
@@ -2385,25 +2551,22 @@ impl BuildExecutor {
                     format!("cached action has no `{name}` output"),
                 )
             })?;
-        let bytes = self
-            .runtime
-            .read_blob(&output.digest)
-            .map_err(|cause| ManagerError::new(cause.code(), Phase::Cache, cause.message()))?
-            .ok_or_else(|| {
-                ManagerError::new(
-                    "MGB110",
-                    Phase::Cache,
-                    format!("cached `{name}` blob disappeared"),
-                )
-            })?;
-        if bytes.len() as u64 != output.size || protocol_blake3(&bytes) != output.digest {
+        let output = &verified.record.outputs[index];
+        let blob = verified.blobs.get(index).ok_or_else(|| {
+            ManagerError::new(
+                "MGB110",
+                Phase::Cache,
+                format!("cached `{name}` verified bytes are absent"),
+            )
+        })?;
+        if blob.bytes().len() as u64 != output.size || blob.digest() != &output.digest {
             return Err(ManagerError::new(
                 "MGB110",
                 Phase::Cache,
                 format!("cached `{name}` blob differs from its declared identity"),
             ));
         }
-        Ok(bytes)
+        Ok(blob.clone())
     }
 }
 
@@ -2424,14 +2587,33 @@ impl WorkExecutor<BuildWork> for BuildExecutor {
         ) {
             return Ok(None);
         }
-        let Some(record) = self
+        let Some(verified) = self
             .runtime
-            .lookup_action(&dispatch.key)
+            .lookup_action_verified(&dispatch.key)
             .map_err(|cause| ManagerError::new(cause.code(), Phase::Cache, cause.message()))?
         else {
             return Ok(None);
         };
-        self.hydrate_cached(work, inputs, &record)?;
+        if verified.record.key != dispatch.key
+            || verified.blobs.len() != verified.record.outputs.len()
+        {
+            return Err(ManagerError::new(
+                "MGB110",
+                Phase::Cache,
+                "cached action identity or verified output count disagrees with dispatch",
+            ));
+        }
+        for (output, blob) in verified.record.outputs.iter().zip(&verified.blobs) {
+            if output.digest != *blob.digest() || output.size != blob.bytes().len() as u64 {
+                return Err(ManagerError::new(
+                    "MGB110",
+                    Phase::Cache,
+                    "cached output differs from its verified bytes",
+                ));
+            }
+        }
+        self.hydrate_cached(work, inputs, &verified)?;
+        let record = verified.record;
         Ok(Some(CachedResult {
             digest: cache_manifest_digest(&record.outputs),
             outputs: record.outputs,
@@ -2525,6 +2707,15 @@ fn expected_output(inputs: &ResolvedInputs, name: &str) -> Option<squish_protoco
         .map(|output| output.digest.clone())
 }
 
+/// Companion provenance/directives are never interchangeable merely because document bytes match.
+fn instantiation_identity(inputs: &ResolvedInputs) -> Result<InstantiationIdentity, ManagerError> {
+    let document = expected_output(inputs, "document")
+        .ok_or_else(|| ManagerError::new("MGB103", Phase::Emit, "document input is absent"))?;
+    let trace = expected_output(inputs, "trace")
+        .ok_or_else(|| ManagerError::new("MGB103", Phase::Emit, "trace input is absent"))?;
+    Ok((document, trace, expected_output(inputs, "directives")))
+}
+
 fn manifest_map(snapshot: &ProjectSnapshot) -> BTreeMap<String, Manifest> {
     snapshot
         .manifests()
@@ -2615,6 +2806,7 @@ fn ensure_authoritative_lock(
 fn freeze_sources(
     snapshot: &ProjectSnapshot,
     locations: &[squish_repository::PackageLocation],
+    sopacks: &BTreeMap<String, Arc<AcquiredSopack>>,
 ) -> Result<Vec<FrozenSource>, ManagerError> {
     let owned = snapshot
         .owned_sources(locations)
@@ -2640,12 +2832,30 @@ fn freeze_sources(
                 blob,
                 package,
                 precompiled: None,
+                precompiled_blob: None,
+                precompiled_validated: None,
                 assets: BTreeMap::new(),
                 archive: None,
             }
         })
         .collect::<Vec<_>>();
-    archive_build::freeze_inputs(snapshot, &mut sources)?;
+    archive_build::freeze_inputs(snapshot, &mut sources, sopacks)?;
+    // Decode/diagnostic validation has covered the whole immutable library. Only
+    // referenced compiled objects need actions/encoded CAS representations.
+    archive_reachability::prune(snapshot, locations, &mut sources)?;
+    for source in &mut sources {
+        if let Some(unit) = &source.precompiled {
+            let validated = ValidatedUnit::new(Arc::clone(unit))
+                .map_err(|e| error("MGB142", Phase::Analyze, e))?;
+            source.precompiled_blob = Some(VerifiedBlob::from_owned(
+                validated
+                    .encode()
+                    .map_err(|e| error("MGB142", Phase::Analyze, e))?,
+            ));
+            source.precompiled_validated = Some(validated);
+        }
+    }
+
     Ok(sources)
 }
 
@@ -3164,7 +3374,7 @@ fn hex(bytes: &[u8]) -> String {
 fn bind_imports(
     snapshot: &ProjectSnapshot,
     locations: &[squish_repository::PackageLocation],
-    units: &BTreeMap<SourceKey, CompiledUnit>,
+    units: &BTreeMap<SourceKey, Arc<CompiledUnit>>,
     sources: &[FrozenSource],
 ) -> Result<ResolutionSnapshot, ManagerError> {
     let lock = snapshot
@@ -3239,10 +3449,12 @@ struct FrozenImportContext<'a> {
     /// Compiler package instances mapped to exact dependency lock nodes.
     instances: &'a BTreeMap<squish_ir::PackageInstanceId, String>,
     /// Uniform compiled objects from local sources and reusable archives.
-    units: &'a BTreeMap<SourceKey, CompiledUnit>,
+    units: &'a BTreeMap<SourceKey, Arc<CompiledUnit>>,
     /// Immutable archive export tables indexed by their provider identity.
-    archives:
-        &'a BTreeMap<squish_ir::PackageInstanceId, &'a Arc<squish_backend::archive::SopackPayload>>,
+    archives: &'a BTreeMap<
+        squish_ir::PackageInstanceId,
+        &'a Arc<squish_backend::archive::SharedSopackPayload>,
+    >,
 }
 
 /// Binds a declaration using one coherent frozen provider context.
@@ -3363,7 +3575,7 @@ fn resolve_import(
 fn validate_import_kind(
     target: SourceKey,
     expected: UnitKind,
-    units: &BTreeMap<SourceKey, CompiledUnit>,
+    units: &BTreeMap<SourceKey, Arc<CompiledUnit>>,
 ) -> Result<SourceKey, ManagerError> {
     match units.get(&target).map(|u| unit_kind(&u.unit)) {
         Some(kind)
@@ -3387,7 +3599,7 @@ fn validate_import_kind(
 fn make_link_trace(
     entry: &SourceKey,
     snapshot: &ResolutionSnapshot,
-    compiled: &BTreeMap<SourceKey, CompiledUnit>,
+    compiled: &BTreeMap<SourceKey, Arc<CompiledUnit>>,
 ) -> Result<LinkTrace, ManagerError> {
     let entry_object = compiled[entry].object;
     let mut imports = Vec::new();
@@ -3442,17 +3654,37 @@ fn make_link_trace(
 
 fn debug_bundle(
     document: &squish_ir::LinkedDocumentIr,
-    output: &squish_backend::BackendOutput,
+    output: &mut squish_backend::BackendOutput,
     image: &squish_ir::LinkedImage,
     link_trace: &LinkTrace,
-    compiled: &BTreeMap<SourceKey, CompiledUnit>,
+    compiled: &BTreeMap<SourceKey, Arc<CompiledUnit>>,
     sources: &[FrozenSource],
 ) -> DebugBundle {
-    let mut trace = output.trace.clone();
-    let mut artifact_map = output.byte_map.clone();
+    // These backend-owned results are not used after debug serialization. Move them,
+    // preserving the shared instantiation trace without another full provenance copy.
+    let mut trace = std::mem::take(&mut output.trace);
+    let mut artifact_map = std::mem::take(&mut output.byte_map);
     retain_backend_origin_dag(&mut trace, &mut artifact_map, image, compiled);
     let mut archives = Vec::new();
     let mut blobs = BTreeMap::new();
+    let mut source_bytes: BTreeMap<SourceKey, &[u8]> = sources
+        .iter()
+        .map(|source| (source_key(source), source.blob.bytes()))
+        .collect();
+    let archives: BTreeMap<_, _> = sources
+        .iter()
+        .filter_map(|source| {
+            source
+                .archive
+                .as_ref()
+                .map(|archive| (&source.package, archive))
+        })
+        .collect();
+    for archive in archives.values() {
+        for (key, bytes) in &archive.sources {
+            source_bytes.entry(key.clone()).or_insert(bytes.as_ref());
+        }
+    }
     for unit in compiled.values() {
         let (archive, origins) = archive_and_origins(&unit.unit);
         archives.push(SourceArchiveReference {
@@ -3462,11 +3694,7 @@ fn debug_bundle(
             origins: origins.clone(),
         });
         for record in &archive.records {
-            if let Some(bytes) = sources
-                .iter()
-                .find(|source| source_key(source) == record.key)
-                .map(|source| source.blob.bytes().to_vec())
-            {
+            if let Some(bytes) = source_bytes.get(&record.key).map(|bytes| bytes.to_vec()) {
                 blobs.insert(
                     (record.exact_bytes.digest, record.exact_bytes.byte_len),
                     BundledSourceBlob {
@@ -3505,7 +3733,7 @@ fn retain_backend_origin_dag(
     trace: &mut squish_ir::ExpansionTrace,
     artifact_map: &mut squish_ir::ArtifactByteMap,
     image: &squish_ir::LinkedImage,
-    compiled: &BTreeMap<SourceKey, CompiledUnit>,
+    compiled: &BTreeMap<SourceKey, Arc<CompiledUnit>>,
 ) {
     let mut closed = BTreeMap::new();
     for entry in &mut artifact_map.entries {
@@ -3589,7 +3817,7 @@ fn collect_static_origins_for_dynamic_node(
     id: squish_ir::OriginNodeId,
     trace: &squish_ir::ExpansionTrace,
     image: &squish_ir::LinkedImage,
-    compiled: &BTreeMap<SourceKey, CompiledUnit>,
+    compiled: &BTreeMap<SourceKey, Arc<CompiledUnit>>,
     seen: &mut BTreeSet<u32>,
     output: &mut Vec<QualifiedOriginRef>,
 ) {
@@ -3676,7 +3904,7 @@ fn origin_reaches_static_node(
 fn producer_static_origin(
     producer: squish_ir::LinkedOpRef,
     image: &squish_ir::LinkedImage,
-    compiled: &BTreeMap<SourceKey, CompiledUnit>,
+    compiled: &BTreeMap<SourceKey, Arc<CompiledUnit>>,
 ) -> Option<QualifiedOriginRef> {
     let source = &image.units.get(producer.unit_slot as usize)?.source;
     let unit = compiled.get(source)?;
@@ -3891,12 +4119,13 @@ fn cache_manifest_digest(outputs: &[ProducedOutput]) -> squish_protocol::Digest 
     protocol_blake3(&bytes)
 }
 
-fn produced(name: &str, kind: ArtifactKind, bytes: &[u8]) -> ProducedOutput {
+/// Reuse identity established at a sealed ownership boundary, without another hash pass.
+fn produced_verified(name: &str, kind: ArtifactKind, blob: &VerifiedBlob) -> ProducedOutput {
     ProducedOutput {
         name: output_name(name),
         kind,
-        digest: protocol_blake3(bytes),
-        size: bytes.len() as u64,
+        digest: blob.digest().clone(),
+        size: blob.bytes().len() as u64,
     }
 }
 fn error(code: &'static str, phase: Phase, value: impl std::fmt::Display) -> ManagerError {
@@ -3905,6 +4134,7 @@ fn error(code: &'static str, phase: Phase, value: impl std::fmt::Display) -> Man
 
 #[cfg(test)]
 mod catalog_error_tests {
+    use super::*;
     use squish_build::{GenerationId, PublicationPath, PublicationTargetId};
 
     #[test]
@@ -3916,5 +4146,70 @@ mod catalog_error_tests {
         for invalid in ["../x", ".squish-publish/current.json", "NUL", "a\\b"] {
             assert!(PublicationPath::new(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn immutable_instantiation_aliases_include_all_companion_evidence() {
+        let document = squish_ir::LinkedDocumentIr {
+            schema: squish_ir::Version { major: 1, minor: 0 },
+            document_abi: squish_ir::AbiId(squish_ir::DOCUMENT_ABI.into()),
+            root: squish_ir::DocumentRegionId(0),
+            regions: vec![squish_ir::DocumentRegion {
+                id: squish_ir::DocumentRegionId(0),
+                start: 0,
+                end: 0,
+            }],
+            items: vec![],
+            strings: vec![],
+            qnames: vec![],
+            feature_bits: squish_ir::FeatureBits(0),
+        };
+        let digest = VerifiedBlob::from_owned(encode_linked_document(&document))
+            .digest()
+            .clone();
+        let make = |label: &str| {
+            Arc::new(InstantiateOutput {
+                document: document.clone(),
+                trace: squish_ir::ExpansionTrace {
+                    debug_strings: vec![label.into()],
+                    ..Default::default()
+                },
+                directives: Vec::new(),
+            })
+        };
+        let a = make("a");
+        let b = make("b");
+        let identity = |output: &InstantiateOutput| {
+            (
+                digest.clone(),
+                VerifiedBlob::from_owned(encode_expansion_trace(&output.trace))
+                    .digest()
+                    .clone(),
+                None,
+            )
+        };
+        let a_identity = identity(&a);
+        let b_identity = identity(&b);
+        let mut state = BuildExecutionState::default();
+        state.insert_instantiated("a1".into(), a_identity.clone(), Arc::clone(&a));
+        state.insert_instantiated("b".into(), b_identity.clone(), Arc::clone(&b));
+        assert_ne!(
+            a_identity, b_identity,
+            "equal document bytes do not imply equal provenance"
+        );
+        assert!(Arc::ptr_eq(&state.instantiated_by_digest[&a_identity], &a));
+        assert!(Arc::ptr_eq(&state.instantiated_by_digest[&b_identity], &b));
+        let mut archive_identity = a_identity.clone();
+        archive_identity.2 = Some(
+            VerifiedBlob::from_owned(b"archive-directives".to_vec())
+                .digest()
+                .clone(),
+        );
+        state.insert_instantiated("archive".into(), archive_identity.clone(), Arc::clone(&b));
+        assert!(Arc::ptr_eq(&state.instantiated_by_digest[&a_identity], &a));
+        assert!(Arc::ptr_eq(
+            &state.instantiated_by_digest[&archive_identity],
+            &b
+        ));
     }
 }

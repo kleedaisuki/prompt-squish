@@ -62,6 +62,7 @@ impl Services for LocalServices {
         });
         lock.manifest_digest = request.manifest_digest.into();
         Ok(ResolvedDependencies {
+            sopacks: BTreeMap::new(),
             lockfile: lock,
             packages: Vec::new(),
         })

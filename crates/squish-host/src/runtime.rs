@@ -1,17 +1,18 @@
 //! 生产构建运行时组合。 / Production build-runtime composition.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs::File,
     sync::{Arc, Mutex},
 };
 
 use squish_backend::{
-    Backend, BackendCacheIdentity, BackendOutput, BackendRequest, SquishBackend, SquishOptions,
+    Backend, BackendCacheIdentity, BackendOutput, BackendRequest, BackendRequestRef, SquishBackend,
+    SquishOptions,
 };
 use squish_build::{
     ActionIndex, ActionKey, ActionRecord, ArtifactRead, BlobStore, CommittedGeneration,
-    GenerationRef, Publication, PublicationPath, PublicationTargetId,
+    GenerationRef, Publication, PublicationPath, PublicationTargetId, VerifiedAction, VerifiedBlob,
 };
 use squish_ir::SourceKey;
 use squish_link::{
@@ -25,7 +26,9 @@ use squish_publish::{
     ExternalPublisherLayout, FileArtifactPublisher, PublishError, PublishObserver,
 };
 use squish_source::SourceBlob;
-use squish_store::{ActionKey as StoreActionKey, BlobDigest, Cas, CasError, VerifiedActionIndex};
+use squish_store::{
+    ActionKey as StoreActionKey, BlobDigest, Cas, CasError, CasSession, VerifiedActionIndex,
+};
 use squish_xml_front::{FrontendOutput, FrontendSourceContext};
 
 /// 在一个调用中共享同一 CAS、动作索引与两个隔离 publisher 的生产运行时。 /
@@ -38,6 +41,7 @@ pub struct ProductionBuildRuntime {
     catalog_observer: Arc<dyn PublishObserver>,
     cas: Mutex<Option<Arc<Cas>>>,
     index: Mutex<Option<Arc<VerifiedActionIndex>>>,
+    session: Mutex<Option<Arc<CasSession>>>,
     maintenance: Mutex<Option<Arc<File>>>,
     targets: Mutex<Option<Arc<FileArtifactPublisher<SharedCas>>>>,
     catalog: Mutex<Option<Arc<FileArtifactPublisher<SharedCas>>>>,
@@ -60,6 +64,7 @@ impl ProductionBuildRuntime {
             catalog_observer,
             cas: Mutex::new(None),
             index: Mutex::new(None),
+            session: Mutex::new(None),
             maintenance: Mutex::new(None),
             targets: Mutex::new(None),
             catalog: Mutex::new(None),
@@ -73,9 +78,15 @@ impl ProductionBuildRuntime {
         })
     }
 
+    fn session(&self) -> Result<Arc<CasSession>, BuildRuntimeError> {
+        initialize(&self.session, "CAS session", || {
+            Ok(CasSession::new(self.cas()?))
+        })
+    }
+
     fn index(&self) -> Result<Arc<VerifiedActionIndex>, BuildRuntimeError> {
         initialize(&self.index, "action index", || {
-            VerifiedActionIndex::open(self.layout.action_index(), self.cas()?)
+            VerifiedActionIndex::open_in_session(self.layout.action_index(), self.session()?)
                 .map_err(|error| storage_error("host_action_index_open", error))
         })
     }
@@ -108,8 +119,15 @@ impl ProductionBuildRuntime {
         };
         initialize(slot, name, || {
             let layout = ExternalPublisherLayout::new(root, state, prefix, publication_lock);
-            FileArtifactPublisher::with_external_layout(layout, SharedCas(self.cas()?), observer)
-                .map_err(|error| publication_error(code, error))
+            FileArtifactPublisher::with_external_layout(
+                layout,
+                SharedCas {
+                    session: self.session()?,
+                    snapshots: HashMap::new(),
+                },
+                observer,
+            )
+            .map_err(|error| publication_error(code, error))
         })
     }
 
@@ -186,6 +204,17 @@ impl ProductionBuildRuntime {
     }
 }
 
+impl Drop for ProductionBuildRuntime {
+    fn drop(&mut self) {
+        // Recency is advisory: explicit finish reports errors; drop is best-effort fallback.
+        if let Ok(index) = self.index.get_mut() {
+            if let Some(index) = index.as_ref() {
+                let _ = index.flush_touches();
+            }
+        }
+    }
+}
+
 impl BuildRuntime for ProductionBuildRuntime {
     fn descriptor(&self) -> BuildRuntimeDescriptor {
         BuildRuntimeDescriptor {
@@ -209,13 +238,54 @@ impl BuildRuntime for ProductionBuildRuntime {
             .map_err(|error| storage_error("host_blob_read", error))
     }
 
+    fn read_verified(&self, digest: &Digest) -> Result<Option<VerifiedBlob>, BuildRuntimeError> {
+        self.session()?
+            .acquire(blob_digest(digest)?)
+            .map_err(|error| storage_error("host_blob_read", error))
+    }
+
+    fn read_blob_shared(&self, digest: &Digest) -> Result<Option<Arc<[u8]>>, BuildRuntimeError> {
+        Ok(self.read_verified(digest)?.map(|blob| blob.shared_bytes()))
+    }
+
+    fn write_verified_blob(&self, blob: &VerifiedBlob) -> Result<Digest, BuildRuntimeError> {
+        let digest = self
+            .session()?
+            .put_verified(blob)
+            .map_err(|error| storage_error("host_blob_write", error))?;
+        Ok(protocol_digest(digest))
+    }
+
+    fn lookup_action_verified(
+        &self,
+        key: &ActionKey,
+    ) -> Result<Option<VerifiedAction>, BuildRuntimeError> {
+        self.index()?
+            .lookup_verified(key)
+            .map_err(|error| storage_error("host_action_lookup", error))
+    }
+
+    fn flush_advisory(&self) -> Result<(), BuildRuntimeError> {
+        let index = self.index.lock().map_err(|_| {
+            BuildRuntimeError::storage(
+                "host_runtime_coordination",
+                "action index initialization mutex is poisoned",
+            )
+        })?;
+        if let Some(index) = index.as_ref() {
+            index
+                .flush_touches()
+                .map_err(|error| storage_error("host_action_touch", error))?;
+        }
+        Ok(())
+    }
+
     fn write_blob(&self, bytes: &[u8]) -> Result<Digest, BuildRuntimeError> {
         let digest = self
             .cas()?
             .put(bytes)
             .map_err(|error| storage_error("host_blob_write", error))?;
-        Digest::new(DigestAlgorithm::Blake3, digest.as_bytes().to_vec())
-            .map_err(|error| corrupt_error("host_blob_digest", error))
+        Ok(protocol_digest(digest))
     }
 
     fn lookup_action(&self, key: &ActionKey) -> Result<Option<ActionRecord>, BuildRuntimeError> {
@@ -265,6 +335,49 @@ impl BuildRuntime for ProductionBuildRuntime {
             .map_err(|error| publication_error("host_generation_publish", error))
     }
 
+    fn publish_generation_verified(
+        &self,
+        space: GenerationSpace,
+        target: &PublicationTargetId,
+        publications: &[Publication],
+        blobs: &[VerifiedBlob],
+    ) -> Result<CommittedGeneration, BuildRuntimeError> {
+        self.maintenance()?;
+        let (root, state, prefix, observer) = match space {
+            GenerationSpace::TargetArtifacts => (
+                self.layout.artifacts_root().to_path_buf(),
+                self.layout.publications_root().to_path_buf(),
+                self.layout.publication_prefix().to_path_buf(),
+                self.target_observer.clone(),
+            ),
+            GenerationSpace::BuildCatalog => (
+                self.layout.catalog_root().join("artifacts"),
+                self.layout.catalog_root().join("state"),
+                std::path::PathBuf::new(),
+                self.catalog_observer.clone(),
+            ),
+        };
+        let layout = ExternalPublisherLayout::new(
+            root,
+            state,
+            prefix,
+            self.layout.metadata_root().join("publication.lock"),
+        );
+        // These are caller-supplied handles, not an unbounded retention cache. The
+        // temporary publication view dies immediately after the atomic operation.
+        let cas = SharedCas {
+            session: self.session()?,
+            snapshots: blobs
+                .iter()
+                .map(|blob| (blob.digest().clone(), blob.clone()))
+                .collect(),
+        };
+        FileArtifactPublisher::with_external_layout(layout, cas, observer)
+            .map_err(|error| publication_error("host_generation_publish", error))?
+            .publish_generation(target, publications)
+            .map_err(|error| publication_error("host_generation_publish", error))
+    }
+
     fn compile(
         &self,
         source: &SourceBlob,
@@ -284,6 +397,26 @@ impl BuildRuntime for ProductionBuildRuntime {
             .map_err(|error| tool_error("host_static_link", error))
     }
 
+    fn link_shared(
+        &self,
+        entry: &SourceKey,
+        closure: squish_link::SharedUnitClosure,
+    ) -> Result<LinkOutput, BuildRuntimeError> {
+        StaticLinker
+            .link_shared(entry, closure)
+            .map_err(|error| tool_error("host_static_link", error))
+    }
+
+    fn link_prepared(
+        &self,
+        entry: &SourceKey,
+        closure: squish_link::PreparedUnitClosure,
+    ) -> Result<LinkOutput, BuildRuntimeError> {
+        StaticLinker
+            .link_prepared(entry, closure)
+            .map_err(|error| tool_error("host_static_link", error))
+    }
+
     fn instantiate(
         &self,
         program: &LinkedProgram,
@@ -300,10 +433,21 @@ impl BuildRuntime for ProductionBuildRuntime {
             .emit(request)
             .map_err(|error| tool_error("host_backend_render", error))
     }
+    fn render_ref(
+        &self,
+        request: BackendRequestRef<'_>,
+    ) -> Result<BackendOutput, BuildRuntimeError> {
+        SquishBackend
+            .emit_ref(request)
+            .map_err(|error| tool_error("host_backend_render", error))
+    }
 }
 
 #[derive(Clone)]
-struct SharedCas(Arc<Cas>);
+struct SharedCas {
+    session: Arc<CasSession>,
+    snapshots: HashMap<Digest, VerifiedBlob>,
+}
 
 impl BlobStore for SharedCas {
     type Error = CasError;
@@ -313,14 +457,18 @@ impl BlobStore for SharedCas {
         digest: &squish_build::ContentDigest,
         sink: &mut dyn std::io::Write,
     ) -> Result<bool, Self::Error> {
-        self.0.copy_to(digest, sink)
+        if let Some(blob) = self.snapshots.get(digest) {
+            sink.write_all(blob.bytes())?;
+            return Ok(true);
+        }
+        self.session.copy_to(digest, sink)
     }
 
     fn write_from(
         &self,
         source: &mut dyn std::io::Read,
     ) -> Result<squish_build::ContentDigest, Self::Error> {
-        self.0.write_from(source)
+        self.session.write_from(source)
     }
 }
 
@@ -522,5 +670,40 @@ mod tests {
         let catalog = runtime.publisher(GenerationSpace::BuildCatalog).unwrap();
         assert_eq!(targets.lock_path(), catalog.lock_path());
         assert_eq!(targets.lock_path(), expected);
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use squish_store::BlobSessionLimits;
+
+    #[test]
+    fn publication_snapshot_does_not_reread_after_zero_retention_eviction() {
+        std::fs::create_dir_all(".temp").unwrap();
+        let directory = tempfile::tempdir_in(".temp").unwrap();
+        let cas = Arc::new(Cas::open(directory.path().join("cas")).unwrap());
+        let session = Arc::new(CasSession::with_limits(
+            cas.clone(),
+            BlobSessionLimits {
+                max_bytes: 0,
+                max_entries: 0,
+            },
+        ));
+        let blob = VerifiedBlob::from_owned(vec![42; 4096]);
+        let digest = session.put_verified(&blob).unwrap();
+        assert_eq!(session.stats().retained_entries, 0);
+        // A snapshot is authority for its immutable bytes, not the mutable CAS path.
+        // A fresh legacy read must still detect corruption independently.
+        std::fs::write(cas.path_for(digest), b"corrupt").unwrap();
+        assert!(cas.get(digest).unwrap().is_none());
+        let store = SharedCas {
+            session: session.clone(),
+            snapshots: HashMap::from([(blob.digest().clone(), blob.clone())]),
+        };
+        let mut bytes = Vec::new();
+        assert!(store.copy_to(blob.digest(), &mut bytes).unwrap());
+        assert_eq!(bytes, blob.bytes());
+        assert_eq!(session.stats().acquisition_reads, 0);
     }
 }

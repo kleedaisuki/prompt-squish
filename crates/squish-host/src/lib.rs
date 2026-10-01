@@ -8,6 +8,11 @@
 #![deny(missing_docs)]
 
 mod runtime;
+mod sopack;
+
+use sopack::SopackAcquisition;
+#[cfg(test)]
+use sopack::read_bounded_archive;
 
 pub use runtime::ProductionBuildRuntime;
 
@@ -1042,6 +1047,16 @@ impl ProductionHost {
         lock: &Lockfile,
         mode: ResolutionMode,
     ) -> Result<Vec<PackageLocation>, SourceUnavailable> {
+        self.materialize_lock_with_sopacks(lock, mode, &SopackAcquisition::new(&self.project_root))
+    }
+
+    /// Shares invocation acquisition with resolution instead of reacquiring mutable locators.
+    fn materialize_lock_with_sopacks(
+        &self,
+        lock: &Lockfile,
+        mode: ResolutionMode,
+        sopacks: &SopackAcquisition<'_>,
+    ) -> Result<Vec<PackageLocation>, SourceUnavailable> {
         self.build_runtime
             .acquire_maintenance()
             .map_err(|error| SourceUnavailable {
@@ -1152,12 +1167,11 @@ impl ProductionHost {
                     Some(locked.materialized)
                 }
                 LockedSource::Sopack { path, checksum } => {
-                    let (_, bytes, payload) =
-                        read_project_sopack(&self.project_root, &self.project_root.join(path))?;
-                    if format!("sha256:{}", hex::encode(Sha256::digest(&bytes))) != *checksum {
+                    let (_, archive) = sopacks.load(&self.project_root.join(path))?;
+                    if archive.checksum() != checksum {
                         return Err(SourceUnavailable { identity: package.id.clone(), detail: "SOPack archive differs from its locked digest; explicitly update the dependency".into() });
                     }
-                    let root = self.materialize_sopack(checksum, &payload)?;
+                    let root = self.materialize_sopack(checksum, archive.payload())?;
                     locations.push(PackageLocation {
                         lock_id: package.id.clone(),
                         root,
@@ -1181,7 +1195,7 @@ impl ProductionHost {
     fn materialize_sopack(
         &self,
         checksum: &str,
-        payload: &squish_backend::archive::SopackPayload,
+        payload: &squish_backend::archive::SharedSopackPayload,
     ) -> Result<PathBuf, SourceUnavailable> {
         let fail = |error: String| SourceUnavailable {
             identity: checksum.into(),
@@ -1209,7 +1223,7 @@ impl ProductionHost {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(|error| fail(error.to_string()))?;
             }
-            std::fs::write(path, bytes).map_err(|error| fail(error.to_string()))?;
+            std::fs::write(path, bytes.as_ref()).map_err(|error| fail(error.to_string()))?;
         }
         std::fs::write(stage.path().join(".complete"), checksum)
             .map_err(|error| fail(error.to_string()))?;
@@ -1259,7 +1273,7 @@ impl ProductionHost {
         manifest_digest: &str,
         prior_lock: Option<&Lockfile>,
         mode: ResolutionMode,
-    ) -> Result<(Lockfile, Vec<PackageLocation>), SourceUnavailable> {
+    ) -> Result<ResolvedDependencies, SourceUnavailable> {
         self.build_runtime
             .acquire_maintenance()
             .map_err(|error| SourceUnavailable {
@@ -1272,8 +1286,10 @@ impl ProductionHost {
                 detail: error.to_string(),
             }
         })?;
-        let resolver = Resolver::new(RegistryView(self), GitView(&self.git))
-            .with_filesystem(FilesystemView(self.filesystem.as_ref(), &self.project_root));
+        let sopacks = SopackAcquisition::new(&self.project_root);
+        let resolver = Resolver::new(RegistryView(self), GitView(&self.git)).with_filesystem(
+            FilesystemView(self.filesystem.as_ref(), &self.project_root, &sopacks),
+        );
         let lockfile = resolver
             .resolve(ResolutionInput {
                 manifests,
@@ -1285,8 +1301,13 @@ impl ProductionHost {
                 identity: self.project_root.display().to_string(),
                 detail: error.to_string(),
             })?;
-        let packages = self.materialize_lock(&lockfile, mode)?;
-        Ok((lockfile, packages))
+        let packages = self.materialize_lock_with_sopacks(&lockfile, mode, &sopacks)?;
+        let sopacks = sopacks.locked(&lockfile)?;
+        Ok(ResolvedDependencies {
+            lockfile,
+            packages,
+            sopacks,
+        })
     }
 }
 
@@ -1981,15 +2002,13 @@ impl Services for ProductionHost {
     }
 
     fn resolve(&self, request: ResolveRequest<'_>) -> Result<ResolvedDependencies, ServiceError> {
-        let (lockfile, packages) = self
-            .resolve_dependencies(
-                request.manifests,
-                request.manifest_digest,
-                request.prior_lock,
-                request.mode,
-            )
-            .map_err(|error| service_error("dependency_resolution_failed", error))?;
-        Ok(ResolvedDependencies { lockfile, packages })
+        self.resolve_dependencies(
+            request.manifests,
+            request.manifest_digest,
+            request.prior_lock,
+            request.mode,
+        )
+        .map_err(|error| service_error("dependency_resolution_failed", error))
     }
 
     fn cache_records(
@@ -2185,7 +2204,11 @@ impl GitPort for GitView<'_> {
     }
 }
 
-struct FilesystemView<'a>(&'a (dyn FilesystemPort + Send + Sync), &'a Path);
+struct FilesystemView<'a>(
+    &'a (dyn FilesystemPort + Send + Sync),
+    &'a Path,
+    &'a SopackAcquisition<'a>,
+);
 impl FilesystemPort for FilesystemView<'_> {
     fn load(&self, request: LocalRequest<'_>) -> Result<LocalPackage, SourceUnavailable> {
         self.0.load(request)
@@ -2196,63 +2219,19 @@ impl FilesystemPort for FilesystemView<'_> {
             .parent()
             .unwrap_or(Path::new(""));
         let path = self.1.join(from).join(request.path);
-        let (relative, bytes, payload) = read_project_sopack(self.1, &path)?;
-        let manifest = sopack_manifest(&payload)?;
+        let (relative, archive) = self.2.load(&path)?;
+        let manifest = sopack_manifest(archive.payload())?;
         Ok(SopackPackage {
             path: relative,
             manifest,
-            checksum: format!("sha256:{}", hex::encode(Sha256::digest(&bytes))),
+            checksum: archive.checksum().to_owned(),
         })
     }
 }
 
-/// Reads a workspace-contained archive and applies the archive decoder's safety limits.
-fn read_project_sopack(
-    root: &Path,
-    path: &Path,
-) -> Result<(PathBuf, Vec<u8>, squish_backend::archive::SopackPayload), SourceUnavailable> {
-    let fail = |detail: String| SourceUnavailable {
-        identity: path.display().to_string(),
-        detail,
-    };
-    let canonical = path
-        .canonicalize()
-        .map_err(|error| fail(error.to_string()))?;
-    let relative = canonical
-        .strip_prefix(root)
-        .map_err(|_| fail("SOPack dependency escapes workspace root".into()))?
-        .to_path_buf();
-    let limits = squish_backend::archive::ArchiveLimits::default();
-    let file = File::open(canonical).map_err(|error| fail(error.to_string()))?;
-    let metadata = file.metadata().map_err(|error| fail(error.to_string()))?;
-    if !metadata.is_file() || metadata.len() > limits.max_archive_bytes {
-        return Err(fail(
-            "SOPack archive exceeds its byte limit or is not a regular file".into(),
-        ));
-    }
-    let bytes = read_bounded_archive(file, limits.max_archive_bytes).map_err(fail)?;
-    let payload = squish_backend::archive::read_sopack(&bytes, limits)
-        .map_err(|error| fail(error.to_string()))?;
-    Ok((relative, bytes, payload))
-}
-
-/// Reads at most limit plus one byte, including files that grow after metadata checking.
-fn read_bounded_archive(reader: impl std::io::Read, limit: u64) -> Result<Vec<u8>, String> {
-    use std::io::Read as _;
-    let mut bytes = Vec::new();
-    reader
-        .take(limit.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|error| error.to_string())?;
-    if bytes.len() as u64 > limit {
-        return Err("SOPack archive exceeds its byte limit".into());
-    }
-    Ok(bytes)
-}
-
 /// Uses embedded manifest intent; archive imports are already linked and self-contained.
 fn sopack_manifest(
-    payload: &squish_backend::archive::SopackPayload,
+    payload: &squish_backend::archive::SharedSopackPayload,
 ) -> Result<Manifest, SourceUnavailable> {
     let source = payload
         .metadata
@@ -2590,7 +2569,7 @@ mod tests {
         )
         .unwrap();
         let manifests = std::collections::BTreeMap::from([("xmlsquish.toml".into(), manifest)]);
-        let (lock, locations) = host
+        let resolved = host
             .resolve_dependencies(
                 &manifests,
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2598,10 +2577,12 @@ mod tests {
                 ResolutionMode::Online,
             )
             .unwrap();
+        let lock = resolved.lockfile;
         assert_eq!(lock.packages.len(), 1);
-        assert!(locations.is_empty());
+        assert!(resolved.packages.is_empty());
+        assert!(resolved.sopacks.is_empty());
         for mode in [ResolutionMode::Locked, ResolutionMode::Frozen] {
-            let (reused, locations) = host
+            let reused = host
                 .resolve_dependencies(
                     &manifests,
                     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2609,8 +2590,9 @@ mod tests {
                     mode,
                 )
                 .unwrap();
-            assert_eq!(reused, lock);
-            assert!(locations.is_empty());
+            assert_eq!(reused.lockfile, lock);
+            assert!(reused.packages.is_empty());
+            assert!(reused.sopacks.is_empty());
         }
     }
 

@@ -173,3 +173,105 @@ private generation metadata. The same classification is used for old-generation
 cleanup, so replacing a generation also removes its obsolete archive products.
 A successful private generation commit alone does not establish end-to-end user
 publication; separated-layout regression checks verify the public files exist.
+
+
+## Manager immutable ownership repair (2026-10-01)
+
+The mechanism audit in `../performance/v1.2-archive-mechanisms.md` distinguished
+transport deduplication from expanded in-memory ownership. Manager staging now
+uses immutable `Arc<RelocatableUnitIr>` and `Arc<[u8]>` handles instead of cloning
+compiled arenas and resource bodies between phases. These are ownership changes,
+not a relaxation of source identity, validation, or archive limits.
+
+* Acquisition supplies `AcquiredSopack` handles keyed by exact lock-node ID. The
+  manager still bounded-streams and SHA-256 hashes each locked file at the freeze
+  barrier, rejecting acquisition-to-freeze content drift. A missing acquisition
+  handle is an explicit error rather than an implicit second decode. The freeze
+  recheck uses a fixed 64 KiB buffer, not another owned archive body. Exact
+  `PackageInstanceId` keys include source kind, canonical source, package name,
+  and exact revision; a same-name local package cannot inherit archived objects.
+* Each exact archive is indexed once by diagnostic logical path and asset owner.
+  Per-source installation performs indexed lookup and clones only handles for
+  its own bindings. Duplicate attachment paths are rejected. Materialized
+  diagnostic bytes must match the immutable archive attachment exactly before
+  any compiled object is installed. This removes repeated archive-unit and
+  entire-asset-map scans without treating attachment files as compilable inputs.
+* Archive emission does not mistake the project-wide frozen resolution for a
+  target closure. SOPack selects `linked.image.units`; pack selects the union of
+  independently projected included-entry closures. Only these compiled handles
+  are taken from the
+  execution state. Pack member staging shares frozen asset bodies and memoized
+  include-output bodies; the reproducible writer receives borrowed member views.
+  Repeated includes therefore share bytes but retain separate archive names.
+* Each include projects its own exact revision/import evidence, builds a shared
+  compiled-unit closure, and invokes the ordinary validated shared linker with
+  fresh arguments and the same independent budget contract. Sharing payload
+  handles does not merge executable symbol scopes or skip child validation.
+* SOPack output constructs a borrowed payload view over reachable unit handles,
+  frozen diagnostic source bytes, and resources. Export resolution uses an exact
+  owner/path index rather than an export-by-unit nested scan. Final archive
+  ownership and canonical relocation remain the backend's responsibility.
+
+Private tests use actual frontend-generated module IR to verify pointer identity
+of installed objects and shared assets, exact diagnostic drift rejection, and
+ambiguous attachment-path rejection. Existing include tests retain independent
+cyclic closures, exact revisions, dangling-edge errors, and missing-payload
+errors. Local `rustfmt` and diff whitespace validation were run; Rust execution
+is delegated to hosted CI. No CLI speedup or allocation reduction is claimed
+until repaired production paths are measured on the same hosted workloads.
+
+## Invocation-scoped verified acquisition (repair)
+
+`host::sopack::SopackAcquisition` is created for each dependency-resolution or
+standalone materialization operation. Resolver metadata loading, locked/frozen
+availability checks and diagnostic materialization use the same captured archive
+handle. A canonical workspace-relative locator is read at most once in that
+operation. Different locator aliases are each read (their content is not assumed
+immutable) but identical SHA-256 content shares one decoded payload.
+
+Manager `AcquiredSopack::acquire` computes the exact archive SHA-256 once and
+returns opaque checksum-bearing `Arc` ownership; a previously verified digest is
+reused before decoding. Shared source/asset buffers and compiled unit objects
+remain shared into manager freeze. `ResolvedDependencies.sopacks` maps exact lock
+node IDs to these handles, not public package names. The host never keeps the
+locator memo in process-global or persistent state.
+
+The authoritative acquisition/freeze drift contract is retained: manager freeze
+boundedly rehashes the original archive locator against the expected checksum,
+but consumes the shared decoded payload rather than decoding again. This second
+byte-read is an explicit safety boundary, not a payload clone/decode optimization
+omission. Materialized source attachments are independently matched to archived
+exact bytes. A later invocation always reopens and verifies each locator.
+
+Regression counters cover repeated path acquisition (one read of B bytes, one
+decode), a byte-identical second locator (two reads totaling 2B, still one decode),
+exact lock-node handle reuse, wrong locked checksum rejection, fresh-invocation
+reacquisition and malformed later-run archive rejection. `Arc::ptr_eq` checks
+shared ownership directly. Fixtures live under the project `.temp` namespace.
+Only rustfmt is run locally; test execution and measurements remain hosted CI.
+
+Archive products and evidence now survive emission as sealed `VerifiedBlob`
+handles. Product evidence references the established digest rather than hashing
+again; cache hydration checks that digest and size without recreating a backend
+output or copying the expansion trace. The backend state keeps publication bytes
+and product kind, not a redundant full `BackendOutput`.
+
+After immutable reachability pruning the relocated unit is encoded and sealed once
+as `FrozenSource::precompiled_blob`. Compile action inputs use this handle's
+stored digest, and execution reuses the same encoded bytes instead of performing
+another serialization or byte hash. The semantic unit remains a shared IR handle;
+cache ownership is still project-local.
+
+
+Immutable compile scheduling now has a separate `archive_reachability` boundary.
+All local sources remain in the strict global frontend plan. A namespace-aware
+prescan of their static `xs:import src="pkg:ALIAS/EXPORT"` declarations resolves
+exact lock-node dependencies to archived exports, then follows validated typed
+archive bindings across provider identities and cycles. Only reachable archive
+sources survive into compile scheduling and encoded-blob sealing. All library
+units and materialized diagnostic attachments are validated *before* pruning;
+unreachable malformed library content is not hidden. Archived XML is never
+prescanned, and local prescan syntax errors still fail in the normal frontend.
+Pure tests verify namespace/attribute/entity handling and cyclic cross-provider
+selection; the 64-module tiny-export compile-count acceptance test belongs to
+hosted end-to-end validation, not an algorithm-imitation benchmark.

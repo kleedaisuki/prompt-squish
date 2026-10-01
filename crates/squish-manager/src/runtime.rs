@@ -2,10 +2,12 @@
 
 use std::{collections::BTreeMap, fmt, path::Path, sync::Arc};
 
-use squish_backend::{BackendCacheIdentity, BackendOutput, BackendRequest, SquishOptions};
+use squish_backend::{
+    BackendCacheIdentity, BackendOutput, BackendRequest, BackendRequestRef, SquishOptions,
+};
 use squish_build::{
     ActionKey, ActionRecord, ArtifactRead, CommittedGeneration, GenerationRef, Publication,
-    PublicationPath, PublicationTargetId,
+    PublicationPath, PublicationTargetId, VerifiedAction, VerifiedBlob,
 };
 use squish_ir::SourceKey;
 use squish_link::{Budgets, InstantiateOutput, LinkOutput, LinkedProgram, UnitClosure};
@@ -122,6 +124,70 @@ pub trait BuildRuntime: Send + Sync {
     ) -> Result<BackendCacheIdentity, BuildRuntimeError>;
     /// 读取并由运行时校验 blob。 / Reads and runtime-verifies a blob.
     fn read_blob(&self, digest: &Digest) -> Result<Option<Vec<u8>>, BuildRuntimeError>;
+    /// Acquires a digest-verified immutable snapshot, checking legacy runtime responses.
+    /// A caller-held handle remains valid independently of a bounded host session cache.
+    fn read_verified(&self, digest: &Digest) -> Result<Option<VerifiedBlob>, BuildRuntimeError> {
+        let Some(bytes) = self.read_blob(digest)? else {
+            return Ok(None);
+        };
+        let blob = VerifiedBlob::from_owned(bytes);
+        if blob.digest() != digest {
+            return Err(BuildRuntimeError::corrupt(
+                "runtime_blob_digest",
+                "runtime returned bytes that do not match the requested digest",
+            ));
+        }
+        Ok(Some(blob))
+    }
+    /// Shares acquired bytes without copying the complete payload.
+    fn read_blob_shared(&self, digest: &Digest) -> Result<Option<Arc<[u8]>>, BuildRuntimeError> {
+        Ok(self.read_verified(digest)?.map(|blob| blob.shared_bytes()))
+    }
+    /// Writes a verified snapshot; legacy adapters must still return its exact identity.
+    fn write_verified_blob(&self, blob: &VerifiedBlob) -> Result<Digest, BuildRuntimeError> {
+        let digest = self.write_blob(blob.bytes())?;
+        if &digest != blob.digest() {
+            return Err(BuildRuntimeError::corrupt(
+                "runtime_blob_digest",
+                "runtime returned an incorrect written blob identity",
+            ));
+        }
+        Ok(digest)
+    }
+    /// Acquires all action outputs explicitly, preserving declaration order and integrity.
+    fn lookup_action_verified(
+        &self,
+        key: &ActionKey,
+    ) -> Result<Option<VerifiedAction>, BuildRuntimeError> {
+        let Some(record) = self.lookup_action(key)? else {
+            return Ok(None);
+        };
+        if &record.key != key {
+            return Err(BuildRuntimeError::corrupt(
+                "runtime_action_key",
+                "runtime returned an action record for a different key",
+            ));
+        }
+        let mut blobs = Vec::with_capacity(record.outputs.len());
+        for output in &record.outputs {
+            let Some(blob) = self.read_verified(&output.digest)? else {
+                return Ok(None);
+            };
+            if blob.bytes().len() as u64 != output.size {
+                return Err(BuildRuntimeError::corrupt(
+                    "runtime_blob_size",
+                    "runtime returned an action output with incorrect size",
+                ));
+            }
+            blobs.push(blob);
+        }
+        Ok(Some(VerifiedAction { record, blobs }))
+    }
+    /// Flushes advisory cache recency updates without changing durable action semantics.
+    /// Legacy runtimes do not need an invocation-scoped writeback phase.
+    fn flush_advisory(&self) -> Result<(), BuildRuntimeError> {
+        Ok(())
+    }
     /// 幂等写入 blob，并返回已校验摘要。 / Idempotently writes a blob and returns its verified digest.
     fn write_blob(&self, bytes: &[u8]) -> Result<Digest, BuildRuntimeError>;
     /// 查找已验证动作记录。 / Looks up a verified action record.
@@ -148,6 +214,17 @@ pub trait BuildRuntime: Send + Sync {
         target: &PublicationTargetId,
         publications: &[Publication],
     ) -> Result<CommittedGeneration, BuildRuntimeError>;
+    /// Publishes explicit acquired snapshots without relying on host cache retention.
+    /// The default preserves custom publishers' legacy contract.
+    fn publish_generation_verified(
+        &self,
+        space: GenerationSpace,
+        target: &PublicationTargetId,
+        publications: &[Publication],
+        _blobs: &[VerifiedBlob],
+    ) -> Result<CommittedGeneration, BuildRuntimeError> {
+        self.publish_generation(space, target, publications)
+    }
     /// 使用选定前端编译冻结源。 / Compiles a frozen source with the selected frontend.
     fn compile(
         &self,
@@ -160,6 +237,46 @@ pub trait BuildRuntime: Send + Sync {
         entry: &SourceKey,
         closure: UnitClosure,
     ) -> Result<LinkOutput, BuildRuntimeError>;
+    /// Links shared immutable unit handles without copying their IR bodies.
+    ///
+    /// The default preserves existing runtime implementations. Production adapters
+    /// override this method to retain shared ownership through the selected linker.
+    fn link_shared(
+        &self,
+        entry: &SourceKey,
+        closure: squish_link::SharedUnitClosure,
+    ) -> Result<LinkOutput, BuildRuntimeError> {
+        self.link(
+            entry,
+            UnitClosure {
+                snapshot: (*closure.snapshot).clone(),
+                units: closure
+                    .units
+                    .into_iter()
+                    .map(|(key, unit)| (key, (*unit).clone()))
+                    .collect(),
+            },
+        )
+    }
+    /// Links units whose validation and context-independent optimization are already sealed.
+    /// Legacy runtime implementations retain their shared-unit fallback contract.
+    fn link_prepared(
+        &self,
+        entry: &SourceKey,
+        closure: squish_link::PreparedUnitClosure,
+    ) -> Result<LinkOutput, BuildRuntimeError> {
+        self.link_shared(
+            entry,
+            squish_link::SharedUnitClosure {
+                snapshot: closure.snapshot,
+                units: closure
+                    .units
+                    .into_iter()
+                    .map(|(key, unit)| (key, unit.unit().clone()))
+                    .collect(),
+            },
+        )
+    }
     /// 使用选定求值器实例化程序。 / Instantiates a program with the selected evaluator.
     fn instantiate(
         &self,
@@ -169,6 +286,31 @@ pub trait BuildRuntime: Send + Sync {
     ) -> Result<InstantiateOutput, BuildRuntimeError>;
     /// 使用选定后端渲染产物。 / Renders output with the selected backend.
     fn render(&self, request: BackendRequest) -> Result<BackendOutput, BuildRuntimeError>;
+    /// Renders an immutable document view while preserving the owned request contract.
+    /// Production adapters override this method to avoid copying the document.
+    fn render_shared(
+        &self,
+        document: &squish_ir::LinkedDocumentIr,
+        trace: &squish_ir::ExpansionTrace,
+        options: SquishOptions,
+    ) -> Result<BackendOutput, BuildRuntimeError> {
+        self.render_ref(BackendRequestRef {
+            document,
+            trace,
+            options,
+        })
+    }
+    /// Renders borrowed immutable inputs; legacy runtimes retain their owned contract.
+    fn render_ref(
+        &self,
+        request: BackendRequestRef<'_>,
+    ) -> Result<BackendOutput, BuildRuntimeError> {
+        self.render(BackendRequest {
+            document: request.document.clone(),
+            trace: request.trace.clone(),
+            options: request.options,
+        })
+    }
 }
 
 /// 在计划恢复边界打开调用级运行时的端口。 / Port opening an invocation runtime at the planning recovery boundary.
@@ -178,4 +320,174 @@ pub trait BuildRuntimeProvider: Send + Sync {
         &self,
         project_root: &Path,
     ) -> Result<Arc<dyn BuildRuntime>, crate::ServiceError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use squish_build::{OutputName, ProducedOutput};
+    use squish_protocol::ArtifactKind;
+
+    /// Deliberately legacy-only adapter exercises all additive default bridges.
+    struct LegacyRuntime {
+        bytes: Option<Vec<u8>>,
+        written_digest: Digest,
+        record: Option<ActionRecord>,
+    }
+
+    impl BuildRuntime for LegacyRuntime {
+        fn descriptor(&self) -> BuildRuntimeDescriptor {
+            unimplemented!()
+        }
+        fn backend_identity(
+            &self,
+            _: SquishOptions,
+        ) -> Result<BackendCacheIdentity, BuildRuntimeError> {
+            unimplemented!()
+        }
+        fn read_blob(&self, _: &Digest) -> Result<Option<Vec<u8>>, BuildRuntimeError> {
+            Ok(self.bytes.clone())
+        }
+        fn write_blob(&self, _: &[u8]) -> Result<Digest, BuildRuntimeError> {
+            Ok(self.written_digest.clone())
+        }
+        fn lookup_action(&self, _: &ActionKey) -> Result<Option<ActionRecord>, BuildRuntimeError> {
+            Ok(self.record.clone())
+        }
+        fn record_action(&self, _: &ActionRecord) -> Result<(), BuildRuntimeError> {
+            unimplemented!()
+        }
+        fn current_generation(
+            &self,
+            _: GenerationSpace,
+            _: &PublicationTargetId,
+        ) -> Result<Option<CommittedGeneration>, BuildRuntimeError> {
+            unimplemented!()
+        }
+        fn read_generation_artifact(
+            &self,
+            _: GenerationSpace,
+            _: &GenerationRef,
+            _: &PublicationPath,
+        ) -> Result<(ArtifactRead, Vec<u8>), BuildRuntimeError> {
+            unimplemented!()
+        }
+        fn publish_generation(
+            &self,
+            _: GenerationSpace,
+            _: &PublicationTargetId,
+            _: &[Publication],
+        ) -> Result<CommittedGeneration, BuildRuntimeError> {
+            unimplemented!()
+        }
+        fn compile(
+            &self,
+            _: &SourceBlob,
+            _: &FrontendSourceContext,
+        ) -> Result<FrontendOutput, BuildRuntimeError> {
+            unimplemented!()
+        }
+        fn link(&self, _: &SourceKey, _: UnitClosure) -> Result<LinkOutput, BuildRuntimeError> {
+            unimplemented!()
+        }
+        fn instantiate(
+            &self,
+            _: &LinkedProgram,
+            _: BTreeMap<String, String>,
+            _: Budgets,
+        ) -> Result<InstantiateOutput, BuildRuntimeError> {
+            unimplemented!()
+        }
+        fn render(&self, _: BackendRequest) -> Result<BackendOutput, BuildRuntimeError> {
+            unimplemented!()
+        }
+    }
+
+    fn fixture() -> (LegacyRuntime, VerifiedBlob) {
+        let blob = VerifiedBlob::from_owned(b"immutable output".to_vec());
+        (
+            LegacyRuntime {
+                bytes: Some(blob.bytes().to_vec()),
+                written_digest: blob.digest().clone(),
+                record: None,
+            },
+            blob,
+        )
+    }
+
+    #[test]
+    fn legacy_read_and_write_bridge_verify_identity() {
+        let (runtime, blob) = fixture();
+        let acquired = runtime.read_verified(blob.digest()).unwrap().unwrap();
+        assert_eq!(acquired.digest(), blob.digest());
+        assert_eq!(acquired.bytes(), blob.bytes());
+        assert_eq!(
+            runtime
+                .read_blob_shared(blob.digest())
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            blob.bytes()
+        );
+        assert_eq!(runtime.write_verified_blob(&blob).unwrap(), *blob.digest());
+        runtime.flush_advisory().unwrap();
+    }
+
+    #[test]
+    fn legacy_wrong_read_or_write_digest_is_corruption() {
+        let (mut runtime, blob) = fixture();
+        runtime.bytes = Some(b"substituted".to_vec());
+        assert_eq!(
+            runtime.read_verified(blob.digest()).unwrap_err().kind(),
+            BuildRuntimeErrorKind::Corrupt
+        );
+        runtime.written_digest = VerifiedBlob::from_owned(b"other".to_vec()).digest().clone();
+        assert_eq!(
+            runtime.write_verified_blob(&blob).unwrap_err().kind(),
+            BuildRuntimeErrorKind::Corrupt
+        );
+    }
+
+    #[test]
+    fn legacy_verified_action_bridge_rejects_wrong_manifest_key() {
+        let (mut runtime, _) = fixture();
+        let requested = ActionKey::new("requested").unwrap();
+        runtime.record = Some(ActionRecord {
+            key: ActionKey::new("other").unwrap(),
+            outputs: Vec::new(),
+        });
+        assert_eq!(
+            runtime
+                .lookup_action_verified(&requested)
+                .unwrap_err()
+                .code(),
+            "runtime_action_key"
+        );
+    }
+
+    #[test]
+    fn verified_action_bridge_preserves_outputs_and_rejects_size_mismatch() {
+        let (mut runtime, blob) = fixture();
+        let key = ActionKey::new("action").unwrap();
+        runtime.record = Some(ActionRecord {
+            key: key.clone(),
+            outputs: vec![ProducedOutput {
+                name: OutputName::new("result").unwrap(),
+                kind: ArtifactKind::Other("test".into()),
+                digest: blob.digest().clone(),
+                size: blob.bytes().len() as u64,
+            }],
+        });
+        let action = runtime.lookup_action_verified(&key).unwrap().unwrap();
+        assert_eq!(action.record, runtime.record.clone().unwrap());
+        assert_eq!(action.blobs.len(), 1);
+        assert_eq!(action.blobs[0].bytes(), blob.bytes());
+        runtime.record.as_mut().unwrap().outputs[0].size += 1;
+        assert_eq!(
+            runtime.lookup_action_verified(&key).unwrap_err().kind(),
+            BuildRuntimeErrorKind::Corrupt
+        );
+        runtime.bytes = None;
+        assert!(runtime.lookup_action_verified(&key).unwrap().is_none());
+    }
 }

@@ -3,24 +3,30 @@
 use super::*;
 use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
 use sha2::Digest as _;
-use squish_backend::archive::{ArchiveLimits, SopackPayload, logical_source_path, read_sopack};
+use squish_backend::archive::{ArchiveLimits, SharedSopackPayload, logical_source_path};
 use std::io::Read;
 
 /// Loads each immutable dependency once and freezes only syntactically declared resources.
 pub(super) fn freeze_inputs(
     snapshot: &ProjectSnapshot,
     sources: &mut [FrozenSource],
+    sopacks: &BTreeMap<String, Arc<crate::services::AcquiredSopack>>,
 ) -> Result<(), ManagerError> {
     let mut archives = BTreeMap::new();
     for package in &snapshot.lockfile().expect("authoritative lock").packages {
         let squish_project::LockedSource::Sopack { path, checksum } = &package.source else {
             continue;
         };
-        let bytes = read_bounded(
+        let instance = squish_ir::PackageInstanceId {
+            source_kind: 5,
+            canonical_source: checksum.clone(),
+            package_name: package.name.clone(),
+            exact_revision: checksum.clone(),
+        };
+        let digest = frozen_archive_checksum(
             &snapshot.root().join(path),
             ArchiveLimits::default().max_archive_bytes,
         )?;
-        let digest = format!("sha256:{}", hex(&sha2::Sha256::digest(&bytes)));
         if digest != *checksum {
             return Err(ManagerError::new(
                 "MGB140",
@@ -31,28 +37,33 @@ pub(super) fn freeze_inputs(
                 ),
             ));
         }
-        let payload = read_sopack(&bytes, ArchiveLimits::default())
-            .map_err(|e| error("MGB141", Phase::Snapshot, e))?;
-        archives.insert(package.id.clone(), Arc::new(payload));
+        let acquired = sopacks.get(&package.id).ok_or_else(|| {
+            ManagerError::new(
+                "MGB141",
+                Phase::Snapshot,
+                "immutable SOPack acquisition handle is absent",
+            )
+        })?;
+        if acquired.checksum() != checksum {
+            return Err(ManagerError::new(
+                "MGB140",
+                Phase::Snapshot,
+                "immutable SOPack acquisition differs from its locked checksum",
+            ));
+        }
+        if let std::collections::btree_map::Entry::Vacant(slot) = archives.entry(instance) {
+            slot.insert(FrozenArchiveIndex::new(acquired.payload().clone())?);
+        }
     }
-    // The lock-derived identity is available directly from each frozen source; match exact checksum.
     for source in sources {
-        let archive = snapshot
-            .lockfile()
-            .expect("authoritative lock")
-            .packages
-            .iter()
-            .find_map(|p| match &p.source {
-                squish_project::LockedSource::Sopack { checksum, .. }
-                    if p.name == source.package.package_name
-                        && source.package.canonical_source == *checksum =>
-                {
-                    archives.get(&p.id)
-                }
-                _ => None,
-            });
-        if let Some(archive) = archive {
-            install_archive_source(source, archive.clone())?;
+        if let Some(archive) = archives.get(&source.package) {
+            install_archive_source(source, archive)?;
+        } else if source.package.source_kind == 5 {
+            return Err(ManagerError::new(
+                "MGB143",
+                Phase::Snapshot,
+                "compiled archive source has no exact locked provider",
+            ));
         } else {
             source.assets = freeze_local_assets(source)?;
         }
@@ -63,50 +74,79 @@ pub(super) fn freeze_inputs(
 /// A reusable object is a declared immutable input, not a request to recompile archived XML.
 pub(super) fn compile_inputs(source: &FrozenSource) -> Result<Vec<InputRef>, ManagerError> {
     let mut inputs = vec![InputRef::Blob(source.blob.digest().to_protocol())];
-    if let Some(unit) = &source.precompiled {
-        let bytes = encode_unit_container(unit).map_err(|e| error("MGB142", Phase::Analyze, e))?;
-        inputs.push(InputRef::Blob(protocol_blake3(&bytes)));
+    if let Some(blob) = &source.precompiled_blob {
+        inputs.push(InputRef::Blob(blob.digest().clone()));
     }
     Ok(inputs)
+}
+
+/// One immutable dependency's acquisition indexes, built once rather than per source.
+struct FrozenArchiveIndex {
+    /// Shared archive authority retains relocated identities and diagnostic attachments.
+    archive: Arc<SharedSopackPayload>,
+    /// Portable attachment paths select exact relocated units without scanning the archive.
+    paths: BTreeMap<String, SourceKey>,
+    /// Definition-owned bindings share bytes, including deduplicated archive blobs.
+    assets: BTreeMap<SourceKey, BTreeMap<String, Arc<[u8]>>>,
+}
+
+impl FrozenArchiveIndex {
+    /// Indexes validated contents once and rejects ambiguous diagnostic attachment paths.
+    fn new(archive: Arc<SharedSopackPayload>) -> Result<Self, ManagerError> {
+        let mut paths = BTreeMap::new();
+        for key in archive.units.keys() {
+            let path = logical_source_path(key).map_err(|e| error("MGB143", Phase::Snapshot, e))?;
+            if paths.insert(path, key.clone()).is_some() {
+                return Err(ManagerError::new(
+                    "MGB143",
+                    Phase::Snapshot,
+                    "archive has ambiguous compiled diagnostic attachment paths",
+                ));
+            }
+        }
+        let mut assets: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
+        for ((owner, path), bytes) in &archive.assets {
+            assets
+                .entry(owner.clone())
+                .or_default()
+                .insert(path.clone(), bytes.clone());
+        }
+        Ok(Self {
+            archive,
+            paths,
+            assets,
+        })
+    }
 }
 
 /// Rebinds diagnostic sources and resource ownership to the archive's relocated unit identity.
 fn install_archive_source(
     source: &mut FrozenSource,
-    archive: Arc<SopackPayload>,
+    index: &FrozenArchiveIndex,
 ) -> Result<(), ManagerError> {
     let logical = source.blob.id().path().as_str();
-    let (key, unit) = archive
-        .units
-        .iter()
-        .find(|(key, _)| logical_source_path(key).is_ok_and(|path| path == logical))
-        .ok_or_else(|| {
-            ManagerError::new(
-                "MGB143",
-                Phase::Snapshot,
-                format!("archive has no compiled unit for {logical}"),
-            )
-        })?;
-    if archive.sources.get(key).map(Vec::as_slice) != Some(source.blob.bytes()) {
+    let key = index.paths.get(logical).ok_or_else(|| {
+        ManagerError::new(
+            "MGB143",
+            Phase::Snapshot,
+            format!("archive has no compiled unit for {logical}"),
+        )
+    })?;
+    if index.archive.sources.get(key).map(|bytes| bytes.as_ref()) != Some(source.blob.bytes()) {
         return Err(ManagerError::new(
             "MGB143",
             Phase::Snapshot,
             format!("immutable SOPack source attachment `{logical}` differs from archive bytes"),
         ));
     }
-    source.precompiled = Some(unit.clone());
-    source.assets = archive
-        .assets
-        .iter()
-        .filter(|((owner, _), _)| owner == key)
-        .map(|((_, path), bytes)| (path.clone(), bytes.clone()))
-        .collect();
-    source.archive = Some(archive);
+    source.precompiled = Some(index.archive.units[key].clone());
+    source.assets = index.assets.get(key).cloned().unwrap_or_default();
+    source.archive = Some(index.archive.clone());
     Ok(())
 }
 
 /// Resolves asset bytes against the defining source, rejecting package escapes including symlinks.
-fn freeze_local_assets(source: &FrozenSource) -> Result<BTreeMap<String, Vec<u8>>, ManagerError> {
+fn freeze_local_assets(source: &FrozenSource) -> Result<BTreeMap<String, Arc<[u8]>>, ManagerError> {
     let paths = declared_assets(source.blob.bytes())?;
     if paths.is_empty() {
         return Ok(BTreeMap::new());
@@ -157,7 +197,7 @@ fn freeze_local_assets(source: &FrozenSource) -> Result<BTreeMap<String, Vec<u8>
                 ));
             }
             let bytes = read_bounded(&resolved, ArchiveLimits::default().max_content_bytes)?;
-            Ok((path, bytes))
+            Ok((path, Arc::from(bytes)))
         })
         .collect()
 }
@@ -239,7 +279,35 @@ pub(super) fn emit(
         })?
         .1
         .clone();
-    let compiled = state.compiled.clone();
+    let include_index = if target.resolved.backend == "pack" {
+        Some(IncludeIndex::new(&resolution)?)
+    } else {
+        None
+    };
+    let reachable = if let Some(index) = &include_index {
+        index.included_units(&instantiated.directives)?
+    } else {
+        linked
+            .image
+            .units
+            .iter()
+            .map(|unit| unit.source.clone())
+            .collect()
+    };
+    // The frozen resolution is project-wide; copy handles only for emitted child closures.
+    let compiled: BTreeMap<_, _> = reachable
+        .iter()
+        .map(|key| {
+            state
+                .compiled
+                .get(key)
+                .cloned()
+                .map(|unit| (key.clone(), unit))
+                .ok_or_else(|| {
+                    ManagerError::new("MGB151", Phase::Emit, "archive compiled closure is absent")
+                })
+        })
+        .collect::<Result<_, _>>()?;
     drop(state);
     let limits = ArchiveLimits {
         max_archive_bytes: budgets(&target.resolved).max_output_bytes,
@@ -250,7 +318,7 @@ pub(super) fn emit(
         pack_bytes(
             executor,
             target,
-            &resolution,
+            include_index.as_ref().expect("pack include index"),
             &compiled,
             instantiated,
             limits,
@@ -258,22 +326,30 @@ pub(super) fn emit(
     } else {
         sopack_bytes(executor, target, linked, &resolution, &compiled, limits)?
     };
+    let product = squish_build::VerifiedBlob::from_owned(bytes);
     let debug = serde_json::to_vec(&serde_json::json!({ "schema": 1,
-        "digest": protocol_blake3(&bytes).hex(), "size": bytes.len() as u64 }))
+        "digest": product.digest().hex(), "size": product.bytes().len() as u64 }))
     .map_err(|e| error("MGB152", Phase::Emit, e))?;
-    executor.store_blob(&bytes, "MGB153", Phase::Cache)?;
-    executor.store_blob(&debug, "MGB154", Phase::Cache)?;
+    let debug = squish_build::VerifiedBlob::from_owned(debug);
+    executor.store_verified(&product, "MGB153", Phase::Cache)?;
+    executor.store_verified(&debug, "MGB154", Phase::Cache)?;
+    let kind = product_kind(&target.resolved.backend);
     let produced = vec![
-        produced("prompt", product_kind(&target.resolved.backend), &bytes),
-        produced("backend-result", ArtifactKind::DebugInfo, &debug),
+        produced_verified("prompt", kind.clone(), &product),
+        produced_verified("backend-result", ArtifactKind::DebugInfo, &debug),
     ];
-    let output = archive_output(executor, target_name, bytes, instantiated.trace.clone());
     executor
         .state
         .lock()
         .expect("build state mutex is not poisoned")
-        .backend
-        .insert(target_name.into(), BackendStage { output, debug });
+        .insert_backend(
+            target_name.into(),
+            BackendStage {
+                product,
+                debug,
+                kind,
+            },
+        );
     Ok((produced, Vec::new()))
 }
 
@@ -281,14 +357,14 @@ pub(super) fn emit(
 pub(super) fn hydrate(
     executor: &BuildExecutor,
     target_name: &str,
-    bytes: Vec<u8>,
-    debug: Vec<u8>,
+    product: squish_build::VerifiedBlob,
+    debug: squish_build::VerifiedBlob,
 ) -> Result<(), ManagerError> {
     let evidence: serde_json::Value =
-        serde_json::from_slice(&debug).map_err(|e| error("MGB155", Phase::Cache, e))?;
+        serde_json::from_slice(debug.bytes()).map_err(|e| error("MGB155", Phase::Cache, e))?;
     if evidence["schema"] != 1
-        || evidence["digest"] != protocol_blake3(&bytes).hex()
-        || evidence["size"] != bytes.len() as u64
+        || evidence["digest"] != product.digest().hex()
+        || evidence["size"] != product.bytes().len() as u64
     {
         return Err(ManagerError::new(
             "MGB156",
@@ -296,54 +372,28 @@ pub(super) fn hydrate(
             "cached archive differs from emission evidence",
         ));
     }
-    let trace = executor
-        .state
-        .lock()
-        .expect("build state mutex is not poisoned")
-        .instantiated
-        .get(target_name)
-        .ok_or_else(|| {
-            ManagerError::new(
-                "MGB157",
-                Phase::Cache,
-                "cached archive lacks its instantiated predecessor",
-            )
-        })?
-        .1
-        .trace
-        .clone();
-    let output = archive_output(executor, target_name, bytes, trace);
+    let kind = product_kind(&executor.target(target_name)?.resolved.backend);
     executor
         .state
         .lock()
         .expect("build state mutex is not poisoned")
-        .backend
-        .insert(target_name.into(), BackendStage { output, debug });
+        .insert_backend(
+            target_name.into(),
+            BackendStage {
+                product,
+                debug,
+                kind,
+            },
+        );
     Ok(())
-}
-
-/// Archives have transport-level evidence, not a misleading XML artifact-byte map.
-fn archive_output(
-    executor: &BuildExecutor,
-    target_name: &str,
-    bytes: Vec<u8>,
-    trace: squish_ir::ExpansionTrace,
-) -> BackendOutput {
-    BackendOutput {
-        bytes,
-        byte_map: Default::default(),
-        trace,
-        cache_identity: executor.prepared.backend_identities[target_name].clone(),
-        metrics: Default::default(),
-    }
 }
 
 /// Independently links entry members while deduplicating repeated includes within one pack.
 fn pack_bytes(
     executor: &BuildExecutor,
     target: &TargetBuild,
-    resolution: &ResolutionSnapshot,
-    compiled: &BTreeMap<SourceKey, CompiledUnit>,
+    include_index: &IncludeIndex<'_>,
+    compiled: &BTreeMap<SourceKey, Arc<CompiledUnit>>,
     instantiated: &InstantiateOutput,
     limits: ArchiveLimits,
 ) -> Result<Vec<u8>, ManagerError> {
@@ -353,12 +403,6 @@ fn pack_bytes(
         .iter()
         .map(|s| (source_key(s), &s.assets))
         .collect();
-    let bindings: BTreeMap<_, _> = resolution
-        .imports
-        .iter()
-        .map(|b| ((&b.importer, b.import.0), &b.target))
-        .collect();
-    let include_index = IncludeIndex::new(resolution)?;
     let mut entries = Vec::with_capacity(instantiated.directives.len());
     let mut includes = BTreeMap::new();
     for directive in &instantiated.directives {
@@ -376,10 +420,7 @@ fn pack_bytes(
                             format!("asset `{path}` is absent from the frozen defining source"),
                         )
                     })?;
-                squish_backend::archive::ArchiveEntry {
-                    path: name.clone(),
-                    bytes: bytes.clone(),
-                }
+                (name.as_str(), Arc::clone(bytes))
             }
             squish_link::ArchiveDirective::Include {
                 source,
@@ -387,24 +428,34 @@ fn pack_bytes(
                 name,
                 ..
             } => {
-                let entry = bindings.get(&(source, import.0)).ok_or_else(|| {
-                    ManagerError::new("MGB160", Phase::Emit, "include binding is absent")
-                })?;
-                let bytes = match includes.entry((*entry).clone()) {
-                    std::collections::btree_map::Entry::Occupied(value) => value.into_mut(),
-                    std::collections::btree_map::Entry::Vacant(value) => value.insert(
-                        include_bytes(executor, target, entry, &include_index, compiled)?,
-                    ),
-                };
-                squish_backend::archive::ArchiveEntry {
-                    path: name.clone(),
-                    bytes: bytes.clone(),
-                }
+                let entry = include_index
+                    .bindings
+                    .get(&(source, import.0))
+                    .ok_or_else(|| {
+                        ManagerError::new("MGB160", Phase::Emit, "include binding is absent")
+                    })?;
+                let bytes =
+                    match includes.entry((*entry).clone()) {
+                        std::collections::btree_map::Entry::Occupied(value) => value.into_mut(),
+                        std::collections::btree_map::Entry::Vacant(value) => value.insert(Arc::<
+                            [u8],
+                        >::from(
+                            include_bytes(executor, target, entry, include_index, compiled)?,
+                        )),
+                    };
+                (name.as_str(), Arc::clone(bytes))
             }
         };
         entries.push(entry);
     }
-    squish_backend::archive::write_reproducible_zip(&entries, limits)
+    let borrowed: Vec<_> = entries
+        .iter()
+        .map(|(path, bytes)| squish_backend::archive::ArchiveEntryRef {
+            path,
+            bytes: bytes.as_ref(),
+        })
+        .collect();
+    squish_backend::archive::write_reproducible_zip_ref(&borrowed, limits)
         .map_err(|e| error("MGB161", Phase::Emit, e))
 }
 
@@ -414,11 +465,11 @@ fn include_bytes(
     target: &TargetBuild,
     entry: &SourceKey,
     index: &IncludeIndex<'_>,
-    compiled: &BTreeMap<SourceKey, CompiledUnit>,
+    compiled: &BTreeMap<SourceKey, Arc<CompiledUnit>>,
 ) -> Result<Vec<u8>, ManagerError> {
     let linked = executor
         .runtime
-        .link(entry, index.closure(entry, compiled)?)
+        .link_prepared(entry, index.closure(entry, compiled)?)
         .map_err(|e| error("MGB162", Phase::Link, e))?;
     let instantiated = executor
         .runtime
@@ -450,7 +501,7 @@ fn sopack_bytes(
     target: &TargetBuild,
     linked: &LinkOutput,
     resolution: &ResolutionSnapshot,
-    compiled: &BTreeMap<SourceKey, CompiledUnit>,
+    compiled: &BTreeMap<SourceKey, Arc<CompiledUnit>>,
     limits: ArchiveLimits,
 ) -> Result<Vec<u8>, ManagerError> {
     let manifest = &executor
@@ -475,17 +526,19 @@ fn sopack_bytes(
         .iter()
         .map(|u| u.source.clone())
         .collect();
-    let mut payload = SopackPayload {
-        package_name: package.name.clone(),
-        package_version: package.version.to_string(),
-        root_source: Some(target.entry.clone()),
-        metadata: BTreeMap::from([(
-            "manifest".into(),
-            manifest
-                .to_toml()
-                .map_err(|e| error("MGB167", Phase::Emit, e))?,
-        )]),
-        ..SopackPayload::default()
+    let package_version = package.version.to_string();
+    let metadata = BTreeMap::from([(
+        "manifest".into(),
+        manifest
+            .to_toml()
+            .map_err(|e| error("MGB167", Phase::Emit, e))?,
+    )]);
+    let mut payload = squish_backend::archive::SopackPayloadRef {
+        package_name: &package.name,
+        package_version: &package_version,
+        root_source: Some(&target.entry),
+        metadata: &metadata,
+        ..Default::default()
     };
     for source in executor
         .prepared
@@ -494,25 +547,23 @@ fn sopack_bytes(
         .filter(|s| reachable.contains(&source_key(s)))
     {
         let key = source_key(source);
-        let unit = match &compiled[&key].unit {
-            RelocatableUnitIr::Module(unit) => RelocatableUnitIr::Module(unit.clone()),
-            RelocatableUnitIr::Sopack(unit) => RelocatableUnitIr::Sopack(unit.clone()),
-            _ => {
-                return Err(ManagerError::new(
-                    "MGB168",
-                    Phase::Emit,
-                    "SOPack cannot contain finished entry/pack units",
-                ));
-            }
-        };
-        payload
-            .sources
-            .insert(key.clone(), source.blob.bytes().to_vec());
+        let unit = compiled[&key].unit.as_ref();
+        if !matches!(
+            unit,
+            RelocatableUnitIr::Module(_) | RelocatableUnitIr::Sopack(_)
+        ) {
+            return Err(ManagerError::new(
+                "MGB168",
+                Phase::Emit,
+                "SOPack cannot contain finished entry/pack units",
+            ));
+        }
+        payload.sources.insert(key.clone(), source.blob.bytes());
         payload.units.insert(key.clone(), unit);
         for (path, bytes) in &source.assets {
             payload
                 .assets
-                .insert((key.clone(), path.clone()), bytes.clone());
+                .insert((key.clone(), path.clone()), bytes.as_ref());
         }
     }
     payload.imports = resolution
@@ -528,31 +579,71 @@ fn sopack_bytes(
             "SOPack packaging root has no exact package identity",
         ));
     };
+    let exported_paths: BTreeMap<_, _> = payload
+        .units
+        .keys()
+        .filter_map(|key| match key {
+            SourceKey::Project { package, path } if package == owner => Some((path.join("/"), key)),
+            _ => None,
+        })
+        .collect();
     for (name, path) in &manifest.exports {
         let logical = LogicalPath::new(path.to_string_lossy())
             .map_err(|e| error("MGB169", Phase::Emit, e))?;
-        let key = payload
-            .units
-            .keys()
-            .find(|key| {
-                matches!(key, SourceKey::Project { package: p, path }
-            if p == owner && path.join("/") == logical.as_str())
-            })
-            .ok_or_else(|| {
-                ManagerError::new(
-                    "MGB170",
-                    Phase::Emit,
-                    format!("export `{name}` is not in the SOPack module closure"),
-                )
-            })?;
-        payload.exports.insert(name.clone(), key.clone());
+        let key = exported_paths.get(logical.as_str()).ok_or_else(|| {
+            ManagerError::new(
+                "MGB170",
+                Phase::Emit,
+                format!("export `{name}` is not in the SOPack module closure"),
+            )
+        })?;
+        payload.exports.insert(name.clone(), (*key).clone());
     }
     payload
         .exports
         .entry("main".into())
         .or_insert_with(|| target.entry.clone());
-    squish_backend::archive::write_sopack(&payload, limits)
+    squish_backend::archive::write_sopack_ref(&payload, limits)
         .map_err(|e| error("MGB171", Phase::Emit, e))
+}
+
+/// Rechecks archive drift with bounded streaming hashing, never allocating another archive body.
+fn frozen_archive_checksum(path: &Path, limit: u64) -> Result<String, ManagerError> {
+    let file = std::fs::File::open(path).map_err(|e| error("MGB148", Phase::Snapshot, e))?;
+    if file
+        .metadata()
+        .map_err(|e| error("MGB148", Phase::Snapshot, e))?
+        .len()
+        > limit
+    {
+        return Err(ManagerError::new(
+            "MGB148",
+            Phase::Snapshot,
+            "archive/resource file exceeds snapshot budget",
+        ));
+    }
+    let mut reader = file.take(limit.saturating_add(1));
+    let mut hash = sha2::Sha256::new();
+    let mut buffer = [0u8; 65536];
+    let mut total = 0u64;
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|e| error("MGB148", Phase::Snapshot, e))?;
+        if count == 0 {
+            break;
+        }
+        total += count as u64;
+        if total > limit {
+            return Err(ManagerError::new(
+                "MGB148",
+                Phase::Snapshot,
+                "archive/resource file grew beyond snapshot budget",
+            ));
+        }
+        hash.update(&buffer[..count]);
+    }
+    Ok(format!("sha256:{}", hex(&hash.finalize())))
 }
 
 /// Bounds both metadata-declared and concurrently changing files before allocating full contents.
@@ -595,6 +686,8 @@ struct IncludeNode<'a> {
 struct IncludeIndex<'a> {
     /// Source-neutral unit and binding metadata; no payload is copied while indexing.
     nodes: BTreeMap<&'a SourceKey, IncludeNode<'a>>,
+    /// Exact import IDs locate include roots without rescanning each owner's edges.
+    bindings: BTreeMap<(&'a SourceKey, u32), &'a SourceKey>,
 }
 
 impl<'a> IncludeIndex<'a> {
@@ -623,7 +716,33 @@ impl<'a> IncludeIndex<'a> {
             })?;
             node.imports.push(binding);
         }
-        Ok(Self { nodes })
+        let bindings = snapshot
+            .imports
+            .iter()
+            .map(|binding| ((&binding.importer, binding.import.0), &binding.target))
+            .collect();
+        Ok(Self { nodes, bindings })
+    }
+
+    /// Selects the union of independently included closures, excluding unrelated project units.
+    fn included_units(
+        &self,
+        directives: &[squish_link::ArchiveDirective],
+    ) -> Result<BTreeSet<SourceKey>, ManagerError> {
+        let mut roots = BTreeSet::new();
+        for directive in directives {
+            if let squish_link::ArchiveDirective::Include { source, import, .. } = directive {
+                let root = self.bindings.get(&(source, import.0)).ok_or_else(|| {
+                    ManagerError::new("MGB160", Phase::Emit, "include binding is absent")
+                })?;
+                roots.insert(*root);
+            }
+        }
+        let mut units = BTreeSet::new();
+        for root in roots {
+            units.extend(self.project(root)?.units.into_iter().map(|(key, _)| key));
+        }
+        Ok(units)
     }
 
     /// Copies only reachable evidence, preserving canonical ordering and legal import cycles.
@@ -654,12 +773,12 @@ impl<'a> IncludeIndex<'a> {
         Ok(ResolutionSnapshot { units, imports })
     }
 
-    /// Clones child payloads only; independent entries never share an executable symbol scope.
+    /// Shares child payloads only; independent entries never share an executable symbol scope.
     fn closure(
         &self,
         entry: &SourceKey,
-        compiled: &BTreeMap<SourceKey, CompiledUnit>,
-    ) -> Result<UnitClosure, ManagerError> {
+        compiled: &BTreeMap<SourceKey, Arc<CompiledUnit>>,
+    ) -> Result<squish_link::PreparedUnitClosure, ManagerError> {
         let snapshot = self.project(entry)?;
         let mut units = BTreeMap::new();
         for (key, _) in &snapshot.units {
@@ -670,9 +789,12 @@ impl<'a> IncludeIndex<'a> {
                     "include transitive compiled unit is absent from the frozen closure",
                 )
             })?;
-            units.insert(key.clone(), unit.unit.clone());
+            units.insert(key.clone(), unit.prepared.clone());
         }
-        Ok(UnitClosure { units, snapshot })
+        Ok(squish_link::PreparedUnitClosure {
+            units,
+            snapshot: Arc::new(snapshot),
+        })
     }
 }
 
@@ -720,6 +842,128 @@ mod tests {
     use super::*;
 
     #[test]
+    fn archive_index_shares_exact_objects_and_assets_and_rejects_attachment_drift() {
+        let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.temp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let directory = tempfile::tempdir_in(scratch).unwrap();
+        let file = directory.path().join("module.xml");
+        let xml = format!(
+            r#"<xs:module xmlns:xs="{}"/>"#,
+            squish_xml_front::DSL_NAMESPACE
+        );
+        std::fs::write(&file, &xml).unwrap();
+        let mut builder = squish_source::SnapshotBuilder::new(squish_source::FileSourceProvider);
+        let blob = builder
+            .load(
+                squish_source::SourceId::new(
+                    squish_source::PackageId::new("demo").unwrap(),
+                    LogicalPath::new("module.xml").unwrap(),
+                ),
+                squish_source::SourceLocator::file(file),
+            )
+            .unwrap();
+        let package = squish_ir::PackageInstanceId {
+            source_kind: 5,
+            canonical_source: "sha256:locked".into(),
+            package_name: "demo".into(),
+            exact_revision: "sha256:locked".into(),
+        };
+        let context = squish_xml_front::FrontendSourceContext::new(package.clone());
+        let unit = Arc::new(squish_xml_front::compile(&blob, &context).unwrap().unit);
+        let key = unit.header().source.clone();
+        let validated = squish_ir::ValidatedUnit::new(unit.clone()).unwrap();
+        let bytes = validated.encode().unwrap();
+        let compiled = BTreeMap::from([(
+            key.clone(),
+            Arc::new(CompiledUnit {
+                unit: unit.clone(),
+                prepared: squish_link::PreparedUnit::from_validated(validated.clone()),
+                object: validated.revision().object,
+                semantic: validated.revision().semantic,
+                debug: validated.debug_digest(),
+                bytes: squish_build::VerifiedBlob::from_owned(bytes),
+            }),
+        )]);
+        let resolution = ResolutionSnapshot {
+            units: vec![(
+                key.clone(),
+                UnitRevision {
+                    kind: UnitKind::Module,
+                    object: compiled[&key].object,
+                    semantic: compiled[&key].semantic,
+                },
+            )],
+            imports: Vec::new(),
+        };
+        let includes = IncludeIndex::new(&resolution).unwrap();
+        let first = includes.closure(&key, &compiled).unwrap();
+        let second = includes.closure(&key, &compiled).unwrap();
+        assert!(Arc::ptr_eq(first.units[&key].unit(), &unit));
+        assert!(Arc::ptr_eq(second.units[&key].unit(), &unit));
+        assert_eq!(*first.snapshot, resolution);
+        let asset: Arc<[u8]> = Arc::from([0u8, 255, 7]);
+        let archive = Arc::new(SharedSopackPayload {
+            units: BTreeMap::from([(key.clone(), unit.clone())]),
+            sources: BTreeMap::from([(key.clone(), Arc::from(blob.bytes()))]),
+            assets: BTreeMap::from([
+                ((key.clone(), "a.bin".into()), asset.clone()),
+                ((key.clone(), "b.bin".into()), asset.clone()),
+            ]),
+            ..Default::default()
+        });
+        let index = FrozenArchiveIndex::new(archive.clone()).unwrap();
+        let mut source = FrozenSource {
+            blob,
+            package,
+            precompiled: None,
+            precompiled_blob: None,
+            precompiled_validated: None,
+            assets: BTreeMap::new(),
+            archive: None,
+        };
+        install_archive_source(&mut source, &index).unwrap();
+        assert!(source.precompiled_blob.is_none());
+        // Planning seals encoded bytes only after immutable reachability pruning.
+        let proof =
+            squish_ir::ValidatedUnit::new(source.precompiled.as_ref().unwrap().clone()).unwrap();
+        source.precompiled_blob = Some(squish_build::VerifiedBlob::from_owned(
+            proof.encode().unwrap(),
+        ));
+        source.precompiled_validated = Some(proof);
+        let frozen_blob = source.precompiled_blob.as_ref().unwrap();
+        assert_eq!(frozen_blob.bytes(), compiled[&key].bytes.bytes());
+        assert_eq!(
+            compile_inputs(&source).unwrap(),
+            vec![
+                InputRef::Blob(source.blob.digest().to_protocol()),
+                InputRef::Blob(frozen_blob.digest().clone()),
+            ]
+        );
+        assert!(Arc::ptr_eq(source.precompiled.as_ref().unwrap(), &unit));
+        assert!(Arc::ptr_eq(&source.assets["a.bin"], &asset));
+        assert!(Arc::ptr_eq(&source.assets["b.bin"], &asset));
+        assert!(Arc::ptr_eq(source.archive.as_ref().unwrap(), &archive));
+        let mut corrupt = (*archive).clone();
+        corrupt
+            .sources
+            .insert(key.clone(), Arc::from(b"changed".as_slice()));
+        let corrupt = FrozenArchiveIndex::new(Arc::new(corrupt)).unwrap();
+        assert_eq!(
+            install_archive_source(&mut source, &corrupt)
+                .unwrap_err()
+                .code(),
+            "MGB143"
+        );
+        let mut ambiguous = (*archive).clone();
+        let mut other = key;
+        if let SourceKey::Project { package, .. } = &mut other {
+            package.exact_revision = "different-provider".into();
+        }
+        ambiguous.units.insert(other, unit);
+        assert!(FrozenArchiveIndex::new(Arc::new(ambiguous)).is_err());
+    }
+
+    #[test]
     fn shared_include_index_projects_independent_cycles_and_retains_exact_evidence() {
         let key = |name: &str| SourceKey::AdHoc {
             uri: format!("test:{name}"),
@@ -762,6 +1006,31 @@ mod tests {
             ],
         };
         let index = IncludeIndex::new(&snapshot).unwrap();
+        // Selection only consumes the frozen binding; provenance is validated by instantiation.
+        let include = squish_link::ArchiveDirective::Include {
+            source: left.clone(),
+            import: squish_ir::ImportId(0),
+            path: "entry.xml".into(),
+            name: "entry.prompt".into(),
+            trace: squish_ir::TraceRef {
+                producer_op: squish_ir::LinkedOpRef {
+                    unit_slot: 0,
+                    op: squish_ir::OpId(0),
+                },
+                frame: squish_ir::FrameId(0),
+                definition_origin: squish_ir::QualifiedOriginRef {
+                    object: ObjectDigest::of(b"entry"),
+                    local: squish_ir::OriginId(0),
+                },
+                call_origin: None,
+                substitution_chain: Vec::new(),
+            },
+        };
+        assert!(index.included_units(&[]).unwrap().is_empty());
+        assert_eq!(
+            index.included_units(&[include.clone(), include]).unwrap(),
+            BTreeSet::from([a.clone(), b.clone()])
+        );
         let left_projection = index.project(&left).unwrap();
         let right_projection = index.project(&right).unwrap();
         assert_eq!(
@@ -862,5 +1131,12 @@ mod tests {
         std::fs::write(&file, [0, 255, 7]).unwrap();
         assert!(read_bounded(&file, 2).is_err());
         assert_eq!(read_bounded(&file, 3).unwrap(), [0, 255, 7]);
+        assert!(frozen_archive_checksum(&file, 2).is_err());
+        let expected = format!("sha256:{}", hex(&sha2::Sha256::digest([0, 255, 7])));
+        assert_eq!(frozen_archive_checksum(&file, 3).unwrap(), expected);
+        std::fs::write(&file, [0, 254, 7]).unwrap();
+        assert_ne!(frozen_archive_checksum(&file, 3).unwrap(), expected);
+        std::fs::remove_file(&file).unwrap();
+        assert!(frozen_archive_checksum(&file, 3).is_err());
     }
 }

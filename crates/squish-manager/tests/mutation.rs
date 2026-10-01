@@ -49,6 +49,7 @@ impl Services for Resolver {
 
     fn resolve(&self, request: ResolveRequest<'_>) -> Result<ResolvedDependencies, ServiceError> {
         Ok(ResolvedDependencies {
+            sopacks: BTreeMap::new(),
             lockfile: Lockfile {
                 lock_version: LOCK_VERSION,
                 resolver_version: "mutation-test/1".into(),
@@ -111,6 +112,7 @@ impl Services for RacingResolver {
             fs::write(&self.manifest, source).unwrap();
         }
         Ok(ResolvedDependencies {
+            sopacks: BTreeMap::new(),
             lockfile: Lockfile {
                 lock_version: LOCK_VERSION,
                 resolver_version: "racing-test/1".into(),

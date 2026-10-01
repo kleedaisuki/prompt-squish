@@ -12,7 +12,7 @@ use squish_backend::{
 use squish_build::{
     ActionIndex, ActionKey, ActionRecord, ArtifactDescriptor, ArtifactRead, CommittedGeneration,
     GenerationArtifact, GenerationId, GenerationRef, Publication, PublicationPath,
-    PublicationTargetId,
+    PublicationTargetId, VerifiedAction,
 };
 use squish_ir::SourceKey;
 use squish_link::{
@@ -237,6 +237,10 @@ fn publication_error(code: &'static str, error: PublishError<CasError>) -> Build
 /// 可独立注入失败的运行时能力。 / Runtime capabilities that can fail independently.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum RuntimeFault {
+    /// A legacy adapter returns a valid manifest for a different requested action key.
+    LookupWrongKey,
+    /// A verified adapter omits a companion output handle from an otherwise valid manifest.
+    LookupWrongOutputCount,
     /// Blob 写入。 / Blob writes.
     WriteBlob,
     /// 前端编译。 / Frontend compilation.
@@ -343,13 +347,39 @@ impl BuildRuntime for MemoryBuildRuntime {
     }
 
     fn lookup_action(&self, key: &ActionKey) -> Result<Option<ActionRecord>, BuildRuntimeError> {
-        Ok(self
+        let mut record = self
             .state
             .lock()
             .unwrap()
             .actions
             .get(key.as_str())
-            .cloned())
+            .cloned();
+        if self.faults.contains(&RuntimeFault::LookupWrongKey) {
+            if let Some(record) = &mut record {
+                record.key = ActionKey::new("different-action-key").unwrap();
+            }
+        }
+        Ok(record)
+    }
+
+    fn lookup_action_verified(
+        &self,
+        key: &ActionKey,
+    ) -> Result<Option<VerifiedAction>, BuildRuntimeError> {
+        let Some(record) = self.lookup_action(key)? else {
+            return Ok(None);
+        };
+        let mut blobs = Vec::new();
+        for output in &record.outputs {
+            let Some(blob) = self.read_verified(&output.digest)? else {
+                return Ok(None);
+            };
+            blobs.push(blob);
+        }
+        if self.faults.contains(&RuntimeFault::LookupWrongOutputCount) {
+            blobs.pop();
+        }
+        Ok(Some(VerifiedAction { record, blobs }))
     }
 
     fn record_action(&self, record: &ActionRecord) -> Result<(), BuildRuntimeError> {

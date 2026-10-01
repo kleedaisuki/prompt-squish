@@ -194,6 +194,7 @@ impl Services for LocalServices {
             .expect("fixture has a package");
         let package = manifest.package.as_ref().unwrap();
         Ok(ResolvedDependencies {
+            sopacks: BTreeMap::new(),
             lockfile: Lockfile {
                 lock_version: squish_project::LOCK_VERSION,
                 resolver_version: "test/1".into(),
@@ -373,6 +374,35 @@ fn catalog_runtime_preserves_corruption_vs_storage_classification() {
         build::read_current_build_catalog(&storage),
         Err(build::BuildCatalogError::Storage(message)) if message.contains("storage failure")
     ));
+}
+
+#[test]
+fn cached_adapter_identity_and_handle_count_fail_before_hydration() {
+    for fault in [
+        RuntimeFault::LookupWrongKey,
+        RuntimeFault::LookupWrongOutputCount,
+    ] {
+        let (_temp, request) = fixture();
+        let runtime = MemoryBuildRuntime::new();
+        let cold = run_memory_build(request.clone(), runtime.clone(), "cache-authority-cold");
+        assert_eq!(cold.summary.totals.failed, 0);
+        let faulty = runtime.clone().with_fault(fault);
+        let warm = run_memory_build(request, faulty, "cache-authority-invalid");
+        assert!(
+            warm.summary.totals.failed > 0,
+            "wrong verified authority must fail: {warm:?}"
+        );
+        let record = build::read_current_build_record(&runtime).unwrap().unwrap();
+        assert!(record.actions.iter().any(|fact| matches!(&fact.state,
+            build::BuildTerminalState::Failed { code, .. } if code == "MGB110")));
+        assert!(
+            record
+                .actions
+                .iter()
+                .filter(|fact| fact.kind == squish_protocol::ActionKind::Compile)
+                .all(|fact| !matches!(fact.state, build::BuildTerminalState::Succeeded))
+        );
+    }
 }
 
 #[test]
@@ -1551,6 +1581,7 @@ impl Services for WorkspaceServices {
             }
         })).collect();
         Ok(ResolvedDependencies {
+            sopacks: BTreeMap::new(),
             lockfile: Lockfile {
                 lock_version: squish_project::LOCK_VERSION,
                 resolver_version: "test/1".into(),
