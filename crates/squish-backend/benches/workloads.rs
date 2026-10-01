@@ -10,6 +10,7 @@ use std::{collections::BTreeMap, hint::black_box};
 
 /// Timing and allocation modes share fixtures, but never instrumentation.
 #[derive(Clone, Copy)]
+#[allow(dead_code)] // Each executable intentionally constructs only its own measurement mode.
 pub enum Mode {
     /// System allocator, adaptive repeated batches.
     Latency,
