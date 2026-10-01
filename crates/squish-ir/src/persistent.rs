@@ -149,6 +149,35 @@ impl ValidatedUnit {
             extensions: None,
         })
     }
+    /// Validates and encodes a fresh unit once, deriving identities from its trusted output.
+    /// Unlike `new(...).encode()`, this avoids rehashing an IR projection before serialization.
+    /// No container decoder, canonical comparison or second structural validation is involved.
+    pub fn encode_new(unit: Arc<RelocatableUnitIr>) -> Result<(Self, Vec<u8>), PersistError> {
+        let proof = VerifiedUnitEncoding::new(&unit)?;
+        let receipt = encode_verified_receipt(proof.unit, UnitEncodingOverrides::default())?;
+        let sections = receipt.sections();
+        let kind = container_kind(&unit);
+        let semantic = SemanticUnitDigest(crate::codec::section_partition_digest(
+            1, kind, &sections, true, "unit",
+        ));
+        let debug = DebugDigest(crate::codec::section_partition_digest(
+            1, kind, &sections, false, "debug",
+        ));
+        let object = ObjectDigest::of(&receipt.bytes);
+        let revision = UnitRevision {
+            kind: unit.kind(),
+            semantic,
+            object,
+        };
+        let witness = Self {
+            unit,
+            revision,
+            debug,
+            minor: 0,
+            extensions: None,
+        };
+        Ok((witness, receipt.bytes))
+    }
     /// Validates actual container bytes and constructs a shared proof in one decode pass.
     /// Optional noncritical debug sections remain accepted and retain their byte identity.
     pub fn decode(bytes: &[u8]) -> Result<Self, PersistError> {
@@ -239,6 +268,44 @@ fn encode_verified_unit(
     unit: &RelocatableUnitIr,
     overrides: UnitEncodingOverrides<'_>,
 ) -> Result<Vec<u8>, PersistError> {
+    Ok(encode_verified_receipt(unit, overrides)?.bytes)
+}
+
+/// Encoder-owned receipt over actual completed bytes; its fields cannot be caller-forged.
+struct UnitEncodingReceipt {
+    /// The complete canonical output, including the already computed section checksums.
+    bytes: Vec<u8>,
+    /// Exact descriptor, semantic and complete payload ranges emitted by the private writer.
+    ranges: [core::ops::Range<usize>; 3],
+}
+impl UnitEncodingReceipt {
+    /// Borrows verified writer output ranges without interpreting or copying its directory.
+    fn sections(&self) -> [SectionRef<'_>; 3] {
+        [
+            SectionRef {
+                tag: SECTION_DESCRIPTOR,
+                flags: SectionFlags::SEMANTIC,
+                payload: &self.bytes[self.ranges[0].clone()],
+            },
+            SectionRef {
+                tag: SECTION_UNIT,
+                flags: SectionFlags::SEMANTIC,
+                payload: &self.bytes[self.ranges[1].clone()],
+            },
+            SectionRef {
+                tag: SECTION_DEBUG,
+                flags: SectionFlags::DEBUG,
+                payload: &self.bytes[self.ranges[2].clone()],
+            },
+        ]
+    }
+}
+
+/// Encodes directly into the final allocation and records actual emitted section boundaries.
+fn encode_verified_receipt(
+    unit: &RelocatableUnitIr,
+    overrides: UnitEncodingOverrides<'_>,
+) -> Result<UnitEncodingReceipt, PersistError> {
     validate_overrides(unit, overrides)?;
     let header = unit.header();
     let descriptor = SemanticDescriptor {
@@ -256,9 +323,16 @@ fn encode_verified_unit(
         .ok_or(DecodeError::LengthOverflow)?;
     let mut out = Vec::with_capacity(length);
     out.resize(UNIT_CONTAINER_HEADER, 0);
+    let descriptor_start = out.len();
     out.extend_from_slice(&descriptor);
+    let semantic_start = out.len();
     append_unit_projection(&mut out, unit, overrides, true);
+    let complete_start = out.len();
     append_unit_projection(&mut out, unit, overrides, false);
+    let complete_end = out.len();
+    debug_assert_eq!(complete_start - semantic_start, semantic_len);
+    debug_assert_eq!(complete_end - complete_start, complete_len);
+    debug_assert_eq!(complete_end, length);
     finish_unit_container(
         &mut out,
         container_kind(unit),
@@ -268,7 +342,14 @@ fn encode_verified_unit(
             (SECTION_DEBUG, SectionFlags::DEBUG, complete_len),
         ],
     );
-    Ok(out)
+    Ok(UnitEncodingReceipt {
+        bytes: out,
+        ranges: [
+            descriptor_start..semantic_start,
+            semantic_start..complete_start,
+            complete_start..complete_end,
+        ],
+    })
 }
 
 /// Computes the exact semantic container identity without allocating container payloads.
@@ -742,6 +823,11 @@ mod tests {
             assert_eq!(witness.revision().object, container.object_digest());
             assert_eq!(witness.debug_digest(), container.debug_digest());
             assert_eq!(witness.encode().unwrap(), bytes);
+            let (fresh, encoded) = ValidatedUnit::encode_new(shared.clone()).unwrap();
+            assert_eq!(encoded, bytes);
+            assert_eq!(fresh.revision(), witness.revision());
+            assert_eq!(fresh.debug_digest(), witness.debug_digest());
+            assert!(Arc::ptr_eq(fresh.unit(), &shared));
             let decoded = ValidatedUnit::decode(&bytes).unwrap();
             assert_eq!(decoded.unit().as_ref(), &unit);
             assert_eq!(decoded.revision(), witness.revision());

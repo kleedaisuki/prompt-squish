@@ -474,11 +474,27 @@ pub(crate) fn borrowed_partition_digest(
     semantic: bool,
     domain: &str,
 ) -> Digest {
+    section_partition_digest(
+        container.major,
+        container.kind,
+        &container.sections,
+        semantic,
+        domain,
+    )
+}
+
+/// Hashes a trusted section receipt without decoding a directory or allocating section bodies.
+pub(crate) fn section_partition_digest(
+    major: u16,
+    kind: ContainerKind,
+    sections: &[SectionRef<'_>],
+    semantic: bool,
+    domain: &str,
+) -> Digest {
     let mut hash = crate::digest::DomainHasher::new(domain);
-    hash.update(&container.major.to_le_bytes());
-    hash.update(&(container.kind as u16).to_le_bytes());
-    for section in container
-        .sections
+    hash.update(&major.to_le_bytes());
+    hash.update(&(kind as u16).to_le_bytes());
+    for section in sections
         .iter()
         .filter(|s| s.flags.is_semantic() == semantic)
     {
