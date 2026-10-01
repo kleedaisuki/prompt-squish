@@ -2325,8 +2325,19 @@ impl BuildExecutor {
         match work {
             BuildWork::Compile { source } => {
                 let bytes = self.cached_bytes(verified, "xsir")?;
-                let validated = ValidatedUnit::decode(bytes.bytes())
-                    .map_err(|e| error("MGB111", Phase::Cache, e))?;
+                let frozen = self
+                    .prepared
+                    .source_indices
+                    .get(source)
+                    .and_then(|index| self.prepared.sources.get(*index))
+                    .ok_or_else(|| {
+                        ManagerError::new(
+                            "MGB111",
+                            Phase::Cache,
+                            "cached source is absent from the frozen snapshot",
+                        )
+                    })?;
+                let validated = cached_unit_proof(frozen, &bytes)?;
                 let unit = Arc::clone(validated.unit());
                 if &header(&unit).source != source
                     || header(&unit).frontend_abi.0 != self.prepared.runtime_descriptor.frontend_abi
@@ -4093,6 +4104,39 @@ fn produced_verified(name: &str, kind: ArtifactKind, blob: &VerifiedBlob) -> Pro
         size: blob.bytes().len() as u64,
     }
 }
+/// Reuses an immutable archive proof only for its exact privately sealed encoding.
+/// Local cached objects still pass the public checked decoder; unrelated valid IR is
+/// never allowed to replace an archive unit already acquired from the locked provider.
+fn cached_unit_proof(
+    source: &FrozenSource,
+    bytes: &VerifiedBlob,
+) -> Result<ValidatedUnit, ManagerError> {
+    match (
+        &source.precompiled,
+        &source.precompiled_validated,
+        &source.precompiled_blob,
+    ) {
+        (Some(_), Some(validated), Some(frozen)) => {
+            if bytes.digest() != frozen.digest() || bytes.bytes().len() != frozen.bytes().len() {
+                return Err(ManagerError::new(
+                    "MGB111",
+                    Phase::Cache,
+                    "cached archive unit differs from its exact frozen encoded identity",
+                ));
+            }
+            Ok(validated.clone())
+        }
+        (None, None, None) => {
+            ValidatedUnit::decode(bytes.bytes()).map_err(|e| error("MGB111", Phase::Cache, e))
+        }
+        _ => Err(ManagerError::new(
+            "MGB111",
+            Phase::Cache,
+            "compiled archive proof and encoded bytes must be frozen together",
+        )),
+    }
+}
+
 /// Preserves compiler source/frame evidence across the manager runtime boundary.
 fn runtime_error(code: impl Into<String>, phase: Phase, value: BuildRuntimeError) -> ManagerError {
     let error = ManagerError::new(code, phase, value.to_string());

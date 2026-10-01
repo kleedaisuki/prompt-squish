@@ -944,6 +944,33 @@ mod tests {
                 InputRef::Blob(frozen_blob.digest().clone()),
             ]
         );
+        let reused = cached_unit_proof(&source, frozen_blob).unwrap();
+        assert!(
+            Arc::ptr_eq(reused.unit(), &unit),
+            "warm archive Compile hydration must reuse the retained typed arena"
+        );
+        assert!(Arc::ptr_eq(
+            reused.unit(),
+            source.precompiled_validated.as_ref().unwrap().unit()
+        ));
+        let mut alternative = (*unit).clone();
+        let RelocatableUnitIr::Module(alternative_module) = &mut alternative else {
+            panic!("module fixture");
+        };
+        alternative_module
+            .header
+            .semantic_strings
+            .push("different-valid-cache-object".into());
+        let (_, alternative_bytes) = ValidatedUnit::encode_new(Arc::new(alternative)).unwrap();
+        // The object remains valid and preserves source/ABI, but is not the immutable provider object.
+        assert!(ValidatedUnit::decode(&alternative_bytes).is_ok());
+        let alternative_blob = VerifiedBlob::from_owned(alternative_bytes);
+        assert_eq!(
+            cached_unit_proof(&source, &alternative_blob)
+                .unwrap_err()
+                .code(),
+            "MGB111"
+        );
         assert!(Arc::ptr_eq(source.precompiled.as_ref().unwrap(), &unit));
         assert!(Arc::ptr_eq(&source.assets["a.bin"], &asset));
         assert!(Arc::ptr_eq(&source.assets["b.bin"], &asset));
