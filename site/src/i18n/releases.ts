@@ -101,7 +101,7 @@ const en: ReleaseUiCopy = {
           "title": "Reuse the right product",
           "items": [
             "Pack reuse matches document, provenance and resource directives together: an empty document can still select different assets.",
-            "Wrong cache keys and missing or mismatched verified outputs are rejected before state hydration; publication preserves a prior complete valid generation when corruption is detected.",
+            "Wrong cached keys/outputs are rejected before hydration; cache policy may warn and rebuild. Derived CAS corruption is not authoritative product corruption: a corrupt published file must never be adopted.",
             "SOPack validation covers the whole archive before selecting referenced precompiled units; unused local XML remains strictly checked."
           ]
         },
@@ -110,8 +110,8 @@ const en: ReleaseUiCopy = {
           "title": "Verify once, preserve the contract",
           "items": [
             "Immutable verified snapshots and borrowed/shared runtime boundaries avoid reacquiring identical data without weakening digest, size, corruption or durability checks.",
-            "Middle-end work preserves source positions, invocation frames and budgets; no new user flags are introduced.",
-            "Canonical ZIP records are checked directly. Provider fingerprints derive from content and reference topology, not checkout paths."
+            "Middle-end work preserves sources, actual invocation chains and budgets. Structured failures retain exact relocated source records without exposing arguments or partial products; no new user flags.",
+            "Canonical ZIP records are checked directly. Provider fingerprints derive from content and reference topology, not checkout paths. Catalog preparation verifies committed publications without loading derived CAS output bodies; exact warm SOPack proofs remain digest/size-bound."
           ]
         },
         {
@@ -120,7 +120,7 @@ const en: ReleaseUiCopy = {
           "items": [
             "Canonical schema-1 readers accept v1.2.0 SOPacks. Rewriting a single relocated archive preserves provider paths and normalized bytes; existing inputs and SHA-256 pins stay immutable.",
             "Private derived caches may rebuild after upgrades; do not edit internal hashes or SQLite records to migrate them.",
-            "Fresh archive bytes can differ between producer versions. The v1.2.0 release history remains unchanged, and final CI/performance evidence is pending."
+            "Fresh archive bytes can differ between producer versions. The v1.2.0 release history remains unchanged. Preliminary scalar regressions remain visible; final candidate CI/performance reruns are pending."
           ]
         }
       ],
@@ -308,7 +308,7 @@ const zh: ReleaseUiCopy = {
           "title": "复用正确的产品",
           "items": [
             "pack 复用同时匹配文档、来源跟踪与资源指令：同样的空文档仍可能选择不同资源。",
-            "错误缓存键及缺失或不符的已验证输出在状态恢复前拒绝；产品损坏时保留上一份完整有效的发布。",
+            "错误缓存键或输出在恢复前拒绝；缓存策略可警告并重建。派生 CAS 损坏不等于权威产品损坏，损坏的已发布文件不得重新采用。",
             "SOPack 先完整验证归档，再选择引用的预编译单元；未引用本地 XML 仍严格检查。"
           ]
         },
@@ -317,8 +317,8 @@ const zh: ReleaseUiCopy = {
           "title": "验证一次，不削弱契约",
           "items": [
             "不可变已验证快照与借用/共享边界避免重复取得相同数据，不放宽摘要、大小、损坏或持久化检查。",
-            "中端（Middle end）保留来源位置、调用帧与预算，不增加用户旗标。",
-            "直接检查规范 ZIP 记录；提供者指纹基于内容与引用拓扑，不依赖检出路径。"
+            "中端（Middle end）保留真实来源、实际调用链与预算。结构化失败保留精确重定位来源，不暴露参数或部分产品，不增加用户旗标。",
+            "直接检查规范 ZIP 记录；提供者指纹基于内容与引用拓扑，不依赖检出路径。目录准备验证已提交发布，不装载派生 CAS 输出；热 SOPack 证明仍绑定精确摘要与大小。"
           ]
         },
         {
@@ -327,7 +327,7 @@ const zh: ReleaseUiCopy = {
           "items": [
             "schema-1 读取契约接受 v1.2.0 SOPack；重写单一已重定位归档保留提供者路径与规范 bytes。既有输入和 SHA-256 摘要不变。",
             "升级可以重建私有派生缓存；不要手改内部 hash 或 SQLite 记录进行迁移。",
-            "不同生产者版本新生成的归档 bytes 可以变化。v1.2.0 发布历史不变，最终 CI 与性能证据待完成。"
+            "不同生产者版本新生成的归档 bytes 可以变化。v1.2.0 发布历史不变。初步标量退化仍须说明，最终候选 CI 与性能重跑待完成。"
           ]
         }
       ],

@@ -157,6 +157,14 @@ make malformed unused local XML acceptable. Keep macro-owned paths anchored at
 the defining source, and give parent-relative assets an explicit safe archive
 `name` rather than using a `../` path as the default member name.
 
+When investigating a failure, retain the structured source locations and actual
+call chain, including relocated SOPack paths; do not reconstruct them from human
+error text or the caller's directory.
+
+A rejected cache result may warn and rebuild. Distinguish damaged derived CAS data
+from a corrupt authoritative published product: the latter is an error, never a
+valid artifact to adopt. Do not edit private publication records to hide it.
+
 ## `xmlsquish.toml` quick reference
 
 ```toml
