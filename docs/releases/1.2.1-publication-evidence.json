@@ -414,5 +414,52 @@
     "Six runner-generated archive hashes were compared to published manifest and GitHub-reported asset digests; no local rehash of downloaded native archive bytes was performed.",
     "Guide standalone raw equality is directly verified; six installed embedded-guide byte equality is not directly tested by release smoke.",
     "Checksums verify content integrity, not binary signing, notarization or independent author identity. No added signing claim."
-  ]
+  ],
+  "public_pages": {
+    "run_id": 36852819785,
+    "source_commit": "f9138f442db2be01d56c4521e1702d01152e937e",
+    "run_url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36852819785",
+    "conclusion": "success",
+    "checks": [
+      {
+        "url": "https://xmlsquish.moesegfault.dev/en/releases/1.2.1/",
+        "http_status": 200,
+        "sha256": "dde2c34b5e1783aef48ef91b4e487619de0c850fc6213f5bc328b7cc940d59f7"
+      },
+      {
+        "url": "https://xmlsquish.moesegfault.dev/releases/1.2.1/",
+        "http_status": 200,
+        "sha256": "432ac45fe2c5289cdc7c865c9a9ec1a5056681ed076e9ae8683f03012872f448"
+      },
+      {
+        "url": "https://xmlsquish.moesegfault.dev/releases/1.2.1.json",
+        "http_status": 200,
+        "sha256": "c3ae1de3447f6c98cc80ea7d9e0dd6bf4fc3a397297b21446b01075dd0c7952a"
+      },
+      {
+        "url": "https://xmlsquish.moesegfault.dev/ns/build-and-artifacts/",
+        "http_status": 200,
+        "sha256": "1771bacf72c1bbf5c6564d8f84ebc852c581fe02f91f586d7d58ec729a9c206b"
+      }
+    ],
+    "verification_method": "TLS-validated direct HTTP GET of deployed English/Chinese release pages, release JSON and normative manual. Release JSON exactly equals the source JSON. Web browsing tool was inaccessible for this domain; direct HTTP succeeded. No local site build or browser visual claim.",
+    "candidate_deployment_held": {
+      "run_id": 36848135293,
+      "conclusion": "cancelled intentionally",
+      "reason": "Preserve working v1.2.0 download links until v1.2.1 native artifacts were actually published."
+    }
+  },
+  "production_source_equivalence": {
+    "measured_source": "388f3640252d71fa1d40514a4775beff6598bb24",
+    "released_source": "fbf60f71d6ef32a80f8f0ff2cccd7182e4a9fc84",
+    "checked_paths": [
+      "crates",
+      "src",
+      "Cargo.toml",
+      "Cargo.lock",
+      "SKILL.md"
+    ],
+    "git_diff_name_only": "",
+    "scope": "Identical production sources/configuration/guide, not a bitwise-binary or cross-platform-performance equality claim."
+  }
 }
