@@ -848,7 +848,7 @@ mod tests {
 
     #[test]
     fn archive_index_shares_exact_objects_and_assets_and_rejects_attachment_drift() {
-        let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.temp");
+        let scratch = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.temp");
         std::fs::create_dir_all(&scratch).unwrap();
         let directory = tempfile::tempdir_in(scratch).unwrap();
         let file = directory.path().join("module.xml");
