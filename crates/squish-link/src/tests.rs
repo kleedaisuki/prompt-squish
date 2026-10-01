@@ -2243,7 +2243,8 @@ fn large_literal_capture_fanout_produces_only_tiny_visible_outputs_with_exact_bu
         .unwrap();
     let after = crate::instantiate::owned_text_materializations();
     // Literal inputs/captures use already-owned unit views. This production-path counter
-    // catches accidental whole-input clones even if final output bytes still look correct.
+    // catches accidental String-producing literal adoption even if final bytes still match;
+    // it is not a general allocator or arbitrary temporary-clone detector.
     assert_eq!((after.0 - before.0, after.1 - before.1), (0, 0));
     assert_eq!(output.document.strings, ["猫"]);
     assert!(output.trace.scalar_values.is_empty());
