@@ -173,6 +173,12 @@ Do not edit internal hashes, SQLite tables or cache paths to force migration.
 If cleanup is required, use `xmlsquish clean`; it removes the entire project build root,
 so ensure dependency inputs are available before an offline rebuild.
 
+重复文本可以共享内容而不合并来源或预算，现有 XML 和字符串参数无需改写；最新实现仍待精确候选的托管验证。
+
+Repeated text can share content without merging provenance or budgets; existing
+XML and string arguments need no rewrite. The latest implementation still
+requires exact-candidate hosted verification.
+
 既有 SOPack 与锁定 SHA-256 摘要保持不可变；升级不会为了优化而改写依赖文件或锁。
 新生产者内部提供者身份可能变化，因此不要要求不同版本重新生产的库具有相同 bytes；
 可复现性要求同一生产者契约和相同有效输入下保持一致，不等于所有版本的编码永远不变。

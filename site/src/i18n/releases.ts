@@ -110,7 +110,7 @@ const en: ReleaseUiCopy = {
           "title": "Verify once, preserve the contract",
           "items": [
             "Immutable verified snapshots and borrowed/shared runtime boundaries avoid reacquiring identical data without weakening digest, size, corruption or durability checks.",
-            "Middle-end work preserves sources, actual invocation chains and budgets. Structured failures retain exact relocated source records without exposing arguments or partial products; no new user flags.",
+            "Repeated text shares content while preserving per-selection provenance, byte budgets and diagnostic ordering. Structured failures retain exact relocated sources and actual call chains; public string interfaces and user flags are unchanged.",
             "Canonical ZIP records are checked directly. Provider fingerprints derive from content and reference topology, not checkout paths. Catalog preparation verifies committed publications without loading derived CAS output bodies; exact warm SOPack proofs remain digest/size-bound."
           ]
         },
@@ -120,7 +120,7 @@ const en: ReleaseUiCopy = {
           "items": [
             "Canonical schema-1 readers accept v1.2.0 SOPacks. Rewriting a single relocated archive preserves provider paths and normalized bytes; existing inputs and SHA-256 pins stay immutable.",
             "Private derived caches may rebuild after upgrades; do not edit internal hashes or SQLite records to migrate them.",
-            "Fresh archive bytes can differ between producer versions. The v1.2.0 release history remains unchanged. Preliminary scalar regressions remain visible; final candidate CI/performance reruns are pending."
+            "Fresh archive bytes can differ between producer versions. The v1.2.0 release history remains unchanged. Earlier scalar regressions and passing repair checkpoints remain historical evidence; the new text-sharing source requires its own exact hosted gates and measurements."
           ]
         }
       ],
@@ -317,7 +317,7 @@ const zh: ReleaseUiCopy = {
           "title": "验证一次，不削弱契约",
           "items": [
             "不可变已验证快照与借用/共享边界避免重复取得相同数据，不放宽摘要、大小、损坏或持久化检查。",
-            "中端（Middle end）保留真实来源、实际调用链与预算。结构化失败保留精确重定位来源，不暴露参数或部分产品，不增加用户旗标。",
+            "重复文本共享内容，同时保留每次选择的来源、字节预算与诊断顺序。结构化失败保留精确重定位来源与实际调用链，公共字符串接口和用户旗标不变。",
             "直接检查规范 ZIP 记录；提供者指纹基于内容与引用拓扑，不依赖检出路径。目录准备验证已提交发布，不装载派生 CAS 输出；热 SOPack 证明仍绑定精确摘要与大小。"
           ]
         },
@@ -327,7 +327,7 @@ const zh: ReleaseUiCopy = {
           "items": [
             "schema-1 读取契约接受 v1.2.0 SOPack；重写单一已重定位归档保留提供者路径与规范 bytes。既有输入和 SHA-256 摘要不变。",
             "升级可以重建私有派生缓存；不要手改内部 hash 或 SQLite 记录进行迁移。",
-            "不同生产者版本新生成的归档 bytes 可以变化。v1.2.0 发布历史不变。初步标量退化仍须说明，最终候选 CI 与性能重跑待完成。"
+            "不同生产者版本新生成的归档 bytes 可以变化。v1.2.0 发布历史不变。较早标量退化及修复通过检查点仍属历史证据；新文本共享源码需要自己的精确托管门禁与测量。"
           ]
         }
       ],

@@ -100,7 +100,8 @@
     "Whole SOPack validation before referenced-unit compilation; strict local-source validation retained.",
     "Verified immutable snapshots and borrowed/shared mechanisms retain integrity and durability checks.",
     "Canonical ZIP direct validation and content/topology-based portable provider identity; hosted verification and performance conclusions pending.",
-    "Structured failures preserve exact relocated source records and actual invocation chains; cache-result rejection does not conflate derived CAS corruption with published-product corruption."
+    "Structured failures preserve exact relocated source records and actual invocation chains; cache-result rejection does not conflate derived CAS corruption with published-product corruption.",
+    "Repeated text content sharing preserves public string interfaces, per-selection provenance, logical byte budgets and diagnostic ordering; exact-source validation pending."
   ],
   "storageLayout": {
     "defaultRoot": "target/xmlsquish",
@@ -158,8 +159,9 @@
   "verification": {
     "status": "pending",
     "environment": "GitHub Actions",
-    "performanceClaims": "Preliminary evidence includes a scalar instantiation regression; exact final candidate rerun pending. No universal gain claimed.",
+    "performanceClaims": "Earlier scalar regressions and the passing 6b2a31b repair checkpoint are historical; subsequent text-sharing source requires exact hosted gates and measurements. No universal gain claimed.",
     "preliminaryReport": "https://github.com/kleedaisuki/prompt-squish/blob/main/docs/performance/v1.2-full-repair-preliminary.md",
-    "scope": "Catalog preparation avoids derived CAS-output hydration but still verifies committed publications. Warm SOPack proof reuse is bound to exact frozen encoding digest and size, not arbitrary valid IR."
+    "scope": "Catalog preparation avoids derived CAS-output hydration but still verifies committed publications. Warm SOPack proof reuse is bound to exact frozen encoding digest and size, not arbitrary valid IR.",
+    "historicalCandidateReport": "https://github.com/kleedaisuki/prompt-squish/blob/main/docs/performance/v1.2-full-repair-candidate.md"
   }
 }

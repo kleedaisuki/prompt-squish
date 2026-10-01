@@ -13,6 +13,9 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 
 ### 身份、验证与可复用执行 / Identity, validation and reusable execution
 
+- 重复文本传递与捕获共享已有内容；必要的拼接仅复制可见文本，同时保留每次选择的来源、逻辑字节预算和诊断顺序。公共字符串接口与 XML 用法不变。新文本共享实现仍待精确候选托管验证，不预先宣称加速。
+  Share repeated text content during passing and capture; necessary concatenation copies only visible text while preserving per-selection provenance, logical byte budgets and diagnostic ordering. Public string interfaces and XML usage remain unchanged; exact-candidate hosted verification is pending, with no premature speedup claim.
+
 - pack 共享结果比较完整文档、来源跟踪和资源指令，防止空文档下资源错误复用；预编译 SOPack 先验证整个归档再选择引用单元，本地源码仍保持严格检查。
   Match complete document, provenance and resource-directive identity for pack reuse; validate whole SOPacks before selecting referenced units, while retaining strict local-source checks.
 - 中端保留源码、展开帧与资源预算；不可变已验证快照及借用/共享数据边界减少重复取得，但不放宽摘要、大小、损坏检测或持久化契约。
