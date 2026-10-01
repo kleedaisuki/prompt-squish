@@ -66,6 +66,26 @@ class FullRepairComparisonTests(unittest.TestCase):
         self.assertEqual(row["candidate_mechanism"], "link_prepared_facts")
         self.assertEqual(row["median_process_pass_ratios"]["elapsed_ns_per_operation"], 0.5)
 
+    def test_capture_memory_case_retains_owner_dimensions_without_fake_ratio(self) -> None:
+        """A new view fixture retains full input geometry, samples and its untimed oracle."""
+        baseline = self.phase("baseline", "link_prepared_input", 100)
+        candidate = self.phase("candidate", "link_prepared_facts", 50)
+        name = "capture-input-bytes1048576-visible3-e512"
+        dimensions = {"definitions": 1, "expansions": 512,
+                      "input_owner_bytes": 1048576, "visible_capture_bytes": 3}
+        candidate["rows"].append({**candidate["rows"][0], "workload": name,
+                                  "mechanism": "instantiate_complete_provenance",
+                                  "dimensions": dimensions, "elapsed_ns": 75})
+        candidate["oracles"].append({**candidate["oracles"][0], "workload": name,
+                                     "dimensions": dimensions})
+        result = compare([baseline, candidate])
+        unpaired = result["unpaired"][0]["candidate"]
+        self.assertEqual(len(unpaired), 1)
+        self.assertEqual(unpaired[0]["dimensions"], dimensions)
+        self.assertEqual(unpaired[0]["elapsed_ns_per_operation"]["samples"], [75.0])
+        self.assertFalse(any(row["workload"] == name for row in result["production_path_comparisons"]))
+        self.assertTrue(any(name in key for key in result["unpaired"]["candidate_only_oracles"]))
+
     def test_changed_output_is_not_accepted_for_speed(self) -> None:
         """Equivalent workload geometry alone never excuses changed complete provenance."""
         baseline = self.phase("baseline", "link_prepared_input", 100)

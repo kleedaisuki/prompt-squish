@@ -454,6 +454,56 @@ fn scalar_domain(expansions: usize, distinct: usize, bytes: usize, name: String)
     )
 }
 
+/// Produces tiny capture occurrences from one program-owned large literal, without changing
+/// the input owner across fanout. The existing owner is setup, not extra-live operation memory.
+fn literal_capture_fanout(expansions: usize, input_bytes: usize) -> Fixture {
+    assert!(input_bytes >= 3);
+    let input = format!("{}猫", "p".repeat(input_bytes - 3));
+    let module = format!(
+        r#"<xs:macro name="m:capture"><xs:ifr str="{input}" pattern="(?P&lt;value&gt;猫)"><xs:insert get="match.value"/></xs:ifr></xs:macro>"#,
+    );
+    fixture(
+        format!("capture-input-bytes{input_bytes}-visible3-e{expansions}"),
+        format!(
+            "<root>{}</root>",
+            r#"<xs:expand ref="m:capture"/>"#.repeat(expansions)
+        ),
+        Some(module),
+        BTreeMap::new(),
+        "猫".repeat(expansions),
+        vec![
+            ("definitions", 1),
+            ("expansions", expansions as u64),
+            ("input_owner_bytes", input_bytes as u64),
+            ("visible_capture_bytes", 3),
+        ],
+    )
+}
+
+/// Measures only complete instantiation; immutable input/program construction stays outside
+/// clock/gauges. This does not claim the existing one-MiB owner disappeared or cloning was free.
+fn capture_stages(mode: Mode, fixture: &Fixture) {
+    oracle(fixture);
+    assert_eq!(fixture.result.document.strings, ["猫"]);
+    assert!(fixture.result.trace.scalar_values.is_empty());
+    fixture
+        .result
+        .trace
+        .validate_against_document(&fixture.result.document)
+        .unwrap();
+    measure(
+        mode,
+        fixture,
+        "instantiate_complete_provenance",
+        || fixture.args.clone(),
+        |args| {
+            Instantiator
+                .instantiate(black_box(&fixture.linked.program), args, Budgets::default())
+                .unwrap()
+        },
+    );
+}
+
 /// Uses the actual public API with per-operation input preparation outside latency/counting.
 fn measure<I, T>(
     mode: Mode,
@@ -949,5 +999,8 @@ pub fn run(mode: Mode) {
     }
     for unique in [false, true] {
         stages(mode, &scalar_values(512, unique, 256));
+    }
+    for expansions in [16, 512] {
+        capture_stages(mode, &literal_capture_fanout(expansions, 1048576));
     }
 }

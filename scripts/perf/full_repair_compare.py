@@ -23,7 +23,8 @@ BASELINE = "1bbf6cd0ec9827a186da18fa0cbe8943257fa8fc"
 AXES = {
     "core": {"definitions", "expansions", "called_last", "unused_payload_bytes",
              "selected_static_regions", "scalar_bytes", "shared_scalar_regions", "scalar_is_static",
-             "unused_patterns", "unique_values", "units", "source_bytes"},
+             "unused_patterns", "unique_values", "units", "source_bytes",
+             "input_owner_bytes", "visible_capture_bytes"},
     "archive": {"members", "content_bytes", "name_bytes", "units", "providers", "import_edges",
                 "source_bytes", "encoded_unit_bytes", "asset_bindings", "unique_asset_bytes",
                 "expanded_asset_bytes"},
