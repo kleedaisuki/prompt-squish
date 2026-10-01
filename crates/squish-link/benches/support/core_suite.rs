@@ -416,23 +416,31 @@ fn unused_regexes(patterns: usize) -> Fixture {
 
 /// Unique scalar values exercise the actual production interning/canonicalization paths.
 fn scalar_values(expansions: usize, unique: bool, bytes: usize) -> Fixture {
+    scalar_domain(
+        expansions,
+        if unique { expansions } else { 1 },
+        bytes,
+        format!(
+            "scalar-values-e{expansions}-unique{}-bytes{bytes}",
+            u8::from(unique)
+        ),
+    )
+}
+
+/// Holds call count, literal input width, source byte count and emitted text fixed while
+/// varying distinct scalar values. The semantic pool and trace arena necessarily vary.
+fn scalar_domain(expansions: usize, distinct: usize, bytes: usize, name: String) -> Fixture {
+    assert!(distinct > 0 && distinct <= expansions && bytes >= 8);
     let mut entry = String::from("<root>");
     for index in 0..expansions {
-        let value = format!(
-            "{}{:08}",
-            "v".repeat(bytes - 8),
-            if unique { index } else { 0 }
-        );
+        let value = format!("{}{:08}", "v".repeat(bytes - 8), index % distinct);
         entry.push_str(&format!(
             r#"<xs:expand ref="m:echo"><xs:arg name="text" value="{value}"/></xs:expand>"#
         ));
     }
     entry.push_str("</root>");
     fixture(
-        format!(
-            "scalar-values-e{expansions}-unique{}-bytes{bytes}",
-            u8::from(unique)
-        ),
+        name,
         entry,
         Some(r#"<xs:macro name="m:echo"><xs:param name="text"/>x</xs:macro>"#.into()),
         BTreeMap::new(),
@@ -440,7 +448,7 @@ fn scalar_values(expansions: usize, unique: bool, bytes: usize) -> Fixture {
         vec![
             ("definitions", 1),
             ("expansions", expansions as u64),
-            ("unique_values", if unique { expansions as u64 } else { 1 }),
+            ("unique_values", distinct as u64),
             ("scalar_bytes", bytes as u64),
         ],
     )
@@ -793,6 +801,24 @@ fn stages(mode: Mode, fixture: &Fixture) {
         || (),
         |()| black_box(&fixture.result.document).validate().unwrap(),
     );
+    if fixture.name.starts_with("scalar-values-e2048-") {
+        // Candidate-only cache/allocation-context control, not a free-clone end-to-end
+        // claim: deep-clone preparation is outside the clock/gauge and the returned
+        // document is dropped afterward. The existing borrowed validator row stays intact.
+        let copy = fixture.result.document.clone();
+        assert_eq!(copy, fixture.result.document);
+        copy.validate().unwrap();
+        measure(
+            mode,
+            fixture,
+            "validate_document_fresh_owned",
+            || fixture.result.document.clone(),
+            |document| {
+                black_box(&document).validate().unwrap();
+                document
+            },
+        );
+    }
     measure(
         mode,
         fixture,
@@ -899,10 +925,22 @@ pub fn run(mode: Mode) {
     for patterns in [0, 64, 256] {
         stages(mode, &unused_regexes(patterns));
     }
-    // Candidate-only crossover controls preserve constant output while varying distinct
-    // long arguments around the bounded small-domain interner's promotion threshold.
+    // Joint scaling controls vary calls/output/source size together. Do not interpret
+    // their cross-K latency as an isolated promotion-threshold effect.
     for expansions in [1, 8, 9, 16] {
         stages(mode, &scalar_values(expansions, true, 4096));
+    }
+    // Fixed-call-count controls isolate value cardinality from operation/output volume.
+    for distinct in [1, 8, 9, 16] {
+        stages(
+            mode,
+            &scalar_domain(
+                16,
+                distinct,
+                4096,
+                format!("scalar-domain-e16-k{distinct}-bytes4096"),
+            ),
+        );
     }
     for expansions in [128, 512, 2048] {
         for unique in [false, true] {
