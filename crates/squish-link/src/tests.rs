@@ -1506,6 +1506,7 @@ fn scalar_fragment_moves_preserve_long_empty_and_unicode_occurrence_evidence() {
         vec![long.clone()],
         vec![long.clone(), String::new(), long.clone()],
         vec![String::new(), long.clone(), "tail".into()],
+        vec!["猫\0".into()],
     ] {
         let fixture = linked();
         let (mut units, objects) = shared_reconstruction_parts(&fixture);
@@ -1597,9 +1598,12 @@ fn scalar_fragment_moves_preserve_long_empty_and_unicode_occurrence_evidence() {
                 fragments.len(),
             );
         }
-        let result = Instantiator
-            .instantiate(&program, BTreeMap::new(), Budgets::default())
-            .unwrap();
+        let result = Instantiator.instantiate(&program, BTreeMap::new(), Budgets::default());
+        if fragments.concat().contains('\0') {
+            assert_eq!(result.unwrap_err().code, "RUN027");
+            continue;
+        }
+        let result = result.unwrap();
         assert_eq!(
             result.trace.scalar_values[result.trace.frames[1].args[0].1.0 as usize],
             fragments.concat(),
@@ -2168,4 +2172,106 @@ fn origin_resolution_uses_exact_object_table_and_source_archive_without_guesses(
     let ambiguous = LinkedProgram::reconstruct_shared(fixture.image, units, objects).unwrap();
     let reference = ambiguous.origin(0, EntityKind::Operation, 0).unwrap();
     assert!(ambiguous.resolve_origin(&reference).is_none());
+}
+
+/// Builds actual frontend IR for a tiny capture repeated from one large literal input.
+pub(crate) fn linked_large_literal_captures(expansions: usize) -> LinkedProgram {
+    struct Memory(Vec<u8>);
+    impl squish_source::SourceProvider for Memory {
+        fn read(&self, _: &squish_source::SourceLocator) -> std::io::Result<Vec<u8>> {
+            Ok(self.0.clone())
+        }
+    }
+    let context = squish_xml_front::FrontendSourceContext::new(PackageInstanceId {
+        source_kind: 1,
+        canonical_source: "workspace:captures".into(),
+        package_name: "captures".into(),
+        exact_revision: "frozen-test".into(),
+    });
+    let mut units = BTreeMap::new();
+    let namespace = squish_xml_front::DSL_NAMESPACE;
+    let entry = format!(
+        r#"<xs:entry xmlns:xs="{namespace}" xmlns:m="urn:test"><xs:import src="module.xml"/><root>{}</root></xs:entry>"#,
+        r#"<xs:expand ref="m:render"/>"#.repeat(expansions),
+    );
+    let module = format!(
+        r#"<xs:module xmlns:xs="{namespace}" xmlns:m="urn:test"><xs:macro name="m:render"><xs:ifr str="{}猫z" pattern="(?P&lt;value&gt;猫)"><xs:insert get="match.value"/></xs:ifr></xs:macro></xs:module>"#,
+        "p".repeat(1024 * 1024),
+    );
+    for (path, text) in [("entry.xml", entry), ("module.xml", module)] {
+        let mut builder = squish_source::SnapshotBuilder::new(Memory(text.into_bytes()));
+        let source = builder
+            .load(
+                squish_source::SourceId::new(
+                    squish_source::PackageId::new("captures").unwrap(),
+                    squish_source::LogicalPath::new(path).unwrap(),
+                ),
+                squish_source::SourceLocator::file("unused"),
+            )
+            .unwrap();
+        let unit = squish_xml_front::compile(&source, &context).unwrap().unit;
+        units.insert(
+            unit.header().source.clone(),
+            PreparedUnit::new(Arc::new(unit)).unwrap(),
+        );
+    }
+    let entry = units.keys().find(|key| matches!(key, SourceKey::Project { path, .. } if path.last().is_some_and(|name| name == "entry.xml"))).unwrap().clone();
+    let module = units.keys().find(|key| *key != &entry).unwrap().clone();
+    let closure = PreparedUnitClosure {
+        snapshot: Arc::new(ResolutionSnapshot {
+            units: units
+                .iter()
+                .map(|(source, unit)| (source.clone(), unit.revision().clone()))
+                .collect(),
+            imports: vec![ImportBinding {
+                importer: entry.clone(),
+                import: ImportId(0),
+                target: module,
+            }],
+        }),
+        units,
+    };
+    StaticLinker.link_prepared(&entry, closure).unwrap().program
+}
+
+#[test]
+fn large_literal_capture_fanout_produces_only_tiny_visible_outputs_with_exact_budget_failure() {
+    let program = linked_large_literal_captures(16);
+    let before = crate::instantiate::owned_text_materializations();
+    let output = Instantiator
+        .instantiate(&program, BTreeMap::new(), Budgets::default())
+        .unwrap();
+    let after = crate::instantiate::owned_text_materializations();
+    // Literal inputs/captures use already-owned unit views. This production-path counter
+    // catches accidental whole-input clones even if final output bytes still look correct.
+    assert_eq!((after.0 - before.0, after.1 - before.1), (0, 0));
+    assert_eq!(output.document.strings, ["猫"]);
+    assert!(output.trace.scalar_values.is_empty());
+    assert_eq!(output.trace.frames.len(), 17);
+    assert_eq!(
+        output
+            .document
+            .items
+            .iter()
+            .filter(|item| matches!(item, DocumentItem::Text { .. }))
+            .count(),
+        16
+    );
+    output
+        .trace
+        .validate_against_document(&output.document)
+        .unwrap();
+    let failure = Instantiator
+        .instantiate_with_diagnostics(
+            &program,
+            BTreeMap::new(),
+            Budgets {
+                max_output_bytes: 64,
+                ..Budgets::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(failure.error.code, "RUN016");
+    assert!(failure.error.origin.is_some());
+    assert!(!failure.frames.is_empty());
 }

@@ -224,6 +224,13 @@ impl LinkedProgram {
             .get(slot as usize)
             .map(|unit| unit.unit.as_ref())
     }
+    /// Shares the exact immutable raw owner for private runtime literal/capture views.
+    pub(crate) fn unit_arc(&self, slot: u32) -> Option<Arc<RelocatableUnitIr>> {
+        self.data
+            .units
+            .get(slot as usize)
+            .map(|unit| Arc::clone(&unit.unit))
+    }
     pub(crate) fn optimized(&self, slot: u32) -> Option<&ExecutableUnit> {
         self.data.units.get(slot as usize).map(Arc::as_ref)
     }
