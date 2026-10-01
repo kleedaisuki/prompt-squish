@@ -1,6 +1,6 @@
 //! 会话内链接程序视图。 / Session-local linked-program view.
 
-use crate::{LinkError, MiddleEnd, OptimizationStats, OptimizedUnit};
+use crate::{LinkError, MiddleEnd, OptimizationStats, middle::ExecutableUnit};
 use squish_ir::{
     DefAddr, EntityKind, LinkedImage, LinkedMacroDef, ObjectDigest, OriginEntry, OriginId,
     QualifiedOriginRef, RelocatableUnitIr, SourceKey, UnitRevision, Validate, ValidatedUnit,
@@ -25,7 +25,7 @@ pub struct LinkedProgram {
 #[derive(Debug)]
 struct ProgramData {
     image: LinkedImage,
-    units: Vec<Arc<OptimizedUnit>>,
+    units: Vec<Arc<ExecutableUnit>>,
     /// Link-time indexed definition addresses replace per-call linear symbol scans.
     definition_slots: Vec<Vec<usize>>,
     objects: Vec<ObjectDigest>,
@@ -66,10 +66,12 @@ impl LinkedProgram {
                 LinkError::new("LNK002", "linked unit payload is missing")
                     .at_source(linked.source.clone())
             })?;
-            let result = MiddleEnd.optimize_shared(unit).map_err(|error| {
-                LinkError::new("LNK030", format!("middle-end optimization failed: {error}"))
-                    .at_source(linked.source.clone())
-            })?;
+            let result = MiddleEnd
+                .optimize_executable_shared(unit)
+                .map_err(|error| {
+                    LinkError::new("LNK030", format!("middle-end optimization failed: {error}"))
+                        .at_source(linked.source.clone())
+                })?;
             optimized.insert(linked.source.clone(), Arc::new(result));
         }
         validate_correspondence(image.get(), &optimized)?;
@@ -112,7 +114,7 @@ impl LinkedProgram {
     /// here. Cache hydration uses `reconstruct` to rebuild device-local regex machinery.
     pub(crate) fn reconstruct_optimized(
         image: ValidatedImage,
-        units: BTreeMap<SourceKey, Arc<OptimizedUnit>>,
+        units: BTreeMap<SourceKey, Arc<ExecutableUnit>>,
         objects: BTreeMap<SourceKey, ObjectDigest>,
     ) -> Result<Self, LinkError> {
         Self::assemble(image, units, objects, |_| None)
@@ -143,7 +145,7 @@ impl LinkedProgram {
     /// Publishes immutable storage while sharing prepared provenance indexes when available.
     fn assemble(
         image: ValidatedImage,
-        mut units: BTreeMap<SourceKey, Arc<OptimizedUnit>>,
+        mut units: BTreeMap<SourceKey, Arc<ExecutableUnit>>,
         objects: BTreeMap<SourceKey, ObjectDigest>,
         index_for: impl Fn(&SourceKey) -> Option<Arc<OriginIndex>>,
     ) -> Result<Self, LinkError> {
@@ -222,7 +224,7 @@ impl LinkedProgram {
             .get(slot as usize)
             .map(|unit| unit.unit.as_ref())
     }
-    pub(crate) fn optimized(&self, slot: u32) -> Option<&OptimizedUnit> {
+    pub(crate) fn optimized(&self, slot: u32) -> Option<&ExecutableUnit> {
         self.data.units.get(slot as usize).map(Arc::as_ref)
     }
     pub(crate) fn definition(&self, addr: DefAddr) -> Option<&LinkedMacroDef> {
@@ -299,7 +301,7 @@ impl LinkedProgram {
 /// validating its slots alone does not authorize arbitrary region IDs or rebound symbols.
 fn validate_correspondence(
     image: &LinkedImage,
-    units: &BTreeMap<SourceKey, Arc<OptimizedUnit>>,
+    units: &BTreeMap<SourceKey, Arc<ExecutableUnit>>,
 ) -> Result<(), LinkError> {
     let mismatch = |message| LinkError::new("LNK032", message);
     let mut expected_definitions = 0usize;
@@ -446,7 +448,7 @@ struct PreparedData {
 #[derive(Debug)]
 struct PreparedFacts {
     /// Regex engines and source-preserving constant facts over the retained raw IR.
-    optimized: Arc<OptimizedUnit>,
+    optimized: Arc<ExecutableUnit>,
     /// Reusable object-local provenance lookup, never renumbered by linking.
     origins: Arc<OriginIndex>,
 }
@@ -507,7 +509,7 @@ impl PreparedUnit {
         self.facts().map(|facts| facts.optimized.stats)
     }
     /// Shares checked facts inside a new independent symbol-binding session.
-    pub(crate) fn optimized(&self) -> Result<Arc<OptimizedUnit>, LinkError> {
+    pub(crate) fn optimized(&self) -> Result<Arc<ExecutableUnit>, LinkError> {
         self.facts().map(|facts| facts.optimized.clone())
     }
     /// Initializes only the referenced unit, retaining all pool-validation errors.
@@ -516,7 +518,7 @@ impl PreparedUnit {
             .facts
             .get_or_init(|| {
                 let optimized = MiddleEnd
-                    .optimize_shared_validated(self.unit().clone())
+                    .optimize_executable_shared_validated(self.unit().clone())
                     .map_err(|error| {
                         LinkError::new("LNK030", format!("middle-end optimization failed: {error}"))
                             .at_source(self.unit().header().source.clone())

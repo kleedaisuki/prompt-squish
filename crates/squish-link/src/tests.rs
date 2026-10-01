@@ -1470,7 +1470,7 @@ fn borrowed_static_scalar_matches_task_evaluation_with_exact_budget_errors() {
     for (source, unit) in units {
         let mut unit = MiddleEnd.optimize_shared(unit).unwrap();
         unit.static_scalars.clear();
-        optimized.insert(source, Arc::new(unit));
+        optimized.insert(source, Arc::new(crate::middle::ExecutableUnit::from(unit)));
     }
     let image = crate::program::ValidatedImage::new(fixture.image, "LNK001", "test image").unwrap();
     let dynamic = LinkedProgram::reconstruct_optimized(image, optimized, objects).unwrap();

@@ -101,7 +101,7 @@ impl StaticLinker {
         let mut optimized_units = BTreeMap::new();
         for source in &ordered_sources {
             let optimized = MiddleEnd
-                .optimize_shared_validated(
+                .optimize_executable_shared_validated(
                     closure
                         .units
                         .remove(source)
@@ -195,7 +195,7 @@ impl StaticLinker {
         &self,
         entry: &SourceKey,
         snapshot: Arc<ResolutionSnapshot>,
-        optimized_units: BTreeMap<SourceKey, Arc<crate::OptimizedUnit>>,
+        optimized_units: BTreeMap<SourceKey, Arc<crate::middle::ExecutableUnit>>,
         ordered_sources: Vec<SourceKey>,
         prepared: Option<BTreeMap<SourceKey, PreparedUnit>>,
     ) -> Result<LinkOutput, LinkError> {

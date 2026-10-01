@@ -38,7 +38,8 @@ pub struct OptimizationStats {
     pub eliminated_branches: usize,
     /// Number of literal-only regions materialized as scalar facts.
     pub static_scalars: usize,
-    /// Total bytes materialized in scalar facts, bounded independently of input region sharing.
+    /// Logical scalar bytes charged per region, not physical bytes after execution-text sharing.
+    /// This remains bounded independently of input or immutable text-storage sharing.
     pub scalar_bytes: usize,
 }
 
@@ -87,6 +88,55 @@ pub struct OptimizedUnit {
     pub stats: OptimizationStats,
 }
 
+/// Internal execution facts with shared scalar bytes and independent region provenance.
+#[derive(Clone, Debug)]
+pub(crate) struct ExecutableUnit {
+    /// Exact immutable unit payload retained by the linked program.
+    pub(crate) unit: Arc<RelocatableUnitIr>,
+    /// Literal decisions retain the original operation IDs.
+    pub(crate) static_matches: BTreeMap<OpId, StaticMatch>,
+    /// Scalar text shares storage only; each region retains its own provenance segments.
+    pub(crate) static_scalars: BTreeMap<RegionId, SharedStaticScalar>,
+    /// Eagerly compiled session patterns in portable pool order.
+    pub(crate) regexes: Vec<Regex>,
+    /// Counters charge logical scalar bytes independently of physical storage sharing.
+    pub(crate) stats: OptimizationStats,
+}
+
+/// Internal scalar value separating immutable content from its occurrence-level provenance.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SharedStaticScalar {
+    /// Exact concatenated literal bytes, shared only for identical canonical literal sequences.
+    pub(crate) text: Arc<String>,
+    /// Original operations and their ranges, owned independently by each region fact.
+    pub(crate) segments: Vec<StaticScalarSegment>,
+}
+
+impl From<OptimizedUnit> for ExecutableUnit {
+    /// Adapts compatibility-owned facts by moving each String once, without copying its bytes.
+    fn from(unit: OptimizedUnit) -> Self {
+        Self {
+            unit: unit.unit,
+            static_matches: unit.static_matches,
+            static_scalars: unit
+                .static_scalars
+                .into_iter()
+                .map(|(id, fact)| {
+                    (
+                        id,
+                        SharedStaticScalar {
+                            text: Arc::new(fact.text),
+                            segments: fact.segments,
+                        },
+                    )
+                })
+                .collect(),
+            regexes: unit.regexes,
+            stats: unit.stats,
+        }
+    }
+}
+
 /// A middle-end validation or regex-compilation failure with a stable IR field path.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MiddleError {
@@ -124,9 +174,9 @@ impl MiddleEnd {
             path: error.path,
             message: error.message.into(),
         })?;
-        // Finish borrowed analysis before allocating ownership metadata. Large literal
-        // materialization must not depend on an extra allocation preceding the analysis.
-        let facts = MiddleFacts::analyze_validated(&unit)?;
+        // Finish borrowed fact analysis before allocating ownership metadata at publication.
+        // This ordering alone does not promise allocator-independent performance.
+        let facts = MiddleFacts::analyze_validated(&unit, owned_scalar_facts)?;
         Ok(facts.with_unit(Arc::new(unit)))
     }
 
@@ -153,51 +203,69 @@ impl MiddleEnd {
         &self,
         unit: Arc<RelocatableUnitIr>,
     ) -> Result<OptimizedUnit, MiddleError> {
-        let facts = MiddleFacts::analyze_validated(&unit)?;
+        let facts = MiddleFacts::analyze_validated(&unit, owned_scalar_facts)?;
         Ok(facts.with_unit(unit))
+    }
+
+    /// Validates shared IR before creating execution-only shared scalar facts.
+    pub(crate) fn optimize_executable_shared(
+        &self,
+        unit: Arc<RelocatableUnitIr>,
+    ) -> Result<ExecutableUnit, MiddleError> {
+        unit.validate().map_err(|error| MiddleError {
+            path: error.path,
+            message: error.message.into(),
+        })?;
+        self.optimize_executable_shared_validated(unit)
+    }
+
+    /// Creates execution facts for this exact previously validated immutable payload.
+    pub(crate) fn optimize_executable_shared_validated(
+        &self,
+        unit: Arc<RelocatableUnitIr>,
+    ) -> Result<ExecutableUnit, MiddleError> {
+        let facts = MiddleFacts::analyze_validated(&unit, shared_scalar_facts)?;
+        Ok(ExecutableUnit {
+            unit,
+            static_matches: facts.static_matches,
+            static_scalars: facts.static_scalars,
+            regexes: facts.regexes,
+            stats: facts.stats,
+        })
     }
 }
 
 /// Borrowed-analysis result independent of when the unchanged input acquires shared ownership.
-struct MiddleFacts {
+struct MiddleFacts<S> {
     /// Literal regex outcomes retaining original operation IDs and capture offsets.
     static_matches: BTreeMap<OpId, StaticMatch>,
     /// Materialized scalar facts retaining operation-level provenance and original region IDs.
-    static_scalars: BTreeMap<RegionId, StaticScalar>,
+    static_scalars: BTreeMap<RegionId, S>,
     /// Compiled session patterns in portable regex-pool order.
     regexes: Vec<Regex>,
     /// Deterministic counters for the exact borrowed analysis.
     stats: OptimizationStats,
 }
 
-impl MiddleFacts {
+impl<S> MiddleFacts<S> {
     /// Analyzes fully validated borrowed IR without copying or changing its ownership.
-    fn analyze_validated(unit: &RelocatableUnitIr) -> Result<Self, MiddleError> {
+    fn analyze_validated(
+        unit: &RelocatableUnitIr,
+        build_scalars: impl FnOnce(&RelocatableUnitIr, &[bool]) -> (BTreeMap<RegionId, S>, usize),
+    ) -> Result<Self, MiddleError> {
         let regexes = compile_regexes(unit)?;
         let static_matches = literal_matches(unit, &regexes);
         // Only scalar argument bodies consume these facts. Avoid duplicating every
         // literal prompt/module body during ordinary small-batch startup.
         let scalar_regions = selected_scalar_regions(unit.ops(), unit.regions().len());
-        let static_scalars = if scalar_regions.is_empty() {
-            BTreeMap::new()
-        } else {
-            let selected_regions = unit
-                .regions()
-                .iter()
-                .filter(|region| scalar_regions[region.id.0 as usize]);
-            literal_scalars(
-                selected_regions,
-                unit.ops(),
-                &unit.header().semantic_strings,
-            )
-        };
+        let (static_scalars, scalar_bytes) = build_scalars(unit, &scalar_regions);
         let stats = OptimizationStats {
             operations: unit.ops().len(),
             compiled_regexes: regexes.len(),
             static_matches: static_matches.len(),
             eliminated_branches: static_matches.values().filter(|fact| !fact.matched).count(),
             static_scalars: static_scalars.len(),
-            scalar_bytes: static_scalars.values().map(|fact| fact.text.len()).sum(),
+            scalar_bytes,
         };
         Ok(Self {
             static_matches,
@@ -206,8 +274,10 @@ impl MiddleFacts {
             stats,
         })
     }
+}
 
-    /// Publishes facts with their unchanged owning payload, moving all fields without cloning.
+impl MiddleFacts<StaticScalar> {
+    /// Publishes compatibility facts with their owning payload without changing public types.
     fn with_unit(self, unit: Arc<RelocatableUnitIr>) -> OptimizedUnit {
         OptimizedUnit {
             unit,
@@ -217,6 +287,117 @@ impl MiddleFacts {
             stats: self.stats,
         }
     }
+}
+
+/// Keeps compatibility-owned text storage and the original scalar materialization policy.
+fn owned_scalar_facts(
+    unit: &RelocatableUnitIr,
+    selected: &[bool],
+) -> (BTreeMap<RegionId, StaticScalar>, usize) {
+    if selected.is_empty() {
+        return (BTreeMap::new(), 0);
+    }
+    let regions = unit
+        .regions()
+        .iter()
+        .filter(|region| selected[region.id.0 as usize]);
+    let facts = literal_scalars(regions, unit.ops(), &unit.header().semantic_strings);
+    let bytes = facts.values().map(|fact| fact.text.len()).sum();
+    (facts, bytes)
+}
+
+/// Interns canonical pool-ID sequences, never hashing or comparing the large literal payloads.
+///
+/// Logical budget charges remain per region even when physical text allocation is shared.
+/// The cache exists only during this unit's bounded materialization pass; facts retain its Arcs.
+fn shared_scalar_facts(
+    unit: &RelocatableUnitIr,
+    selected: &[bool],
+) -> (BTreeMap<RegionId, SharedStaticScalar>, usize) {
+    if selected.is_empty() {
+        return (BTreeMap::new(), 0);
+    }
+    let strings = &unit.header().semantic_strings;
+    let mut interned: BTreeMap<Vec<squish_ir::StringId>, Arc<String>> = BTreeMap::new();
+    let mut facts = BTreeMap::new();
+    let mut remaining = MAX_UNIT_SCALAR_BYTES;
+    for region in unit
+        .regions()
+        .iter()
+        .filter(|region| selected[region.id.0 as usize])
+    {
+        let Some(plan) = scalar_plan(region, unit.ops(), strings, remaining.min(MAX_SCALAR_BYTES))
+        else {
+            continue;
+        };
+        let text = interned
+            .entry(plan.literals)
+            .or_insert_with_key(|literals| {
+                let mut text = String::with_capacity(plan.bytes);
+                for literal in literals {
+                    text.push_str(&strings[literal.0 as usize]);
+                }
+                Arc::new(text)
+            });
+        remaining -= plan.bytes;
+        facts.insert(
+            region.id,
+            SharedStaticScalar {
+                text: Arc::clone(text),
+                segments: plan.segments,
+            },
+        );
+    }
+    (facts, MAX_UNIT_SCALAR_BYTES - remaining)
+}
+
+/// Literal sequence identity and independent region provenance, without materialized text.
+struct ScalarPlan {
+    /// Pool IDs identify exact literal values without hashing payload bytes.
+    literals: Vec<squish_ir::StringId>,
+    /// Ordered contributions from this region's own original operations.
+    segments: Vec<StaticScalarSegment>,
+    /// Logical concatenated length, charged even when text is reused.
+    bytes: usize,
+}
+
+/// Preflights the unchanged logical limits before allocating sequence IDs or provenance.
+fn scalar_plan(
+    region: &Region,
+    ops: &[squish_ir::OpRecord],
+    strings: &[String],
+    limit: usize,
+) -> Option<ScalarPlan> {
+    let mut bytes = 0usize;
+    for id in &region.ops {
+        let Op::EmitText { value } = &ops[id.0 as usize].op else {
+            return None;
+        };
+        bytes = bytes.checked_add(strings[value.0 as usize].len())?;
+        if bytes > limit {
+            return None;
+        }
+    }
+    let mut literals = Vec::with_capacity(region.ops.len());
+    let mut segments = Vec::with_capacity(region.ops.len());
+    let mut offset = 0;
+    for id in &region.ops {
+        let Op::EmitText { value } = &ops[id.0 as usize].op else {
+            unreachable!();
+        };
+        let end = offset + strings[value.0 as usize].len();
+        literals.push(*value);
+        segments.push(StaticScalarSegment {
+            op: *id,
+            bytes: offset..end,
+        });
+        offset = end;
+    }
+    Some(ScalarPlan {
+        literals,
+        segments,
+        bytes,
+    })
 }
 
 /// Selects validated scalar arguments without per-call allocation or region arena copies.
@@ -531,6 +712,10 @@ mod tests {
         let error = MiddleEnd.optimize_shared(Arc::clone(&shared)).unwrap_err();
         assert_eq!(error.path, "header");
         assert_eq!(error.message, "unsupported schema major");
+        let executable_error = MiddleEnd
+            .optimize_executable_shared(Arc::clone(&shared))
+            .unwrap_err();
+        assert_eq!(executable_error, error);
         let owned_error = MiddleEnd
             .optimize(Arc::unwrap_or_clone(shared))
             .unwrap_err();
@@ -569,6 +754,153 @@ mod tests {
         assert_eq!(owned.static_scalars[&RegionId(1)].segments[0].op, OpId(2));
         assert!(owned.static_matches[&OpId(1)].matched);
         assert_eq!(owned.regexes[0].as_str(), borrowed.regexes[0].as_str());
+    }
+
+    #[test]
+    fn execution_facts_share_large_text_but_keep_distinct_original_operations() {
+        let mut raw = literal_unit();
+        let RelocatableUnitIr::Module(unit) = &mut raw else {
+            unreachable!()
+        };
+        unit.regions.push(Region {
+            id: RegionId(3),
+            ops: vec![OpId(4)],
+        });
+        unit.ops.push(OpRecord {
+            id: OpId(4),
+            op: Op::EmitText { value: StringId(1) },
+        });
+        let Op::Call { args, .. } = &mut unit.ops[0].op else {
+            unreachable!()
+        };
+        args.push(squish_ir::Argument {
+            name: "other".into(),
+            value: squish_ir::ScalarExpr::RenderText(RegionId(3)),
+        });
+        let mut origin = unit.origins.entries[0].clone();
+        origin.local_id = 4;
+        unit.origins.entries.push(origin);
+        let shared = Arc::new(raw);
+        let executable = MiddleEnd
+            .optimize_executable_shared(Arc::clone(&shared))
+            .unwrap();
+        let public = MiddleEnd.optimize_shared(Arc::clone(&shared)).unwrap();
+        assert!(Arc::ptr_eq(&executable.unit, &shared));
+        assert!(Arc::ptr_eq(
+            &executable.static_scalars[&RegionId(1)].text,
+            &executable.static_scalars[&RegionId(3)].text
+        ));
+        assert_eq!(
+            executable.static_scalars[&RegionId(1)].segments[0].op,
+            OpId(2)
+        );
+        assert_eq!(
+            executable.static_scalars[&RegionId(3)].segments[0].op,
+            OpId(4)
+        );
+        assert_eq!(executable.stats.scalar_bytes, 2 * 65536);
+        assert_eq!(executable.stats, public.stats);
+        assert_eq!(executable.static_matches, public.static_matches);
+        for (id, fact) in &executable.static_scalars {
+            assert_eq!(fact.text.as_ref(), &public.static_scalars[id].text);
+            assert_eq!(fact.segments, public.static_scalars[id].segments);
+        }
+        let text_pointer = public.static_scalars[&RegionId(1)].text.as_ptr();
+        let compatibility: ExecutableUnit = public.into();
+        assert_eq!(
+            compatibility.static_scalars[&RegionId(1)].text.as_ptr(),
+            text_pointer
+        );
+    }
+
+    #[test]
+    fn execution_sharing_does_not_expand_the_logical_materialization_budget() {
+        let RelocatableUnitIr::Module(mut raw) = empty_unit() else {
+            unreachable!()
+        };
+        raw.header.semantic_strings = vec!["x".repeat(MAX_SCALAR_BYTES)];
+        raw.ops = vec![OpRecord {
+            id: OpId(0),
+            op: Op::EmitText { value: StringId(0) },
+        }];
+        raw.regions = (0..10)
+            .map(|id| Region {
+                id: RegionId(id),
+                ops: if id == 9 { vec![] } else { vec![OpId(0)] },
+            })
+            .collect();
+        let raw = RelocatableUnitIr::Module(raw);
+        let selected = vec![true; 10];
+        let (shared, logical_bytes) = shared_scalar_facts(&raw, &selected);
+        let (owned, owned_bytes) = owned_scalar_facts(&raw, &selected);
+        assert_eq!(logical_bytes, MAX_UNIT_SCALAR_BYTES);
+        assert_eq!(logical_bytes, owned_bytes);
+        assert_eq!(shared.len(), 9);
+        assert!(!shared.contains_key(&RegionId(8)));
+        assert_eq!(shared[&RegionId(9)].text.as_str(), "");
+        assert!(Arc::ptr_eq(
+            &shared[&RegionId(0)].text,
+            &shared[&RegionId(7)].text
+        ));
+        for (id, fact) in shared {
+            assert_eq!(fact.text.as_ref(), &owned[&id].text);
+            assert_eq!(fact.segments, owned[&id].segments);
+        }
+    }
+
+    #[test]
+    fn execution_sharing_retains_unicode_ranges_and_empty_region_identity() {
+        let RelocatableUnitIr::Module(mut raw) = empty_unit() else {
+            unreachable!()
+        };
+        raw.header.semantic_strings = vec!["".into(), "猫".into()];
+        raw.ops = vec![
+            OpRecord {
+                id: OpId(0),
+                op: Op::EmitText { value: StringId(0) },
+            },
+            OpRecord {
+                id: OpId(1),
+                op: Op::EmitText { value: StringId(1) },
+            },
+            OpRecord {
+                id: OpId(2),
+                op: Op::EmitText { value: StringId(1) },
+            },
+        ];
+        raw.regions = vec![
+            Region {
+                id: RegionId(0),
+                ops: vec![OpId(0), OpId(1)],
+            },
+            Region {
+                id: RegionId(1),
+                ops: vec![OpId(0), OpId(2)],
+            },
+            Region {
+                id: RegionId(2),
+                ops: vec![],
+            },
+            Region {
+                id: RegionId(3),
+                ops: vec![],
+            },
+        ];
+        let raw = RelocatableUnitIr::Module(raw);
+        let (facts, bytes) = shared_scalar_facts(&raw, &[true; 4]);
+        assert_eq!(bytes, 6);
+        assert_eq!(facts[&RegionId(0)].text.as_str(), "猫");
+        assert!(Arc::ptr_eq(
+            &facts[&RegionId(0)].text,
+            &facts[&RegionId(1)].text
+        ));
+        assert!(Arc::ptr_eq(
+            &facts[&RegionId(2)].text,
+            &facts[&RegionId(3)].text
+        ));
+        assert_eq!(facts[&RegionId(0)].segments[0].bytes, 0..0);
+        assert_eq!(facts[&RegionId(0)].segments[1].bytes, 0..3);
+        assert_eq!(facts[&RegionId(1)].segments[1].op, OpId(2));
     }
 
     /// Adds one large scalar and literal regex decision to a structurally valid module.
