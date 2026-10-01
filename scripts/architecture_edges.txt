@@ -27,6 +27,7 @@ squish-host -[normal]-> squish-source
 squish-host -[normal]-> squish-store
 squish-host -[normal]-> squish-xml-front
 squish-kernel -[normal]-> squish-protocol
+squish-link -[dev]-> squish-xml-front
 squish-link -[normal]-> squish-ir
 squish-link -[normal]-> squish-protocol
 squish-link -[normal]-> squish-source

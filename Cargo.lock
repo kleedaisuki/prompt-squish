@@ -1590,6 +1590,7 @@ dependencies = [
  "squish-ir",
  "squish-protocol",
  "squish-source",
+ "squish-xml-front",
 ]
 
 [[package]]

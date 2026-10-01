@@ -6,6 +6,21 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Backend contracts for prompt-squish"
+autobenches = false
+
+[features]
+# Explicit hosted mechanism probes; ordinary crate builds do not run these suites.
+mechanism-benchmarks = []
+
+[[bench]]
+name = "archive_latency"
+harness = false
+required-features = ["mechanism-benchmarks"]
+
+[[bench]]
+name = "archive_allocations"
+harness = false
+required-features = ["mechanism-benchmarks"]
 
 [dependencies]
 squish-ir = { path = "../squish-ir" }
