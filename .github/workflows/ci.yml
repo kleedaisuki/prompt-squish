@@ -81,7 +81,7 @@ jobs:
 
       - name: Check minimum supported Rust version
         id: compile
-        run: cargo +1.88.0 check --workspace --all-targets --locked
+        run: cargo +1.88.0 check --workspace --all-targets --locked --keep-going
 
       # Keep the declared workspace graph equal to the reviewed architectural contract.
       # 保持已声明的 workspace 依赖图与经过评审的架构契约完全一致。
@@ -99,7 +99,8 @@ jobs:
         run: cargo +1.88.0 fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo +1.88.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
+        # Gather independent errors in one hosted pass; failure still blocks native jobs.
+        run: cargo +1.88.0 clippy --workspace --all-targets --all-features --locked --keep-going -- -D warnings
 
       - name: Test documentation examples
         run: cargo +1.88.0 test --workspace --doc --all-features --locked
