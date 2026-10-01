@@ -44,7 +44,7 @@ def check_topology(document: str) -> None:
     if jobs is None:
         raise ValueError("missing top-level jobs mapping")
     names = re.findall(r"^  ([a-z][a-z-]*):$", jobs.group(1), re.MULTILINE)
-    if names != ["rust-quality", "rust-test", "performance", "profile", "mechanisms", "site"]:
+    if names != ["rust-quality", "rust-test", "performance", "profile", "mechanisms", "site", "legacy-fixture"]:
         raise ValueError("CI jobs must remain unique and below the jobs mapping")
     mechanisms_input = re.search(r"^      mechanisms:\n(.*?)(?=^      \S|\Z)",
                                  dispatch.group(1), re.MULTILINE | re.DOTALL)
@@ -80,17 +80,17 @@ def check_topology(document: str) -> None:
     if not re.search(r"^        id: compile$", quality.group(1), re.MULTILINE):
         raise ValueError("compile outcome must belong to the real MSRV check step")
     if native is None or (
-        "if: always() && !cancelled() && needs.rust-quality.outputs.compiled == 'success'"
+        "if: always() && !cancelled() && needs.rust-quality.result == 'success'"
         not in native.group(1)
     ):
-        raise ValueError("native tests must require successful compilation even after lint failure")
+        raise ValueError("native tests must require complete quality success before expensive platform builds")
     performance = re.search(r"^  performance:\n(.*?)(?=^  \S|\Z)",
                             jobs.group(1), re.MULTILINE | re.DOTALL)
     if performance is None or "inputs.performance" not in performance.group(1):
         raise ValueError("performance job must be gated by the explicit dispatch input")
     site = re.search(r"^  site:\n(.*?)(?=^  \S|\Z)", jobs.group(1), re.MULTILINE | re.DOTALL)
     if site is None or not re.search(
-        r"^    if: github.event_name != 'workflow_dispatch' \|\| inputs.site$",
+        r"^    if: \$\{\{ !inputs.legacy_fixture_only && \(github.event_name != 'workflow_dispatch' \|\| inputs.site\) \}\}$",
         site.group(1), re.MULTILINE,
     ):
         raise ValueError("site validation must run for all push and pull-request events")

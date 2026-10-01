@@ -2,7 +2,7 @@
 
 import unittest
 
-from verify_ci import successful_ci
+from verify_ci import REQUIRED_JOBS, required_jobs_passed, successful_ci
 
 
 class CiGateTests(unittest.TestCase):
@@ -22,6 +22,16 @@ class CiGateTests(unittest.TestCase):
     def test_absent_evidence_fails(self) -> None:
         """API emptiness is not permission to publish."""
         self.assertFalse(successful_ci([], "abc"))
+
+    def test_preparation_success_is_not_release_verification(self) -> None:
+        """Every required quality/native/site job must succeed, not merely the workflow."""
+        jobs = [dict(name=name, status="completed", conclusion="success") for name in REQUIRED_JOBS]
+        self.assertTrue(required_jobs_passed(jobs))
+        self.assertFalse(required_jobs_passed([
+            dict(name="Preparation only - shipped v1.2 fixture", status="completed", conclusion="success")]))
+        for required in REQUIRED_JOBS:
+            changed = [{**job, "conclusion": "skipped"} if job["name"] == required else job for job in jobs]
+            self.assertFalse(required_jobs_passed(changed))
 
 
 if __name__ == "__main__":
