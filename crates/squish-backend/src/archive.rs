@@ -698,6 +698,21 @@ where
     U: std::ops::Deref<Target = RelocatableUnitIr>,
     B: AsRef<[u8]>,
 {
+    validate_payload_source_hashes(units, import_bindings, assets, sources).map(|_| ())
+}
+/// Returns the number of authoritative source hashes, allowing fan-in regression checks.
+/// Cached values are computed only from immutable exact source bytes, never record claims.
+fn validate_payload_source_hashes<U, B>(
+    units: &BTreeMap<SourceKey, U>,
+    import_bindings: &[ImportBinding],
+    assets: &BTreeMap<(SourceKey, String), B>,
+    sources: &BTreeMap<SourceKey, B>,
+) -> Result<usize, ArchiveError>
+where
+    U: std::ops::Deref<Target = RelocatableUnitIr>,
+    B: AsRef<[u8]>,
+{
+    let mut source_digests = BTreeMap::new();
     let mut bindings = BTreeMap::new();
     for binding in import_bindings {
         if !units.contains_key(&binding.importer)
@@ -740,10 +755,13 @@ where
             }
         }
         for record in &unit.sources().records {
-            let bytes = sources
-                .get(&record.key)
+            let (source, bytes) = sources
+                .get_key_value(&record.key)
                 .ok_or_else(|| fail("SOPack diagnostic source missing"))?;
-            if squish_ir::SourceDigest::of(bytes.as_ref()) != record.digest
+            let digest = source_digests
+                .entry(source)
+                .or_insert_with(|| squish_ir::SourceDigest::of(bytes.as_ref()));
+            if *digest != record.digest
                 || record.exact_bytes.digest != record.digest.0
                 || record.exact_bytes.byte_len != bytes.as_ref().len() as u64
             {
@@ -754,7 +772,7 @@ where
     if imports != bindings.len() {
         return Err(fail("SOPack has undeclared import bindings"));
     }
-    Ok(())
+    Ok(source_digests.len())
 }
 
 #[cfg(test)]
@@ -1036,6 +1054,94 @@ mod sopack_tests {
         );
         assert!(direct.is_err());
         assert_eq!(direct, validate_payload(&shared.as_ref()));
+    }
+    /// Builds multiple valid units sharing one exact diagnostic source attachment.
+    fn source_fanin_fixture(units: usize) -> (SopackPayload, SourceKey) {
+        let mut payload = fixture("workspace");
+        let original = payload.units.keys().next().unwrap().clone();
+        let template = payload.units.values().next().unwrap().clone();
+        let own_bytes = payload.sources.values().next().unwrap().clone();
+        let mut shared = original.clone();
+        if let SourceKey::Project { path, .. } = &mut shared {
+            *path = vec!["shared-diagnostic.xml".into()];
+        }
+        let shared_bytes = vec![b'x'; 64 * 1024];
+        let shared_digest = squish_ir::SourceDigest::of(&shared_bytes);
+        let mut shared_record = template.sources().records[0].clone();
+        shared_record.key = shared.clone();
+        shared_record.digest = shared_digest;
+        shared_record.exact_bytes = BlobRef {
+            digest: shared_digest.0,
+            byte_len: shared_bytes.len() as u64,
+        };
+        payload.units.clear();
+        payload.sources.clear();
+        payload.exports.clear();
+        payload.sources.insert(shared.clone(), shared_bytes);
+        for index in 0..units {
+            let mut key = original.clone();
+            if let SourceKey::Project { path, .. } = &mut key {
+                *path = vec![format!("unit-{index:04}.xml")];
+            }
+            let mut unit = template.clone();
+            relocate(
+                &mut unit,
+                &BTreeMap::from([(original.clone(), key.clone())]),
+            )
+            .unwrap();
+            unit.sources_mut().records.push(shared_record.clone());
+            payload.units.insert(key.clone(), unit);
+            payload.sources.insert(key.clone(), own_bytes.clone());
+            if index == 0 {
+                payload.root_source = Some(key.clone());
+                payload.exports.insert("main".into(), key);
+            }
+        }
+        (payload, shared)
+    }
+    #[test]
+    fn diagnostic_source_fanin_hashes_each_exact_key_once() {
+        let (payload, _) = source_fanin_fixture(16);
+        let view = payload.as_ref();
+        let hashes =
+            validate_payload_source_hashes(&view.units, &view.imports, &view.assets, &view.sources)
+                .unwrap();
+        assert_eq!(hashes, 17);
+        assert_eq!(hashes, payload.sources.len());
+        assert_eq!(
+            payload
+                .units
+                .values()
+                .map(|unit| unit.sources().records.len())
+                .sum::<usize>(),
+            32
+        );
+    }
+    #[test]
+    fn cached_diagnostic_digest_still_rejects_every_record_mismatch() {
+        let (payload, shared) = source_fanin_fixture(8);
+        for key in payload.units.keys() {
+            for field in 0..3 {
+                let mut changed = payload.clone();
+                let record = &mut changed.units.get_mut(key).unwrap().sources_mut().records[1];
+                match field {
+                    0 => {
+                        let forged = SourceDigest::of(b"forged-record");
+                        record.digest = forged;
+                        record.exact_bytes.digest = forged.0;
+                    }
+                    1 => record.exact_bytes.digest = SourceDigest::of(b"forged-blob").0,
+                    _ => record.exact_bytes.byte_len += 1,
+                }
+                assert!(
+                    validate_payload(&changed.as_ref()).is_err(),
+                    "unit {key:?}, field {field}"
+                );
+            }
+        }
+        let mut changed = payload;
+        changed.sources.get_mut(&shared).unwrap()[0] ^= 1;
+        assert!(validate_payload(&changed.as_ref()).is_err());
     }
     #[test]
     fn borrowed_writer_does_not_modify_input_ir_or_source_identities() {
