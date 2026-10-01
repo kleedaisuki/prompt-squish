@@ -25,7 +25,7 @@ export interface SourceAcquisition {
 }
 
 export type ReleaseAcquisition = NativeAcquisition | SourceAcquisition;
-export type ReleaseVersion = "1.2.0" | "1.1.0" | "1.0.4" | "1.0.2" | "1.0.1" | "1.0.0" | "0.3.0" | "0.2.0";
+export type ReleaseVersion = "1.2.1" | "1.2.0" | "1.1.0" | "1.0.4" | "1.0.2" | "1.0.1" | "1.0.0" | "0.3.0" | "0.2.0";
 
 /** Locale-neutral facts for one immutable product release.
  * 单个不可变产品版本的非本地化事实。 */
@@ -87,8 +87,13 @@ function nativeAcquisition(version: ReleaseVersion): NativeAcquisition {
  * 逆时间顺序目录；产品顺序绝不依赖翻译数组位置。 */
 export const releases: ReadonlyArray<ProductRelease> = [
   {
+    version: "1.2.1", tag: "v1.2.1", date: "2026-10-01", protocol: "3.2",
+    status: "current", githubRelease: `${repository}/releases/tag/v1.2.1`,
+    metadataPath: "/releases/1.2.1.json", acquisition: nativeAcquisition("1.2.1"),
+  },
+  {
     version: "1.2.0", tag: "v1.2.0", date: "2026-10-01", protocol: "3.2",
-    status: "current", githubRelease: `${repository}/releases/tag/v1.2.0`,
+    status: "historical", githubRelease: `${repository}/releases/tag/v1.2.0`,
     metadataPath: "/releases/1.2.0.json", acquisition: nativeAcquisition("1.2.0"),
   },
   {

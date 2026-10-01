@@ -19,6 +19,22 @@ on:
         description: 'Explicitly authorize the bounded default-versus-ThinLTO experiment'
         type: boolean
         default: false
+      mechanisms:
+        description: 'Collect in-process v1.2 mechanism latency and allocation evidence'
+        type: boolean
+        default: false
+      origin_compare:
+        description: 'Compare pinned pre-index and candidate origins on one hosted runner'
+        type: boolean
+        default: false
+      legacy_fixture_only:
+        description: 'Preparation only: generate a verified shipped-v1.2 fixture, NOT current-source verification'
+        type: boolean
+        default: false
+      full_repair_compare:
+        description: 'Compare version-specific pre-repair and candidate core/archive APIs plus separate IO counts'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -29,6 +45,7 @@ concurrency:
 
 jobs:
   rust-quality:
+    if: ${{ !inputs.legacy_fixture_only }}
     name: Rust quality (Ubuntu, MSRV 1.88)
     outputs:
       compiled: ${{ steps.compile.outcome }}
@@ -51,7 +68,9 @@ jobs:
             ~/.cargo/git
             target
           key: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
-          restore-keys: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+          restore-keys: |
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-
 
       - name: Verify minimum supported Rust toolchain
         run: |
@@ -62,7 +81,7 @@ jobs:
 
       - name: Check minimum supported Rust version
         id: compile
-        run: cargo +1.88.0 check --workspace --all-targets --locked
+        run: cargo +1.88.0 check --workspace --all-targets --locked --keep-going
 
       # Keep the declared workspace graph equal to the reviewed architectural contract.
       # 保持已声明的 workspace 依赖图与经过评审的架构契约完全一致。
@@ -80,7 +99,8 @@ jobs:
         run: cargo +1.88.0 fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo +1.88.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
+        # Gather independent errors in one hosted pass; failure still blocks native jobs.
+        run: cargo +1.88.0 clippy --workspace --all-targets --all-features --locked --keep-going -- -D warnings
 
       - name: Test documentation examples
         run: cargo +1.88.0 test --workspace --doc --all-features --locked
@@ -98,7 +118,7 @@ jobs:
 
   rust-test:
     needs: rust-quality
-    if: always() && !cancelled() && needs.rust-quality.outputs.compiled == 'success'
+    if: always() && !cancelled() && needs.rust-quality.result == 'success'
     name: Rust test (${{ matrix.name }}, MSRV 1.88)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -129,7 +149,9 @@ jobs:
             ~/.cargo/git
             target
           key: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
-          restore-keys: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+          restore-keys: |
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-
 
       - name: Verify minimum supported Rust toolchain
         run: |
@@ -223,7 +245,9 @@ jobs:
             ~/.cargo/git
             target
           key: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
-          restore-keys: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+          restore-keys: |
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-
 
       - name: Build measured release binary
         run: cargo +1.88.0 build --release --bin xmlsquish --locked
@@ -328,8 +352,135 @@ jobs:
             .cache/profile-target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
+  mechanisms:
+    if: github.event_name == 'workflow_dispatch' && (inputs.mechanisms || inputs.origin_compare || inputs.full_repair_compare)
+    needs: rust-quality
+    name: In-process mechanism evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Restore selected benchmark compilation
+        id: rust-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: mechanism-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            mechanism-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ hashFiles('Cargo.lock') }}-
+            mechanism-v1-${{ runner.os }}-${{ runner.arch }}-1.88-
+            rust-v1-Linux-X64-1.88-performance-${{ hashFiles('Cargo.lock') }}-
+            rust-v1-Linux-X64-1.88-performance-
+      - name: Measure four selected in-process targets without rebuilding all tests
+        if: inputs.mechanisms
+        env:
+          MECHANISM_SAMPLES: '5'
+          MECHANISM_WARMUP: '2'
+          MECHANISM_TARGET_US: '3000'
+          MECHANISM_MAX_ITERATIONS: '256'
+          MECHANISM_ALLOCATION_ITERATIONS: '1'
+        run: python scripts/perf/mechanisms.py --directory .temp/mechanisms
+      - name: Restore isolated version-specific pre-repair compilation
+        if: inputs.full_repair_compare
+        id: full-repair-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .cache/full-repair-reference-target
+          key: full-repair-reference-v1-1bbf6cd-linux-x64-1.88-${{ hashFiles('scripts/perf/archive_oracle.rs', 'scripts/perf/baseline_archive_oracle.patch') }}
+          restore-keys: full-repair-reference-v1-1bbf6cd-linux-x64-1.88-
+      - name: Ensure Linux syscall counter tool is available
+        if: inputs.full_repair_compare
+        run: command -v strace >/dev/null || (sudo apt-get update && sudo apt-get install -y strace)
+      - name: Compare all version-specific mechanisms and separate end-to-end IO
+        if: inputs.full_repair_compare
+        env:
+          MECHANISM_SAMPLES: '5'
+          MECHANISM_WARMUP: '2'
+          MECHANISM_TARGET_US: '3000'
+          MECHANISM_MAX_ITERATIONS: '256'
+          MECHANISM_ALLOCATION_ITERATIONS: '1'
+        run: python scripts/perf/full_repair_compare.py --passes 3 --io --directory .temp/full-repair-comparison
+      - name: Retain small full-repair evidence only
+        if: always() && inputs.full_repair_compare
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: full-repair-${{ github.sha }}
+          path: |
+            .temp/full-repair-comparison/report.json
+            .temp/full-repair-comparison/*.jsonl
+            .temp/full-repair-comparison/*/cargo-stderr.txt
+            .temp/full-repair-comparison/*-io/*-strace.txt
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Preserve pre-repair compilation after non-cancelled failure
+        if: always() && !cancelled() && inputs.full_repair_compare && steps.full-repair-cache.outputs.cache-hit != 'true' && steps.full-repair-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .cache/full-repair-reference-target
+          key: ${{ steps.full-repair-cache.outputs.cache-primary-key }}
+      - name: Restore isolated pinned-reference core compilation
+        if: inputs.origin_compare
+        id: origin-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .cache/origin-reference-target
+          key: origin-reference-v1-54fe53f-linux-x64-1.88-${{ hashFiles('Cargo.lock', 'scripts/perf/mechanism_support.rs', 'crates/squish-link/benches/**') }}
+          restore-keys: origin-reference-v1-54fe53f-linux-x64-1.88-
+      - name: Compare targeted origins with identical harness and ABBA process passes
+        if: inputs.origin_compare
+        env:
+          MECHANISM_SAMPLES: '5'
+          MECHANISM_WARMUP: '2'
+          MECHANISM_TARGET_US: '3000'
+          MECHANISM_MAX_ITERATIONS: '256'
+        run: python scripts/perf/origin_compare.py --passes 3 --directory .temp/origin-comparison
+      - name: Retain small same-runner comparison evidence
+        if: always() && inputs.origin_compare
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: origin-comparison-${{ github.sha }}
+          path: |
+            .temp/origin-comparison/report.json
+            .temp/origin-comparison/*.jsonl
+            .temp/origin-comparison/*-cargo-stderr.txt
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Preserve isolated reference compilation after non-cancelled failure
+        if: always() && !cancelled() && inputs.origin_compare && steps.origin-cache.outputs.cache-hit != 'true' && steps.origin-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .cache/origin-reference-target
+          key: ${{ steps.origin-cache.outputs.cache-primary-key }}
+      - name: Retain small mechanism evidence only
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mechanisms-${{ github.sha }}
+          path: |
+            .temp/mechanisms/report.json
+            .temp/mechanisms/*.jsonl
+            .temp/mechanisms/cargo-stderr.txt
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Save selected compilation after success or failure
+        if: always() && !cancelled() && steps.rust-cache.outputs.cache-hit != 'true' && steps.rust-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
   site:
-    if: github.event_name != 'workflow_dispatch' || inputs.site
+    if: ${{ !inputs.legacy_fixture_only && (github.event_name != 'workflow_dispatch' || inputs.site) }}
     name: Site
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -361,3 +512,22 @@ jobs:
 
       - name: Test published pages in browser
         run: npm run test:browser
+
+  legacy-fixture:
+    if: github.event_name == 'workflow_dispatch' && inputs.legacy_fixture_only
+    name: Preparation only - shipped v1.2 fixture
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Generate exact old foreign-provider archive without compiling current Rust
+        run: python scripts/perf/legacy_fixture.py
+      - name: Upload fixture and writer provenance only
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: legacy-v1.2-fixture-${{ github.sha }}
+          path: |
+            tests/fixtures/v1.2.0-library.sopack
+            .temp/legacy-fixture-preparation/provenance.json
+          if-no-files-found: error
+          retention-days: 30

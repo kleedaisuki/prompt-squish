@@ -1,17 +1,24 @@
 //! ADR 0007 宏展开机。 / ADR 0007 macro-expansion machine.
 
-use crate::{ArchiveDirective, InstantiateError, LinkedProgram};
+use crate::{
+    ArchiveDirective, InstantiateError, InstantiationFailure, InstantiationFrame, LinkedProgram,
+};
 use regex::Regex;
 use squish_ir::{
     BindingRef, DefAddr, DocumentItem, DocumentItemId, DocumentRegion, DocumentRegionId,
     EntityKind, ExpansionTrace, FileBinding, FrameId, FrameIdentity, FrameRecord, LinkedDocumentIr,
-    LinkedOpRef, LocalName, Op, OriginId, OriginNode, QualifiedOriginRef, RelocatableUnitIr,
-    ScalarExpr, ScalarValueId, SequenceValueId, StringId, SubstitutionKind, SubstitutionStep,
-    TraceRef, Validate,
+    LinkedOpRef, LocalName, Op, OriginNode, QualifiedOriginRef, RelocatableUnitIr, ScalarExpr,
+    ScalarValueId, SequenceValueId, StringId, SubstitutionKind, SubstitutionStep, TraceRef,
+    Validate,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    borrow::{Borrow, Cow},
+    collections::{BTreeMap, BTreeSet, HashMap},
+    fmt,
+    hash::{Hash, Hasher},
+    ops::{Deref, Range},
     rc::Rc,
+    sync::Arc,
 };
 
 /// 一次实例化的显式资源上限。 / Explicit resource limits for one instantiation.
@@ -64,11 +71,254 @@ impl Instantiator {
     ) -> Result<InstantiateOutput, InstantiateError> {
         Machine::new(program, args, budgets)?.run()
     }
+
+    /// Instantiates with actual failure-frame provenance for structured diagnostic rendering.
+    ///
+    /// Successful output and budget/error semantics are identical to `instantiate`. Only an
+    /// error copies the selected parent-chain call/declaration origins while the machine still
+    /// owns its frames. This avoids interpreting frame IDs after their provenance was dropped.
+    ///
+    /// ```ignore
+    /// let failure = Instantiator.instantiate_with_diagnostics(&program, args, budgets)
+    ///     .expect_err("the recursive fixture exhausts its budget");
+    /// let primary = failure.error.origin.as_ref()
+    ///     .and_then(|origin| program.resolve_origin(origin));
+    /// ```
+    pub fn instantiate_with_diagnostics(
+        &self,
+        program: &LinkedProgram,
+        args: BTreeMap<LocalName, String>,
+        budgets: Budgets,
+    ) -> Result<InstantiateOutput, InstantiationFailure> {
+        let mut machine = Machine::new(program, args, budgets)?;
+        match machine.run() {
+            Ok(output) => Ok(output),
+            Err(error) => Err(machine.failure_context(error)),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Counts actual adopted runtime String payloads, not Arc clones or heap allocator events.
+    static OWNED_TEXT_MATERIALIZATIONS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// Test-thread witness for String-backed text construction, without resetting parallel tests.
+#[cfg(test)]
+pub(crate) fn owned_text_materializations() -> (usize, usize) {
+    OWNED_TEXT_MATERIALIZATIONS.with(std::cell::Cell::get)
+}
+
+/// Text ownership, not a global literal cache: unit strings already belong to the program.
+#[derive(Clone)]
+enum TextBacking {
+    /// Runtime concatenations, external arguments and existing shared scalar fact strings.
+    Owned(Arc<String>),
+    /// A literal view retains its exact immutable unit, never a duplicated whole input.
+    Unit {
+        unit: Arc<RelocatableUnitIr>,
+        string: StringId,
+    },
+}
+
+impl TextBacking {
+    /// Returns the immutable full backing; unit IDs were checked by the sole constructor.
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Owned(text) => text.as_str(),
+            Self::Unit { unit, string } => &unit.header().semantic_strings[string.0 as usize],
+        }
+    }
+}
+
+/// Immutable visible UTF-8 text retaining its owner only for the invocation lifetime.
+///
+/// Occurrences own distinct provenance, not necessarily distinct bytes. Equality and hashing
+/// use the visible substring; backing identity/range never selects a scalar ID.
+#[derive(Clone)]
+struct Text {
+    /// Immutable string storage; partial views never mutate or trim this shared allocation.
+    backing: TextBacking,
+    /// Checked byte boundaries into the backing, always relative to its UTF-8 representation.
+    range: Range<usize>,
+}
+
+impl fmt::Debug for Text {
+    /// Diagnostics expose only the visible value, not unrelated input bytes or entire unit IR.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Text")
+            .field("visible", &self.as_str())
+            .field("range", &self.range)
+            .finish()
+    }
+}
+
+impl Text {
+    /// Creates a view only when both bounds describe a valid UTF-8 substring.
+    fn view(backing: Arc<String>, range: Range<usize>) -> Option<Self> {
+        backing.get(range.clone())?;
+        Some(Self {
+            backing: TextBacking::Owned(backing),
+            range,
+        })
+    }
+
+    /// Borrows a checked literal from the unit already retained by the executable program.
+    fn unit_view(
+        unit: Arc<RelocatableUnitIr>,
+        string: StringId,
+        range: Range<usize>,
+    ) -> Option<Self> {
+        unit.header()
+            .semantic_strings
+            .get(string.0 as usize)?
+            .get(range.clone())?;
+        Some(Self {
+            backing: TextBacking::Unit { unit, string },
+            range,
+        })
+    }
+
+    /// Test-only owned-storage witness; unit-backed values intentionally have no String Arc.
+    #[cfg(test)]
+    fn owned_backing(&self) -> Option<&Arc<String>> {
+        match &self.backing {
+            TextBacking::Owned(text) => Some(text),
+            TextBacking::Unit { .. } => None,
+        }
+    }
+
+    /// Returns precisely the visible bytes, never unrelated bytes retained in the backing.
+    fn as_str(&self) -> &str {
+        &self.backing.as_str()[self.range.clone()]
+    }
+
+    /// Transfers a uniquely owned full string, or copies only the visible substring.
+    fn into_owned(self) -> String {
+        let Self { backing, range } = self;
+        match backing {
+            TextBacking::Owned(text) if range.start == 0 && range.end == text.len() => {
+                Arc::try_unwrap(text).unwrap_or_else(|text| text.as_str().to_owned())
+            }
+            backing => backing.as_str()[range].to_owned(),
+        }
+    }
+
+    /// Slices relative visible bytes without copying captured/fact text.
+    fn slice(&self, range: Range<usize>) -> Option<Self> {
+        self.as_str().get(range.clone())?;
+        let start = self.range.start.checked_add(range.start)?;
+        let end = self.range.start.checked_add(range.end)?;
+        Some(Self {
+            backing: self.backing.clone(),
+            range: start..end,
+        })
+    }
+}
+
+impl PartialEq for Text {
+    /// Equal visible bytes are equal keys even when their backings/ranges differ.
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+impl Eq for Text {}
+impl Hash for Text {
+    /// Matches the `str` hash exactly so borrowed hash-map lookup remains valid.
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state);
+    }
+}
+impl Borrow<str> for Text {
+    /// Borrows the same visible key used by Eq/Hash, never the complete backing.
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl From<String> for Text {
+    /// Transfers a full owned string; no additional payload copy occurs.
+    fn from(value: String) -> Self {
+        #[cfg(test)]
+        OWNED_TEXT_MATERIALIZATIONS.with(|count| {
+            let (calls, bytes) = count.get();
+            count.set((calls + 1, bytes + value.len()));
+        });
+        let range = 0..value.len();
+        Self {
+            backing: TextBacking::Owned(Arc::new(value)),
+            range,
+        }
+    }
+}
+
+impl From<&str> for Text {
+    /// Owns a borrowed literal at its existing materialization boundary.
+    fn from(value: &str) -> Self {
+        value.to_owned().into()
+    }
+}
+
+impl Deref for Text {
+    type Target = str;
+
+    /// Makes all scalar consumers observe the same visible UTF-8 value.
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+/// Scalar materialization state; only multiple nonempty views require contiguous new bytes.
+#[derive(Default)]
+enum ScalarText {
+    /// No occurrence was evaluated; finishing produces the ordinary empty scalar.
+    #[default]
+    Empty,
+    /// One visible value, possibly preceded/followed by empty provenance contributions.
+    View(Text),
+    /// Concatenation owns only visible bytes, never an entire unrelated partial-view backing.
+    Joined(String),
+}
+
+impl ScalarText {
+    /// Appends visible bytes while retaining single-fragment ownership without a copy.
+    fn append(&mut self, value: Text) {
+        if value.is_empty() {
+            if matches!(self, Self::Empty) {
+                *self = Self::View(value);
+            }
+            return;
+        }
+        *self = match std::mem::take(self) {
+            Self::Empty => Self::View(value),
+            Self::View(first) if first.is_empty() => Self::View(value),
+            Self::View(first) => {
+                let mut text = String::with_capacity(first.len().saturating_add(value.len()));
+                text.push_str(first.as_str());
+                text.push_str(value.as_str());
+                Self::Joined(text)
+            }
+            Self::Joined(mut text) => {
+                text.push_str(value.as_str());
+                Self::Joined(text)
+            }
+        };
+    }
+
+    /// Publishes immutable scalar bytes once; joined strings transfer their owned buffers.
+    fn finish(self) -> Text {
+        match self {
+            Self::Empty => String::new().into(),
+            Self::View(text) => text,
+            Self::Joined(text) => text.into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 struct Value {
-    text: String,
+    text: Text,
     substitutions: Vec<SubstitutionStep>,
 }
 
@@ -93,30 +343,30 @@ struct SlotValue {
 }
 #[derive(Clone, Debug)]
 enum OccurrenceKind {
-    Text(String),
-    Comment(String),
-    Pi(String, String),
+    Text(Text),
+    Comment(Text),
+    Pi(Text, Text),
     Element {
         name: squish_ir::ExpandedName,
-        attributes: Vec<(squish_ir::ExpandedName, String)>,
+        attributes: Vec<(squish_ir::ExpandedName, Text)>,
         children: Vec<Occurrence>,
     },
 }
 
 #[derive(Clone, Debug)]
-struct CallState {
+struct CallState<'a> {
     target: DefAddr,
     op_ref: LinkedOpRef,
     caller: Env,
-    args: Vec<squish_ir::Argument>,
-    fills: Vec<squish_ir::Fill>,
+    args: &'a [squish_ir::Argument],
+    fills: &'a [squish_ir::Fill],
     values: BTreeMap<String, Value>,
     slots: BTreeMap<String, SlotValue>,
     output: usize,
 }
 
 #[derive(Clone, Debug)]
-enum Task {
+enum Task<'a> {
     Region {
         at: squish_ir::LinkedRegionRef,
         env: Env,
@@ -131,39 +381,90 @@ enum Task {
         at: LinkedOpRef,
         env: Env,
         name: squish_ir::ExpandedName,
-        attrs: Vec<(squish_ir::ExpandedName, String)>,
+        attrs: Vec<(squish_ir::ExpandedName, Text)>,
         children: usize,
         output: usize,
     },
     Arg {
-        call: CallState,
+        call: CallState<'a>,
         index: usize,
     },
     ArgDone {
-        call: CallState,
+        call: CallState<'a>,
         index: usize,
         buffer: usize,
     },
     Fill {
-        call: CallState,
+        call: CallState<'a>,
         index: usize,
     },
     FillDone {
-        call: CallState,
+        call: CallState<'a>,
         index: usize,
         buffer: usize,
     },
 }
 
+/// Maximum scalar arena size scanned directly before indexing the immutable prefix.
+///
+/// Small invocations commonly reuse one long argument. Hashing and duplicating that entire
+/// key on every lookup costs more than a bounded equality check. The cap is independent of
+/// workload size: large distinct-value workloads still enter the indexed path once, rather
+/// than restoring an unbounded quadratic scan. Eight is a conservative fixed small-domain
+/// cutoff, not a claimed universal hardware-optimal crossover.
+const LINEAR_SCALAR_LIMIT: usize = 8;
+
+/// Preserves first-insertion scalar IDs without paying for an index in tiny value domains.
+#[derive(Default)]
+struct ScalarIndex {
+    /// Created once after the bounded prefix; keys are session state, never trace ordering.
+    large: Option<HashMap<Text, u32>>,
+}
+
+impl ScalarIndex {
+    /// Finds the first arena occurrence, promoting the complete prefix at most once.
+    fn find(&mut self, values: &[Text], value: &str) -> Option<u32> {
+        if values.len() <= LINEAR_SCALAR_LIMIT && self.large.is_none() {
+            return values
+                .iter()
+                .position(|old| old.as_str() == value)
+                .map(|id| id as u32);
+        }
+        let index = self.large.get_or_insert_with(|| {
+            let mut index = HashMap::with_capacity(values.len());
+            for (id, text) in values.iter().enumerate() {
+                index.entry(text.clone()).or_insert(id as u32);
+            }
+            index
+        });
+        index.get(value).copied()
+    }
+
+    /// Appends a new value once; indexed mode never derives an ID from map iteration.
+    fn intern(&mut self, values: &mut Vec<Text>, value: &Text) -> u32 {
+        if let Some(id) = self.find(values, value.as_str()) {
+            return id;
+        }
+        let id = values.len() as u32;
+        values.push(value.clone());
+        if let Some(index) = &mut self.large {
+            index.insert(value.clone(), id);
+        }
+        id
+    }
+}
+
 struct Machine<'a> {
     program: &'a LinkedProgram,
     budgets: Budgets,
-    tasks: Vec<Task>,
+    tasks: Vec<Task<'a>>,
     buffers: Vec<Vec<Occurrence>>,
     buffer_bytes: Vec<u64>,
     frames: Vec<FrameRecord>,
     frame_origins: Vec<QualifiedOriginRef>,
-    scalar_values: Vec<String>,
+    scalar_values: Vec<Text>,
+    /// Session-only bounded small-pool lookup and lazy index; never serialized.
+    scalar_index: ScalarIndex,
     sequences: Vec<Vec<DocumentItemId>>,
     origins: Vec<OriginNode>,
     directives: Vec<ArchiveDirective>,
@@ -200,9 +501,23 @@ impl<'a> Machine<'a> {
         let definition_origin = origin_for_region(program, root)
             .ok_or_else(|| InstantiateError::new("RUN003", "entry root has no source origin"))?;
         let mut scalar_values = Vec::new();
+        let mut scalar_index = ScalarIndex::default();
+        let mut frame_args = Vec::with_capacity(args.len());
         let values: BTreeMap<_, _> = args
             .into_iter()
             .map(|(name, text)| {
+                // Entry arguments retain their original arena positions, including duplicate
+                // values. Frame IDs always name the first equal value, as in macro interning.
+                let first = scalar_index.find(&scalar_values, &text);
+                let id = first.unwrap_or(scalar_values.len() as u32);
+                let text: Text = match first {
+                    Some(id) => scalar_values[id as usize].clone(),
+                    None => text.into(),
+                };
+                frame_args.push((name.clone(), ScalarValueId(id)));
+                if let Some(index) = &mut scalar_index.large {
+                    index.entry(text.clone()).or_insert(id);
+                }
                 scalar_values.push(text.clone());
                 (
                     name,
@@ -210,15 +525,6 @@ impl<'a> Machine<'a> {
                         text,
                         substitutions: Vec::new(),
                     },
-                )
-            })
-            .collect();
-        let frame_args: Vec<(LocalName, ScalarValueId)> = values
-            .iter()
-            .map(|(n, v)| {
-                (
-                    n.clone(),
-                    ScalarValueId(scalar_values.iter().position(|x| x == &v.text).unwrap() as u32),
                 )
             })
             .collect();
@@ -255,6 +561,7 @@ impl<'a> Machine<'a> {
             frames,
             frame_origins: vec![definition_origin],
             scalar_values,
+            scalar_index,
             sequences: Vec::new(),
             origins,
             directives: Vec::new(),
@@ -262,7 +569,7 @@ impl<'a> Machine<'a> {
         })
     }
 
-    fn run(mut self) -> Result<InstantiateOutput, InstantiateError> {
+    fn run(&mut self) -> Result<InstantiateOutput, InstantiateError> {
         while let Some(task) = self.tasks.pop() {
             match task {
                 Task::Region { at, env, output } => {
@@ -303,7 +610,8 @@ impl<'a> Machine<'a> {
                     )?;
                 }
                 Task::Arg { mut call, index } => {
-                    let Some(arg) = call.args.get(index).cloned() else {
+                    let arguments = call.args;
+                    let Some(arg) = arguments.get(index) else {
                         self.tasks.push(Task::Fill { call, index: 0 });
                         continue;
                     };
@@ -315,8 +623,9 @@ impl<'a> Machine<'a> {
                             Some(call.op_ref),
                         ));
                     }
-                    match arg.value {
+                    match &arg.value {
                         ScalarExpr::RenderText(region) => {
+                            let region = *region;
                             let buffer = self.buffer();
                             let caller = call.caller.clone();
                             let unit_slot = call.op_ref.unit_slot;
@@ -325,15 +634,16 @@ impl<'a> Machine<'a> {
                                 index,
                                 buffer,
                             });
-                            let literal = self
-                                .program
+                            // Borrow the immutable fact through the external program lifetime,
+                            // not through the mutable machine being used to emit occurrences.
+                            let program = self.program;
+                            let literal = program
                                 .optimized(unit_slot)
-                                .and_then(|unit| unit.static_scalars.get(&region))
-                                .cloned();
+                                .and_then(|unit| unit.static_scalars.get(&region));
                             if let Some(literal) = literal {
                                 // Preserve each operation occurrence, trace and semantic budget
                                 // while skipping task dispatch for compile-time literal bodies.
-                                for segment in literal.segments {
+                                for segment in &literal.segments {
                                     let at = LinkedOpRef {
                                         unit_slot,
                                         op: segment.op,
@@ -343,7 +653,16 @@ impl<'a> Machine<'a> {
                                         &caller,
                                         buffer,
                                         OccurrenceKind::Text(
-                                            literal.text[segment.bytes].to_owned(),
+                                            Text::view(
+                                                Arc::clone(&literal.text),
+                                                segment.bytes.clone(),
+                                            )
+                                            .ok_or_else(|| {
+                                                InstantiateError::new(
+                                                    "RUN034",
+                                                    "invalid static scalar UTF-8 range",
+                                                )
+                                            })?,
                                         ),
                                     )?;
                                 }
@@ -356,8 +675,8 @@ impl<'a> Machine<'a> {
                             }
                         }
                         value => {
-                            let value = self.scalar(call.op_ref.unit_slot, &value, &call.caller)?;
-                            call.values.insert(arg.name, value);
+                            let value = self.scalar(call.op_ref.unit_slot, value, &call.caller)?;
+                            call.values.insert(arg.name.clone(), value);
                             self.tasks.push(Task::Arg {
                                 call,
                                 index: index + 1,
@@ -371,7 +690,7 @@ impl<'a> Machine<'a> {
                     buffer,
                 } => {
                     let occurrences = std::mem::take(&mut self.buffers[buffer]);
-                    let mut text = String::new();
+                    let mut text = ScalarText::default();
                     let mut substitutions = Vec::new();
                     for occurrence in occurrences {
                         let OccurrenceKind::Text(value) = occurrence.kind else {
@@ -382,7 +701,9 @@ impl<'a> Machine<'a> {
                                 Some(call.op_ref),
                             ));
                         };
-                        text.push_str(&value);
+                        // Text sharing never removes occurrence validation, substitutions or
+                        // earlier budget charges. Only multiple nonempty pieces materialize.
+                        text.append(value);
                         substitutions.extend(occurrence.trace.substitution_chain);
                     }
                     substitutions.push(SubstitutionStep {
@@ -392,7 +713,7 @@ impl<'a> Machine<'a> {
                     call.values.insert(
                         call.args[index].name.clone(),
                         Value {
-                            text,
+                            text: text.finish(),
                             substitutions,
                         },
                     );
@@ -402,7 +723,8 @@ impl<'a> Machine<'a> {
                     });
                 }
                 Task::Fill { call, index } => {
-                    let Some(fill) = call.fills.get(index).cloned() else {
+                    let fills = call.fills;
+                    let Some(fill) = fills.get(index) else {
                         self.enter(call)?;
                         continue;
                     };
@@ -462,13 +784,20 @@ impl<'a> Machine<'a> {
         let document_trace = flattened.traces;
         self.sequences = flattened.sequences;
         canonicalize_document(&mut document);
-        canonicalize_scalars(&mut self.scalar_values, &mut self.frames, &mut self.origins);
+        // The lookup no longer participates after evaluation. Release its shared keys before
+        // producing the public owned pool so uniquely held full values can transfer buffers.
+        drop(std::mem::take(&mut self.scalar_index));
+        let scalar_values = canonicalize_scalars(
+            std::mem::take(&mut self.scalar_values),
+            &mut self.frames,
+            &mut self.origins,
+        );
         let trace = ExpansionTrace {
-            frames: self.frames,
-            scalar_values: self.scalar_values,
-            sequences: self.sequences,
+            frames: std::mem::take(&mut self.frames),
+            scalar_values,
+            sequences: std::mem::take(&mut self.sequences),
             debug_strings: Vec::new(),
-            origins: self.origins,
+            origins: std::mem::take(&mut self.origins),
             document_items: document_trace,
         };
         document.validate().map_err(|e| {
@@ -484,7 +813,7 @@ impl<'a> Machine<'a> {
         Ok(InstantiateOutput {
             document,
             trace,
-            directives: self.directives,
+            directives: std::mem::take(&mut self.directives),
         })
     }
 
@@ -494,27 +823,28 @@ impl<'a> Machine<'a> {
         env: Env,
         output: usize,
     ) -> Result<(), InstantiateError> {
-        let op = operation(self.program, at)?.clone();
+        let program = self.program;
+        let op = operation(program, at)?;
         match op {
             Op::EmitText { value } => self.emit_simple(
                 at,
                 &env,
                 output,
-                OccurrenceKind::Text(self.string(at.unit_slot, value)?),
+                OccurrenceKind::Text(self.literal_text(at.unit_slot, *value)?),
             )?,
             Op::EmitComment { value } => self.emit_simple(
                 at,
                 &env,
                 output,
-                OccurrenceKind::Comment(self.string(at.unit_slot, value)?),
+                OccurrenceKind::Comment(self.literal_text(at.unit_slot, *value)?),
             )?,
             Op::EmitPi { target, data } => self.emit_simple(
                 at,
                 &env,
                 output,
                 OccurrenceKind::Pi(
-                    self.string(at.unit_slot, target)?,
-                    self.string(at.unit_slot, data)?,
+                    self.literal_text(at.unit_slot, *target)?,
+                    self.literal_text(at.unit_slot, *data)?,
                 ),
             )?,
             Op::EmitElement {
@@ -522,13 +852,13 @@ impl<'a> Machine<'a> {
                 attributes,
                 children,
             } => {
-                let name = self.qname(at.unit_slot, name)?;
+                let name = self.qname(at.unit_slot, *name)?;
                 let attrs = attributes
-                    .into_iter()
+                    .iter()
                     .map(|a| {
                         Ok((
                             self.qname(at.unit_slot, a.name)?,
-                            self.string(at.unit_slot, a.value)?,
+                            self.literal_text(at.unit_slot, a.value)?,
                         ))
                     })
                     .collect::<Result<_, InstantiateError>>()?;
@@ -544,14 +874,14 @@ impl<'a> Machine<'a> {
                 self.tasks.push(Task::Region {
                     at: squish_ir::LinkedRegionRef {
                         unit_slot: at.unit_slot,
-                        region: children,
+                        region: *children,
                     },
                     env,
                     output: buffer,
                 });
             }
             Op::InsertScalar { value } => {
-                let value = self.binding(at.unit_slot, &value, &env)?;
+                let value = self.binding(at.unit_slot, value, &env)?;
                 if !valid_xml_chars(&value.text) {
                     return Err(self.failure(
                         "RUN027",
@@ -583,39 +913,39 @@ impl<'a> Machine<'a> {
             } => {
                 let input = match input {
                     squish_ir::MatchInput::Literal(id) => Value {
-                        text: self.string(at.unit_slot, id)?,
+                        text: self.literal_text(at.unit_slot, *id)?,
                         substitutions: Vec::new(),
                     },
-                    squish_ir::MatchInput::ReadBinding(b) => {
-                        self.binding(at.unit_slot, &b, &env)?
-                    }
+                    squish_ir::MatchInput::ReadBinding(b) => self.binding(at.unit_slot, b, &env)?,
                 };
-                let static_match = self
-                    .program
+                let static_match = program
                     .optimized(at.unit_slot)
                     .and_then(|unit| unit.static_matches.get(&at.op));
                 let found = match static_match {
-                    Some(fact) if fact.matched => Some(fact.captures.clone()),
+                    Some(fact) if fact.matched => Some(Cow::Borrowed(&fact.captures)),
                     Some(_) => None,
                     None => {
-                        let regex = self.regex(at.unit_slot, pattern)?;
-                        regex.captures(&input.text).map(|found| {
-                            captures
-                                .iter()
-                                .filter_map(|name| {
-                                    found
-                                        .name(name)
-                                        .map(|value| (name.clone(), value.start()..value.end()))
-                                })
-                                .collect::<BTreeMap<_, _>>()
-                        })
+                        let regex = self.regex(at.unit_slot, *pattern)?;
+                        regex
+                            .captures(&input.text)
+                            .map(|found| {
+                                captures
+                                    .iter()
+                                    .filter_map(|name| {
+                                        found
+                                            .name(name)
+                                            .map(|value| (name.clone(), value.start()..value.end()))
+                                    })
+                                    .collect::<BTreeMap<_, _>>()
+                            })
+                            .map(Cow::Owned)
                     }
                 };
                 if let Some(found) = found {
                     let mut map = (*env.captures).clone();
                     let mut capture_records = Vec::new();
                     for name in captures {
-                        if let Some(value) = found.get(&name) {
+                        if let Some(value) = found.get(name) {
                             let mut substitutions = input.substitutions.clone();
                             substitutions.push(SubstitutionStep {
                                 kind: SubstitutionKind::ScalarBody,
@@ -625,7 +955,12 @@ impl<'a> Machine<'a> {
                             map.insert(
                                 name.clone(),
                                 Value {
-                                    text: input.text[value.clone()].into(),
+                                    text: input.text.slice(value.clone()).ok_or_else(|| {
+                                        InstantiateError::new(
+                                            "RUN034",
+                                            "invalid capture UTF-8 range",
+                                        )
+                                    })?,
                                     substitutions,
                                 },
                             );
@@ -652,7 +987,7 @@ impl<'a> Machine<'a> {
                     self.tasks.push(Task::Region {
                         at: squish_ir::LinkedRegionRef {
                             unit_slot: at.unit_slot,
-                            region: matched,
+                            region: *matched,
                         },
                         env: branch,
                         output,
@@ -661,8 +996,8 @@ impl<'a> Machine<'a> {
             }
             Op::Asset { path, name } => {
                 let source = self.source(at.unit_slot)?;
-                let path = self.string(at.unit_slot, path)?;
-                let name = self.string(at.unit_slot, name)?;
+                let path = self.string(at.unit_slot, *path)?;
+                let name = self.string(at.unit_slot, *name)?;
                 let trace = self.trace_ref(at, &env, Vec::new())?;
                 self.directive_bytes = self
                     .directive_bytes
@@ -684,8 +1019,8 @@ impl<'a> Machine<'a> {
             }
             Op::Include { import, path, name } => {
                 let source = self.source(at.unit_slot)?;
-                let path = self.string(at.unit_slot, path)?;
-                let name = self.string(at.unit_slot, name)?;
+                let path = self.string(at.unit_slot, *path)?;
+                let name = self.string(at.unit_slot, *name)?;
                 let trace = self.trace_ref(at, &env, Vec::new())?;
                 self.directive_bytes = self
                     .directive_bytes
@@ -700,14 +1035,14 @@ impl<'a> Machine<'a> {
                 }
                 self.directives.push(ArchiveDirective::Include {
                     source,
-                    import,
+                    import: *import,
                     path,
                     name,
                     trace,
                 });
             }
             Op::ReadSlot { name } => {
-                let Some(items) = env.slots.get(&name) else {
+                let Some(items) = env.slots.get(name) else {
                     return Ok(());
                 };
                 let origin = self.op_origin(at)?;
@@ -761,19 +1096,16 @@ impl<'a> Machine<'a> {
         Ok(())
     }
 
-    fn enter(&mut self, call: CallState) -> Result<(), InstantiateError> {
-        let def = self
-            .program
-            .definition(call.target)
-            .ok_or_else(|| {
-                self.failure(
-                    "RUN011",
-                    "relocation target is missing",
-                    call.caller.frame,
-                    Some(call.op_ref),
-                )
-            })?
-            .clone();
+    fn enter(&mut self, call: CallState<'a>) -> Result<(), InstantiateError> {
+        let program = self.program;
+        let def = program.definition(call.target).ok_or_else(|| {
+            self.failure(
+                "RUN011",
+                "relocation target is missing",
+                call.caller.frame,
+                Some(call.op_ref),
+            )
+        })?;
         let depth = self.frames[call.caller.frame.0 as usize].depth + 1;
         if depth > self.budgets.max_depth {
             return Err(self.failure(
@@ -844,7 +1176,7 @@ impl<'a> Machine<'a> {
     fn scalar(&self, slot: u32, expr: &ScalarExpr, env: &Env) -> Result<Value, InstantiateError> {
         match expr {
             ScalarExpr::Literal(id) => Ok(Value {
-                text: self.string(slot, *id)?,
+                text: self.literal_text(slot, *id)?,
                 substitutions: Vec::new(),
             }),
             ScalarExpr::ReadBinding(b) => self.binding(slot, b, env),
@@ -862,7 +1194,7 @@ impl<'a> Machine<'a> {
             BindingRef::Match(name) => env.captures.get(name),
             BindingRef::File(kind) => {
                 return Ok(Value {
-                    text: file_binding(&self.source(slot)?, *kind)?,
+                    text: file_binding(&self.source(slot)?, *kind)?.into(),
                     substitutions: Vec::new(),
                 });
             }
@@ -935,14 +1267,25 @@ impl<'a> Machine<'a> {
         self.buffer_bytes.push(0);
         self.buffers.len() - 1
     }
-    fn intern_scalar(&mut self, value: &str) -> u32 {
-        if let Some(i) = self.scalar_values.iter().position(|x| x == value) {
-            i as u32
-        } else {
-            self.scalar_values.push(value.into());
-            (self.scalar_values.len() - 1) as u32
-        }
+    fn intern_scalar(&mut self, value: &Text) -> u32 {
+        self.scalar_index.intern(&mut self.scalar_values, value)
     }
+    /// Retains a literal owner, not its payload copy; lookup errors match the String helper.
+    fn literal_text(&self, slot: u32, id: StringId) -> Result<Text, InstantiateError> {
+        let unit = self
+            .program
+            .unit_arc(slot)
+            .ok_or_else(|| InstantiateError::new("RUN021", "unit slot is out of range"))?;
+        let len = unit
+            .header()
+            .semantic_strings
+            .get(id.0 as usize)
+            .ok_or_else(|| InstantiateError::new("RUN017", "string ID is out of range"))?
+            .len();
+        Text::unit_view(unit, id, 0..len)
+            .ok_or_else(|| InstantiateError::new("RUN034", "invalid literal UTF-8 range"))
+    }
+
     fn string(&self, slot: u32, id: StringId) -> Result<String, InstantiateError> {
         let unit = self.unit(slot)?;
         unit.header()
@@ -1001,6 +1344,22 @@ impl<'a> Machine<'a> {
             origin: op.and_then(|x| origin_for_op(self.program, x)),
             frame_chain: chain,
         }
+    }
+
+    /// Copies only witnessed failure-chain origins; successful execution does no extra work.
+    fn failure_context(&self, error: InstantiateError) -> InstantiationFailure {
+        let frames = error
+            .frame_chain
+            .iter()
+            .filter_map(|id| self.frames.get(id.0 as usize))
+            .map(|frame| InstantiationFrame {
+                id: frame.id,
+                identity: frame.identity.clone(),
+                call_origin: frame.call_origin.clone(),
+                definition_origin: frame.definition_origin.clone(),
+            })
+            .collect();
+        InstantiationFailure { error, frames }
     }
 }
 
@@ -1075,16 +1434,7 @@ fn origin(
     kind: EntityKind,
     local: u32,
 ) -> Option<QualifiedOriginRef> {
-    let unit = program.unit(slot)?;
-    let index = unit
-        .origins()
-        .entries
-        .iter()
-        .position(|x| x.entity_kind == kind && x.local_id == local)?;
-    Some(QualifiedOriginRef {
-        object: program.object(slot)?,
-        local: OriginId(index as u32),
-    })
+    program.origin(slot, kind, local)
 }
 fn origin_for_op(program: &LinkedProgram, at: LinkedOpRef) -> Option<QualifiedOriginRef> {
     origin(program, at.unit_slot, EntityKind::Operation, at.op.0)
@@ -1257,12 +1607,7 @@ fn flatten(
         }
     }
     regions[0].end = items.len() as u32;
-    let mut strings: Vec<_> = items.iter().flat_map(TempItem::strings).collect();
-    strings.sort();
-    strings.dedup();
-    let mut qnames: Vec<_> = items.iter().flat_map(TempItem::qnames).collect();
-    qnames.sort();
-    qnames.dedup();
+    let (strings, qnames) = canonical_pools(&items);
     let items = items
         .into_iter()
         .map(|x| x.finish(&strings, &qnames))
@@ -1294,44 +1639,68 @@ fn record_sequence(
 }
 
 enum TempItem {
-    Text(String),
-    Comment(String),
-    Pi(String, String),
+    Text(Text),
+    Comment(Text),
+    Pi(Text, Text),
     Start(
         squish_ir::ExpandedName,
-        Vec<(squish_ir::ExpandedName, String)>,
+        Vec<(squish_ir::ExpandedName, Text)>,
         DocumentRegionId,
     ),
     End,
 }
 impl TempItem {
-    fn strings(&self) -> Vec<String> {
-        match self {
-            Self::Text(x) | Self::Comment(x) => vec![x.clone()],
-            Self::Pi(a, b) => vec![a.clone(), b.clone()],
-            Self::Start(_, a, _) => a.iter().map(|x| x.1.clone()).collect(),
-            Self::End => vec![],
-        }
+    /// Borrows string candidates without allocating a per-occurrence temporary vector.
+    fn strings(&self) -> impl Iterator<Item = &str> {
+        let (first, second, attributes) = match self {
+            Self::Text(text) | Self::Comment(text) => (Some(text), None, &[][..]),
+            Self::Pi(target, data) => (Some(target), Some(data), &[][..]),
+            Self::Start(_, attributes, _) => (None, None, attributes.as_slice()),
+            Self::End => (None, None, &[][..]),
+        };
+        first
+            .into_iter()
+            .chain(second)
+            .chain(attributes.iter().map(|attribute| &attribute.1))
+            .map(Text::as_str)
     }
-    fn qnames(&self) -> Vec<squish_ir::ExpandedName> {
-        match self {
-            Self::Start(n, a, _) => std::iter::once(n.clone())
-                .chain(a.iter().map(|x| x.0.clone()))
-                .collect(),
-            _ => vec![],
-        }
+
+    /// Borrows element/attribute names; only canonical unique names become pool owners.
+    fn qnames(&self) -> impl Iterator<Item = &squish_ir::ExpandedName> {
+        let (name, attributes) = match self {
+            Self::Start(name, attributes, _) => (Some(name), attributes.as_slice()),
+            _ => (None, &[][..]),
+        };
+        name.into_iter()
+            .chain(attributes.iter().map(|attribute| &attribute.0))
     }
     fn finish(self, strings: &[String], qnames: &[squish_ir::ExpandedName]) -> DocumentItem {
         match self {
             Self::Text(v) => DocumentItem::Text {
-                value: StringId(strings.binary_search(&v).unwrap() as u32),
+                value: StringId(
+                    strings
+                        .binary_search_by(|text| text.as_str().cmp(v.as_str()))
+                        .unwrap() as u32,
+                ),
             },
             Self::Comment(v) => DocumentItem::Comment {
-                value: StringId(strings.binary_search(&v).unwrap() as u32),
+                value: StringId(
+                    strings
+                        .binary_search_by(|text| text.as_str().cmp(v.as_str()))
+                        .unwrap() as u32,
+                ),
             },
             Self::Pi(target, data) => DocumentItem::ProcessingInstruction {
-                target: StringId(strings.binary_search(&target).unwrap() as u32),
-                data: StringId(strings.binary_search(&data).unwrap() as u32),
+                target: StringId(
+                    strings
+                        .binary_search_by(|text| text.as_str().cmp(target.as_str()))
+                        .unwrap() as u32,
+                ),
+                data: StringId(
+                    strings
+                        .binary_search_by(|text| text.as_str().cmp(data.as_str()))
+                        .unwrap() as u32,
+                ),
             },
             Self::Start(n, a, children) => DocumentItem::ElementStart {
                 expanded_name: squish_ir::QNameId(qnames.binary_search(&n).unwrap() as u32),
@@ -1339,7 +1708,11 @@ impl TempItem {
                     .into_iter()
                     .map(|(n, v)| squish_ir::Attribute {
                         name: squish_ir::QNameId(qnames.binary_search(&n).unwrap() as u32),
-                        value: StringId(strings.binary_search(&v).unwrap() as u32),
+                        value: StringId(
+                            strings
+                                .binary_search_by(|text| text.as_str().cmp(v.as_str()))
+                                .unwrap() as u32,
+                        ),
                     })
                     .collect(),
                 children,
@@ -1347,6 +1720,23 @@ impl TempItem {
             Self::End => DocumentItem::ElementEnd,
         }
     }
+}
+
+/// Canonicalizes borrowed candidates before cloning only the unique output pool payloads.
+///
+/// Temporary items retain their owned occurrence strings until IDs are resolved. Reference
+/// sorting/deduplication compares values, not addresses, preserving the previous wire ordering.
+/// No fragment or occurrence is discarded: only the document's interned pools are deduplicated.
+fn canonical_pools(items: &[TempItem]) -> (Vec<String>, Vec<squish_ir::ExpandedName>) {
+    let mut strings: Vec<_> = items.iter().flat_map(TempItem::strings).collect();
+    strings.sort();
+    strings.dedup();
+    let strings = strings.into_iter().map(str::to_owned).collect();
+    let mut qnames: Vec<_> = items.iter().flat_map(TempItem::qnames).collect();
+    qnames.sort();
+    qnames.dedup();
+    let qnames = qnames.into_iter().cloned().collect();
+    (strings, qnames)
 }
 
 fn validate_document_shape(
@@ -1398,15 +1788,31 @@ fn validate_document_shape(
 
 fn canonicalize_document(_: &mut LinkedDocumentIr) {}
 fn canonicalize_scalars(
-    values: &mut Vec<String>,
+    values: Vec<Text>,
     frames: &mut [FrameRecord],
     origins: &mut [OriginNode],
-) {
-    let old = values.clone();
-    values.sort();
-    values.dedup();
+) -> Vec<String> {
+    // Group visible values, release duplicate handles, then materialize each unique public
+    // String once. Full unique buffers can move; a partial view copies only its visible bytes.
+    let mut indexed: Vec<_> = values.into_iter().enumerate().collect();
+    indexed.sort_unstable_by(|(_, left), (_, right)| left.as_str().cmp(right.as_str()));
+    let mut ids = vec![ScalarValueId(0); indexed.len()];
+    let mut strings = Vec::with_capacity(indexed.len());
+    let mut indexed = indexed.into_iter().peekable();
+    while let Some((old_id, text)) = indexed.next() {
+        let id = ScalarValueId(strings.len() as u32);
+        ids[old_id] = id;
+        while indexed
+            .peek()
+            .is_some_and(|(_, next)| next.as_str() == text.as_str())
+        {
+            let (duplicate_id, _) = indexed.next().expect("peeked scalar value");
+            ids[duplicate_id] = id;
+        }
+        strings.push(text.into_owned());
+    }
     let remap = |id: &mut ScalarValueId| {
-        *id = ScalarValueId(values.binary_search(&old[id.0 as usize]).unwrap() as u32);
+        *id = ids[id.0 as usize];
     };
     for frame in frames {
         for (_, id) in &mut frame.args {
@@ -1418,6 +1824,7 @@ fn canonicalize_scalars(
             remap(value);
         }
     }
+    strings
 }
 
 #[cfg(test)]
@@ -1476,6 +1883,379 @@ mod archive_fragment_tests {
                 .unwrap_err()
                 .code,
             "RUN028"
+        );
+    }
+}
+
+#[cfg(test)]
+mod scalar_index_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_large_single_value_never_hashes_or_duplicates_an_index_key() {
+        let text: Text = "猫".repeat(65536 / 3).into();
+        let mut values = Vec::new();
+        let mut index = ScalarIndex::default();
+        for _ in 0..1024 {
+            assert_eq!(index.intern(&mut values, &text), 0);
+        }
+        assert_eq!(values, [text]);
+        assert!(index.large.is_none());
+    }
+
+    #[test]
+    fn promotion_preserves_duplicate_prefix_first_ids_and_indexes_new_values() {
+        // Entry setup may retain duplicates. Promotion must not select the last equal ID.
+        let mut values: Vec<Text> = vec![String::new().into(), "same".into(), "same".into()];
+        values.extend((0..LINEAR_SCALAR_LIMIT).map(|id| Text::from(format!("prefix{id}"))));
+        let mut index = ScalarIndex::default();
+        assert_eq!(index.intern(&mut values, &Text::from("same")), 1);
+        assert_eq!(index.intern(&mut values, &Text::from("")), 0);
+        assert!(index.large.is_some());
+        for id in 0..2048 {
+            let text: Text = format!("different-{id:08}").into();
+            let first = values.len() as u32;
+            assert_eq!(index.intern(&mut values, &text), first);
+            assert_eq!(index.intern(&mut values, &text), first);
+        }
+        for (id, text) in values.iter().enumerate() {
+            let expected = values.iter().position(|old| old == text).unwrap() as u32;
+            assert_eq!(index.find(&values, text), Some(expected), "arena slot {id}");
+        }
+    }
+
+    #[test]
+    fn bounded_prefix_promotes_only_after_the_crossover_and_keeps_empty_unicode_ids() {
+        let mut values = Vec::new();
+        let mut index = ScalarIndex::default();
+        let text: Vec<_> = (0..=LINEAR_SCALAR_LIMIT)
+            .map(|id| {
+                Text::from(if id == 0 {
+                    String::new()
+                } else {
+                    format!("猫{id}")
+                })
+            })
+            .collect();
+        for (id, value) in text.iter().enumerate() {
+            assert_eq!(index.intern(&mut values, value), id as u32);
+            assert!(index.large.is_none());
+        }
+        assert_eq!(index.intern(&mut values, &text[1]), 1);
+        assert!(index.large.is_some());
+        assert_eq!(
+            index.intern(&mut values, &Text::from("after")),
+            text.len() as u32
+        );
+        assert_eq!(
+            index.intern(&mut values, &Text::from("after")),
+            text.len() as u32
+        );
+    }
+}
+
+#[cfg(test)]
+mod canonical_pool_tests {
+    use super::*;
+    use squish_ir::{Attribute, ExpandedName, QNameId};
+
+    /// Builds names with intentionally non-sorted input positions and repeated identities.
+    fn name(local_name: &str) -> ExpandedName {
+        ExpandedName {
+            namespace_uri: "urn:test".into(),
+            local_name: local_name.into(),
+        }
+    }
+
+    #[test]
+    fn borrowed_candidates_keep_unique_unicode_pi_attribute_and_comment_pools() {
+        let long = "猫<&>".repeat(16384);
+        let mut items: Vec<_> = (0..32)
+            .map(|_| TempItem::Text(long.clone().into()))
+            .collect();
+        items.extend([
+            TempItem::Comment(long.clone().into()),
+            TempItem::Pi("target".into(), String::new().into()),
+            TempItem::Start(
+                name("z"),
+                vec![
+                    (name("a"), long.clone().into()),
+                    (name("z"), "alpha".into()),
+                ],
+                DocumentRegionId(1),
+            ),
+            TempItem::Text("alpha".into()),
+            TempItem::End,
+        ]);
+        let (strings, qnames) = canonical_pools(&items);
+        assert_eq!(
+            strings,
+            [String::new(), "alpha".into(), "target".into(), long]
+        );
+        assert_eq!(qnames, [name("a"), name("z")]);
+        let finished: Vec<_> = items
+            .into_iter()
+            .map(|item| item.finish(&strings, &qnames))
+            .collect();
+        assert!(
+            finished[..32]
+                .iter()
+                .all(|item| *item == DocumentItem::Text { value: StringId(3) })
+        );
+        assert_eq!(finished[32], DocumentItem::Comment { value: StringId(3) });
+        assert_eq!(
+            finished[33],
+            DocumentItem::ProcessingInstruction {
+                target: StringId(2),
+                data: StringId(0)
+            }
+        );
+        assert_eq!(
+            finished[34],
+            DocumentItem::ElementStart {
+                expanded_name: QNameId(1),
+                attributes: vec![
+                    Attribute {
+                        name: QNameId(0),
+                        value: StringId(3)
+                    },
+                    Attribute {
+                        name: QNameId(1),
+                        value: StringId(1)
+                    }
+                ],
+                children: DocumentRegionId(1),
+            }
+        );
+        assert_eq!(finished[35], DocumentItem::Text { value: StringId(1) });
+        assert_eq!(finished[36], DocumentItem::ElementEnd);
+    }
+
+    #[test]
+    fn empty_and_all_distinct_candidates_remain_exactly_sorted_without_dropping_items() {
+        assert_eq!(canonical_pools(&[]), (Vec::new(), Vec::new()));
+        let items = [
+            TempItem::Text("猫".into()),
+            TempItem::Text("z".into()),
+            TempItem::Text(String::new().into()),
+        ];
+        let (strings, qnames) = canonical_pools(&items);
+        assert_eq!(strings, ["", "z", "猫"]);
+        assert!(qnames.is_empty());
+        let finished: Vec<_> = items
+            .into_iter()
+            .map(|item| item.finish(&strings, &qnames))
+            .collect();
+        assert_eq!(
+            finished,
+            [
+                DocumentItem::Text { value: StringId(2) },
+                DocumentItem::Text { value: StringId(1) },
+                DocumentItem::Text { value: StringId(0) },
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod shared_text_tests {
+    use super::*;
+    use std::collections::hash_map::DefaultHasher;
+
+    /// Uses the same str hashing contract as borrowed scalar-index lookup.
+    fn hash(value: impl Hash) -> u64 {
+        let mut state = DefaultHasher::new();
+        value.hash(&mut state);
+        state.finish()
+    }
+
+    #[test]
+    fn utf8_views_hash_and_compare_visible_bytes_not_backing_or_offset() {
+        let backing = Arc::new("prefix猫suffix".to_owned());
+        let view = Text::view(Arc::clone(&backing), 6..9).unwrap();
+        let owned = Text::from("猫");
+        assert_eq!(view, owned);
+        assert_eq!(hash(&view), hash("猫"));
+        assert_eq!(hash(&view), hash(&owned));
+        assert_eq!(<Text as Borrow<str>>::borrow(&view), "猫");
+        assert!(Text::view(Arc::clone(&backing), 7..9).is_none());
+        assert!(Text::view(Arc::clone(&backing), 0..usize::MAX).is_none());
+        assert!(view.slice(1..2).is_none());
+        let surrounding_invalid = Arc::new("\0猫\0".to_owned());
+        let visible = Text::view(Arc::clone(&surrounding_invalid), 1..4).unwrap();
+        assert!(valid_xml_chars(visible.as_str()));
+        assert!(!valid_xml_chars(surrounding_invalid.as_str()));
+        let mut values: Vec<Text> = (0..9).map(|id| format!("item{id}").into()).collect();
+        let mut index = ScalarIndex::default();
+        assert_eq!(index.intern(&mut values, &view), 9);
+        assert_eq!(index.intern(&mut values, &owned), 9);
+        assert_eq!(index.large.as_ref().unwrap().get("猫"), Some(&9));
+        assert_eq!(index.large.as_ref().unwrap().get(backing.as_str()), None);
+        assert!(Arc::ptr_eq(values[9].owned_backing().unwrap(), &backing));
+        let strings = canonicalize_scalars(vec![view, owned, Text::from("")], &mut [], &mut []);
+        assert_eq!(strings, ["", "猫"]);
+    }
+
+    #[test]
+    fn scalar_concatenation_retains_single_views_and_copies_only_visible_multi_piece_bytes() {
+        let backing = Arc::new(format!("{}猫tail", "p".repeat(1024 * 1024)));
+        let view = Text::view(Arc::clone(&backing), 1024 * 1024..1024 * 1024 + 3).unwrap();
+        let mut single = ScalarText::default();
+        single.append(Text::from(""));
+        single.append(view.clone());
+        single.append(Text::from(""));
+        let single = single.finish();
+        assert!(Arc::ptr_eq(single.owned_backing().unwrap(), &backing));
+        assert_eq!(single.as_str(), "猫");
+        let mut joined = ScalarText::default();
+        joined.append(view.clone());
+        joined.append(Text::from(""));
+        joined.append(Text::from("猫"));
+        let joined = joined.finish();
+        assert_eq!(joined.as_str(), "猫猫");
+        assert_eq!(joined.backing.as_str().len(), 6);
+        assert!(!Arc::ptr_eq(joined.owned_backing().unwrap(), &backing));
+        assert_eq!(view.into_owned(), "猫");
+        let owned = Text::from("transfer this buffer");
+        let pointer = owned.backing.as_str().as_ptr();
+        let transferred = owned.into_owned();
+        assert_eq!(transferred.as_ptr(), pointer);
+        assert_eq!(ScalarText::default().finish().as_str(), "");
+    }
+
+    #[test]
+    fn captures_slice_relative_visible_input_and_clones_keep_independent_provenance() {
+        let backing = Arc::new(format!("{}a猫zsuffix", "p".repeat(1024 * 1024)));
+        let input = Text::view(Arc::clone(&backing), 1024 * 1024..1024 * 1024 + 5).unwrap();
+        let regex = Regex::new("(?P<value>猫)").unwrap();
+        let capture = regex
+            .captures(input.as_str())
+            .unwrap()
+            .name("value")
+            .unwrap();
+        let text = input.slice(capture.start()..capture.end()).unwrap();
+        assert_eq!(text.as_str(), "猫");
+        assert!(Arc::ptr_eq(text.owned_backing().unwrap(), &backing));
+        let origin = QualifiedOriginRef {
+            object: squish_ir::ObjectDigest::of(b"shared-text-test"),
+            local: squish_ir::OriginId(0),
+        };
+        let occurrence = Occurrence {
+            kind: OccurrenceKind::Text(text),
+            trace: TraceRef {
+                producer_op: LinkedOpRef {
+                    unit_slot: 0,
+                    op: squish_ir::OpId(0),
+                },
+                frame: FrameId(0),
+                definition_origin: origin.clone(),
+                call_origin: None,
+                substitution_chain: Vec::new(),
+            },
+            sequence: None,
+        };
+        let mut copy = occurrence.clone();
+        add_substitution(
+            &mut copy,
+            SubstitutionStep {
+                kind: SubstitutionKind::SlotFill,
+                origin,
+            },
+        );
+        assert!(occurrence.trace.substitution_chain.is_empty());
+        assert_eq!(copy.trace.substitution_chain.len(), 1);
+        let (OccurrenceKind::Text(first), OccurrenceKind::Text(second)) =
+            (&occurrence.kind, &copy.kind)
+        else {
+            unreachable!()
+        };
+        assert!(Arc::ptr_eq(
+            first.owned_backing().unwrap(),
+            second.owned_backing().unwrap()
+        ));
+        assert_eq!(occurrence.cost(), copy.cost());
+        let strings = canonical_pools(&[
+            TempItem::Text(first.clone()),
+            TempItem::Text(second.clone()),
+        ])
+        .0;
+        assert_eq!(strings, ["猫"]);
+    }
+}
+
+#[cfg(test)]
+mod unit_text_retention_tests {
+    use super::*;
+    use std::collections::hash_map::DefaultHasher;
+
+    #[test]
+    fn repeated_tiny_literal_captures_share_the_already_program_owned_unit_without_string_backings()
+    {
+        let program = crate::tests::linked_large_literal_captures(16);
+        let slot = program
+            .image()
+            .units
+            .iter()
+            .position(|unit| unit.kind == squish_ir::UnitKind::Module)
+            .unwrap() as u32;
+        let unit = program.unit_arc(slot).unwrap();
+        let id = StringId(
+            unit.header()
+                .semantic_strings
+                .iter()
+                .position(|text| text.len() > 1024 * 1024)
+                .unwrap() as u32,
+        );
+        let len = unit.header().semantic_strings[id.0 as usize].len();
+        let input = Text::unit_view(Arc::clone(&unit), id, 0..len).unwrap();
+        let regex = Regex::new("(?P<value>猫)").unwrap();
+        let capture = regex
+            .captures(input.as_str())
+            .unwrap()
+            .name("value")
+            .unwrap();
+        let views: Vec<_> = (0..1024)
+            .map(|_| input.slice(capture.start()..capture.end()).unwrap())
+            .collect();
+        for view in &views {
+            assert_eq!(view.as_str(), "猫");
+            assert!(view.owned_backing().is_none());
+            let TextBacking::Unit {
+                unit: owner,
+                string,
+            } = &view.backing
+            else {
+                unreachable!()
+            };
+            assert!(Arc::ptr_eq(owner, &unit));
+            assert_eq!(*string, id);
+            assert_eq!(view, &Text::from("猫"));
+            let mut actual = DefaultHasher::new();
+            let mut expected = DefaultHasher::new();
+            view.hash(&mut actual);
+            "猫".hash(&mut expected);
+            assert_eq!(actual.finish(), expected.finish());
+            assert_eq!(<Text as Borrow<str>>::borrow(view), "猫");
+            let debug = format!("{view:?}");
+            assert!(debug.contains("猫"));
+            assert!(!debug.contains("pppp"));
+            assert!(!debug.contains("semantic_strings"));
+        }
+        assert_eq!(
+            canonical_pools(
+                &views
+                    .iter()
+                    .cloned()
+                    .map(TempItem::Text)
+                    .collect::<Vec<_>>()
+            )
+            .0,
+            ["猫"]
+        );
+        assert!(Text::unit_view(Arc::clone(&unit), StringId(u32::MAX), 0..0).is_none());
+        assert!(Text::unit_view(Arc::clone(&unit), id, 0..len + 1).is_none());
+        assert!(
+            Text::unit_view(Arc::clone(&unit), id, capture.start() + 1..capture.end()).is_none()
         );
     }
 }

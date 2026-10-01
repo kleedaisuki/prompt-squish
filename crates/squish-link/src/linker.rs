@@ -1,12 +1,15 @@
 //! 冻结单元闭包的静态链接。 / Static linking of a frozen unit closure.
 
-use crate::{LinkError, LinkedProgram, MiddleEnd};
+use crate::{LinkError, LinkedProgram, MiddleEnd, PreparedUnit};
 use squish_ir::{
     DefAddr, FeatureBits, LinkedEntry, LinkedImage, LinkedMacroDef, LinkedOpRef, LinkedRegionRef,
     LinkedUnit, Op, RelocatableUnitIr, ResolutionSnapshot, Signature, SourceKey, StaticLinkMap,
     SymbolKey, Validate,
 };
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    sync::Arc,
+};
 
 /// 冻结 resolver 快照与对应语义单元。 / Frozen resolver snapshot and its semantic units.
 #[derive(Clone, Debug)]
@@ -15,6 +18,41 @@ pub struct UnitClosure {
     pub snapshot: ResolutionSnapshot,
     /// 按逻辑源身份索引的语义 payload。 / Semantic payloads indexed by logical source identity.
     pub units: BTreeMap<SourceKey, RelocatableUnitIr>,
+}
+
+/// Frozen immutable closure sharing validated source and IR payloads across entry scopes.
+///
+/// Each independent entry retains its own symbol binding; sharing payloads never merges
+/// namespaces or weakens snapshot/IR verification at the public linker boundary.
+#[derive(Clone, Debug)]
+pub struct SharedUnitClosure {
+    /// Exact frozen resolution evidence, shared without copying its import graph.
+    pub snapshot: Arc<ResolutionSnapshot>,
+    /// Immutable payloads indexed by exact source identity.
+    pub units: BTreeMap<SourceKey, Arc<RelocatableUnitIr>>,
+}
+
+impl From<UnitClosure> for SharedUnitClosure {
+    /// Transfers owned IR into shared storage without cloning its payloads.
+    fn from(closure: UnitClosure) -> Self {
+        Self {
+            snapshot: Arc::new(closure.snapshot),
+            units: closure
+                .units
+                .into_iter()
+                .map(|(key, unit)| (key, Arc::new(unit)))
+                .collect(),
+        }
+    }
+}
+
+/// Resolution evidence and sealed verified unit facts reusable across independent entries.
+#[derive(Clone, Debug)]
+pub struct PreparedUnitClosure {
+    /// Exact per-scope resolution evidence; revisions must match every prepared payload.
+    pub snapshot: Arc<ResolutionSnapshot>,
+    /// Immutable verification capabilities; linking never mutates or re-specializes them.
+    pub units: BTreeMap<SourceKey, PreparedUnit>,
 }
 
 /// 静态链接的全部结果。 / Complete result of static linking.
@@ -36,24 +74,34 @@ impl StaticLinker {
     /// 从 entry 运算 import 闭包，允许 import 环，并对所有操作做符号与签名验证。
     /// Computes the import closure from an entry, permits import cycles, and validates every
     /// operation's symbol and signature before constructing a linked image.
-    pub fn link(
+    pub fn link(&self, entry: &SourceKey, closure: UnitClosure) -> Result<LinkOutput, LinkError> {
+        self.link_shared(entry, closure.into())
+    }
+
+    /// Links a frozen shared closure without copying immutable unit/source payloads.
+    ///
+    /// This public boundary validates all snapshot units, including unreachable units.
+    /// Only specialization and executable construction use the verified internal path.
+    pub fn link_shared(
         &self,
         entry: &SourceKey,
-        mut closure: UnitClosure,
+        mut closure: SharedUnitClosure,
     ) -> Result<LinkOutput, LinkError> {
         closure
             .snapshot
             .validate()
             .map_err(|e| LinkError::new("LNK010", format!("invalid resolution snapshot: {e}")))?;
         validate_snapshot_payloads(&closure)?;
-        let reachable = reachable_sources(entry, &closure)?;
+        let reachable = reachable_sources(entry, &closure.snapshot, |source| {
+            closure.units.get(source).map(Arc::as_ref)
+        })?;
         let ordered_sources: Vec<_> = reachable.into_iter().collect();
         // Explicit pre-link middle-end boundary: facts are computed on unbound units,
         // then retained through symbol binding and link-time executable indexing.
         let mut optimized_units = BTreeMap::new();
         for source in &ordered_sources {
             let optimized = MiddleEnd
-                .optimize(
+                .optimize_executable_shared_validated(
                     closure
                         .units
                         .remove(source)
@@ -63,8 +111,94 @@ impl StaticLinker {
                     LinkError::new("LNK030", format!("middle-end optimization failed: {error}"))
                         .at_source(source.clone())
                 })?;
-            optimized_units.insert(source.clone(), optimized);
+            optimized_units.insert(source.clone(), Arc::new(optimized));
         }
+        self.bind(
+            entry,
+            closure.snapshot,
+            optimized_units,
+            ordered_sources,
+            None,
+        )
+    }
+
+    /// Links sealed prepared units without repeated unit validation, hashing or regex compilation.
+    ///
+    /// Snapshot metadata and every reachable call/signature are checked per scope. All snapshot
+    /// revisions, including unreachable units, must match independently verified capabilities.
+    /// The raw payload and fact allocations are shared, never merged into a global symbol scope.
+    pub fn link_prepared(
+        &self,
+        entry: &SourceKey,
+        closure: PreparedUnitClosure,
+    ) -> Result<LinkOutput, LinkError> {
+        closure.snapshot.validate().map_err(|error| {
+            LinkError::new("LNK010", format!("invalid resolution snapshot: {error}"))
+        })?;
+        let mut compatibility = None;
+        for (source, revision) in &closure.snapshot.units {
+            let prepared = closure.units.get(source).ok_or_else(|| {
+                LinkError::new("LNK015", "resolution unit has no prepared payload")
+                    .at_source(source.clone())
+            })?;
+            let unit = prepared.unit();
+            if unit.header().source != *source || unit.kind() != revision.kind {
+                return Err(
+                    LinkError::new("LNK017", "snapshot kind/source differs from payload")
+                        .at_source(source.clone()),
+                );
+            }
+            if prepared.revision() != revision {
+                return Err(LinkError::new(
+                    "LNK034",
+                    "snapshot revision differs from verified prepared payload",
+                )
+                .at_source(source.clone()));
+            }
+            let header = unit.header();
+            let current = (header.ir_schema, &header.language_abi, &header.regex_abi);
+            if compatibility.is_some_and(|expected| expected != current) {
+                return Err(LinkError::new(
+                    "LNK028",
+                    "linked units have incompatible schema or language/regex ABI",
+                )
+                .at_source(source.clone()));
+            }
+            compatibility.get_or_insert(current);
+        }
+        let reachable = reachable_sources(entry, &closure.snapshot, |source| {
+            closure
+                .units
+                .get(source)
+                .map(|prepared| prepared.unit().as_ref())
+        })?;
+        let ordered_sources: Vec<_> = reachable.into_iter().collect();
+        let optimized = ordered_sources
+            .iter()
+            .map(|source| {
+                closure.units[source]
+                    .optimized()
+                    .map(|facts| (source.clone(), facts))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        self.bind(
+            entry,
+            closure.snapshot,
+            optimized,
+            ordered_sources,
+            Some(closure.units),
+        )
+    }
+
+    /// Binds each scope independently after raw validation or sealed preparation.
+    fn bind(
+        &self,
+        entry: &SourceKey,
+        snapshot: Arc<ResolutionSnapshot>,
+        optimized_units: BTreeMap<SourceKey, Arc<crate::middle::ExecutableUnit>>,
+        ordered_sources: Vec<SourceKey>,
+        prepared: Option<BTreeMap<SourceKey, PreparedUnit>>,
+    ) -> Result<LinkOutput, LinkError> {
         let slots: BTreeMap<_, _> = ordered_sources
             .iter()
             .cloned()
@@ -112,15 +246,12 @@ impl StaticLinker {
             symbols: symbols.iter().map(|(k, (a, _))| (k.clone(), *a)).collect(),
             relocations,
         };
-        map.validate()
-            .map_err(|e| LinkError::new("LNK013", format!("constructed invalid link map: {e}")))?;
         let revision = |source: &SourceKey| {
-            closure
-                .snapshot
+            snapshot
                 .units
                 .binary_search_by(|x| x.0.cmp(source))
                 .ok()
-                .map(|i| &closure.snapshot.units[i].1)
+                .map(|i| &snapshot.units[i].1)
                 .unwrap()
         };
         let units = ordered_sources
@@ -156,24 +287,28 @@ impl StaticLinker {
                     .fold(0, |bits, unit| bits | unit.unit.header().feature_bits.0),
             ),
         };
-        image.validate().map_err(|e| {
-            LinkError::new("LNK014", format!("constructed invalid linked image: {e}"))
-        })?;
+        let image = crate::program::ValidatedImage::new(
+            image,
+            "LNK014",
+            "constructed invalid linked image",
+        )?;
         let objects = ordered_sources
             .iter()
             .map(|source| (source.clone(), revision(source).object))
             .collect();
-        let program =
-            LinkedProgram::reconstruct_optimized(image.clone(), optimized_units, objects)?;
+        let program = match prepared {
+            Some(units) => LinkedProgram::reconstruct_prepared_optimized(image.clone(), units)?,
+            None => LinkedProgram::reconstruct_optimized(image.clone(), optimized_units, objects)?,
+        };
         Ok(LinkOutput {
             map,
-            image,
+            image: image.into_inner(),
             program,
         })
     }
 }
 
-fn validate_snapshot_payloads(closure: &UnitClosure) -> Result<(), LinkError> {
+fn validate_snapshot_payloads(closure: &SharedUnitClosure) -> Result<(), LinkError> {
     let mut compatibility = None;
     for (source, revision) in &closure.snapshot.units {
         let unit = closure.units.get(source).ok_or_else(|| {
@@ -210,18 +345,18 @@ fn validate_snapshot_payloads(closure: &UnitClosure) -> Result<(), LinkError> {
     Ok(())
 }
 
-fn reachable_sources(
+fn reachable_sources<'a>(
     entry: &SourceKey,
-    closure: &UnitClosure,
+    snapshot: &ResolutionSnapshot,
+    unit_for: impl Fn(&SourceKey) -> Option<&'a RelocatableUnitIr>,
 ) -> Result<BTreeSet<SourceKey>, LinkError> {
-    if !closure.snapshot.units.iter().any(|x| &x.0 == entry) {
+    if !snapshot.units.iter().any(|x| &x.0 == entry) {
         return Err(
             LinkError::new("LNK018", "entry is absent from resolution snapshot")
                 .at_source(entry.clone()),
         );
     }
-    let bindings: BTreeMap<_, _> = closure
-        .snapshot
+    let bindings: BTreeMap<_, _> = snapshot
         .imports
         .iter()
         .map(|b| ((b.importer.clone(), b.import), b.target.clone()))
@@ -232,7 +367,7 @@ fn reachable_sources(
         if !seen.insert(source.clone()) {
             continue;
         }
-        let unit = closure.units.get(&source).ok_or_else(|| {
+        let unit = unit_for(&source).ok_or_else(|| {
             LinkError::new("LNK019", "reachable payload is missing").at_source(source.clone())
         })?;
         for import in &unit.header().imports {
@@ -245,7 +380,7 @@ fn reachable_sources(
                     )
                     .at_source(source.clone())
                 })?;
-            let target_unit = closure.units.get(target).ok_or_else(|| {
+            let target_unit = unit_for(target).ok_or_else(|| {
                 LinkError::new("LNK021", "import target payload is missing")
                     .at_source(target.clone())
             })?;
@@ -306,11 +441,12 @@ fn add_definitions(
             },
         });
     }
-    out.sort_by_key(|a| a.addr);
+    // Callers visit canonical unit slots and each validated definition arena is dense;
+    // appending retains address order without repeatedly sorting the accumulated prefix.
     Ok(())
 }
 
-fn validate_calls(
+pub(crate) fn validate_calls(
     source: &SourceKey,
     slot: u32,
     unit: &RelocatableUnitIr,
@@ -381,7 +517,8 @@ fn validate_calls(
         )
         .at_source(source.clone()));
     }
-    relocations.sort_by_key(|x| x.0);
+    // Validated operation IDs are dense and callers visit ascending unit slots.
+    // The appended relocation stream is already canonical; do not sort old prefixes.
     Ok(())
 }
 

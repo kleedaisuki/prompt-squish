@@ -10,11 +10,14 @@
 
 mod action;
 mod cas;
+mod session;
 
 pub use action::{
     ACTION_RESULT_FORMAT_VERSION, ActionEntry, ActionKey, ActionManifest, ActionManifestPage,
     BuildActionIndex, CatalogIssue, CatalogIssueKind, IndexError, MAX_MANIFEST_PAGE_SIZE,
-    MemoryActionIndex, RunEvent, SqliteActionIndex, VerifiedActionIndex, decode_action_result,
-    encode_action_result,
+    MemoryActionIndex, RunEvent, SqliteActionIndex, TouchStats, VerifiedActionIndex,
+    decode_action_result, encode_action_result,
 };
 pub use cas::{BlobDigest, Cas, CasError, CasEvent, CasEventKind, CasObserver, NoopObserver};
+
+pub use session::{BlobSessionLimits, BlobSessionStats, CasSession};

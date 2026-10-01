@@ -128,6 +128,43 @@ also records lifecycle events and diagnostics. JSONL records use
 transmission. Trace write failures emit `TRACE001` warnings without changing
 the command result; review paths and diagnostic payloads before sharing.
 
+## Patch upgrades and immutable inputs (v1.2.1)
+
+Use the current executable's bundled guide after upgrading. Do not migrate private
+cache hashes, SQLite tables or action-recipe keys by hand. A version change can
+rebuild invalid derived state; use the existing `clean` command only when cleanup
+is needed, remembering that it removes all project-local inputs cached for offline
+rebuilds. No new migration flag is required.
+
+Existing SOPack bytes and SHA-256 lock pins remain immutable. Optimization must
+not rewrite archive inputs or update lock pins during a cache lookup. Freshly
+produced provider identities can differ between producer versions; reproducible
+archives do not imply cross-version byte-identical re-encoding. Review and update
+a dependency intentionally through the existing `add` lifecycle when replacing
+its archive.
+
+Canonical schema-1 readers accept existing v1.2.0 SOPacks. Rewriting a
+single already-relocated archive preserves its existing `_providers` names
+and normalized container bytes. New multi-provider builds can use different
+fingerprints across producer versions; public persisted IR wire/digest
+semantics remain unchanged. Final integrated validation is required before
+publication.
+
+Pack reuse must compare document, provenance and resource directives together:
+identical empty documents can still select different asset bytes. Reachability
+pruning applies only after validating a complete precompiled SOPack; it does not
+make malformed unused local XML acceptable. Keep macro-owned paths anchored at
+the defining source, and give parent-relative assets an explicit safe archive
+`name` rather than using a `../` path as the default member name.
+
+When investigating a failure, retain the structured source locations and actual
+call chain, including relocated SOPack paths; do not reconstruct them from human
+error text or the caller's directory.
+
+A rejected cache result may warn and rebuild. Distinguish damaged derived CAS data
+from a corrupt authoritative published product: the latter is an error, never a
+valid artifact to adopt. Do not edit private publication records to hide it.
+
 ## `xmlsquish.toml` quick reference
 
 ```toml

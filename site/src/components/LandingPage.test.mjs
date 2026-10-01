@@ -11,15 +11,15 @@ import { chromium } from "playwright";
 const dist = resolve(dirname(fileURLToPath(import.meta.url)), "../../dist");
 const origin = "https://xmlsquish.moesegfault.dev";
 const namespaceUri = `${origin}/ns`;
-const versions = ["1.2.0", "1.1.0", "1.0.4", "1.0.2", "1.0.1", "1.0.0", "0.3.0", "0.2.0"];
-const dates = ["2026-10-01", "2026-09-29", "2026-09-20", "2026-09-17", "2026-09-16", "2026-09-15", "2026-09-11", "2026-09-11"];
+const versions = ["1.2.1", "1.2.0", "1.1.0", "1.0.4", "1.0.2", "1.0.1", "1.0.0", "0.3.0", "0.2.0"];
+const dates = ["2026-10-01", "2026-10-01", "2026-09-29", "2026-09-20", "2026-09-17", "2026-09-16", "2026-09-15", "2026-09-11", "2026-09-11"];
 /** Historical releases without published JSON retain their original acquisition contract. */
-const metadataVersions = new Set(["1.2.0", "1.1.0", "1.0.4", "1.0.2", "1.0.1", "1.0.0"]);
+const metadataVersions = new Set(["1.2.1", "1.2.0", "1.1.0", "1.0.4", "1.0.2", "1.0.1", "1.0.0"]);
 const chapters = ["getting-started", "source-model", "composition", "control-and-scope", "build-and-artifacts", "skill-dependencies", "reference", "limits-and-invariants"];
 const expectedAssets = [
-  "xmlsquish-1.2.0-x86_64-pc-windows-msvc.zip", "xmlsquish-1.2.0-aarch64-pc-windows-msvc.zip",
-  "xmlsquish-1.2.0-x86_64-unknown-linux-gnu.tar.gz", "xmlsquish-1.2.0-aarch64-unknown-linux-gnu.tar.gz",
-  "xmlsquish-1.2.0-x86_64-apple-darwin.tar.gz", "xmlsquish-1.2.0-aarch64-apple-darwin.tar.gz",
+  "xmlsquish-1.2.1-x86_64-pc-windows-msvc.zip", "xmlsquish-1.2.1-aarch64-pc-windows-msvc.zip",
+  "xmlsquish-1.2.1-x86_64-unknown-linux-gnu.tar.gz", "xmlsquish-1.2.1-aarch64-unknown-linux-gnu.tar.gz",
+  "xmlsquish-1.2.1-x86_64-apple-darwin.tar.gz", "xmlsquish-1.2.1-aarch64-apple-darwin.tar.gz",
 ];
 
 /** Create one bilingual route pair while retaining its top-level section. / 创建一组双语路由并保留顶层栏目。 */
@@ -38,7 +38,7 @@ const routePairs = [
   ...chapters.map((chapter) => [`/ns/${chapter}/`, `/en/ns/${chapter}/`, "namespace"]),
 ];
 const routes = routePairs.flatMap(([zh, en, section]) => pair(zh, en, section));
-assert.equal(routes.length, 38);
+assert.equal(routes.length, 40);
 
 const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".json": "application/json", ".woff2": "font/woff2", ".md": "text/markdown; charset=utf-8", ".txt": "text/plain; charset=utf-8" };
 const server = createServer(async (request, response) => {
@@ -76,7 +76,7 @@ function canonicalFor(path) {
   return origin + (path === "/ns" ? "/ns" : path);
 }
 
-test("all 38 human routes have localized identity and one active global destination", async () => {
+test("all 40 human routes have localized identity and one active global destination", async () => {
   const page = await browser.newPage({ javaScriptEnabled: false, viewport: { width: 390, height: 900 } });
   for (const route of routes) {
     const response = await page.goto(base + route.path, { waitUntil: "domcontentloaded" });
@@ -100,7 +100,7 @@ test("all 38 human routes have localized identity and one active global destinat
 test("global controls remain in one vertically aligned header row", async () => {
   for (const width of [320, 390, 768, 1440]) {
     const page = await browser.newPage({ viewport: { width, height: 900 } });
-    for (const path of ["/", "/releases/", "/releases/1.2.0/", "/ns", "/ns/reference/"]) {
+    for (const path of ["/", "/releases/", "/releases/1.2.1/", "/ns", "/ns/reference/"]) {
       await page.goto(base + path, { waitUntil: "domcontentloaded" });
       const geometry = await page.locator(".header-row").evaluate((row) => {
         const children = [row.querySelector(".product-brand"), row.querySelector(".product-nav"), row.querySelector(".header-actions")];
@@ -116,13 +116,13 @@ test("global controls remain in one vertically aligned header row", async () => 
 
 test("home preserves its product layout, explorer, and direct latest-release cue", async () => {
   const demo = JSON.parse(await readFile(new URL("../data/build-demo.json", import.meta.url), "utf8"));
-  for (const [path, releasePath] of [["/", "/releases/1.2.0/"], ["/en/", "/en/releases/1.2.0/"]]) {
+  for (const [path, releasePath] of [["/", "/releases/1.2.1/"], ["/en/", "/en/releases/1.2.1/"]]) {
     const page = await browser.newPage();
     await page.goto(base + path, { waitUntil: "domcontentloaded" });
     await page.waitForSelector("[data-build-explorer][data-ready]");
     assert.deepEqual(await page.locator("main > section").evaluateAll((sections) => sections.map((section) => section.id || (section.querySelector(".capabilities") ? "capabilities" : [...section.classList].find((name) => ["hero", "journey-band", "boundaries", "closing", "product-formats"].includes(name))))), ["hero", "how", "project-state", "build", "model", "capabilities", "cli", "stats", "boundaries", "closing", "product-formats"]);
     assert.equal(await page.locator(".hero-release-link").getAttribute("href"), releasePath);
-    assert.match(await page.locator(".hero-release-link").textContent(), /v1\.2\.0/);
+    assert.match(await page.locator(".hero-release-link").textContent(), /v1\.2\.1/);
     await page.locator('[data-example-tab="prompt"]').click();
     await page.locator('[data-mode="self"]').click();
     assert.equal(await page.locator("[data-code-panel]:visible").getAttribute("data-source"), demo.scenarios.self.stages.prompt);
@@ -130,13 +130,13 @@ test("home preserves its product layout, explorer, and direct latest-release cue
   }
 });
 
-test("release indexes list eight entries and every entry opens a same-locale detail", async () => {
+test("release indexes list nine entries and every entry opens a same-locale detail", async () => {
   for (const prefix of ["", "/en"]) {
     const page = await browser.newPage();
     await page.goto(`${base}${prefix}/releases/`, { waitUntil: "domcontentloaded" });
     assert.equal(await page.locator(".log-entry").count(), versions.length);
     assert.equal(await page.locator(".log-entry.current").count(), 1, "exactly the latest release is current");
-    assert.equal(await page.locator(".log-entry.current .version-line code").textContent(), "v1.2.0");
+    assert.equal(await page.locator(".log-entry.current .version-line code").textContent(), "v1.2.1");
     const links = await page.locator(".entry-body h2 a").evaluateAll((items) => items.map((item) => item.getAttribute("href")));
     assert.deepEqual(links, versions.map((version) => `${prefix}/releases/${version}/`));
     for (let index = 0; index < links.length; index += 1) {
@@ -177,13 +177,13 @@ test("each immutable release detail has exact date, acquisition, metadata, and p
 
 test("current release acquisition and machine metadata agree exactly", async () => {
   const page = await browser.newPage();
-  await page.goto(base + "/releases/1.2.0/", { waitUntil: "domcontentloaded" });
+  await page.goto(base + "/releases/1.2.1/", { waitUntil: "domcontentloaded" });
   const hrefs = await page.locator(".download-table a[download]").evaluateAll((links) => links.map((link) => link.href));
-  const root = "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.0/";
+  const root = "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.1/";
   assert.deepEqual([...hrefs].sort(), expectedAssets.map((asset) => root + asset).sort());
   assert.equal(await page.locator('.resource-button[href$="SHA256SUMS"]').getAttribute("href"), root + "SHA256SUMS");
-  const metadata = JSON.parse(await readFile(join(dist, "releases/1.2.0.json"), "utf8"));
-  assert.deepEqual([metadata.release.version, metadata.release.tag, metadata.release.date], ["1.2.0", "v1.2.0", "2026-10-01"]);
+  const metadata = JSON.parse(await readFile(join(dist, "releases/1.2.1.json"), "utf8"));
+  assert.deepEqual([metadata.release.version, metadata.release.tag, metadata.release.date], ["1.2.1", "v1.2.1", "2026-10-01"]);
   assert.equal(metadata.cli.machineProtocol, "3.2");
   assert.deepEqual(metadata.artifacts.map((artifact) => artifact.url).sort(), [...hrefs].sort());
   await page.close();
@@ -355,11 +355,11 @@ test("manual no-JavaScript fallback and raw specifications remain complete", asy
   await page.close();
 });
 
-test("sitemap covers exactly 38 reciprocal human routes and llms navigation separates artifacts", async () => {
+test("sitemap covers exactly 40 reciprocal human routes and llms navigation separates artifacts", async () => {
   const sitemap = await readFile(join(dist, "sitemap.xml"), "utf8");
   const locations = [...sitemap.matchAll(/<loc>([^<]+)<\/loc>/g)].map((match) => match[1]);
-  assert.equal(locations.length, 38);
-  assert.equal(new Set(locations).size, 38);
+  assert.equal(locations.length, 40);
+  assert.equal(new Set(locations).size, 40);
   assert.deepEqual(new Set(locations), new Set(routes.map((route) => canonicalFor(route.path))));
   for (const [zhPath, enPath] of routePairs) {
     const zh = canonicalFor(zhPath); const en = canonicalFor(enPath);
@@ -371,9 +371,9 @@ test("sitemap covers exactly 38 reciprocal human routes and llms navigation sepa
   }
   assert(!sitemap.includes(".json") && !sitemap.includes(".md"));
   const llms = await readFile(join(dist, "llms.txt"), "utf8");
-  for (const claim of ["English release index", "/en/releases/1.2.0/", "manual overview", "/en/ns/reference/", "/ns/dsl.md", "/ns/0.3.0/dsl.md"]) assert(llms.includes(claim), claim);
+  for (const claim of ["English release index", "/en/releases/1.2.1/", "manual overview", "/en/ns/reference/", "/ns/dsl.md", "/ns/0.3.0/dsl.md"]) assert(llms.includes(claim), claim);
   const currentMachineRecord = llms.match(/\[Machine-readable v(\d+\.\d+\.\d+) metadata\]\([^)]*\/releases\/(\d+\.\d+\.\d+)\.json\)/);
-  assert.deepEqual(currentMachineRecord?.slice(1), ["1.2.0", "1.2.0"], "llms label and current metadata URL must identify the same release");
+  assert.deepEqual(currentMachineRecord?.slice(1), ["1.2.1", "1.2.1"], "llms label and current metadata URL must identify the same release");
 });
 
 test("all route links are underline-free and retain a 3px keyboard focus indicator", async () => {
@@ -393,7 +393,7 @@ test("all route links are underline-free and retain a 3px keyboard focus indicat
   await page.close();
 });
 
-test("all 38 routes reflow without document overflow at four widths in both themes", async () => {
+test("all 40 routes reflow without document overflow at four widths in both themes", async () => {
   for (const theme of ["light", "dark"]) {
     const page = await browser.newPage();
     await page.addInitScript((value) => localStorage.setItem("xmlsquish-theme", value), theme);
@@ -433,7 +433,7 @@ test("v1.2 distribution roles and trace instructions are readable without script
       assert((await card.locator("p").textContent()).trim().length > 0);
     }
     await page.goto(base + prefix + "/ns/build-and-artifacts/", { waitUntil: "domcontentloaded" });
-    for (const id of ["packs", "sopack", "tracing"]) assert.equal(await page.locator(`#${id}`).count(), 1);
+    for (const id of ["packs", "sopack", "tracing", "patch-upgrade"]) assert.equal(await page.locator(`#${id}`).count(), 1);
     const text = await page.locator("main").textContent();
     for (const flag of ["--trace=summary", "--trace=events", "--trace=off", "metadata/traces/", "TRACE001"]) assert(text.includes(flag), flag);
   }

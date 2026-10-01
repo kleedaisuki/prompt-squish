@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use squish_build::WorkerFailure;
 use squish_protocol::{Diagnostic, DiagnosticId, Phase, Severity};
@@ -44,6 +44,7 @@ pub struct ManagerError {
     code: String,
     phase: Phase,
     message: String,
+    diagnostic: Option<Arc<Diagnostic>>,
 }
 
 impl ManagerError {
@@ -53,7 +54,19 @@ impl ManagerError {
             code: code.into(),
             phase,
             message: message.into(),
+            diagnostic: None,
         }
+    }
+
+    /// Retains source evidence while preserving the manager error code and phase.
+    pub fn with_diagnostic(mut self, diagnostic: Diagnostic) -> Self {
+        self.diagnostic = Some(Arc::new(diagnostic));
+        self
+    }
+
+    /// Returns upstream source evidence, if the failing compiler stage provided it.
+    pub fn source_diagnostic(&self) -> Option<&Diagnostic> {
+        self.diagnostic.as_deref()
     }
 
     /// 返回稳定机器代码。 / Returns the stable machine code.
@@ -84,9 +97,13 @@ impl ManagerError {
             severity: Severity::Error,
             phase: self.phase,
             message: self.message.clone(),
-            primary: None,
-            related: Vec::new(),
-            help: None,
+            primary: self.diagnostic.as_ref().and_then(|d| d.primary.clone()),
+            related: self
+                .diagnostic
+                .as_ref()
+                .map(|d| d.related.clone())
+                .unwrap_or_default(),
+            help: self.diagnostic.as_ref().and_then(|d| d.help.clone()),
         }
     }
 }
@@ -98,3 +115,41 @@ impl fmt::Display for ManagerError {
 }
 
 impl std::error::Error for ManagerError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use squish_protocol::{OpaqueSourceId, RelatedSpan, Span};
+
+    #[test]
+    fn compiler_source_evidence_preserves_manager_failure_contract() {
+        let span = Span::new(
+            OpaqueSourceId::new("sopack://digest/lib.xml").unwrap(),
+            1,
+            9,
+        )
+        .unwrap();
+        let upstream = Diagnostic {
+            id: DiagnosticId::new("compiler-diagnostic").unwrap(),
+            code: "RUN013".into(),
+            severity: Severity::Error,
+            phase: Phase::Instantiate,
+            message: "compiler budget".into(),
+            primary: Some(span.clone()),
+            related: vec![RelatedSpan {
+                span,
+                label: "call".into(),
+            }],
+            help: Some("choose a finite expansion".into()),
+        };
+        let error = ManagerError::new("MGB073", Phase::Instantiate, "manager budget")
+            .with_diagnostic(upstream.clone());
+        let emitted = error.diagnostic(DiagnosticId::new("action-failure").unwrap());
+        assert_eq!(emitted.code, "MGB073");
+        assert_eq!(emitted.message, "manager budget");
+        assert_eq!(emitted.primary, upstream.primary);
+        assert_eq!(emitted.related, upstream.related);
+        assert_eq!(emitted.help, upstream.help);
+        assert_eq!(error.worker_failure().code, "MGB073");
+    }
+}

@@ -12,3 +12,20 @@ regex = "1.12"
 squish-ir = { path = "../squish-ir" }
 squish-protocol = { path = "../squish-protocol" }
 squish-source = { path = "../squish-source" }
+
+[features]
+# Explicitly selected research-only executables; never change production semantics.
+mechanism-benchmarks = []
+
+[dev-dependencies]
+squish-xml-front = { path = "../squish-xml-front" }
+
+[[bench]]
+name = "core_latency"
+harness = false
+required-features = ["mechanism-benchmarks"]
+
+[[bench]]
+name = "core_allocations"
+harness = false
+required-features = ["mechanism-benchmarks"]

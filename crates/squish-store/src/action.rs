@@ -14,13 +14,15 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use squish_build::{
     ActionIndex as BuildIndex, ActionKey as BuildKey, ActionRecord, ContentDigest, OutputName,
-    ProducedOutput,
+    ProducedOutput, VerifiedAction, VerifiedBlob,
 };
 use squish_protocol::{ArtifactKind, DigestAlgorithm};
 
-use crate::{BlobDigest, Cas, CasError};
+use crate::{BlobDigest, Cas, CasError, CasSession};
 
 static REBUILD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+/// Maximum distinct advisory timestamps retained even after a failed flush.
+const MAX_PENDING_TOUCHES: usize = 64;
 
 /// 一个已规范化动作描述的 BLAKE3 键。 / A BLAKE3 key of a canonical action description.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -613,6 +615,14 @@ impl SqliteActionIndex {
 pub struct VerifiedActionIndex {
     index: SqliteActionIndex,
     cas: Arc<Cas>,
+    /// Explicit invocation-local verified acquisition, absent for fresh legacy verification.
+    session: Option<Arc<CasSession>>,
+    /// Optional invocation-local queue: LRU is advisory, unlike durable manifests.
+    touches: Option<Mutex<HashMap<ActionKey, i64>>>,
+    /// Completed advisory transactions, separate from correctness-critical writes.
+    touch_transactions: AtomicU64,
+    /// Rows actually changed by advisory transactions.
+    touch_rows: AtomicU64,
 }
 
 impl VerifiedActionIndex {
@@ -621,13 +631,116 @@ impl VerifiedActionIndex {
         Ok(Self {
             index: SqliteActionIndex::open(path)?,
             cas,
+            session: None,
+            touches: None,
+            touch_transactions: AtomicU64::new(0),
+            touch_rows: AtomicU64::new(0),
         })
     }
 
     /// 从已打开索引与 CAS 构造适配器。 / Constructs the adapter from an open index and CAS.
     #[must_use]
     pub fn from_parts(index: SqliteActionIndex, cas: Arc<Cas>) -> Self {
-        Self { index, cas }
+        Self {
+            index,
+            cas,
+            session: None,
+            touches: None,
+            touch_transactions: AtomicU64::new(0),
+            touch_rows: AtomicU64::new(0),
+        }
+    }
+
+    /// Opens an invocation-local verified index sharing immutable acquisitions with consumers.
+    ///
+    /// Advisory touches are batched automatically. The caller owns the session lifetime and
+    /// must not reuse it across invocations. Returned handles remain live independently of the
+    /// bounded session cache, including when its retention budget is zero.
+    pub fn open_in_session(
+        path: impl AsRef<Path>,
+        session: Arc<CasSession>,
+    ) -> Result<Self, IndexError> {
+        let mut index = Self::open(path, Arc::clone(session.cas()))?.with_batched_touches();
+        index.session = Some(session);
+        Ok(index)
+    }
+
+    /// Verifies the complete manifest and transfers immutable handles in declaration order.
+    ///
+    /// Consumers can hydrate outputs without reopening or rehashing the same CAS bytes. If
+    /// any member is missing, corrupt, or incorrectly sized, the whole action remains a miss
+    /// and its rebuildable row is removed exactly as in the ordinary lookup contract.
+    pub fn lookup_verified(&self, key: &BuildKey) -> Result<Option<VerifiedAction>, IndexError> {
+        let stored_key = parse_build_key(key)?;
+        let Some(outputs) = self.load_manifest(stored_key)? else {
+            return Ok(None);
+        };
+        let mut blobs = Vec::with_capacity(outputs.len());
+        let mut acquired: HashMap<BlobDigest, VerifiedBlob> = HashMap::new();
+        for output in &outputs {
+            let digest = blob_digest(&output.digest)?;
+            let blob = if let Some(blob) = acquired.get(&digest) {
+                Some(blob.clone())
+            } else {
+                self.acquire_output(digest)?
+            };
+            let Some(blob) = blob else {
+                self.remove(stored_key)?;
+                return Ok(None);
+            };
+            if u64::try_from(blob.bytes().len()).ok() != Some(output.size) {
+                self.remove(stored_key)?;
+                return Ok(None);
+            }
+            acquired.entry(digest).or_insert_with(|| blob.clone());
+            blobs.push(blob);
+        }
+        self.touch(stored_key, now_unix_ms())?;
+        Ok(Some(VerifiedAction {
+            record: ActionRecord {
+                key: key.clone(),
+                outputs,
+            },
+            blobs,
+        }))
+    }
+
+    /// Preserves fresh persistent verification unless a caller explicitly supplies a session.
+    fn acquire_output(&self, digest: BlobDigest) -> Result<Option<VerifiedBlob>, CasError> {
+        match &self.session {
+            Some(session) => session.acquire(digest),
+            None => self.cas.get_verified(digest),
+        }
+    }
+
+    /// Enables bounded invocation-local batching of advisory last-use timestamps.
+    ///
+    /// Manifests and invalid-row removal retain their immediate durable transactions.
+    /// At most 64 distinct keys are pending; successful batches commit atomically. A crash
+    /// may lose recent last-use timestamps, never successful action records. Use
+    /// [`Self::flush_touches`] to observe final advisory I/O errors; Drop makes a best effort.
+    #[must_use]
+    pub fn with_batched_touches(mut self) -> Self {
+        self.touches = Some(Mutex::new(HashMap::new()));
+        self
+    }
+
+    /// Flushes pending advisory LRU timestamps in one transaction without changing manifests.
+    pub fn flush_touches(&self) -> Result<(), IndexError> {
+        let Some(touches) = &self.touches else {
+            return Ok(());
+        };
+        let mut pending = touches.lock().expect("action touch queue poisoned");
+        self.flush_pending_touches(&mut pending)
+    }
+
+    /// Returns completed advisory transactions and changed rows for mechanism-level probes.
+    #[must_use]
+    pub fn touch_stats(&self) -> TouchStats {
+        TouchStats {
+            transactions: self.touch_transactions.load(Ordering::Relaxed),
+            rows: self.touch_rows.load(Ordering::Relaxed),
+        }
     }
 
     /// 返回底层领域索引。 / Returns the underlying domain index.
@@ -638,12 +751,11 @@ impl VerifiedActionIndex {
 
     /// 枚举并逐输出验证一页完整清单。 / Enumerates and validates every output in one page of complete manifests.
     ///
-    /// SQLite 快照先产生类型化候选，随后每个输出通过 CAS 重新计算摘要并检查长度。
-    /// 失效记录不会返回；若记录在并发修复期间未改变，验证器会删除旧索引行并增加
-    /// `repaired`。 / A SQLite snapshot first produces typed candidates, after which
-    /// every output is rehashed by the CAS and length-checked. Invalid records are
-    /// omitted; if a record did not change during a concurrent repair, its stale index
-    /// row is deleted and `repaired` is incremented.
+    /// A SQLite snapshot produces typed candidates; every output is digest-verified and
+    /// length-checked. Invocation-local immutable handles may satisfy repeated acquisitions.
+    /// Invalid records are omitted; if a record did not change during a concurrent repair,
+    /// its stale row is removed and `repaired` is incremented. Repair rechecks persistent
+    /// CAS bytes freshly inside the write transaction, never only a retained snapshot.
     pub fn manifest_page(
         &self,
         after: Option<ActionKey>,
@@ -662,11 +774,11 @@ impl VerifiedActionIndex {
                         break;
                     }
                 };
-                let Some(bytes) = self.cas.get(digest)? else {
+                let Some(bytes) = self.acquire_output(digest)? else {
                     failure = Some(CatalogIssueKind::OutputUnavailable);
                     break;
                 };
-                if u64::try_from(bytes.len()).ok() != Some(output.size) {
+                if u64::try_from(bytes.bytes().len()).ok() != Some(output.size) {
                     failure = Some(CatalogIssueKind::OutputSizeMismatch);
                     break;
                 }
@@ -690,6 +802,11 @@ impl BuildIndex for VerifiedActionIndex {
     type Error = IndexError;
 
     fn lookup(&self, key: &BuildKey) -> Result<Option<ActionRecord>, Self::Error> {
+        if self.session.is_some() {
+            return self
+                .lookup_verified(key)
+                .map(|verified| verified.map(|action| action.record));
+        }
         let stored_key = parse_build_key(key)?;
         let Some(outputs) = self.load_manifest(stored_key)? else {
             return Ok(None);
@@ -896,6 +1013,20 @@ fn load_manifest_from(
 
 impl VerifiedActionIndex {
     fn touch(&self, key: ActionKey, time: i64) -> Result<(), IndexError> {
+        if let Some(touches) = &self.touches {
+            let mut pending = touches.lock().expect("action touch queue poisoned");
+            if pending.len() >= MAX_PENDING_TOUCHES && !pending.contains_key(&key) {
+                self.flush_pending_touches(&mut pending)?;
+            }
+            pending
+                .entry(key)
+                .and_modify(|previous| *previous = (*previous).max(time))
+                .or_insert(time);
+            if pending.len() >= MAX_PENDING_TOUCHES {
+                self.flush_pending_touches(&mut pending)?;
+            }
+            return Ok(());
+        }
         self.index
             .connection
             .lock()
@@ -904,6 +1035,37 @@ impl VerifiedActionIndex {
                 "UPDATE actions SET last_used_unix_ms=?2 WHERE action_key=?1",
                 params![key.digest().as_bytes().as_slice(), time],
             )?;
+        Ok(())
+    }
+
+    /// Retains the queue until commit succeeds; callers can retry after transient I/O failures.
+    fn flush_pending_touches(
+        &self,
+        pending: &mut HashMap<ActionKey, i64>,
+    ) -> Result<(), IndexError> {
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self
+            .index
+            .connection
+            .lock()
+            .expect("SQLite action index poisoned");
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut changed = 0_u64;
+        {
+            let mut statement = transaction.prepare_cached(
+                "UPDATE actions SET last_used_unix_ms=?2 WHERE action_key=?1 AND last_used_unix_ms<?2"
+            )?;
+            for (key, time) in pending.iter() {
+                changed +=
+                    statement.execute(params![key.digest().as_bytes().as_slice(), time])? as u64;
+            }
+        }
+        transaction.commit()?;
+        pending.clear();
+        self.touch_transactions.fetch_add(1, Ordering::Relaxed);
+        self.touch_rows.fetch_add(changed, Ordering::Relaxed);
         Ok(())
     }
 
@@ -917,6 +1079,22 @@ impl VerifiedActionIndex {
                 [key.digest().as_bytes().as_slice()],
             )?;
         Ok(())
+    }
+}
+
+/// Bounded advisory write counters; they do not count manifest/publication transactions.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TouchStats {
+    /// Successfully committed last-use batches.
+    pub transactions: u64,
+    /// Rows with an older timestamp that were actually updated.
+    pub rows: u64,
+}
+
+impl Drop for VerifiedActionIndex {
+    fn drop(&mut self) {
+        // Advisory recency is permitted to be lost on failures/crashes; manifests are not.
+        let _ = self.flush_touches();
     }
 }
 
@@ -1849,6 +2027,278 @@ mod tests {
         assert_eq!(
             reopened_again.manifest_page(None, 1).unwrap().manifests[0].result_digest,
             expected_digest
+        );
+    }
+    #[test]
+    fn invocation_touch_batches_are_bounded_and_do_not_delay_manifests() {
+        let (directory, path) = database_path();
+        let cas = Arc::new(Cas::open(directory.path().join("cas")).unwrap());
+        let index = VerifiedActionIndex::open(&path, cas)
+            .unwrap()
+            .with_batched_touches();
+        let mut keys = Vec::new();
+        for ordinal in 0..70 {
+            let stored = ActionKey::of(format!("action-{ordinal}").as_bytes());
+            let key = BuildKey::new(format!("blake3:{}", stored.digest())).unwrap();
+            let record = ActionRecord {
+                key: key.clone(),
+                outputs: Vec::new(),
+            };
+            BuildIndex::record(&index, &record).unwrap();
+            keys.push(key);
+        }
+        // A separate connection already sees all correctness-critical records before any touch flush.
+        let observer = Connection::open(&path).unwrap();
+        assert_eq!(
+            observer
+                .query_row("SELECT COUNT(*) FROM actions", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            70
+        );
+        observer
+            .execute("UPDATE actions SET last_used_unix_ms=0", [])
+            .unwrap();
+        for key in &keys {
+            assert!(BuildIndex::lookup(&index, key).unwrap().is_some());
+        }
+        assert_eq!(index.touch_stats().transactions, 1);
+        assert_eq!(index.touch_stats().rows, 64);
+        assert_eq!(index.touches.as_ref().unwrap().lock().unwrap().len(), 6);
+        index.flush_touches().unwrap();
+        assert_eq!(
+            index.touch_stats(),
+            TouchStats {
+                transactions: 2,
+                rows: 70
+            }
+        );
+        assert_eq!(
+            observer
+                .query_row(
+                    "SELECT COUNT(*) FROM actions WHERE last_used_unix_ms>0",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            70
+        );
+    }
+
+    #[test]
+    fn repeated_advisory_touches_coalesce_without_backdating_or_resurrection() {
+        let (directory, path) = database_path();
+        let cas = Arc::new(Cas::open(directory.path().join("cas")).unwrap());
+        let index = VerifiedActionIndex::open(&path, cas)
+            .unwrap()
+            .with_batched_touches();
+        let stored = ActionKey::of(b"touch");
+        let key = BuildKey::new(format!("blake3:{}", stored.digest())).unwrap();
+        BuildIndex::record(
+            &index,
+            &ActionRecord {
+                key,
+                outputs: Vec::new(),
+            },
+        )
+        .unwrap();
+        let observer = Connection::open(&path).unwrap();
+        observer
+            .execute("UPDATE actions SET last_used_unix_ms=0", [])
+            .unwrap();
+        for time in 1..=100 {
+            index.touch(stored, time).unwrap();
+        }
+        assert_eq!(index.touch_stats(), TouchStats::default());
+        index.flush_touches().unwrap();
+        assert_eq!(
+            index.touch_stats(),
+            TouchStats {
+                transactions: 1,
+                rows: 1
+            }
+        );
+        index.touch(stored, 1).unwrap();
+        index.flush_touches().unwrap();
+        assert_eq!(
+            observer
+                .query_row("SELECT last_used_unix_ms FROM actions", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            100
+        );
+        index.touch(stored, 101).unwrap();
+        index.remove(stored).unwrap();
+        index.flush_touches().unwrap();
+        assert_eq!(
+            observer
+                .query_row("SELECT COUNT(*) FROM actions", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    #[test]
+    fn verified_lookup_transfers_large_handles_with_zero_hidden_retention() {
+        let (directory, path) = database_path();
+        let cas = Arc::new(Cas::open(directory.path().join("cas")).unwrap());
+        let bytes = vec![0x5a; 1024 * 1024];
+        let digest = cas.put(&bytes).unwrap();
+        let session = Arc::new(CasSession::with_limits(
+            cas,
+            crate::BlobSessionLimits {
+                max_bytes: 0,
+                max_entries: 0,
+            },
+        ));
+        let index = VerifiedActionIndex::open_in_session(path, Arc::clone(&session)).unwrap();
+        let stored = ActionKey::of(b"oversized action");
+        let key = BuildKey::new(format!("blake3:{}", stored.digest())).unwrap();
+        let output = ProducedOutput {
+            name: OutputName::new("large").unwrap(),
+            kind: ArtifactKind::Prompt,
+            digest: content_digest(digest),
+            size: bytes.len() as u64,
+        };
+        let mut duplicate = output.clone();
+        duplicate.name = OutputName::new("same-bytes").unwrap();
+        BuildIndex::record(
+            &index,
+            &ActionRecord {
+                key: key.clone(),
+                outputs: vec![output, duplicate],
+            },
+        )
+        .unwrap();
+        let verified = index.lookup_verified(&key).unwrap().unwrap();
+        assert_eq!(verified.blobs.len(), 2);
+        assert_eq!(verified.blobs[0].bytes(), bytes);
+        assert_eq!(
+            verified.blobs[0].bytes().as_ptr(),
+            verified.blobs[1].bytes().as_ptr()
+        );
+        assert_eq!(session.stats().acquisition_reads, 1);
+        assert_eq!(session.stats().acquisition_hashes, 1);
+        assert_eq!(session.stats().retained_bytes, 0);
+        assert_eq!(session.stats().retained_entries, 0);
+        // Hydrating both explicit handles does not perform any second acquisition.
+        assert_eq!(
+            verified
+                .blobs
+                .iter()
+                .map(|blob| blob.bytes().len())
+                .sum::<usize>(),
+            2 * bytes.len()
+        );
+        assert_eq!(session.stats().acquisition_reads, 1);
+    }
+
+    #[test]
+    fn verified_lookup_remains_a_miss_for_size_mismatch() {
+        let (directory, path) = database_path();
+        let cas = Arc::new(Cas::open(directory.path().join("cas")).unwrap());
+        let digest = cas.put(b"wrong manifest length").unwrap();
+        let session = Arc::new(CasSession::new(cas));
+        let index = VerifiedActionIndex::open_in_session(path, session).unwrap();
+        let stored = ActionKey::of(b"wrong length");
+        let key = BuildKey::new(format!("blake3:{}", stored.digest())).unwrap();
+        let record = ActionRecord {
+            key: key.clone(),
+            outputs: vec![ProducedOutput {
+                name: OutputName::new("main").unwrap(),
+                kind: ArtifactKind::Prompt,
+                digest: content_digest(digest),
+                size: 0,
+            }],
+        };
+        BuildIndex::record(&index, &record).unwrap();
+        assert!(index.lookup_verified(&key).unwrap().is_none());
+        assert!(index.load_manifest(stored).unwrap().is_none());
+    }
+    #[test]
+    fn advisory_queue_retries_failed_transactions_and_remains_bounded() {
+        let (directory, path) = database_path();
+        let cas = Arc::new(Cas::open(directory.path().join("cas")).unwrap());
+        let index = VerifiedActionIndex::open(&path, cas)
+            .unwrap()
+            .with_batched_touches();
+        let stored = ActionKey::of(b"flush retry");
+        let key = BuildKey::new(format!("blake3:{}", stored.digest())).unwrap();
+        BuildIndex::record(
+            &index,
+            &ActionRecord {
+                key,
+                outputs: Vec::new(),
+            },
+        )
+        .unwrap();
+        let observer = Connection::open(&path).unwrap();
+        observer.execute_batch("UPDATE actions SET last_used_unix_ms=0; CREATE TRIGGER fail_touch BEFORE UPDATE ON actions BEGIN SELECT RAISE(ABORT, 'injected advisory failure'); END;").unwrap();
+        // Fill the bounded queue without claiming nonexistent keys are action hits.
+        for ordinal in 0..MAX_PENDING_TOUCHES - 1 {
+            index
+                .touch(ActionKey::of(format!("absent-{ordinal}").as_bytes()), 100)
+                .unwrap();
+        }
+        assert!(index.touch(stored, 100).is_err());
+        assert_eq!(
+            index.touches.as_ref().unwrap().lock().unwrap().len(),
+            MAX_PENDING_TOUCHES
+        );
+        assert!(index.touch(ActionKey::of(b"must not grow"), 100).is_err());
+        assert_eq!(
+            index.touches.as_ref().unwrap().lock().unwrap().len(),
+            MAX_PENDING_TOUCHES
+        );
+        assert_eq!(index.touch_stats(), TouchStats::default());
+        observer.execute_batch("DROP TRIGGER fail_touch;").unwrap();
+        index.flush_touches().unwrap();
+        assert_eq!(
+            index.touch_stats(),
+            TouchStats {
+                transactions: 1,
+                rows: 1
+            }
+        );
+        assert!(index.touches.as_ref().unwrap().lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn drop_flushes_remaining_advisory_timestamps() {
+        let (directory, path) = database_path();
+        let cas = Arc::new(Cas::open(directory.path().join("cas")).unwrap());
+        let index = VerifiedActionIndex::open(&path, cas)
+            .unwrap()
+            .with_batched_touches();
+        let observer = Connection::open(&path).unwrap();
+        let stored = ActionKey::of(b"drop flush");
+        let key = BuildKey::new(format!("blake3:{}", stored.digest())).unwrap();
+        BuildIndex::record(
+            &index,
+            &ActionRecord {
+                key,
+                outputs: Vec::new(),
+            },
+        )
+        .unwrap();
+        observer
+            .execute("UPDATE actions SET last_used_unix_ms=0", [])
+            .unwrap();
+        index.touch(stored, 123).unwrap();
+        assert_eq!(
+            observer
+                .query_row("SELECT last_used_unix_ms FROM actions", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(index);
+        assert_eq!(
+            observer
+                .query_row("SELECT last_used_unix_ms FROM actions", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            123
         );
     }
 }

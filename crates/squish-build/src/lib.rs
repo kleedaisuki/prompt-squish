@@ -12,6 +12,7 @@ mod model;
 mod plan;
 mod ports;
 mod scheduler;
+mod verified;
 
 pub use model::{
     Action, ActionEvent, ActionKey, ActionKind, ActionResult, ContentDigest, InputRef, KeyRecipe,
@@ -28,6 +29,7 @@ pub use scheduler::{
     ActionState, CompletionError, Dispatch, ResultSource, ScheduleEvent, Scheduler, SchedulerError,
 };
 pub use squish_protocol::ActionId;
+pub use verified::{VerifiedAction, VerifiedBlob};
 
 #[cfg(test)]
 mod tests;

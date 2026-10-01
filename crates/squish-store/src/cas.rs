@@ -1,3 +1,5 @@
+use squish_build::VerifiedBlob;
+
 use std::{
     fmt,
     fs::{self, OpenOptions},
@@ -203,7 +205,19 @@ impl Cas {
 
     /// 原子写入内容并返回其摘要；相同内容的并发写入收敛到一个文件。 / Atomically stores content and returns its digest; concurrent identical writes converge on one file.
     pub fn put(&self, bytes: &[u8]) -> Result<BlobDigest, CasError> {
-        let digest = BlobDigest::of(bytes);
+        self.put_bytes(BlobDigest::of(bytes), bytes)
+    }
+
+    /// Durably publishes a sealed immutable buffer without hashing its input again.
+    ///
+    /// The handle proves its own byte identity, not existing-file integrity. Existing CAS
+    /// files are still checked, and cold publication retains file and directory sync.
+    pub fn put_verified(&self, blob: &VerifiedBlob) -> Result<BlobDigest, CasError> {
+        self.put_bytes(build_digest(blob.digest())?, blob.bytes())
+    }
+
+    /// Shared publication machinery; the caller establishes input identity at its boundary.
+    fn put_bytes(&self, digest: BlobDigest, bytes: &[u8]) -> Result<BlobDigest, CasError> {
         let destination = self.path_for(digest);
         fs::create_dir_all(destination.parent().expect("CAS path has a bucket parent"))?;
         if self.valid_file(&destination, digest)? {
@@ -278,6 +292,37 @@ impl Cas {
             return Ok(None);
         }
         Ok(Some(bytes))
+    }
+
+    /// Acquires an immutable handle after freshly reading and hashing the addressed file once.
+    ///
+    /// Unlike an invocation session, this method never trusts a prior acquisition. Missing
+    /// or corrupt files return `None`; corruption retains the existing observer event.
+    pub fn get_verified(&self, digest: BlobDigest) -> Result<Option<VerifiedBlob>, CasError> {
+        self.acquire_counted(digest, &mut AcquisitionCounts::default())
+    }
+
+    /// Counts successful physical reads and hash work, including corrupt reads, for sessions.
+    pub(crate) fn acquire_counted(
+        &self,
+        digest: BlobDigest,
+        counts: &mut AcquisitionCounts,
+    ) -> Result<Option<VerifiedBlob>, CasError> {
+        let bytes = match fs::read(self.path_for(digest)) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        counts.reads += 1;
+        counts.bytes += bytes.len() as u64;
+        let blob = VerifiedBlob::from_owned(bytes);
+        counts.hashes += 1;
+        let actual = build_digest(blob.digest())?;
+        if actual != digest {
+            self.emit(CasEventKind::CorruptMiss, digest, Some(actual));
+            return Ok(None);
+        }
+        Ok(Some(blob))
     }
 
     /// 提交已同步、且内容与摘要一致的暂存 blob；负责观察事件与目录持久化。
@@ -477,7 +522,15 @@ impl squish_build::BlobStore for Cas {
     }
 }
 
-fn build_digest(digest: &squish_build::ContentDigest) -> Result<BlobDigest, CasError> {
+/// Per-acquisition work, aggregated by an explicit invocation session only.
+#[derive(Default)]
+pub(crate) struct AcquisitionCounts {
+    pub(crate) reads: u64,
+    pub(crate) bytes: u64,
+    pub(crate) hashes: u64,
+}
+
+pub(crate) fn build_digest(digest: &squish_build::ContentDigest) -> Result<BlobDigest, CasError> {
     if digest.algorithm() != &squish_protocol::DigestAlgorithm::Blake3 {
         return Err(CasError::UnsupportedAlgorithm);
     }

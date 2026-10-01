@@ -144,7 +144,9 @@ fn structured_golden_preserves_current_lowering_and_whitespace() {
             end: 6,
         },
     ]);
+    let borrowed = SquishBackend.emit_ref((&request).into()).unwrap();
     let output = SquishBackend.emit(request).unwrap();
+    assert_eq!(borrowed, output);
     assert_eq!(
         String::from_utf8(output.bytes.clone()).unwrap(),
         "<!--keep--> <?user data?> <R> hello&#13; world <子> 猫 娘 &amp; &lt; &gt; </子> </R>"
@@ -420,5 +422,69 @@ fn negotiation_and_options_are_part_of_identity() {
     assert_eq!(
         backend.emit(unsupported).unwrap_err().kind,
         BackendErrorKind::IncompatibleDocument
+    );
+}
+
+/// Owned and borrowed requests must preserve products and complete provenance exactly.
+#[test]
+fn borrowed_emission_matches_owned_and_keeps_inputs_unchanged() {
+    for depth in [1, 3, 128] {
+        let request = nested_request(depth);
+        let unchanged = request.clone();
+        let borrowed = SquishBackend.emit_ref((&request).into()).unwrap();
+        let owned = SquishBackend.emit(request.clone()).unwrap();
+        assert_eq!(borrowed, owned);
+        assert_eq!(request, unchanged);
+        let mut exact = request;
+        exact.options.max_output_bytes = borrowed.bytes.len() as u64;
+        assert_eq!(
+            SquishBackend.emit_ref((&exact).into()).unwrap(),
+            SquishBackend.emit(exact).unwrap(),
+        );
+    }
+}
+
+/// Borrowing is not a trust boundary: malformed IR and exact budgets still fail.
+#[test]
+fn borrowed_emission_preserves_validation_and_budget_errors() {
+    let mut malformed = nested_request(1);
+    malformed.document.items.pop();
+    let mut incompatible = nested_request(1);
+    incompatible.document.feature_bits = FeatureBits(1);
+    let mut mismatched = nested_request(1);
+    mismatched.trace.document_items.pop();
+    let mut invalid_xml = nested_named_request("bad name");
+    invalid_xml.options.max_output_bytes = 0;
+    let mut exhausted = nested_request(1);
+    exhausted.options.max_output_bytes = 1;
+    for request in [malformed, incompatible, mismatched, invalid_xml, exhausted] {
+        let borrowed = SquishBackend.emit_ref((&request).into()).unwrap_err();
+        let owned = SquishBackend.emit(request).unwrap_err();
+        assert_eq!(borrowed, owned);
+    }
+}
+
+/// Existing third-party implementations need not add a new required trait method.
+#[test]
+fn borrowed_default_bridge_preserves_existing_backends() {
+    struct OwnedOnly;
+    impl Backend for OwnedOnly {
+        fn cache_identity(&self, options: SquishOptions) -> BackendCacheIdentity {
+            SquishBackend.cache_identity(options)
+        }
+        fn capabilities(&self) -> BackendCapabilities {
+            SquishBackend.capabilities()
+        }
+        fn negotiate(&self, document: &LinkedDocumentIr) -> Result<(), BackendError> {
+            SquishBackend.negotiate(document)
+        }
+        fn emit(&self, request: BackendRequest) -> Result<BackendOutput, BackendError> {
+            SquishBackend.emit(request)
+        }
+    }
+    let request = nested_request(2);
+    assert_eq!(
+        OwnedOnly.emit_ref((&request).into()).unwrap(),
+        SquishBackend.emit_ref((&request).into()).unwrap(),
     );
 }

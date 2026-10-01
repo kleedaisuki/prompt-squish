@@ -384,6 +384,85 @@ pub struct ResolvedDependencies {
     pub lockfile: Lockfile,
     /// Registry 归档、Git checkout 和本地包的位置。 / Locations of registry archives, Git checkouts, and local packages.
     pub packages: Vec<PackageLocation>,
+    /// Invocation-local verified immutable libraries, indexed by the exact locked node ID.
+    pub sopacks: BTreeMap<String, Arc<AcquiredSopack>>,
+}
+
+/// One checksum-verified archive decode shared by resolution, materialization and freezing.
+///
+/// The locator remains mutable outside this value. Manager freezing rechecks the locked
+/// bytes before accepting this invocation-local payload; the handle never authorizes a
+/// future invocation or suppresses attachment/source identity checks.
+#[derive(Clone, Debug)]
+pub struct AcquiredSopack {
+    checksum: String,
+    payload: Arc<squish_backend::archive::SharedSopackPayload>,
+}
+
+impl AcquiredSopack {
+    /// Deduplicate verified decodes within one invocation, hashing each newly read buffer once.
+    pub fn acquire(
+        bytes: &[u8],
+        known: &mut BTreeMap<String, Arc<Self>>,
+    ) -> Result<Arc<Self>, squish_backend::archive::ArchiveError> {
+        use sha2::Digest as _;
+        let limits = squish_backend::archive::ArchiveLimits::default();
+        if bytes.len() as u64 > limits.max_archive_bytes {
+            return Err(squish_backend::archive::ArchiveError(
+                "SOPack archive byte limit exceeded".into(),
+            ));
+        }
+        let checksum = format!("sha256:{:x}", sha2::Sha256::digest(bytes));
+        if let Some(existing) = known.get(&checksum) {
+            if existing.checksum != checksum {
+                return Err(squish_backend::archive::ArchiveError(
+                    "SOPack acquisition index mismatch".into(),
+                ));
+            }
+            return Ok(Arc::clone(existing));
+        }
+        let payload = squish_backend::archive::read_sopack_shared(bytes, limits)?;
+        let acquired = Arc::new(Self {
+            checksum: checksum.clone(),
+            payload: Arc::new(payload),
+        });
+        known.insert(checksum, Arc::clone(&acquired));
+        Ok(acquired)
+    }
+    /// Verify exact bounded archive bytes against a lock checksum and decode them once.
+    pub fn from_bytes(
+        bytes: &[u8],
+        checksum: &str,
+    ) -> Result<Self, squish_backend::archive::ArchiveError> {
+        use sha2::Digest as _;
+        let limits = squish_backend::archive::ArchiveLimits::default();
+        if bytes.len() as u64 > limits.max_archive_bytes {
+            return Err(squish_backend::archive::ArchiveError(
+                "SOPack archive byte limit exceeded".into(),
+            ));
+        }
+        let actual = format!("sha256:{:x}", sha2::Sha256::digest(bytes));
+        if actual != checksum {
+            return Err(squish_backend::archive::ArchiveError(
+                "SOPack acquisition checksum mismatch".into(),
+            ));
+        }
+        let payload = squish_backend::archive::read_sopack_shared(bytes, limits)?;
+        Ok(Self {
+            checksum: actual,
+            payload: Arc::new(payload),
+        })
+    }
+
+    /// Exact SHA-256 lock identity validated by the constructor.
+    pub fn checksum(&self) -> &str {
+        &self.checksum
+    }
+
+    /// Shared decoded units and bytes, immutable for the lifetime of this invocation.
+    pub fn payload(&self) -> &Arc<squish_backend::archive::SharedSopackPayload> {
+        &self.payload
+    }
 }
 
 /// A verified source tree returned by the host before manager-level Skill validation.

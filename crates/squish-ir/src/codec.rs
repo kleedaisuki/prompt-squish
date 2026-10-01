@@ -139,33 +139,37 @@ impl Container {
     /// 完整对象摘要。 / Complete-object digest.
     #[must_use]
     pub fn object_digest(&self) -> ObjectDigest {
-        ObjectDigest::of(&encode_container(self))
+        let mut header = Vec::with_capacity(HEADER + DIRECTORY * self.sections.len());
+        append_container_directory(&mut header, self);
+        let parts = std::iter::once(header.as_slice())
+            .chain(self.sections.iter().map(|s| s.payload.as_slice()));
+        ObjectDigest(Digest::sha256_parts("object", parts))
     }
     /// 仅语义 section 的摘要。 / Semantic-only digest.
     #[must_use]
     pub fn semantic_digest(&self) -> SemanticUnitDigest {
-        let mut p = Vec::new();
-        p.extend_from_slice(&self.major.to_le_bytes());
-        p.extend_from_slice(&(self.kind as u16).to_le_bytes());
-        for s in self.sections.iter().filter(|s| s.flags.is_semantic()) {
-            p.extend_from_slice(&s.tag.to_le_bytes());
-            p.extend_from_slice(&(s.payload.len() as u64).to_le_bytes());
-            p.extend_from_slice(&s.payload)
-        }
-        SemanticUnitDigest::of(&p)
+        SemanticUnitDigest(self.partition_digest(true, "unit"))
     }
     /// 仅调试/source section 的摘要。 / Debug/source-only digest.
     #[must_use]
     pub fn debug_digest(&self) -> DebugDigest {
-        let mut p = Vec::new();
-        p.extend_from_slice(&self.major.to_le_bytes());
-        p.extend_from_slice(&(self.kind as u16).to_le_bytes());
-        for s in self.sections.iter().filter(|s| !s.flags.is_semantic()) {
-            p.extend_from_slice(&s.tag.to_le_bytes());
-            p.extend_from_slice(&(s.payload.len() as u64).to_le_bytes());
-            p.extend_from_slice(&s.payload)
+        DebugDigest(self.partition_digest(false, "debug"))
+    }
+    /// Hashes borrowed section payloads with fixed-size state and no payload allocation.
+    fn partition_digest(&self, semantic: bool, domain: &str) -> Digest {
+        let mut hash = crate::digest::DomainHasher::new(domain);
+        hash.update(&self.major.to_le_bytes());
+        hash.update(&(self.kind as u16).to_le_bytes());
+        for section in self
+            .sections
+            .iter()
+            .filter(|s| s.flags.is_semantic() == semantic)
+        {
+            hash.update(&section.tag.to_le_bytes());
+            hash.update(&(section.payload.len() as u64).to_le_bytes());
+            hash.update(&section.payload);
         }
-        DebugDigest::of(&p)
+        hash.finish()
     }
 }
 
@@ -207,6 +211,17 @@ pub fn encode_container(c: &Container) -> Vec<u8> {
     let mut out = Vec::with_capacity(
         payload_start + c.sections.iter().map(|s| s.payload.len()).sum::<usize>(),
     );
+    append_container_directory(&mut out, c);
+    for s in &c.sections {
+        out.extend_from_slice(&s.payload)
+    }
+    out
+}
+
+/// Serializes only the fixed-width directory, shared by bytes and object-digest writers.
+fn append_container_directory(out: &mut Vec<u8>, c: &Container) {
+    let count = c.sections.len();
+    let payload_start = HEADER + DIRECTORY * count;
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&c.major.to_le_bytes());
     out.extend_from_slice(&c.minor.to_le_bytes());
@@ -223,14 +238,41 @@ pub fn encode_container(c: &Container) -> Vec<u8> {
         out.extend_from_slice(&section_digest(s).bytes);
         off += s.payload.len() as u64
     }
-    for s in &c.sections {
-        out.extend_from_slice(&s.payload)
-    }
-    out
 }
 
 /// 有界解码、校验 checksum，然后才返回值。 / Bounded decode that validates checksums before returning.
 pub fn decode_container(bytes: &[u8]) -> Result<Container, DecodeError> {
+    let view = decode_container_ref(bytes)?;
+    Ok(Container {
+        major: view.major,
+        minor: view.minor,
+        kind: view.kind,
+        sections: view
+            .sections
+            .into_iter()
+            .map(|s| Section {
+                tag: s.tag,
+                flags: s.flags,
+                payload: s.payload.to_vec(),
+            })
+            .collect(),
+    })
+}
+
+/// Validated borrowed section, never copied while checking a typed unit.
+pub(crate) struct SectionRef<'a> {
+    pub tag: u32,
+    pub flags: SectionFlags,
+    pub payload: &'a [u8],
+}
+/// Validated directory over the caller-owned immutable container bytes.
+pub(crate) struct ContainerRef<'a> {
+    pub major: u16,
+    pub minor: u16,
+    pub kind: ContainerKind,
+    pub sections: Vec<SectionRef<'a>>,
+}
+pub(crate) fn decode_container_ref(bytes: &[u8]) -> Result<ContainerRef<'_>, DecodeError> {
     if bytes.len() < HEADER {
         return Err(DecodeError::Truncated);
     }
@@ -283,13 +325,13 @@ pub fn decode_container(bytes: &[u8]) -> Result<Container, DecodeError> {
         if u16le(bytes, p + 24)? != DigestAlgorithm::Sha256 as u16 {
             return Err(DecodeError::UnsupportedDigest);
         }
-        let payload = bytes[off as usize..end as usize].to_vec();
-        let s = Section {
+        let payload = &bytes[off as usize..end as usize];
+        let s = SectionRef {
             tag,
             flags,
             payload,
         };
-        if section_digest(&s).bytes != bytes[p + 26..p + 58] {
+        if section_digest_parts(s.tag, s.payload).bytes != bytes[p + 26..p + 58] {
             return Err(DecodeError::Checksum(tag));
         }
         expected = end;
@@ -298,8 +340,8 @@ pub fn decode_container(bytes: &[u8]) -> Result<Container, DecodeError> {
     if expected != bytes.len() as u64 {
         return Err(DecodeError::TrailingBytes);
     }
-    validate_sections(&sections)?;
-    Ok(Container {
+    validate_section_refs(&sections)?;
+    Ok(ContainerRef {
         major,
         minor,
         kind,
@@ -323,6 +365,17 @@ fn known_tag(t: u32) -> bool {
     )
 }
 fn validate_sections(s: &[Section]) -> Result<(), DecodeError> {
+    let refs: Vec<_> = s
+        .iter()
+        .map(|s| SectionRef {
+            tag: s.tag,
+            flags: s.flags,
+            payload: &s.payload,
+        })
+        .collect();
+    validate_section_refs(&refs)
+}
+fn validate_section_refs(s: &[SectionRef<'_>]) -> Result<(), DecodeError> {
     let mut last = None;
     for x in s {
         if last.is_some_and(|v| x.tag <= v) {
@@ -340,16 +393,119 @@ fn validate_sections(s: &[Section]) -> Result<(), DecodeError> {
     if !descriptor.flags.is_semantic() {
         return Err(DecodeError::NonCanonical("descriptor classification"));
     }
-    SemanticDescriptor::decode(&descriptor.payload)?;
+    SemanticDescriptor::decode(descriptor.payload)?;
     Ok(())
 }
 fn section_digest(s: &Section) -> Digest {
-    let mut p = Vec::with_capacity(12 + s.payload.len());
-    p.extend_from_slice(&s.tag.to_le_bytes());
-    p.extend_from_slice(&(s.payload.len() as u64).to_le_bytes());
-    p.extend_from_slice(&s.payload);
-    Digest::sha256("section", &p)
+    section_digest_parts(s.tag, &s.payload)
 }
+/// Computes the unchanged section digest without concatenating its body.
+pub(crate) fn section_digest_parts(tag: u32, payload: &[u8]) -> Digest {
+    Digest::sha256_parts(
+        "section",
+        [
+            tag.to_le_bytes().as_slice(),
+            (payload.len() as u64).to_le_bytes().as_slice(),
+            payload,
+        ],
+    )
+}
+
+/// Computes checksums from final payload slices before writing their canonical directory.
+pub(crate) fn finish_unit_container(
+    out: &mut [u8],
+    kind: ContainerKind,
+    sections: &[(u32, SectionFlags, usize); 3],
+) {
+    let mut offset = UNIT_CONTAINER_HEADER;
+    let metadata = (*sections).map(|(tag, flags, length)| {
+        let digest = section_digest_parts(tag, &out[offset..offset + length]);
+        offset += length;
+        (tag, flags, length, digest)
+    });
+    write_unit_directory(out, kind, &metadata);
+}
+/// Writes the canonical v1 three-section directory from precomputed checksums.
+pub(crate) fn write_unit_directory(
+    out: &mut [u8],
+    kind: ContainerKind,
+    sections: &[(u32, SectionFlags, usize, Digest); 3],
+) {
+    write_container_directory(out, 1, 0, kind, sections);
+}
+/// Writes the canonical v1 unit directory from checked lengths and precomputed checksums.
+pub(crate) fn write_container_directory(
+    out: &mut [u8],
+    major: u16,
+    minor: u16,
+    kind: ContainerKind,
+    sections: &[(u32, SectionFlags, usize, Digest)],
+) {
+    out[..8].copy_from_slice(MAGIC);
+    out[8..10].copy_from_slice(&major.to_le_bytes());
+    out[10..12].copy_from_slice(&minor.to_le_bytes());
+    out[12..14].copy_from_slice(&(kind as u16).to_le_bytes());
+    out[14..16].copy_from_slice(&0u16.to_le_bytes());
+    out[16..20].copy_from_slice(&(sections.len() as u32).to_le_bytes());
+    let mut offset = HEADER + DIRECTORY * sections.len();
+    for (index, &(tag, flags, length, digest)) in sections.iter().enumerate() {
+        let p = HEADER + DIRECTORY * index;
+        out[p..p + 4].copy_from_slice(&tag.to_le_bytes());
+        out[p + 4..p + 8].copy_from_slice(&flags.0.to_le_bytes());
+        out[p + 8..p + 16].copy_from_slice(&(offset as u64).to_le_bytes());
+        out[p + 16..p + 24].copy_from_slice(&(length as u64).to_le_bytes());
+        out[p + 24..p + 26].copy_from_slice(&(DigestAlgorithm::Sha256 as u16).to_le_bytes());
+        out[p + 26..p + 58].copy_from_slice(&digest.bytes);
+        offset += length;
+    }
+}
+/// Returns the checked directory envelope length for a bounded section count.
+pub(crate) fn container_header_len(count: usize) -> Result<usize, DecodeError> {
+    u32::try_from(count).map_err(|_| DecodeError::LengthOverflow)?;
+    DIRECTORY
+        .checked_mul(count)
+        .and_then(|n| HEADER.checked_add(n))
+        .ok_or(DecodeError::LengthOverflow)
+}
+
+/// Derives a partition identity directly from already validated borrowed sections.
+pub(crate) fn borrowed_partition_digest(
+    container: &ContainerRef<'_>,
+    semantic: bool,
+    domain: &str,
+) -> Digest {
+    section_partition_digest(
+        container.major,
+        container.kind,
+        &container.sections,
+        semantic,
+        domain,
+    )
+}
+
+/// Hashes a trusted section receipt without decoding a directory or allocating section bodies.
+pub(crate) fn section_partition_digest(
+    major: u16,
+    kind: ContainerKind,
+    sections: &[SectionRef<'_>],
+    semantic: bool,
+    domain: &str,
+) -> Digest {
+    let mut hash = crate::digest::DomainHasher::new(domain);
+    hash.update(&major.to_le_bytes());
+    hash.update(&(kind as u16).to_le_bytes());
+    for section in sections
+        .iter()
+        .filter(|s| s.flags.is_semantic() == semantic)
+    {
+        hash.update(&section.tag.to_le_bytes());
+        hash.update(&(section.payload.len() as u64).to_le_bytes());
+        hash.update(section.payload);
+    }
+    hash.finish()
+}
+pub(crate) const UNIT_CONTAINER_HEADER: usize = HEADER + DIRECTORY * 3;
+
 fn u16le(b: &[u8], p: usize) -> Result<u16, DecodeError> {
     Ok(u16::from_le_bytes(
         b.get(p..p + 2)

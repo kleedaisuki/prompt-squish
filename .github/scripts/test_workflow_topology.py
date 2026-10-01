@@ -44,8 +44,27 @@ def check_topology(document: str) -> None:
     if jobs is None:
         raise ValueError("missing top-level jobs mapping")
     names = re.findall(r"^  ([a-z][a-z-]*):$", jobs.group(1), re.MULTILINE)
-    if names != ["rust-quality", "rust-test", "performance", "profile", "site"]:
+    if names != ["rust-quality", "rust-test", "performance", "profile", "mechanisms", "site", "legacy-fixture"]:
         raise ValueError("CI jobs must remain unique and below the jobs mapping")
+    mechanisms_input = re.search(r"^      mechanisms:\n(.*?)(?=^      \S|\Z)",
+                                 dispatch.group(1), re.MULTILINE | re.DOTALL)
+    if mechanisms_input is None or "        default: false" not in mechanisms_input.group(1):
+        raise ValueError("mechanism evidence must remain explicitly opt-in")
+    origin_input = re.search(r"^      origin_compare:\n(.*?)(?=^      \S|\Z)",
+                            dispatch.group(1), re.MULTILINE | re.DOTALL)
+    if origin_input is None or "        default: false" not in origin_input.group(1):
+        raise ValueError("same-runner origin comparison must remain explicitly opt-in")
+    full_input = re.search(r"^      full_repair_compare:\n(.*?)(?=^      \S|\Z)",
+                           dispatch.group(1), re.MULTILINE | re.DOTALL)
+    if full_input is None or "        default: false" not in full_input.group(1) or "        type: boolean" not in full_input.group(1):
+        raise ValueError("full-repair comparison must remain explicitly opt-in")
+    mechanisms = re.search(r"^  mechanisms:\n(.*?)(?=^  \S|\Z)",
+                           jobs.group(1), re.MULTILINE | re.DOTALL)
+    if mechanisms is None or "    needs: rust-quality" not in mechanisms.group(1) or (
+        "if: github.event_name == 'workflow_dispatch' && (inputs.mechanisms || inputs.origin_compare || inputs.full_repair_compare)"
+        not in mechanisms.group(1)
+    ):
+        raise ValueError("mechanism evidence must require manual input and successful quality")
     profile_input = re.search(r"^      profile:\n(.*?)(?=^      \S|\Z)",
                               dispatch.group(1), re.MULTILINE | re.DOTALL)
     if profile_input is None or "        default: false" not in profile_input.group(1):
@@ -65,17 +84,17 @@ def check_topology(document: str) -> None:
     if not re.search(r"^        id: compile$", quality.group(1), re.MULTILINE):
         raise ValueError("compile outcome must belong to the real MSRV check step")
     if native is None or (
-        "if: always() && !cancelled() && needs.rust-quality.outputs.compiled == 'success'"
+        "if: always() && !cancelled() && needs.rust-quality.result == 'success'"
         not in native.group(1)
     ):
-        raise ValueError("native tests must require successful compilation even after lint failure")
+        raise ValueError("native tests must require complete quality success before expensive platform builds")
     performance = re.search(r"^  performance:\n(.*?)(?=^  \S|\Z)",
                             jobs.group(1), re.MULTILINE | re.DOTALL)
     if performance is None or "inputs.performance" not in performance.group(1):
         raise ValueError("performance job must be gated by the explicit dispatch input")
     site = re.search(r"^  site:\n(.*?)(?=^  \S|\Z)", jobs.group(1), re.MULTILINE | re.DOTALL)
     if site is None or not re.search(
-        r"^    if: github.event_name != 'workflow_dispatch' \|\| inputs.site$",
+        r"^    if: \$\{\{ !inputs.legacy_fixture_only && \(github.event_name != 'workflow_dispatch' \|\| inputs.site\) \}\}$",
         site.group(1), re.MULTILINE,
     ):
         raise ValueError("site validation must run for all push and pull-request events")
@@ -87,6 +106,14 @@ class WorkflowTopologyTests(unittest.TestCase):
     def test_checked_in_workflow_has_expected_boundaries(self) -> None:
         """The lightweight CI suite checks the document that GitHub will dispatch."""
         check_topology(WORKFLOW.read_text(encoding="utf-8"))
+
+    def test_release_contracts_do_not_run_full_timing_benchmarks(self) -> None:
+        """Complete native contracts remain, while only shipping binaries use release."""
+        release = (WORKFLOW.parent / "release.yml").read_text(encoding="utf-8")
+        self.assertIn("build --release --locked --target", release)
+        self.assertIn("test --workspace --all-targets --all-features --locked --target", release)
+        self.assertNotIn("test --release", release)
+        self.assertIn("Smoke test and package", release)
 
     def test_job_step_inserted_before_input_is_rejected(self) -> None:
         """An unanchored performance replacement must fail before another dispatch."""

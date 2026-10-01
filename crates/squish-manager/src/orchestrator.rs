@@ -1167,10 +1167,12 @@ struct EventMapping {
     plan: PlanId,
     timing: BTreeMap<ActionId, Timing>,
     artifacts: BTreeMap<ActionId, Vec<Artifact>>,
+    /// Source evidence supplied by the worker for the same terminal failure.
+    failure_diagnostics: BTreeMap<ActionId, Diagnostic>,
     cache: BTreeMap<ActionId, CachedResult>,
     totals: ActionTotals,
     root_failures: u64,
-    joined: BTreeSet<ActionId>,
+    joined: BTreeMap<ActionId, ActionId>,
     superseded_actions: BTreeSet<ActionId>,
     sources: BTreeMap<ActionId, ResultSource>,
     messages: u64,
@@ -1184,10 +1186,11 @@ impl EventMapping {
             plan,
             timing: BTreeMap::new(),
             artifacts: BTreeMap::new(),
+            failure_diagnostics: BTreeMap::new(),
             cache: BTreeMap::new(),
             totals: ActionTotals::default(),
             root_failures: 0,
-            joined: BTreeSet::new(),
+            joined: BTreeMap::new(),
             superseded_actions: BTreeSet::new(),
             sources: BTreeMap::new(),
             messages: 0,
@@ -1218,8 +1221,8 @@ impl EventMapping {
                 source,
                 ..
             } => self.result(action, key, source),
-            ScheduleEvent::SingleFlight { action, .. } => {
-                self.joined.insert(action);
+            ScheduleEvent::SingleFlight { action, leader, .. } => {
+                self.joined.insert(action, leader);
                 None
             }
             _ => None,
@@ -1246,10 +1249,14 @@ impl EventMapping {
             }
             ActionState::Failed(failure) => {
                 self.totals.failed += 1;
-                if !self.joined.contains(&action) {
+                if !self.joined.contains_key(&action) {
                     self.root_failures += 1;
                 }
-                let diagnostic = failure_diagnostic(&action, failure.code, failure.message);
+                let diagnostic = self
+                    .failure_diagnostics
+                    .remove(&action)
+                    .filter(|diagnostic| diagnostic.code == failure.code)
+                    .unwrap_or_else(|| failure_diagnostic(&action, failure.code, failure.message));
                 Some(EventPayload::ActionFailed {
                     job: self.job.clone(),
                     plan: self.plan.clone(),
@@ -1282,7 +1289,20 @@ impl EventMapping {
 
     fn worker(&mut self, action: ActionId, event: ActionEvent) -> Option<EventPayload> {
         match event {
-            ActionEvent::Diagnostic(diagnostic) => Some(EventPayload::Diagnostic(diagnostic)),
+            ActionEvent::Diagnostic(diagnostic) => {
+                if diagnostic.severity == Severity::Error
+                    && diagnostic
+                        .id
+                        .as_str()
+                        .starts_with("manager-source-failure-")
+                {
+                    // The terminal ActionFailed event carries this once, avoiding duplicate UI errors.
+                    self.capture_source_failure(action, diagnostic);
+                    None
+                } else {
+                    Some(EventPayload::Diagnostic(diagnostic))
+                }
+            }
             ActionEvent::Artifact(artifact) => {
                 self.artifacts.entry(action).or_default().push(artifact);
                 None
@@ -1302,6 +1322,23 @@ impl EventMapping {
                 }))
             }
             _ => None,
+        }
+    }
+
+    /// Mirrors leader evidence into known followers without changing scheduler failure types.
+    fn capture_source_failure(&mut self, leader: ActionId, diagnostic: Diagnostic) {
+        let mut members: Vec<_> = self
+            .joined
+            .iter()
+            .filter(|(_, joined_leader)| **joined_leader == leader)
+            .map(|(member, _)| member.clone())
+            .collect();
+        members.push(leader);
+        for member in members {
+            let mut evidence = diagnostic.clone();
+            evidence.id = DiagnosticId::new(format!("action-{member}-failure"))
+                .expect("non-empty action diagnostic identity");
+            self.failure_diagnostics.insert(member, evidence);
         }
     }
 
@@ -1427,4 +1464,69 @@ fn emit(context: &InvocationContext, payload: EventPayload) -> Result<(), Manage
 
 fn orchestration(message: impl Into<String>) -> ManagerError {
     ManagerError::new("manager_orchestration", Phase::Orchestrate, message)
+}
+
+#[cfg(test)]
+mod source_failure_tests {
+    use super::*;
+    use squish_protocol::{OpaqueSourceId, RelatedSpan, Span};
+
+    #[test]
+    fn worker_source_evidence_is_emitted_once_in_each_terminal_failure() {
+        let mut mapping =
+            EventMapping::new(JobId::new("job").unwrap(), PlanId::new("plan").unwrap());
+        let span = Span::new(
+            OpaqueSourceId::new("sopack://digest/provider/lib.xml").unwrap(),
+            3,
+            11,
+        )
+        .unwrap();
+        let diagnostic = Diagnostic {
+            id: DiagnosticId::new("manager-source-failure-leader").unwrap(),
+            code: "MGB073".into(),
+            severity: Severity::Error,
+            phase: Phase::Instantiate,
+            message: "budget exhausted".into(),
+            primary: Some(span.clone()),
+            related: vec![RelatedSpan {
+                span,
+                label: "macro definition".into(),
+            }],
+            help: Some("increase the invocation budget".into()),
+        };
+        // Scheduler emits the worker evidence once, then terminal states for all members.
+        let leader = ActionId::new("leader").unwrap();
+        mapping.map(ScheduleEvent::SingleFlight {
+            action: ActionId::new("follower").unwrap(),
+            leader: leader.clone(),
+            key: ActionKey::new("same-final-key").unwrap(),
+        });
+        assert!(
+            mapping
+                .worker(leader, ActionEvent::Diagnostic(diagnostic.clone()))
+                .is_none()
+        );
+        for label in ["leader", "follower"] {
+            let action = ActionId::new(label).unwrap();
+            let Some(EventPayload::ActionFailed {
+                diagnostic: emitted,
+                ..
+            }) = mapping.state(
+                action,
+                ActionState::Failed(squish_build::WorkerFailure::new(
+                    "MGB073",
+                    "budget exhausted",
+                )),
+            )
+            else {
+                panic!("expected terminal failure");
+            };
+            assert_eq!(emitted.id.as_str(), format!("action-{label}-failure"));
+            assert_eq!(emitted.primary, diagnostic.primary);
+            assert_eq!(emitted.related, diagnostic.related);
+            assert_eq!(emitted.help, diagnostic.help);
+            assert_eq!(emitted.phase, Phase::Instantiate);
+        }
+        assert!(mapping.failure_diagnostics.is_empty());
+    }
 }

@@ -43,7 +43,10 @@ pub use link_wire::{
     decode_linked_image, decode_static_link_map, encode_linked_image, encode_static_link_map,
 };
 pub use model::*;
-pub use persistent::{PersistError, decode_unit_container, encode_unit_container};
+pub use persistent::{
+    PersistError, ValidatedUnit, VerifiedUnitEncoding, decode_unit_container,
+    encode_unit_container, encode_unit_container_with, semantic_unit_digest_with,
+};
 pub use trace_wire::{decode_expansion_trace, encode_expansion_trace};
 pub use validate::{Validate, ValidationError};
-pub use wire::{decode_relocatable_unit, encode_relocatable_unit};
+pub use wire::{UnitEncodingOverrides, decode_relocatable_unit, encode_relocatable_unit};

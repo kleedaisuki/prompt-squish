@@ -1,6 +1,7 @@
 //! 算法带标签的摘要类型。 / Algorithm-tagged digest types.
 
 use core::fmt;
+use sha2::Digest as _;
 
 /// 持久摘要算法。 / Persistent digest algorithm.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -23,16 +24,21 @@ impl Digest {
     /// 计算规范的领域分隔 SHA-256。 / Computes canonical domain-separated SHA-256.
     #[must_use]
     pub fn sha256(domain: &str, payload: &[u8]) -> Self {
-        let mut bytes = Vec::with_capacity(12 + domain.len() + payload.len());
-        bytes.extend_from_slice(b"xmlsquish\0");
-        bytes.extend_from_slice(domain.as_bytes());
-        bytes.push(0);
-        bytes.extend_from_slice(payload);
-        Self {
-            algorithm: DigestAlgorithm::Sha256,
-            bytes: sha256(&bytes),
-        }
+        Self::sha256_parts(domain, [payload])
     }
+
+    /// Hashes a domain-separated sequence without concatenating its payload.
+    pub(crate) fn sha256_parts<'a>(
+        domain: &str,
+        parts: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Self {
+        let mut hash = DomainHasher::new(domain);
+        for part in parts {
+            hash.update(part);
+        }
+        hash.finish()
+    }
+
     /// 返回小写十六进制。 / Returns lowercase hexadecimal.
     #[must_use]
     pub fn hex(self) -> String {
@@ -58,80 +64,30 @@ macro_rules! digest_newtype { ($($name:ident=>$domain:literal),+$(,)?)=>{$(
 )+};}
 digest_newtype! {SourceDigest=>"source",SemanticUnitDigest=>"unit",DebugDigest=>"debug",ObjectDigest=>"object",LinkedImageDigest=>"linked",DocumentDigest=>"document",ArtifactDigest=>"artifact"}
 
-// 固定分块写法兼容项目 MSRV；新编译器建议的 `as_chunks` 稳定得更晚。
-// Fixed chunk iteration preserves the project MSRV; `as_chunks` stabilized later.
-#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
+/// Streaming domain-separated SHA-256 shared by canonical persistence writers.
+pub(crate) struct DomainHasher(sha2::Sha256);
+impl DomainHasher {
+    pub(crate) fn new(domain: &str) -> Self {
+        let mut hash = sha2::Sha256::new();
+        hash.update(b"xmlsquish\0");
+        hash.update(domain.as_bytes());
+        hash.update([0]);
+        Self(hash)
+    }
+    pub(crate) fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+    pub(crate) fn finish(self) -> Digest {
+        Digest {
+            algorithm: DigestAlgorithm::Sha256,
+            bytes: self.0.finalize().into(),
+        }
+    }
+}
+
+#[cfg(test)]
 fn sha256(input: &[u8]) -> [u8; 32] {
-    const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
-    ];
-    let mut h = [
-        0x6a09e667u32,
-        0xbb67ae85,
-        0x3c6ef372,
-        0xa54ff53a,
-        0x510e527f,
-        0x9b05688c,
-        0x1f83d9ab,
-        0x5be0cd19,
-    ];
-    let n = (input.len() as u64).wrapping_mul(8);
-    let mut d = input.to_vec();
-    d.push(128);
-    while d.len() % 64 != 56 {
-        d.push(0)
-    }
-    d.extend_from_slice(&n.to_be_bytes());
-    for block in d.chunks_exact(64) {
-        let mut w = [0u32; 64];
-        for (i, c) in block.chunks_exact(4).enumerate() {
-            w[i] = u32::from_be_bytes([c[0], c[1], c[2], c[3]])
-        }
-        for i in 16..64 {
-            let a = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let b = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(a)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(b)
-        }
-        let [mut a, mut b, mut c, mut dd, mut e, mut f, mut g, mut z] = h;
-        for i in 0..64 {
-            let s = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let t = z
-                .wrapping_add(s)
-                .wrapping_add((e & f) ^ (!e & g))
-                .wrapping_add(K[i])
-                .wrapping_add(w[i]);
-            let q = (a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22))
-                .wrapping_add((a & b) ^ (a & c) ^ (b & c));
-            z = g;
-            g = f;
-            f = e;
-            e = dd.wrapping_add(t);
-            dd = c;
-            c = b;
-            b = a;
-            a = t.wrapping_add(q)
-        }
-        for (x, y) in h.iter_mut().zip([a, b, c, dd, e, f, g, z]) {
-            *x = x.wrapping_add(y)
-        }
-    }
-    let mut o = [0; 32];
-    for (c, v) in o.chunks_exact_mut(4).zip(h) {
-        c.copy_from_slice(&v.to_be_bytes())
-    }
-    o
+    sha2::Sha256::digest(input).into()
 }
 
 #[cfg(test)]
@@ -151,6 +107,30 @@ mod tests {
         assert_eq!(
             Digest::sha256("source", b"").hex(),
             "19e870d3e8bf9ae077cf6e49dffcb9ccd53eea3b73c03184b755b8f54bd7abd5"
+        );
+    }
+    #[test]
+    fn segmented_hash_preserves_domain_and_all_block_boundaries() {
+        for length in [0, 1, 55, 56, 63, 64, 65, 127, 128, 129, 1024, 4096] {
+            let bytes: Vec<_> = (0..length).map(|i| (i % 251) as u8).collect();
+            let mut framed = b"xmlsquish\0boundary\0".to_vec();
+            framed.extend_from_slice(&bytes);
+            let expected: [u8; 32] = sha2::Sha256::digest(&framed).into();
+            for width in [1, 7, 31, 64, 65] {
+                assert_eq!(
+                    Digest::sha256_parts("boundary", bytes.chunks(width)).bytes,
+                    expected,
+                    "length={length}, width={width}"
+                );
+            }
+        }
+        assert_eq!(
+            Digest {
+                algorithm: DigestAlgorithm::Sha256,
+                bytes: sha256(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")
+            }
+            .hex(),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
         );
     }
 }

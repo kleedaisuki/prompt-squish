@@ -6,7 +6,123 @@ use crate::*;
 /// Encodes a complete module/entry value; IR order is preserved rather than normalized implicitly.
 #[must_use]
 pub fn encode_relocatable_unit(unit: &RelocatableUnitIr) -> Vec<u8> {
-    let mut w = W(Vec::new());
+    encode_unit_projection(unit, UnitEncodingOverrides::default(), false)
+}
+
+/// Borrowed metadata substitutions used when relocating immutable library units.
+/// Semantic arenas, source line maps and operation payloads are never cloned.
+#[derive(Clone, Copy, Default)]
+pub struct UnitEncodingOverrides<'a> {
+    /// Overrides the defining source identity.
+    pub source: Option<&'a SourceKey>,
+    /// Overrides import declarations while preserving their local IDs.
+    pub imports: Option<&'a [ImportDecl]>,
+    /// Maps every original source identity in debug attachments and source records.
+    pub source_keys: Option<&'a std::collections::BTreeMap<SourceKey, SourceKey>>,
+    /// Overrides non-semantic producer metadata.
+    pub producer: Option<&'a Producer>,
+}
+
+pub(crate) fn encode_unit_projection(
+    unit: &RelocatableUnitIr,
+    overrides: UnitEncodingOverrides<'_>,
+    semantic: bool,
+) -> Vec<u8> {
+    let length = unit_projection_len(unit, overrides, semantic);
+    let mut w = W {
+        out: Output::Bytes(Vec::with_capacity(length)),
+        overrides,
+        semantic,
+    };
+    write_unit(&mut w, unit);
+    match w.out {
+        Output::Bytes(bytes) => bytes,
+        _ => unreachable!(),
+    }
+}
+
+/// Counts canonical payload length without allocating a payload buffer.
+pub(crate) fn unit_projection_len(
+    unit: &RelocatableUnitIr,
+    overrides: UnitEncodingOverrides<'_>,
+    semantic: bool,
+) -> usize {
+    let mut w = W {
+        out: Output::Count(0),
+        overrides,
+        semantic,
+    };
+    write_unit(&mut w, unit);
+    match w.out {
+        Output::Count(length) => length,
+        _ => unreachable!(),
+    }
+}
+
+/// Appends a canonical projection into the final container allocation.
+pub(crate) fn append_unit_projection(
+    out: &mut Vec<u8>,
+    unit: &RelocatableUnitIr,
+    overrides: UnitEncodingOverrides<'_>,
+    semantic: bool,
+) {
+    let mut w = W {
+        out: Output::Borrowed(out),
+        overrides,
+        semantic,
+    };
+    write_unit(&mut w, unit);
+}
+
+/// Streams a borrowed semantic projection into an existing digest domain.
+pub(crate) fn hash_unit_projection(
+    hash: crate::digest::DomainHasher,
+    unit: &RelocatableUnitIr,
+    overrides: UnitEncodingOverrides<'_>,
+) -> Digest {
+    update_unit_projection(hash, unit, overrides, true).finish()
+}
+
+/// Feeds either canonical projection into a hasher without materializing payload bytes.
+pub(crate) fn update_unit_projection(
+    hash: crate::digest::DomainHasher,
+    unit: &RelocatableUnitIr,
+    overrides: UnitEncodingOverrides<'_>,
+    semantic: bool,
+) -> crate::digest::DomainHasher {
+    let mut w = W {
+        out: Output::Hash(hash),
+        overrides,
+        semantic,
+    };
+    write_unit(&mut w, unit);
+    match w.out {
+        Output::Hash(hash) => hash,
+        _ => unreachable!(),
+    }
+}
+
+/// Compares canonical semantic bytes directly with the stored section, without a second payload.
+pub(crate) fn semantic_projection_matches(unit: &RelocatableUnitIr, bytes: &[u8]) -> bool {
+    let mut w = W {
+        out: Output::Compare {
+            bytes,
+            position: 0,
+            equal: true,
+        },
+        overrides: UnitEncodingOverrides::default(),
+        semantic: true,
+    };
+    write_unit(&mut w, unit);
+    match w.out {
+        Output::Compare {
+            position, equal, ..
+        } => equal && position == bytes.len(),
+        _ => unreachable!(),
+    }
+}
+
+fn write_unit(w: &mut W<'_>, unit: &RelocatableUnitIr) {
     match unit {
         RelocatableUnitIr::Module(v) => {
             w.tag(1);
@@ -26,7 +142,6 @@ pub fn encode_relocatable_unit(unit: &RelocatableUnitIr) -> Vec<u8> {
             w.entry(v);
         }
     }
-    w.0
 }
 
 /// 有界解码完整单元，拒绝未知 discriminant、非最小 LEB128、非法 UTF-8 和结构无效值。
@@ -49,10 +164,55 @@ pub fn decode_relocatable_unit(bytes: &[u8]) -> Result<RelocatableUnitIr, Decode
     Ok(v)
 }
 
-struct W(Vec<u8>);
-impl W {
+/// The stripped attachment identity is constant across all units and projections.
+fn empty_source_digest() -> SourceDigest {
+    static EMPTY: std::sync::OnceLock<SourceDigest> = std::sync::OnceLock::new();
+    *EMPTY.get_or_init(|| SourceDigest::of(&[]))
+}
+
+/// Canonical bytes or a bounded streaming equality sink.
+enum Output<'a> {
+    Bytes(Vec<u8>),
+    Borrowed(&'a mut Vec<u8>),
+    Count(usize),
+    Hash(crate::digest::DomainHasher),
+    Compare {
+        bytes: &'a [u8],
+        position: usize,
+        equal: bool,
+    },
+}
+impl Output<'_> {
+    fn slice(&mut self, input: &[u8]) {
+        match self {
+            Self::Bytes(out) => out.extend_from_slice(input),
+            Self::Borrowed(out) => out.extend_from_slice(input),
+            Self::Count(length) => *length += input.len(),
+            Self::Hash(hash) => hash.update(input),
+            Self::Compare {
+                bytes,
+                position,
+                equal,
+            } => {
+                let end = position.saturating_add(input.len());
+                *equal &= bytes.get(*position..end) == Some(input);
+                *position = end;
+            }
+        }
+    }
+
+    fn push(&mut self, byte: u8) {
+        self.slice(&[byte]);
+    }
+}
+struct W<'a> {
+    out: Output<'a>,
+    overrides: UnitEncodingOverrides<'a>,
+    semantic: bool,
+}
+impl W<'_> {
     fn tag(&mut self, v: u8) {
-        self.0.push(v)
+        self.out.push(v)
     }
     fn var(&mut self, mut v: u64) {
         loop {
@@ -61,27 +221,27 @@ impl W {
             if v != 0 {
                 b |= 128
             }
-            self.0.push(b);
+            self.out.push(b);
             if v == 0 {
                 break;
             }
         }
     }
     fn u16(&mut self, v: u16) {
-        self.0.extend(v.to_le_bytes())
+        self.out.slice(&v.to_le_bytes())
     }
     fn u32(&mut self, v: u32) {
         self.var(v as u64)
     }
     fn u64(&mut self, v: u64) {
-        self.0.extend(v.to_le_bytes())
+        self.out.slice(&v.to_le_bytes())
     }
     fn bool(&mut self, v: bool) {
         self.tag(v as u8)
     }
     fn str(&mut self, v: &str) {
         self.var(v.len() as u64);
-        self.0.extend(v.as_bytes())
+        self.out.slice(v.as_bytes())
     }
     fn list<T>(&mut self, v: &[T], f: impl Fn(&mut Self, &T)) {
         self.var(v.len() as u64);
@@ -100,9 +260,17 @@ impl W {
     }
     fn digest(&mut self, v: &Digest) {
         self.u16(v.algorithm as u16);
-        self.0.extend(v.bytes)
+        self.out.slice(&v.bytes)
     }
     fn source(&mut self, v: &SourceKey) {
+        let v = self
+            .overrides
+            .source_keys
+            .and_then(|map| map.get(v))
+            .unwrap_or(v);
+        self.source_raw(v);
+    }
+    fn source_raw(&mut self, v: &SourceKey) {
         match v {
             SourceKey::Project { package, path } => {
                 self.tag(1);
@@ -155,8 +323,12 @@ impl W {
         self.str(&v.language_abi.0);
         self.str(&v.frontend_abi.0);
         self.str(&v.regex_abi.0);
-        self.source(&v.source);
-        self.list(&v.imports, |w, x| {
+        if let Some(source) = self.overrides.source {
+            self.source_raw(source);
+        } else {
+            self.source(&v.source);
+        }
+        self.list(self.overrides.imports.unwrap_or(&v.imports), |w, x| {
             w.u32(x.local_id.0);
             w.import_spec(&x.spec);
             w.tag(match x.expected_kind {
@@ -370,6 +542,28 @@ impl W {
         self.str(&v.tool_version);
         self.str(&v.build_fingerprint)
     }
+    fn debug(
+        &mut self,
+        origins: &OriginTable,
+        sources: &SourceArchive,
+        attachment: &UnitSourceAttachment,
+        producer: &Producer,
+    ) {
+        if self.semantic {
+            self.origins(&OriginTable::default());
+            self.archive(&SourceArchive::default());
+            self.source(&attachment.source);
+            self.digest(&empty_source_digest().0);
+            self.u32(0);
+            self.str("");
+            self.str("");
+        } else {
+            self.origins(origins);
+            self.archive(sources);
+            self.attach(attachment);
+            self.producer(self.overrides.producer.unwrap_or(producer));
+        }
+    }
     fn module(&mut self, v: &ModuleObject) {
         self.header(&v.header);
         self.list(&v.definitions, |w, x| {
@@ -385,10 +579,7 @@ impl W {
             w.sig(&x.signature)
         });
         self.common(&v.regions, &v.ops);
-        self.origins(&v.origins);
-        self.archive(&v.sources);
-        self.attach(&v.attachment);
-        self.producer(&v.producer)
+        self.debug(&v.origins, &v.sources, &v.attachment, &v.producer)
     }
     fn entry(&mut self, v: &EntryObject) {
         self.header(&v.header);
@@ -396,10 +587,7 @@ impl W {
         self.u32(v.root_region.0);
         self.list(&v.external_symbols, |w, x| w.name(x));
         self.common(&v.regions, &v.ops);
-        self.origins(&v.origins);
-        self.archive(&v.sources);
-        self.attach(&v.attachment);
-        self.producer(&v.producer)
+        self.debug(&v.origins, &v.sources, &v.attachment, &v.producer)
     }
 }
 
@@ -841,7 +1029,7 @@ impl<'a> R<'a> {
 type ResultBytes<const N: usize> = [u8; N];
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn source() -> SourceKey {
@@ -912,7 +1100,7 @@ mod tests {
             decoded_values: vec![],
         }
     }
-    fn module() -> RelocatableUnitIr {
+    pub(crate) fn module() -> RelocatableUnitIr {
         let ops = vec![
             Op::EmitText { value: StringId(0) },
             Op::EmitComment { value: StringId(1) },
@@ -1021,7 +1209,7 @@ mod tests {
             },
         })
     }
-    fn entry() -> RelocatableUnitIr {
+    pub(crate) fn entry() -> RelocatableUnitIr {
         RelocatableUnitIr::Entry(EntryObject {
             header: header(),
             required_params: vec!["arg".into()],

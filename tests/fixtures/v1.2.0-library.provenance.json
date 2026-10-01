@@ -1,0 +1,14 @@
+{
+  "schema": "xmlsquish.legacy-fixture.v1",
+  "preparation_only": true,
+  "writer_version": "xmlsquish 1.2.0",
+  "official_url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.0/xmlsquish-1.2.0-x86_64-unknown-linux-gnu.tar.gz",
+  "official_archive_sha256": "6d41c44ed11444612b670150e6a1badd9fcb68521f540df1d52a317943ba3287",
+  "writer_executable_sha256": "2c952f02477fd59a55ceba53e471c35972c4dbf5b89549a5be72579a06016bdf",
+  "fixture_sha256": "05ad789a1046df26f40919ba06ffc9bd80bee4fcf80ca1336685f743dc5f1bf2",
+  "fixture_bytes": 5949,
+  "foreign_provider_namespace_present": true,
+  "deterministic_clean_rebuild": true,
+  "preparation_run": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36818129753",
+  "writer_source_commit": "85b68c04c88b6a6b8bce12f1b4e3e10a5a218366"
+}

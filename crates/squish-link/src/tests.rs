@@ -2,7 +2,7 @@
 
 use super::*;
 use squish_ir::*;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 fn source(name: &str) -> SourceKey {
     SourceKey::AdHoc {
@@ -906,4 +906,1373 @@ fn instantiated_documents_advertise_authoritative_portable_abi() {
         decode_linked_document(&encode_linked_document(&output.document)).unwrap(),
         output.document
     );
+}
+
+/// Mutates only debug provenance while retaining real linked units and qualified object identities.
+fn reconstruct_with_origins(
+    mut mutate: impl FnMut(u32, &mut RelocatableUnitIr),
+) -> Result<LinkedProgram, LinkError> {
+    let fixture = linked();
+    let mut units = BTreeMap::new();
+    let mut objects = BTreeMap::new();
+    for (slot, linked) in fixture.image.units.iter().enumerate() {
+        let mut unit = fixture.program.unit(slot as u32).unwrap().clone();
+        mutate(slot as u32, &mut unit);
+        units.insert(linked.source.clone(), unit);
+        objects.insert(
+            linked.source.clone(),
+            fixture.program.object(slot as u32).unwrap(),
+        );
+    }
+    LinkedProgram::reconstruct(fixture.image, units, objects)
+}
+
+/// Accesses test provenance without changing the production unit representation.
+fn test_origins_mut(unit: &mut RelocatableUnitIr) -> &mut OriginTable {
+    match unit {
+        RelocatableUnitIr::Entry(unit) | RelocatableUnitIr::Pack(unit) => &mut unit.origins,
+        RelocatableUnitIr::Module(unit) => &mut unit.origins,
+        RelocatableUnitIr::Sopack(unit) => &mut unit.module.origins,
+    }
+}
+
+/// Differential oracle for the exact previous successful, object-qualified lookup contract.
+fn linear_origin_oracle(
+    program: &LinkedProgram,
+    slot: u32,
+    kind: EntityKind,
+    local: u32,
+) -> Option<QualifiedOriginRef> {
+    let position = program
+        .unit(slot)?
+        .origins()
+        .entries
+        .iter()
+        .position(|entry| entry.entity_kind == kind && entry.local_id == local)?;
+    Some(QualifiedOriginRef {
+        object: program.object(slot)?,
+        local: OriginId(position as u32),
+    })
+}
+
+#[test]
+fn origin_index_matches_linear_first_position_for_duplicates_gaps_and_each_kind() {
+    let program = reconstruct_with_origins(|_, unit| {
+        let origins = test_origins_mut(unit);
+        origins.entries.reverse();
+        let mut extra = origins.entries[0].clone();
+        extra.entity_kind = EntityKind::Parameter;
+        extra.local_id = u32::MAX;
+        origins.entries.insert(0, extra.clone());
+        extra.entity_kind = EntityKind::Region;
+        origins.entries.insert(1, extra.clone());
+        extra.entity_kind = EntityKind::Definition;
+        origins.entries.insert(2, extra);
+        let duplicates = origins
+            .entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.entity_kind,
+                    EntityKind::Operation | EntityKind::Region | EntityKind::Definition
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for mut duplicate in duplicates {
+            // A conflicting span makes accidental last-match selection observable.
+            duplicate.origin.span = Span { start: 1, end: 2 };
+            origins.entries.push(duplicate);
+        }
+    })
+    .unwrap();
+    for slot in 0..program.image().units.len() as u32 {
+        let unit = program.unit(slot).unwrap();
+        for (kind, count) in [
+            (EntityKind::Operation, unit.ops().len()),
+            (EntityKind::Region, unit.regions().len()),
+            (EntityKind::Definition, unit.definitions().len()),
+        ] {
+            for local in 0..count as u32 {
+                assert_eq!(
+                    program.origin(slot, kind, local),
+                    linear_origin_oracle(&program, slot, kind, local),
+                    "{slot}/{kind:?}/{local}"
+                );
+            }
+            assert_eq!(program.origin(slot, kind, u32::MAX), None);
+        }
+    }
+    assert_eq!(program.origin(u32::MAX, EntityKind::Operation, 0), None);
+    let output = Instantiator
+        .instantiate(&program, BTreeMap::new(), Budgets::default())
+        .unwrap();
+    output
+        .trace
+        .validate_against_document(&output.document)
+        .unwrap();
+}
+
+#[test]
+fn explicit_region_origin_wins_over_earlier_operation_origin() {
+    let program =
+        reconstruct_with_origins(|_, unit| test_origins_mut(unit).entries.reverse()).unwrap();
+    let root = program.image().entry.root_region;
+    let first = program.unit(root.unit_slot).unwrap().regions()[root.region.0 as usize].ops[0];
+    let region = program
+        .origin(root.unit_slot, EntityKind::Region, root.region.0)
+        .unwrap();
+    let operation = program
+        .origin(root.unit_slot, EntityKind::Operation, first.0)
+        .unwrap();
+    assert!(
+        operation.local.0 < region.local.0,
+        "fixture puts operation first in the table"
+    );
+    let result = Instantiator
+        .instantiate(&program, BTreeMap::new(), Budgets::default())
+        .unwrap();
+    assert_eq!(result.trace.frames[0].definition_origin, region);
+}
+
+#[test]
+fn absent_region_origin_falls_back_to_the_first_region_operation() {
+    let program = reconstruct_with_origins(|_, unit| {
+        if let Some(root) = unit.root_region() {
+            test_origins_mut(unit).entries.retain(|entry| {
+                !(entry.entity_kind == EntityKind::Region && entry.local_id == root.0)
+            });
+        }
+    })
+    .unwrap();
+    let root = program.image().entry.root_region;
+    assert!(
+        program
+            .origin(root.unit_slot, EntityKind::Region, root.region.0)
+            .is_none()
+    );
+    let first = program.unit(root.unit_slot).unwrap().regions()[root.region.0 as usize].ops[0];
+    let result = Instantiator
+        .instantiate(&program, BTreeMap::new(), Budgets::default())
+        .unwrap();
+    assert_eq!(
+        result.trace.frames[0].definition_origin,
+        linear_origin_oracle(&program, root.unit_slot, EntityKind::Operation, first.0).unwrap()
+    );
+}
+
+#[test]
+fn fresh_cached_and_duplicate_attachment_programs_preserve_complete_results() {
+    let fixture = linked();
+    let expected = Instantiator
+        .instantiate(&fixture.program, BTreeMap::new(), Budgets::default())
+        .unwrap();
+    let cached = reconstruct_with_origins(|_, _| {}).unwrap();
+    assert_eq!(
+        Instantiator
+            .instantiate(&cached, BTreeMap::new(), Budgets::default())
+            .unwrap(),
+        expected
+    );
+    let duplicated = reconstruct_with_origins(|_, unit| {
+        let table = test_origins_mut(unit);
+        table.entries.extend(table.entries.clone());
+    })
+    .unwrap();
+    assert_eq!(
+        Instantiator
+            .instantiate(&duplicated, BTreeMap::new(), Budgets::default())
+            .unwrap(),
+        expected
+    );
+    let first = cached.origin(0, EntityKind::Operation, 0).unwrap();
+    let second = cached.origin(1, EntityKind::Operation, 0).unwrap();
+    assert_ne!(first.object, second.object);
+    assert_eq!(
+        first,
+        linear_origin_oracle(&cached, 0, EntityKind::Operation, 0).unwrap()
+    );
+    assert_eq!(
+        second,
+        linear_origin_oracle(&cached, 1, EntityKind::Operation, 0).unwrap()
+    );
+}
+
+#[test]
+fn missing_definition_origin_and_invalid_operation_origin_keep_failure_semantics() {
+    let missing = reconstruct_with_origins(|_, unit| {
+        test_origins_mut(unit)
+            .entries
+            .retain(|entry| entry.entity_kind != EntityKind::Definition)
+    })
+    .unwrap();
+    let error = Instantiator
+        .instantiate(&missing, BTreeMap::new(), Budgets::default())
+        .unwrap_err();
+    assert_eq!(error.code, "RUN014");
+    assert_eq!(error.frame_chain, vec![FrameId(0)]);
+    assert!(error.origin.is_some());
+    let invalid = reconstruct_with_origins(|_, unit| {
+        let table = test_origins_mut(unit);
+        let mut extra = table.entries[0].clone();
+        extra.entity_kind = EntityKind::Operation;
+        extra.local_id = u32::MAX;
+        table.entries.push(extra);
+    })
+    .unwrap_err();
+    assert_eq!(
+        invalid.code, "LNK030",
+        "the unchanged verifier rejects invalid operation metadata before indexing"
+    );
+}
+
+#[test]
+fn empty_root_without_region_origin_still_reports_run003() {
+    let fixture = linked();
+    let root_slot = fixture.image.entry.root_region.unit_slot;
+    let RelocatableUnitIr::Entry(original) = fixture.program.unit(root_slot).unwrap() else {
+        panic!()
+    };
+    let mut entry = original.clone();
+    entry.header.imports.clear();
+    entry.external_symbols.clear();
+    entry.required_params.clear();
+    entry.regions = vec![Region {
+        id: RegionId(0),
+        ops: Vec::new(),
+    }];
+    entry.ops.clear();
+    entry.root_region = RegionId(0);
+    entry.origins.entries.clear();
+    entry.origins.decoded_values.clear();
+    let source = entry.header.source.clone();
+    let semantic = SemanticUnitDigest::of(b"empty");
+    let image = LinkedImage {
+        schema: entry.header.ir_schema,
+        language_abi: entry.header.language_abi.clone(),
+        entry: LinkedEntry {
+            source: source.clone(),
+            semantic_digest: semantic,
+            required_params: Vec::new(),
+            root_region: LinkedRegionRef {
+                unit_slot: 0,
+                region: RegionId(0),
+            },
+        },
+        units: vec![LinkedUnit {
+            kind: UnitKind::Entry,
+            source: source.clone(),
+            semantic_digest: semantic,
+        }],
+        definitions: Vec::new(),
+        link_map: StaticLinkMap::default(),
+        feature_bits: FeatureBits(0),
+    };
+    let program = LinkedProgram::reconstruct(
+        image,
+        BTreeMap::from([(source.clone(), RelocatableUnitIr::Entry(entry))]),
+        BTreeMap::from([(source, ObjectDigest::of(b"empty"))]),
+    )
+    .unwrap();
+    assert_eq!(
+        Instantiator
+            .instantiate(&program, BTreeMap::new(), Budgets::default())
+            .unwrap_err()
+            .code,
+        "RUN003"
+    );
+}
+
+/// Recovers exact immutable payloads and object qualifications for public cache reconstruction.
+fn shared_reconstruction_parts(
+    fixture: &LinkOutput,
+) -> (
+    BTreeMap<SourceKey, Arc<RelocatableUnitIr>>,
+    BTreeMap<SourceKey, ObjectDigest>,
+) {
+    let mut units = BTreeMap::new();
+    let mut objects = BTreeMap::new();
+    for (slot, linked) in fixture.image.units.iter().enumerate() {
+        units.insert(
+            linked.source.clone(),
+            Arc::new(fixture.program.unit(slot as u32).unwrap().clone()),
+        );
+        objects.insert(
+            linked.source.clone(),
+            fixture.program.object(slot as u32).unwrap(),
+        );
+    }
+    (units, objects)
+}
+
+#[test]
+fn program_clone_and_shared_link_retain_exact_immutable_payloads() {
+    let fixture = linked();
+    let cloned = fixture.program.clone();
+    assert!(std::ptr::eq(fixture.program.image(), cloned.image()));
+    for slot in 0..fixture.image.units.len() as u32 {
+        assert!(std::ptr::eq(
+            fixture.program.unit(slot).unwrap(),
+            cloned.unit(slot).unwrap()
+        ));
+        assert!(std::ptr::eq(
+            fixture.program.optimized(slot).unwrap(),
+            cloned.optimized(slot).unwrap()
+        ));
+    }
+    let (units, objects) = shared_reconstruction_parts(&fixture);
+    let shared = SharedUnitClosure {
+        snapshot: Arc::new(ResolutionSnapshot {
+            units: fixture
+                .image
+                .units
+                .iter()
+                .map(|unit| {
+                    (
+                        unit.source.clone(),
+                        UnitRevision {
+                            kind: unit.kind,
+                            semantic: unit.semantic_digest,
+                            object: objects[&unit.source],
+                        },
+                    )
+                })
+                .collect(),
+            imports: fixture
+                .image
+                .units
+                .iter()
+                .flat_map(|unit| {
+                    units[&unit.source]
+                        .header()
+                        .imports
+                        .iter()
+                        .map(move |import| ImportBinding {
+                            importer: unit.source.clone(),
+                            import: import.local_id,
+                            target: source("m.xml"),
+                        })
+                })
+                .collect(),
+        }),
+        units: units.clone(),
+    };
+    let linked = StaticLinker
+        .link_shared(&fixture.image.entry.source, shared)
+        .unwrap();
+    let cached =
+        LinkedProgram::reconstruct_shared(fixture.image.clone(), units.clone(), objects).unwrap();
+    for (slot, linked_unit) in fixture.image.units.iter().enumerate() {
+        let payload = units[&linked_unit.source].as_ref();
+        assert!(std::ptr::eq(
+            linked.program.unit(slot as u32).unwrap(),
+            payload
+        ));
+        assert!(std::ptr::eq(cached.unit(slot as u32).unwrap(), payload));
+    }
+    let expected = Instantiator
+        .instantiate(&fixture.program, BTreeMap::new(), Budgets::default())
+        .unwrap();
+    for program in [&cloned, &linked.program, &cached] {
+        assert_eq!(
+            Instantiator
+                .instantiate(program, BTreeMap::new(), Budgets::default())
+                .unwrap(),
+            expected
+        );
+    }
+}
+
+/// Named mutation that keeps an image structurally valid while forging cross-object evidence.
+type ImageForgeryCase = (&'static str, fn(&mut LinkedImage));
+
+#[test]
+fn public_reconstruction_rejects_cross_object_root_definition_and_relocation_forgery() {
+    let cases: &[ImageForgeryCase] = &[
+        ("root out of bounds", |image| {
+            image.entry.root_region.region = RegionId(u32::MAX)
+        }),
+        ("different valid root", |image| {
+            image.entry.root_region.region = RegionId(1)
+        }),
+        ("root source", |image| {
+            image.entry.source = source("wrong.xml")
+        }),
+        ("root signature", |image| {
+            image.entry.required_params = vec!["wrong".into()]
+        }),
+        ("definition region out of bounds", |image| {
+            image.definitions[0].body.region = RegionId(u32::MAX)
+        }),
+        ("different valid definition region", |image| {
+            image.definitions[0].body.region = RegionId(1)
+        }),
+        ("cross-unit definition body", |image| {
+            image.definitions[0].body.unit_slot = 0
+        }),
+        ("definition local ID", |image| {
+            image.definitions[0].addr.local_def = LocalDefId(u32::MAX)
+        }),
+        ("definition symbol", |image| {
+            image.definitions[0].symbol.local_name = "wrong".into()
+        }),
+        ("definition signature", |image| {
+            image.definitions[0].signature.params = vec!["wrong".into()]
+        }),
+        ("missing definition", |image| image.definitions.clear()),
+        ("missing symbol", |image| image.link_map.symbols.clear()),
+        ("missing relocation", |image| {
+            image.link_map.relocations.clear()
+        }),
+        ("relocation at non-call", |image| {
+            image.link_map.relocations[0].0.op = OpId(0)
+        }),
+        ("relocation target", |image| {
+            image.link_map.relocations[0].1.local_def = LocalDefId(u32::MAX)
+        }),
+    ];
+    for (label, mutate) in cases {
+        let fixture = linked();
+        let (units, objects) = shared_reconstruction_parts(&fixture);
+        let mut image = fixture.image;
+        mutate(&mut image);
+        image.validate().unwrap(); // Individual structural verification cannot see the mismatch.
+        let error = LinkedProgram::reconstruct_shared(image, units, objects).unwrap_err();
+        assert_eq!(error.code, "LNK032", "{label}: {error}");
+    }
+}
+
+#[test]
+fn scalar_index_preserves_duplicate_entry_values_and_sorted_final_trace_ids() {
+    let fixture = linked();
+    let (mut units, objects) = shared_reconstruction_parts(&fixture);
+    let mut image = fixture.image;
+    image.entry.required_params = vec!["a".into(), "b".into(), "c".into()];
+    let unit = Arc::make_mut(units.get_mut(&image.entry.source).unwrap());
+    let RelocatableUnitIr::Entry(entry) = unit else {
+        panic!("entry fixture")
+    };
+    entry.required_params = image.entry.required_params.clone();
+    let program = LinkedProgram::reconstruct_shared(image, units, objects).unwrap();
+    let result = Instantiator
+        .instantiate(
+            &program,
+            BTreeMap::from([
+                ("a".into(), "same".into()),
+                ("b".into(), "same".into()),
+                ("c".into(), "".into()),
+            ]),
+            Budgets::default(),
+        )
+        .unwrap();
+    assert_eq!(result.trace.scalar_values, ["", "ab", "same"]);
+    assert_eq!(
+        result.trace.frames[0].args,
+        [
+            ("a".into(), ScalarValueId(2)),
+            ("b".into(), ScalarValueId(2)),
+            ("c".into(), ScalarValueId(0)),
+        ]
+    );
+    assert_eq!(
+        result.trace.frames[1].args,
+        [("s".into(), ScalarValueId(1))]
+    );
+    result
+        .trace
+        .validate_against_document(&result.document)
+        .unwrap();
+}
+
+#[test]
+fn scalar_index_entry_setup_crosses_threshold_without_changing_canonical_ids() {
+    let fixture = linked();
+    let (mut units, objects) = shared_reconstruction_parts(&fixture);
+    let mut image = fixture.image;
+    image.entry.required_params = (0..12).map(|id| format!("arg{id:02}")).collect();
+    let unit = Arc::make_mut(units.get_mut(&image.entry.source).unwrap());
+    let RelocatableUnitIr::Entry(entry) = unit else {
+        panic!("entry fixture")
+    };
+    entry.required_params = image.entry.required_params.clone();
+    let program = LinkedProgram::reconstruct_shared(image, units, objects).unwrap();
+    let arguments: BTreeMap<_, _> = (0..12)
+        .map(|id| {
+            let text = match id {
+                0 | 11 => String::new(),
+                1 | 10 => "猫".repeat(4096),
+                _ => format!("unique{id:02}"),
+            };
+            (format!("arg{id:02}"), text)
+        })
+        .collect();
+    let mut expected: Vec<_> = arguments.values().cloned().collect();
+    expected.push("ab".into());
+    expected.sort();
+    expected.dedup();
+    let result = Instantiator
+        .instantiate(&program, arguments.clone(), Budgets::default())
+        .unwrap();
+    assert_eq!(result.trace.scalar_values, expected);
+    let frame_args: Vec<_> = arguments
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.clone(),
+                ScalarValueId(expected.binary_search(value).unwrap() as u32),
+            )
+        })
+        .collect();
+    assert_eq!(result.trace.frames[0].args, frame_args);
+    result
+        .trace
+        .validate_against_document(&result.document)
+        .unwrap();
+}
+
+#[test]
+fn borrowed_static_scalar_matches_task_evaluation_with_exact_budget_errors() {
+    let fixture = linked();
+    let (mut units, objects) = shared_reconstruction_parts(&fixture);
+    let entry_source = fixture.image.entry.source.clone();
+    let RelocatableUnitIr::Entry(entry) = Arc::make_mut(units.get_mut(&entry_source).unwrap())
+    else {
+        panic!("entry fixture")
+    };
+    let Op::Call { args, .. } = &mut entry.ops[1].op else {
+        panic!("call fixture")
+    };
+    args[0].value = ScalarExpr::RenderText(RegionId(4));
+    entry.regions.push(Region {
+        id: RegionId(4),
+        ops: vec![OpId(4), OpId(5)],
+    });
+    // Preserve the canonical sorted pool; remap the existing X literal before adding
+    // separate ab and empty contributions to the scalar's operation-level provenance.
+    entry.header.semantic_strings = vec![String::new(), "X".into(), "ab".into()];
+    entry.ops[3].op = Op::EmitText { value: StringId(1) };
+    entry.ops.push(OpRecord {
+        id: OpId(4),
+        op: Op::EmitText { value: StringId(2) },
+    });
+    entry.ops.push(OpRecord {
+        id: OpId(5),
+        op: Op::EmitText { value: StringId(0) },
+    });
+    let (origins, sources, attachment) = debug(entry_source, 6, 5, 0);
+    entry.origins = origins;
+    entry.sources = sources;
+    entry.attachment = attachment;
+    let program =
+        LinkedProgram::reconstruct_shared(fixture.image.clone(), units.clone(), objects.clone())
+            .unwrap();
+    let mut optimized = BTreeMap::new();
+    for (source, unit) in units {
+        let mut unit = MiddleEnd.optimize_shared(unit).unwrap();
+        unit.static_scalars.clear();
+        optimized.insert(source, Arc::new(crate::middle::ExecutableUnit::from(unit)));
+    }
+    let image = crate::program::ValidatedImage::new(fixture.image, "LNK001", "test image").unwrap();
+    let dynamic = LinkedProgram::reconstruct_optimized(image, optimized, objects).unwrap();
+    for max_output_bytes in [
+        0,
+        8,
+        16,
+        20,
+        40,
+        100,
+        1024,
+        Budgets::default().max_output_bytes,
+    ] {
+        let budget = Budgets {
+            max_output_bytes,
+            ..Budgets::default()
+        };
+        assert_eq!(
+            Instantiator.instantiate(&program, BTreeMap::new(), budget),
+            Instantiator.instantiate(&dynamic, BTreeMap::new(), budget)
+        );
+    }
+}
+
+#[test]
+fn scalar_fragment_moves_preserve_long_empty_and_unicode_occurrence_evidence() {
+    let long = "猫<&>".repeat(16384);
+    for fragments in [
+        vec![],
+        vec![String::new()],
+        vec![String::new(), String::new(), String::new()],
+        vec![String::new(), String::new(), long.clone()],
+        vec![long.clone()],
+        vec![long.clone(), String::new(), long.clone()],
+        vec![String::new(), long.clone(), "tail".into()],
+        vec!["猫\0".into()],
+    ] {
+        let fixture = linked();
+        let (mut units, objects) = shared_reconstruction_parts(&fixture);
+        let entry_source = fixture.image.entry.source.clone();
+        let RelocatableUnitIr::Entry(entry) = Arc::make_mut(units.get_mut(&entry_source).unwrap())
+        else {
+            panic!("entry fixture")
+        };
+        let Op::Call { args, .. } = &mut entry.ops[1].op else {
+            panic!("call fixture")
+        };
+        args[0].value = ScalarExpr::RenderText(RegionId(4));
+        entry.header.semantic_strings = fragments.clone();
+        entry.header.semantic_strings.push("X".into());
+        entry.header.semantic_strings.sort();
+        entry.header.semantic_strings.dedup();
+        entry.ops[3].op = Op::EmitText {
+            value: StringId(
+                entry
+                    .header
+                    .semantic_strings
+                    .binary_search(&"X".into())
+                    .unwrap() as u32,
+            ),
+        };
+        let body_ops: Vec<_> = fragments
+            .iter()
+            .map(|fragment| {
+                let op = OpId(entry.ops.len() as u32);
+                entry.ops.push(OpRecord {
+                    id: op,
+                    op: Op::EmitText {
+                        value: StringId(
+                            entry
+                                .header
+                                .semantic_strings
+                                .binary_search(fragment)
+                                .unwrap() as u32,
+                        ),
+                    },
+                });
+                op
+            })
+            .collect();
+        entry.regions.push(Region {
+            id: RegionId(4),
+            ops: body_ops,
+        });
+        let (origins, sources, attachment) = debug(entry_source, entry.ops.len(), 5, 0);
+        entry.origins = origins;
+        entry.sources = sources;
+        entry.attachment = attachment;
+        let program = LinkedProgram::reconstruct_shared(
+            fixture.image.clone(),
+            units.clone(),
+            objects.clone(),
+        )
+        .unwrap();
+        let optimized = units
+            .into_iter()
+            .map(|(source, unit)| {
+                let mut optimized = MiddleEnd.optimize_shared(unit).unwrap();
+                optimized.static_scalars.clear();
+                (
+                    source,
+                    Arc::new(crate::middle::ExecutableUnit::from(optimized)),
+                )
+            })
+            .collect();
+        let image =
+            crate::program::ValidatedImage::new(fixture.image, "LNK001", "test image").unwrap();
+        let dynamic = LinkedProgram::reconstruct_optimized(image, optimized, objects).unwrap();
+        for max_output_bytes in [
+            0,
+            64,
+            4096,
+            65536,
+            262144,
+            Budgets::default().max_output_bytes,
+        ] {
+            let budget = Budgets {
+                max_output_bytes,
+                ..Budgets::default()
+            };
+            assert_eq!(
+                Instantiator.instantiate(&program, BTreeMap::new(), budget),
+                Instantiator.instantiate(&dynamic, BTreeMap::new(), budget),
+                "{} fragments, budget {max_output_bytes}",
+                fragments.len(),
+            );
+        }
+        let result = Instantiator.instantiate(&program, BTreeMap::new(), Budgets::default());
+        if fragments.concat().contains('\0') {
+            assert_eq!(result.unwrap_err().code, "RUN027");
+            continue;
+        }
+        let result = result.unwrap();
+        assert_eq!(
+            result.trace.scalar_values[result.trace.frames[1].args[0].1.0 as usize],
+            fragments.concat(),
+        );
+        result
+            .trace
+            .validate_against_document(&result.document)
+            .unwrap();
+    }
+}
+
+#[test]
+fn prepared_shared_regex_pool_compiles_once_across_independent_entries_and_hydration() {
+    let symbol = ExpandedName {
+        namespace_uri: "urn:test".into(),
+        local_name: "render".into(),
+    };
+    let module_source = source("m.xml");
+    let before = crate::middle::regex_compilation_attempts();
+    let mut units = BTreeMap::new();
+    let prepared_module = PreparedUnit::new(Arc::new(RelocatableUnitIr::Module(module(
+        module_source.clone(),
+        symbol.clone(),
+    ))))
+    .unwrap();
+    units.insert(module_source.clone(), prepared_module.clone());
+    let roots: Vec<_> = (0..32)
+        .map(|index| source(&format!("entry-{index:02}.xml")))
+        .collect();
+    for root in &roots {
+        units.insert(
+            root.clone(),
+            PreparedUnit::new(Arc::new(RelocatableUnitIr::Entry(entry(
+                root.clone(),
+                symbol.clone(),
+            ))))
+            .unwrap(),
+        );
+    }
+    assert_eq!(crate::middle::regex_compilation_attempts() - before, 0);
+    let closure = PreparedUnitClosure {
+        snapshot: Arc::new(ResolutionSnapshot {
+            units: units
+                .iter()
+                .map(|(source, prepared)| (source.clone(), prepared.revision().clone()))
+                .collect(),
+            imports: units
+                .iter()
+                .flat_map(|(source, prepared)| {
+                    let target = &module_source;
+                    prepared
+                        .unit()
+                        .header()
+                        .imports
+                        .iter()
+                        .map(move |import| ImportBinding {
+                            importer: source.clone(),
+                            import: import.local_id,
+                            target: target.clone(),
+                        })
+                })
+                .collect(),
+        }),
+        units,
+    };
+    for root in &roots {
+        let linked = StaticLinker.link_prepared(root, closure.clone()).unwrap();
+        let slot = linked
+            .image
+            .units
+            .iter()
+            .position(|unit| unit.source == module_source)
+            .unwrap() as u32;
+        assert!(std::ptr::eq(
+            linked.program.optimized(slot).unwrap(),
+            prepared_module.optimized().unwrap().as_ref()
+        ));
+        let cached =
+            LinkedProgram::reconstruct_prepared(linked.image.clone(), closure.units.clone())
+                .unwrap();
+        assert!(std::ptr::eq(
+            cached.optimized(slot).unwrap(),
+            linked.program.optimized(slot).unwrap()
+        ));
+        assert_eq!(
+            Instantiator
+                .instantiate(&cached, BTreeMap::new(), Budgets::default())
+                .unwrap(),
+            Instantiator
+                .instantiate(&linked.program, BTreeMap::new(), Budgets::default())
+                .unwrap()
+        );
+    }
+    assert_eq!(
+        crate::middle::regex_compilation_attempts() - before,
+        2,
+        "32 independent link scopes and cache hydrations must not rebuild the shared pool"
+    );
+    // A compatibility raw link must produce the exact same full result from these identities.
+    let raw = SharedUnitClosure {
+        snapshot: closure.snapshot.clone(),
+        units: closure
+            .units
+            .iter()
+            .map(|(source, prepared)| (source.clone(), prepared.unit().clone()))
+            .collect(),
+    };
+    let expected = StaticLinker.link_shared(&roots[0], raw).unwrap();
+    let actual = StaticLinker.link_prepared(&roots[0], closure).unwrap();
+    assert_eq!(expected.image, actual.image);
+    assert_eq!(expected.map, actual.map);
+    assert_eq!(
+        Instantiator
+            .instantiate(&expected.program, BTreeMap::new(), Budgets::default())
+            .unwrap(),
+        Instantiator
+            .instantiate(&actual.program, BTreeMap::new(), Budgets::default())
+            .unwrap()
+    );
+}
+
+#[test]
+fn prepared_units_derive_actual_revisions_reject_stale_labels_and_unused_invalid_regexes() {
+    let fixture = linked();
+    let (units, _) = shared_reconstruction_parts(&fixture);
+    let prepared: BTreeMap<_, _> = units
+        .into_iter()
+        .map(|(source, unit)| {
+            let bytes = encode_unit_container(&unit).unwrap();
+            let container = decode_container(&bytes).unwrap();
+            let prepared = PreparedUnit::new(unit).unwrap();
+            assert_eq!(prepared.revision().semantic, container.semantic_digest());
+            assert_eq!(prepared.revision().object, container.object_digest());
+            (source, prepared)
+        })
+        .collect();
+    // Existing legacy fixtures intentionally assert synthetic digests; sealed preparation
+    // must not silently authorize those labels, even if all structural metadata matches.
+    assert_eq!(
+        LinkedProgram::reconstruct_prepared(fixture.image.clone(), prepared.clone())
+            .unwrap_err()
+            .code,
+        "LNK034"
+    );
+    let mut image = fixture.image;
+    for unit in &mut image.units {
+        unit.semantic_digest = prepared[&unit.source].revision().semantic;
+    }
+    image.entry.semantic_digest = prepared[&image.entry.source].revision().semantic;
+    let program = LinkedProgram::reconstruct_prepared(image.clone(), prepared.clone()).unwrap();
+    let mut forged = image;
+    forged.definitions[0].body.region = RegionId(1);
+    assert_eq!(
+        LinkedProgram::reconstruct_prepared(forged, prepared)
+            .unwrap_err()
+            .code,
+        "LNK032"
+    );
+    let mut raw = program.unit(1).unwrap().clone();
+    let RelocatableUnitIr::Module(module) = &mut raw else {
+        panic!("module fixture")
+    };
+    // Add an invalid but structurally legal unused pattern at the sorted front of the pool.
+    module.header.semantic_strings.insert(0, "(".into());
+    for regex in &mut module.header.regexes {
+        regex.pattern.0 += 1;
+    }
+    for op in &mut module.ops {
+        if let Op::MatchRegex { pattern, input, .. } = &mut op.op {
+            pattern.0 += 1;
+            if let MatchInput::Literal(id) = input {
+                id.0 += 1;
+            }
+        }
+    }
+    module.header.regexes.insert(
+        0,
+        RegexPattern {
+            pattern: StringId(0),
+            named_captures: vec![],
+        },
+    );
+    raw.validate().unwrap();
+    let invalid = PreparedUnit::new(Arc::new(raw)).unwrap();
+    assert!(invalid.stats().is_none());
+    let before = crate::middle::regex_compilation_attempts();
+    let first = invalid.specialize().unwrap_err();
+    let second = invalid.specialize().unwrap_err();
+    assert_eq!(first, second);
+    assert_eq!(first.code, "LNK030");
+    assert_eq!(
+        crate::middle::regex_compilation_attempts() - before,
+        1,
+        "a failing first pattern must not be recompiled by another consumer"
+    );
+}
+
+#[test]
+fn raw_link_preserves_unreferenced_archive_engine_pattern_boundary() {
+    let fixture = linked();
+    let (mut units, objects) = shared_reconstruction_parts(&fixture);
+    let unused_source = source("z-unused.xml");
+    let symbol = fixture.image.definitions[0].symbol.clone();
+    let mut unused = RelocatableUnitIr::Module(module(unused_source.clone(), symbol));
+    let RelocatableUnitIr::Module(module) = &mut unused else {
+        unreachable!()
+    };
+    module.header.semantic_strings[0] = "(".into();
+    unused.validate().unwrap();
+    assert_eq!(
+        PreparedUnit::new(Arc::new(unused.clone()))
+            .unwrap()
+            .specialize()
+            .unwrap_err()
+            .code,
+        "LNK030"
+    );
+    units.insert(unused_source.clone(), Arc::new(unused));
+    let mut snapshot = ResolutionSnapshot {
+        units: fixture
+            .image
+            .units
+            .iter()
+            .map(|unit| {
+                (
+                    unit.source.clone(),
+                    UnitRevision {
+                        kind: unit.kind,
+                        semantic: unit.semantic_digest,
+                        object: objects[&unit.source],
+                    },
+                )
+            })
+            .collect(),
+        imports: fixture
+            .image
+            .units
+            .iter()
+            .map(|unit| ImportBinding {
+                importer: unit.source.clone(),
+                import: ImportId(0),
+                target: source("m.xml"),
+            })
+            .collect(),
+    };
+    snapshot
+        .units
+        .push((unused_source.clone(), revision(UnitKind::Module, "unused")));
+    snapshot.imports.push(ImportBinding {
+        importer: unused_source,
+        import: ImportId(0),
+        target: source("m.xml"),
+    });
+    let result = StaticLinker
+        .link_shared(
+            &fixture.image.entry.source,
+            SharedUnitClosure {
+                snapshot: Arc::new(snapshot),
+                units,
+            },
+        )
+        .unwrap();
+    assert_eq!(result.image, fixture.image);
+    assert_eq!(
+        Instantiator
+            .instantiate(&result.program, BTreeMap::new(), Budgets::default())
+            .unwrap(),
+        Instantiator
+            .instantiate(&fixture.program, BTreeMap::new(), Budgets::default())
+            .unwrap()
+    );
+}
+
+#[test]
+fn prepared_closure_rejects_forged_snapshot_object_and_retains_original_arc_after_copy_on_write() {
+    let fixture = linked();
+    let (raw, _) = shared_reconstruction_parts(&fixture);
+    let units: BTreeMap<_, _> = raw
+        .into_iter()
+        .map(|(source, unit)| (source, PreparedUnit::new(unit).unwrap()))
+        .collect();
+    let mut snapshot = ResolutionSnapshot {
+        units: units
+            .iter()
+            .map(|(source, prepared)| (source.clone(), prepared.revision().clone()))
+            .collect(),
+        imports: units
+            .keys()
+            .map(|source_key| ImportBinding {
+                importer: source_key.clone(),
+                import: ImportId(0),
+                target: source("m.xml"),
+            })
+            .collect(),
+    };
+    snapshot.units[0].1.object = ObjectDigest::of(b"forged caller label");
+    let error = StaticLinker
+        .link_prepared(
+            &fixture.image.entry.source,
+            PreparedUnitClosure {
+                snapshot: Arc::new(snapshot),
+                units: units.clone(),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "LNK034");
+    let original = &units[&fixture.image.entry.source];
+    let mut edited = original.unit().clone();
+    let RelocatableUnitIr::Entry(entry) = Arc::make_mut(&mut edited) else {
+        panic!("entry fixture")
+    };
+    entry.header.semantic_strings[0] = "Y".into();
+    let changed = PreparedUnit::new(edited).unwrap();
+    assert_ne!(changed.revision().semantic, original.revision().semantic);
+    assert_ne!(changed.revision().object, original.revision().object);
+    assert_eq!(original.unit().header().semantic_strings[0], "X");
+}
+
+/// Relocates a real recursive unit into a portable library identity before independent binding.
+fn linked_relocated_recursive_library() -> LinkOutput {
+    let original = linked_non_tail_reverse();
+    let entry_source = original.image.entry.source.clone();
+    let library_source = SourceKey::Project {
+        package: PackageInstanceId {
+            source_kind: 5,
+            canonical_source: "sopack:library/frozen-example".into(),
+            package_name: "library".into(),
+            exact_revision: "frozen-unit-v1".into(),
+        },
+        path: vec![
+            "_providers".into(),
+            "frozen-provider".into(),
+            "lib.xml".into(),
+        ],
+    };
+    let mut units = BTreeMap::new();
+    for slot in 0..original.image.units.len() as u32 {
+        let mut unit = original.program.unit(slot).unwrap().clone();
+        if unit.kind() == UnitKind::Module {
+            let old_source = unit.header().source.clone();
+            unit.header_mut().source = library_source.clone();
+            unit.attachment_mut().source = library_source.clone();
+            for record in &mut unit.sources_mut().records {
+                if record.key == old_source {
+                    record.key = library_source.clone();
+                }
+            }
+        }
+        let source = unit.header().source.clone();
+        units.insert(source, PreparedUnit::new(Arc::new(unit)).unwrap());
+    }
+    let closure = PreparedUnitClosure {
+        snapshot: Arc::new(ResolutionSnapshot {
+            units: units
+                .iter()
+                .map(|(source, unit)| (source.clone(), unit.revision().clone()))
+                .collect(),
+            imports: vec![ImportBinding {
+                importer: entry_source.clone(),
+                import: ImportId(0),
+                target: library_source,
+            }],
+        }),
+        units,
+    };
+    StaticLinker.link_prepared(&entry_source, closure).unwrap()
+}
+
+#[test]
+fn diagnostic_failure_retains_actual_archived_call_chain_and_unchanged_budget_error() {
+    let linked = linked_relocated_recursive_library();
+    let budgets = Budgets {
+        max_depth: 100,
+        max_expansions: 3,
+        max_output_bytes: 1_000_000,
+    };
+    let legacy = Instantiator
+        .instantiate(&linked.program, BTreeMap::new(), budgets)
+        .unwrap_err();
+    let failure = Instantiator
+        .instantiate_with_diagnostics(&linked.program, BTreeMap::new(), budgets)
+        .unwrap_err();
+    assert_eq!(failure.error, legacy);
+    assert_eq!(failure.error.code, "RUN013");
+    assert_eq!(
+        failure
+            .frames
+            .iter()
+            .map(|frame| frame.id)
+            .collect::<Vec<_>>(),
+        legacy.frame_chain
+    );
+    assert_eq!(failure.frames.len(), 3);
+    assert_eq!(failure.frames[0].identity, FrameIdentity::Entry);
+    assert!(failure.frames[0].call_origin.is_none());
+    let entry = linked.image.entry.source.clone();
+    let (primary_source, primary_span) = linked
+        .program
+        .resolve_origin(failure.error.origin.as_ref().unwrap())
+        .unwrap();
+    let SourceKey::Project { package, path } = &primary_source else {
+        panic!("library origin")
+    };
+    assert_eq!(package.source_kind, 5);
+    assert_eq!(path.last().unwrap(), "lib.xml");
+    assert_eq!(primary_span, Span { start: 0, end: 1 });
+    assert_eq!(
+        linked
+            .program
+            .resolve_origin(failure.frames[1].call_origin.as_ref().unwrap())
+            .unwrap()
+            .0,
+        entry
+    );
+    assert_eq!(
+        linked
+            .program
+            .resolve_origin(failure.frames[2].call_origin.as_ref().unwrap())
+            .unwrap()
+            .0,
+        primary_source
+    );
+    for frame in &failure.frames[1..] {
+        assert!(matches!(frame.identity, FrameIdentity::Macro(_)));
+        assert_eq!(
+            linked
+                .program
+                .resolve_origin(&frame.definition_origin)
+                .unwrap()
+                .0,
+            primary_source
+        );
+    }
+    assert_ne!(failure.frames[1].id, failure.frames[2].id);
+    assert_eq!(
+        failure.frames[1].definition_origin, failure.frames[2].definition_origin,
+        "recursive occurrences keep distinct frames, not fabricated declaration identities"
+    );
+}
+
+#[test]
+fn diagnostic_entry_point_preserves_success_depth_output_and_pre_machine_failures() {
+    let fixture = linked_non_tail_reverse();
+    let success = Instantiator
+        .instantiate(&fixture.program, BTreeMap::new(), Budgets::default())
+        .unwrap();
+    assert_eq!(
+        Instantiator
+            .instantiate_with_diagnostics(&fixture.program, BTreeMap::new(), Budgets::default())
+            .unwrap(),
+        success
+    );
+    for budgets in [
+        Budgets {
+            max_depth: 2,
+            ..Budgets::default()
+        },
+        Budgets {
+            max_output_bytes: 1,
+            ..Budgets::default()
+        },
+        Budgets {
+            max_depth: 0,
+            ..Budgets::default()
+        },
+    ] {
+        let legacy = Instantiator
+            .instantiate(&fixture.program, BTreeMap::new(), budgets)
+            .unwrap_err();
+        let failure = Instantiator
+            .instantiate_with_diagnostics(&fixture.program, BTreeMap::new(), budgets)
+            .unwrap_err();
+        assert_eq!(failure.error, legacy);
+        assert_eq!(
+            failure
+                .frames
+                .iter()
+                .map(|frame| frame.id)
+                .collect::<Vec<_>>(),
+            legacy.frame_chain
+        );
+        for frame in failure.frames.iter() {
+            assert!(
+                fixture
+                    .program
+                    .resolve_origin(&frame.definition_origin)
+                    .is_some()
+            );
+            if let Some(origin) = &frame.call_origin {
+                assert!(fixture.program.resolve_origin(origin).is_some());
+            }
+        }
+    }
+    let arguments = BTreeMap::from([("unexpected".into(), "x".into())]);
+    let legacy = Instantiator
+        .instantiate(&fixture.program, arguments.clone(), Budgets::default())
+        .unwrap_err();
+    let failure = Instantiator
+        .instantiate_with_diagnostics(&fixture.program, arguments, Budgets::default())
+        .unwrap_err();
+    assert_eq!(failure.error, legacy);
+    assert_eq!(failure.error.code, "RUN002");
+    assert!(failure.frames.is_empty());
+}
+
+#[test]
+fn origin_resolution_uses_exact_object_table_and_source_archive_without_guesses() {
+    let fixture = linked();
+    for slot in 0..fixture.image.units.len() as u32 {
+        let origin = fixture
+            .program
+            .origin(slot, EntityKind::Operation, 0)
+            .unwrap();
+        let (key, span) = fixture.program.resolve_origin(&origin).unwrap();
+        assert_eq!(
+            key,
+            fixture.program.unit(slot).unwrap().sources().records[0].key
+        );
+        assert_eq!(span, Span { start: 0, end: 1 });
+        assert!(
+            fixture
+                .program
+                .resolve_origin(&QualifiedOriginRef {
+                    object: origin.object,
+                    local: OriginId(u32::MAX)
+                })
+                .is_none()
+        );
+    }
+    assert!(
+        fixture
+            .program
+            .resolve_origin(&QualifiedOriginRef {
+                object: ObjectDigest::of(b"unknown object"),
+                local: OriginId(0)
+            })
+            .is_none()
+    );
+    let archived_source = source("z-included.xml");
+    let program = reconstruct_with_origins(|_, unit| {
+        if unit.kind() == UnitKind::Module {
+            let mut record = unit.sources().records[0].clone();
+            record.key = archived_source.clone();
+            record.bom_len = 3;
+            unit.sources_mut().records.push(record);
+            let origin = test_origins_mut(unit)
+                .entries
+                .iter_mut()
+                .find(|entry| entry.entity_kind == EntityKind::Operation && entry.local_id == 0)
+                .unwrap();
+            origin.origin.source = SourceRef(1);
+            origin.origin.span = Span { start: 6, end: 7 };
+        }
+    })
+    .unwrap();
+    let origin = program.origin(1, EntityKind::Operation, 0).unwrap();
+    assert_eq!(
+        program.resolve_origin(&origin),
+        Some((archived_source, Span { start: 6, end: 7 })),
+        "sourceRef, not unit header or caller URI, owns payload-relative BOM spans"
+    );
+    let (units, mut objects) = shared_reconstruction_parts(&fixture);
+    for digest in objects.values_mut() {
+        *digest = ObjectDigest::of(b"duplicated asserted object");
+    }
+    let ambiguous = LinkedProgram::reconstruct_shared(fixture.image, units, objects).unwrap();
+    let reference = ambiguous.origin(0, EntityKind::Operation, 0).unwrap();
+    assert!(ambiguous.resolve_origin(&reference).is_none());
+}
+
+/// Builds actual frontend IR for a tiny capture repeated from one large literal input.
+pub(crate) fn linked_large_literal_captures(expansions: usize) -> LinkedProgram {
+    struct Memory(Vec<u8>);
+    impl squish_source::SourceProvider for Memory {
+        fn read(&self, _: &squish_source::SourceLocator) -> std::io::Result<Vec<u8>> {
+            Ok(self.0.clone())
+        }
+    }
+    let context = squish_xml_front::FrontendSourceContext::new(PackageInstanceId {
+        source_kind: 1,
+        canonical_source: "workspace:captures".into(),
+        package_name: "captures".into(),
+        exact_revision: "frozen-test".into(),
+    });
+    let mut units = BTreeMap::new();
+    let namespace = squish_xml_front::DSL_NAMESPACE;
+    let entry = format!(
+        r#"<xs:entry xmlns:xs="{namespace}" xmlns:m="urn:test"><xs:import src="module.xml"/><root>{}</root></xs:entry>"#,
+        r#"<xs:expand ref="m:render"/>"#.repeat(expansions),
+    );
+    let module = format!(
+        r#"<xs:module xmlns:xs="{namespace}" xmlns:m="urn:test"><xs:macro name="m:render"><xs:ifr str="{}猫z" pattern="(?P&lt;value&gt;猫)"><xs:insert get="match.value"/></xs:ifr></xs:macro></xs:module>"#,
+        "p".repeat(1024 * 1024),
+    );
+    for (path, text) in [("entry.xml", entry), ("module.xml", module)] {
+        let mut builder = squish_source::SnapshotBuilder::new(Memory(text.into_bytes()));
+        let source = builder
+            .load(
+                squish_source::SourceId::new(
+                    squish_source::PackageId::new("captures").unwrap(),
+                    squish_source::LogicalPath::new(path).unwrap(),
+                ),
+                squish_source::SourceLocator::file("unused"),
+            )
+            .unwrap();
+        let unit = squish_xml_front::compile(&source, &context).unwrap().unit;
+        units.insert(
+            unit.header().source.clone(),
+            PreparedUnit::new(Arc::new(unit)).unwrap(),
+        );
+    }
+    let entry = units.keys().find(|key| matches!(key, SourceKey::Project { path, .. } if path.last().is_some_and(|name| name == "entry.xml"))).unwrap().clone();
+    let module = units.keys().find(|key| *key != &entry).unwrap().clone();
+    let closure = PreparedUnitClosure {
+        snapshot: Arc::new(ResolutionSnapshot {
+            units: units
+                .iter()
+                .map(|(source, unit)| (source.clone(), unit.revision().clone()))
+                .collect(),
+            imports: vec![ImportBinding {
+                importer: entry.clone(),
+                import: ImportId(0),
+                target: module,
+            }],
+        }),
+        units,
+    };
+    StaticLinker.link_prepared(&entry, closure).unwrap().program
+}
+
+#[test]
+fn large_literal_capture_fanout_produces_only_tiny_visible_outputs_with_exact_budget_failure() {
+    let program = linked_large_literal_captures(16);
+    let before = crate::instantiate::owned_text_materializations();
+    let output = Instantiator
+        .instantiate(&program, BTreeMap::new(), Budgets::default())
+        .unwrap();
+    let after = crate::instantiate::owned_text_materializations();
+    // Literal inputs/captures use already-owned unit views. This production-path counter
+    // catches accidental String-producing literal adoption even if final bytes still match;
+    // it is not a general allocator or arbitrary temporary-clone detector.
+    assert_eq!((after.0 - before.0, after.1 - before.1), (0, 0));
+    assert_eq!(output.document.strings, ["猫"]);
+    assert!(output.trace.scalar_values.is_empty());
+    assert_eq!(output.trace.frames.len(), 17);
+    assert_eq!(
+        output
+            .document
+            .items
+            .iter()
+            .filter(|item| matches!(item, DocumentItem::Text { .. }))
+            .count(),
+        16
+    );
+    output
+        .trace
+        .validate_against_document(&output.document)
+        .unwrap();
+    let failure = Instantiator
+        .instantiate_with_diagnostics(
+            &program,
+            BTreeMap::new(),
+            Budgets {
+                max_output_bytes: 64,
+                ..Budgets::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(failure.error.code, "RUN016");
+    assert!(failure.error.origin.is_some());
+    assert!(!failure.frames.is_empty());
 }

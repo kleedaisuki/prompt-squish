@@ -90,6 +90,47 @@ const en: ReleaseUiCopy = {
     allReleases: "All releases",
   },
   versions: {
+    "1.2.1": {
+      "title": "Identity-safe reuse and verified runtime repair",
+      "description": "xmlsquish 1.2.1 repairs pack identity, reusable compilation, SOPack archive handling and verified storage. Exact-source hosted verification passed; the main gate and publication are pending.",
+      "date": "October 1, 2026",
+      "summary": "Repair sharing and identity boundaries without changing the public CLI or rewriting existing SOPack inputs. The exact source passed hosted contracts and scoped measurements. Main-branch/release gates remain pending; results are not a universal speedup claim.",
+      "changes": [
+        {
+          "id": "identity",
+          "title": "Reuse the right product",
+          "items": [
+            "Pack reuse matches document, provenance and resource directives together: an empty document can still select different assets.",
+            "Wrong cached keys/outputs are rejected before hydration; cache policy may warn and rebuild. Derived CAS corruption is not authoritative product corruption: a corrupt published file must never be adopted.",
+            "SOPack validation covers the whole archive before selecting referenced precompiled units; unused local XML remains strictly checked."
+          ]
+        },
+        {
+          "id": "mechanisms",
+          "title": "Verify once, preserve the contract",
+          "items": [
+            "Immutable verified snapshots and borrowed/shared runtime boundaries avoid reacquiring identical data without weakening digest, size, corruption or durability checks.",
+            "Repeated text shares existing content; multi-fragment concatenation still materializes visible bytes when necessary. Per-selection provenance, budgets, diagnostic order and public strings remain unchanged.",
+            "Canonical ZIP records are checked directly. Provider fingerprints derive from content and reference topology, not checkout paths. Catalog preparation verifies committed publications without loading derived CAS output bodies; exact warm SOPack proofs remain digest/size-bound."
+          ]
+        },
+        {
+          "id": "upgrade",
+          "title": "Private cache identity is not a library format",
+          "items": [
+            "Canonical schema-1 readers accept v1.2.0 SOPacks. Rewriting a single relocated archive preserves provider paths and normalized bytes; existing inputs and SHA-256 pins stay immutable.",
+            "Private derived caches may rebuild after upgrades; do not edit internal hashes or SQLite records to migrate them.",
+            "Fresh archive bytes can differ between producer versions. The v1.2.0 release history remains unchanged. Exact text-sharing source passed quality, three native platforms, Site and mechanism comparison; earlier checkpoints remain historical, and main/release gates are pending."
+          ]
+        }
+      ],
+      "compatibility": [
+        "Existing namespace, manifest, CLI flags and product roles are unchanged. Review the current manual and bundled guide after upgrading.",
+        "Do not replace SOPack bytes under an existing pin; intentionally update the dependency through the existing add lifecycle.",
+        "Use clean only if cleanup is needed: it removes all project-local build state, so offline rebuilds require available dependency inputs."
+      ]
+    },
+
     "1.2.0": {
       "title": "Reproducible packs and relocatable libraries",
       "description": "xmlsquish 1.2.0 adds pack and SOPack units, raw assets, an explicit compiler pipeline, and opt-in persistent tracing.",
@@ -256,6 +297,47 @@ const zh: ReleaseUiCopy = {
     allReleases: "全部发布",
   },
   versions: {
+    "1.2.1": {
+      "title": "身份安全的复用与已验证运行期修复",
+      "description": "xmlsquish 1.2.1 修复 pack 身份、可复用编译、SOPack 归档处理与已验证存储；精确源码托管验证已通过；主分支门禁与发布待完成。",
+      "date": "2026 年 10 月 1 日",
+      "summary": "修复共享与身份边界，不改公共 CLI，也不重写既有 SOPack 输入。精确源码契约与有限场景测量已通过。主分支/发布门禁仍待完成，不宣称普遍加速。",
+      "changes": [
+        {
+          "id": "identity",
+          "title": "复用正确的产品",
+          "items": [
+            "pack 复用同时匹配文档、来源跟踪与资源指令：同样的空文档仍可能选择不同资源。",
+            "错误缓存键或输出在恢复前拒绝；缓存策略可警告并重建。派生 CAS 损坏不等于权威产品损坏，损坏的已发布文件不得重新采用。",
+            "SOPack 先完整验证归档，再选择引用的预编译单元；未引用本地 XML 仍严格检查。"
+          ]
+        },
+        {
+          "id": "mechanisms",
+          "title": "验证一次，不削弱契约",
+          "items": [
+            "不可变已验证快照与借用/共享边界避免重复取得相同数据，不放宽摘要、大小、损坏或持久化检查。",
+            "重复文本共享已有内容，多片段拼接仍按需物化可见 bytes；每次选择的来源、预算、诊断顺序与公共字符串接口不变。",
+            "直接检查规范 ZIP 记录；提供者指纹基于内容与引用拓扑，不依赖检出路径。目录准备验证已提交发布，不装载派生 CAS 输出；热 SOPack 证明仍绑定精确摘要与大小。"
+          ]
+        },
+        {
+          "id": "upgrade",
+          "title": "私有缓存身份不是编译库格式",
+          "items": [
+            "schema-1 读取契约接受 v1.2.0 SOPack；重写单一已重定位归档保留提供者路径与规范 bytes。既有输入和 SHA-256 摘要不变。",
+            "升级可以重建私有派生缓存；不要手改内部 hash 或 SQLite 记录进行迁移。",
+            "不同生产者版本新生成的归档 bytes 可以变化。v1.2.0 发布历史不变。精确文本共享源码已通过质量、三个原生平台、站点与机制比较；较早检查点属历史，主分支/发布门禁仍待完成。"
+          ]
+        }
+      ],
+      "compatibility": [
+        "命名空间、清单、CLI 旗标和产品角色不变。升级后查阅当前手册与自带指南。",
+        "不要在既有锁定身份下替换 SOPack bytes；通过既有 add 生命周期有意更新依赖。",
+        "仅在需要清理时使用 clean：它删除全部项目构建状态，离线重建必须具备依赖输入。"
+      ]
+    },
+
     "1.2.0": {
       "title": "可复现打包与可重定位编译库",
       "description": "xmlsquish 1.2.0 新增 pack、SOPack、原始资源、显式编译管线与可选的跨运行跟踪。",
