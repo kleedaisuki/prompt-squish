@@ -661,13 +661,13 @@ fn instantiation_error(
         {
             related.push(RelatedSpan {
                 span,
-                label: format!("expansion frame {}: {kind} call", depth),
+                label: format!("expansion frame {depth}: {kind} call"),
             });
         }
         if let Some(span) = diagnostic_span(program, &frame.definition_origin) {
             related.push(RelatedSpan {
                 span,
-                label: format!("expansion frame {}: {kind} definition", depth),
+                label: format!("expansion frame {depth}: {kind} definition"),
             });
         }
     }
