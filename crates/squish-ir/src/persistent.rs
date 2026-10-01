@@ -701,7 +701,7 @@ mod tests {
 
     #[test]
     fn unit_sections_allow_unknown_optional_debug_extensions() {
-        let sections = vec![
+        let sections = [
             descriptor(),
             Section {
                 tag: SECTION_UNIT,
