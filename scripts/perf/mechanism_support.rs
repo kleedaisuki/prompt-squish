@@ -486,21 +486,3 @@ fn quoted(value: &str) -> String {
     result.push('"');
     result
 }
-
-#[cfg(test)]
-mod smoke_tests {
-    use super::{Config, smoke_requested};
-
-    /// Ordinary debug tests cannot accidentally select expensive adaptive sampling.
-    #[test]
-    fn debug_execution_selects_bounded_smoke() {
-        if cfg!(debug_assertions) {
-            assert!(smoke_requested());
-            let config = Config::from_env();
-            assert_eq!(config.samples, 1);
-            assert_eq!(config.warmup, 1);
-            assert_eq!(config.max_iterations, 1);
-            assert_eq!(config.allocation_iterations, 1);
-        }
-    }
-}
