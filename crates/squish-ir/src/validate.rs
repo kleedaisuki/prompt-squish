@@ -199,7 +199,7 @@ fn validate_header(h: &UnitHeader) -> Result<(), ValidationError> {
     }
     validate_source_key(&h.source)
 }
-fn validate_source_key(k: &SourceKey) -> Result<(), ValidationError> {
+pub(crate) fn validate_source_key(k: &SourceKey) -> Result<(), ValidationError> {
     match k {
         SourceKey::Project { path, package } => {
             if path.is_empty()

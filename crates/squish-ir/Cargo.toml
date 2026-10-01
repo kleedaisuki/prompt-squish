@@ -7,3 +7,6 @@ license.workspace = true
 repository.workspace = true
 description = "Reusable intermediate representation for prompt-squish"
 
+
+[dependencies]
+sha2 = "0.10"
