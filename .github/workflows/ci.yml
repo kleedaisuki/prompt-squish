@@ -23,6 +23,10 @@ on:
         description: 'Collect in-process v1.2 mechanism latency and allocation evidence'
         type: boolean
         default: false
+      origin_compare:
+        description: 'Compare pinned pre-index and candidate origins on one hosted runner'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -333,7 +337,7 @@ jobs:
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
   mechanisms:
-    if: github.event_name == 'workflow_dispatch' && inputs.mechanisms
+    if: github.event_name == 'workflow_dispatch' && (inputs.mechanisms || inputs.origin_compare)
     needs: rust-quality
     name: In-process mechanism evidence
     runs-on: ubuntu-latest
@@ -358,6 +362,7 @@ jobs:
             rust-v1-Linux-X64-1.88-performance-${{ hashFiles('Cargo.lock') }}-
             rust-v1-Linux-X64-1.88-performance-
       - name: Measure four selected in-process targets without rebuilding all tests
+        if: inputs.mechanisms
         env:
           MECHANISM_SAMPLES: '5'
           MECHANISM_WARMUP: '2'
@@ -365,6 +370,39 @@ jobs:
           MECHANISM_MAX_ITERATIONS: '256'
           MECHANISM_ALLOCATION_ITERATIONS: '1'
         run: python scripts/perf/mechanisms.py --directory .temp/mechanisms
+      - name: Restore isolated pinned-reference core compilation
+        if: inputs.origin_compare
+        id: origin-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .cache/origin-reference-target
+          key: origin-reference-v1-54fe53f-linux-x64-1.88-${{ hashFiles('Cargo.lock', 'scripts/perf/mechanism_support.rs', 'crates/squish-link/benches/**') }}
+          restore-keys: origin-reference-v1-54fe53f-linux-x64-1.88-
+      - name: Compare targeted origins with identical harness and ABBA process passes
+        if: inputs.origin_compare
+        env:
+          MECHANISM_SAMPLES: '5'
+          MECHANISM_WARMUP: '2'
+          MECHANISM_TARGET_US: '3000'
+          MECHANISM_MAX_ITERATIONS: '256'
+        run: python scripts/perf/origin_compare.py --passes 3 --directory .temp/origin-comparison
+      - name: Retain small same-runner comparison evidence
+        if: always() && inputs.origin_compare
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: origin-comparison-${{ github.sha }}
+          path: |
+            .temp/origin-comparison/report.json
+            .temp/origin-comparison/*.jsonl
+            .temp/origin-comparison/*-cargo-stderr.txt
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Preserve isolated reference compilation after non-cancelled failure
+        if: always() && !cancelled() && inputs.origin_compare && steps.origin-cache.outputs.cache-hit != 'true' && steps.origin-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .cache/origin-reference-target
+          key: ${{ steps.origin-cache.outputs.cache-primary-key }}
       - name: Retain small mechanism evidence only
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

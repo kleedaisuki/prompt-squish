@@ -50,10 +50,15 @@ def check_topology(document: str) -> None:
                                  dispatch.group(1), re.MULTILINE | re.DOTALL)
     if mechanisms_input is None or "        default: false" not in mechanisms_input.group(1):
         raise ValueError("mechanism evidence must remain explicitly opt-in")
+    origin_input = re.search(r"^      origin_compare:\n(.*?)(?=^      \S|\Z)",
+                            dispatch.group(1), re.MULTILINE | re.DOTALL)
+    if origin_input is None or "        default: false" not in origin_input.group(1):
+        raise ValueError("same-runner origin comparison must remain explicitly opt-in")
     mechanisms = re.search(r"^  mechanisms:\n(.*?)(?=^  \S|\Z)",
                            jobs.group(1), re.MULTILINE | re.DOTALL)
     if mechanisms is None or "    needs: rust-quality" not in mechanisms.group(1) or (
-        "if: github.event_name == 'workflow_dispatch' && inputs.mechanisms" not in mechanisms.group(1)
+        "if: github.event_name == 'workflow_dispatch' && (inputs.mechanisms || inputs.origin_compare)"
+        not in mechanisms.group(1)
     ):
         raise ValueError("mechanism evidence must require manual input and successful quality")
     profile_input = re.search(r"^      profile:\n(.*?)(?=^      \S|\Z)",

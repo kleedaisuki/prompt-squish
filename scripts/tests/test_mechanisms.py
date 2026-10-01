@@ -53,6 +53,17 @@ class MechanismReportTests(unittest.TestCase):
         row = self.latency()
         self.assertEqual(len(mechanisms.aggregate([row, {**row, "drop_included": False}])), 2)
 
+    def test_untimed_oracle_is_not_aggregated_as_a_sample(self) -> None:
+        """Canonical output metadata remains outside latency statistics."""
+        oracle = dict(schema=mechanisms.ORACLE_SCHEMA, suite="core", workload="owned",
+                      dimensions={"definitions": 64}, document_sha256="a" * 64,
+                      trace_sha256="b" * 64, directives_sha256="c" * 64)
+        samples, oracles = mechanisms.split_records([oracle, self.latency()])
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(oracles, [oracle])
+        with self.assertRaisesRegex(ValueError, "digest"):
+            mechanisms.validate_oracle({**oracle, "trace_sha256": "not-a-sha256"})
+
 
 if __name__ == "__main__":
     unittest.main()

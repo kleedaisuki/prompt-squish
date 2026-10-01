@@ -4,10 +4,11 @@ use crate::support;
 use squish_ir::{
     DocumentItem, ImportBinding, PackageInstanceId, RelocatableUnitIr, ResolutionSnapshot,
     SourceKey, UnitRevision, Validate, decode_container, decode_unit_container,
-    encode_expansion_trace, encode_unit_container,
+    encode_expansion_trace, encode_linked_document, encode_unit_container,
 };
 use squish_link::{
     Budgets, InstantiateOutput, Instantiator, LinkOutput, MiddleEnd, StaticLinker, UnitClosure,
+    encode_archive_directives,
 };
 use squish_source::{
     LogicalPath, PackageId, SnapshotBuilder, SourceBlob, SourceId, SourceLocator, SourceProvider,
@@ -239,8 +240,8 @@ fn fixture(
         ("document_items", result.document.items.len() as u64),
         ("trace_origins", result.trace.origins.len() as u64),
         ("scalar_values", result.trace.scalar_values.len() as u64),
-        // Every witnessed origin required a real linear lookup; extra substitutions may
-        // perform additional lookups, so this is a provenance-derived lower bound.
+        // Fixed provenance-derived proxy for the released linear lookup's comparison floor.
+        // After indexing, keep the same paired geometry; it is not candidate comparisons.
         (
             "origin_scan_comparison_floor",
             result
@@ -472,8 +473,39 @@ fn measure<I, T>(
     }
 }
 
+/// Emits independent canonical result evidence outside every observation interval.
+/// Generated workload/dimension labels contain only trusted ASCII benchmark identifiers.
+fn oracle(fixture: &Fixture) {
+    let document = squish_ir::Digest::sha256(
+        "mechanism-oracle-document",
+        &encode_linked_document(&fixture.result.document),
+    )
+    .hex();
+    let trace = squish_ir::Digest::sha256(
+        "mechanism-oracle-trace",
+        &encode_expansion_trace(&fixture.result.trace),
+    )
+    .hex();
+    let directives = squish_ir::Digest::sha256(
+        "mechanism-oracle-directives",
+        &encode_archive_directives(&fixture.result.directives),
+    )
+    .hex();
+    let dimensions = fixture
+        .dimensions
+        .iter()
+        .map(|(key, value)| format!("\"{key}\":{value}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    println!(
+        "{{\"schema\":\"xmlsquish.mechanism.oracle.v1\",\"suite\":\"core\",\"workload\":\"{}\",\"dimensions\":{{{dimensions}}},\"document_sha256\":\"{document}\",\"trace_sha256\":\"{trace}\",\"directives_sha256\":\"{directives}\"}}",
+        fixture.name
+    );
+}
+
 /// All stage outputs are dropped after measurement; owned input destruction remains API work.
 fn stages(mode: Mode, fixture: &Fixture) {
+    oracle(fixture);
     let entry = &fixture.linked.image.entry.source;
     let unit = &fixture.closure.units[&fixture.sample_unit];
     // Public middle-end facts expose the exact Clone performed by the scalar shortcut.
@@ -620,6 +652,26 @@ pub fn run(mode: Mode) {
     if support::smoke_requested() {
         stages(mode, &macros(1, 1, false, 0));
         stages(mode, &scalars(2, 1, 8));
+        return;
+    }
+    // Identical harness overlays permit a pinned-baseline/candidate origin-only comparison.
+    // This changes benchmark selection, never any production API or validation behavior.
+    if std::env::var_os("MECHANISM_ORIGIN_ONLY").is_some() {
+        let tiny = fixture(
+            "tiny-document".into(),
+            "<root>x</root>".into(),
+            None,
+            BTreeMap::new(),
+            "x".into(),
+            vec![("definitions", 0), ("expansions", 0)],
+        );
+        stages(mode, &tiny);
+        for definitions in [1, 128, 1024, 4096] {
+            for call_last in [false, true] {
+                stages(mode, &macros(definitions, 64, call_last, 0));
+            }
+        }
+        stages(mode, &macros(1, 1024, false, 0));
         return;
     }
     let tiny = fixture(

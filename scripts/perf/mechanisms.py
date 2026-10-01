@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import statistics
 import subprocess
 import time
@@ -19,6 +20,7 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[2]
 TARGETS = {"core_latency", "core_allocations", "archive_latency", "archive_allocations"}
 SCHEMA = "xmlsquish.mechanism.v1"
+ORACLE_SCHEMA = "xmlsquish.mechanism.oracle.v1"
 
 
 def command(*arguments: str) -> str:
@@ -54,6 +56,33 @@ def validate(row: dict) -> None:
                      "reallocation_calls", "peak_live_delta_bytes", "retained_live_delta_bytes"):
             if type(row.get(name)) is not int or row[name] < 0:
                 raise ValueError(f"invalid allocation counter {name}")
+
+
+def validate_oracle(row: dict) -> None:
+    """Require three untimed canonical output digests and stable fixture dimensions."""
+    if row.get("schema") != ORACLE_SCHEMA:
+        raise ValueError("unknown mechanism oracle schema")
+    if not all(isinstance(row.get(name), str) and row[name] for name in ("suite", "workload")):
+        raise ValueError("oracle requires suite and workload labels")
+    if not isinstance(row.get("dimensions"), dict) or any(type(value) is not int or value < 0
+                                                         for value in row["dimensions"].values()):
+        raise ValueError("oracle dimensions must be nonnegative integers")
+    for name in ("document_sha256", "trace_sha256", "directives_sha256"):
+        if not isinstance(row.get(name), str) or not re.fullmatch(r"[0-9a-f]{64}", row[name]):
+            raise ValueError(f"invalid canonical output digest {name}")
+
+
+def split_records(records: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Keep untimed oracle metadata out of latency and allocation sample aggregation."""
+    samples, oracles = [], []
+    for record in records:
+        if record.get("schema") == ORACLE_SCHEMA:
+            validate_oracle(record)
+            oracles.append(record)
+        else:
+            validate(record)
+            samples.append(record)
+    return samples, oracles
 
 
 def aggregate(rows: list[dict]) -> list[dict]:
@@ -158,7 +187,9 @@ def collect(directory: Path, report: dict) -> None:
         (directory / f"{name}.jsonl").write_text(result.stdout, encoding="utf-8")
         if result.returncode:
             raise RuntimeError(f"{name} failed ({result.returncode}): {result.stderr}")
-        rows = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        records = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        rows, oracles = split_records(records)
+        report.setdefault("untimed_oracles", {})[name] = oracles
         if not rows:
             raise ValueError(f"{name} emitted no mechanism samples")
         expected_mode = "latency" if name.endswith("latency") else "allocations"
@@ -184,8 +215,10 @@ def main() -> None:
     report = {"schema": "xmlsquish.mechanism.report.v1", "status": "running", "summary": []}
     try:
         if arguments.summarize:
-            rows = [json.loads(line) for path in arguments.summarize
-                    for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            records = [json.loads(line) for path in arguments.summarize
+                       for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            rows, oracles = split_records(records)
+            report["untimed_oracles"] = oracles
             report["summary"] = aggregate(rows)
         else:
             collect(directory, report)
