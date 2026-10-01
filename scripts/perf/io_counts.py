@@ -64,10 +64,12 @@ def prepare(binary: Path, directory: Path) -> dict[str, Path]:
                         + '\n[exports]\nmain = "unit000.xml"\n', encoding="utf-8")
     for number in range(32):
         body = '<xs:macro name="m:used">small reachable module</xs:macro>' if number == 0 else (
-            f'<xs:macro name="m:unused{number}"><xs:asset path="unused.bin" name="unused{number}.bin"/></xs:macro>')
+            f'<xs:macro name="m:unused{number}">' + "x" * (16 * 1024)
+            + f'<xs:asset path="unused.bin" name="unused{number}.bin"/></xs:macro>')
         (producer / f"unit{number:03}.xml").write_text(
             f'<xs:module xmlns:xs="{NS}" xmlns:m="urn:io:library">{body}</xs:module>', encoding="utf-8")
-    (producer / "unused.bin").write_bytes(bytes(range(256)) * (32 * 1024))
+    # Keep all 31 logical bindings below the default 64 MiB expanded-asset limit.
+    (producer / "unused.bin").write_bytes(bytes(range(256)) * 1024)
     invoke(binary, ["build", "--offline", "--plain"], producer)
     consumer = fixture(directory / "small-reachable", "prompt",
                        f'<xs:entry xmlns:xs="{NS}" xmlns:m="urn:io:library">'
