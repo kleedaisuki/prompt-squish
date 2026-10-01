@@ -1,7 +1,7 @@
 //! Untimed archive compatibility oracles using only pre-repair public owned APIs.
 use squish_backend::archive::{ArchiveEntry, SopackPayload, content_digest};
 use squish_ir::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Exact transport and member bytes; called outside every sampled operation.
 pub fn zip(workload: &str, dimensions: &[(&str, u64)], encoded: &[u8], members: &[ArchiveEntry]) {
@@ -17,22 +17,17 @@ pub fn zip(workload: &str, dimensions: &[(&str, u64)], encoded: &[u8], members: 
     );
 }
 /// Full normalized typed IR, sources, assets, exports and frozen topology.
-/// Provider namespace hashes are excluded; fixtures have unique source content identities.
+/// Duplicate source bytes require a root-reachable canonical labelled graph traversal.
 pub fn sopack(workload: &str, dimensions: &[(&str, u64)], payload: &SopackPayload) {
-    let identities: BTreeMap<_, _> = payload
-        .sources
-        .iter()
-        .map(|(key, bytes)| {
-            (
-                key.clone(),
-                SourceKey::AdHoc {
-                    // A canonical virtual file URI satisfies the original IR trust boundary.
-                    // This content-addressed diagnostic identity never accesses the filesystem.
-                    uri: format!("file:///xmlsquish-oracle/{}.xml", content_digest(bytes)),
-                },
-            )
-        })
-        .collect();
+    emit(
+        workload,
+        dimensions,
+        serde_json::json!({"sopack_semantic_blake3":sopack_semantic_digest(payload)}),
+    );
+}
+/// Untimed structural assertion helper; ambiguous source identities fail explicitly.
+pub fn sopack_semantic_digest(payload: &SopackPayload) -> String {
+    let identities = source_identities(payload);
     let source_id = |key: &SourceKey| match &identities[key] {
         SourceKey::AdHoc { uri } => uri.clone(),
         _ => unreachable!(),
@@ -96,11 +91,92 @@ pub fn sopack(workload: &str, dimensions: &[(&str, u64)], payload: &SopackPayloa
         .map(|(name, key)| (name, source_id(key)))
         .collect();
     let canonical = serde_json::json!({"package":payload.package_name,"version":payload.package_version,"root":payload.root_source.as_ref().map(source_id),"units":units,"sources":sources,"assets":assets,"imports":imports,"exports":exports});
-    emit(
-        workload,
-        dimensions,
-        serde_json::json!({"sopack_semantic_blake3":content_digest(&serde_json::to_vec(&canonical).unwrap())}),
+    content_digest(&serde_json::to_vec(&canonical).unwrap())
+}
+/// Keeps the historical distinct-content normalization byte-identical.
+/// Collisions instead receive deterministic root-anchored ordinals, never input/path order.
+fn source_identities(payload: &SopackPayload) -> BTreeMap<SourceKey, SourceKey> {
+    let digests: BTreeMap<_, _> = payload
+        .sources
+        .iter()
+        .map(|(key, bytes)| (key.clone(), content_digest(bytes)))
+        .collect();
+    let distinct: BTreeSet<_> = digests.values().collect();
+    if distinct.len() == digests.len() {
+        return digests
+            .into_iter()
+            .map(|(key, digest)| {
+                (
+                    key,
+                    SourceKey::AdHoc {
+                        uri: format!("file:///xmlsquish-oracle/{digest}.xml"),
+                    },
+                )
+            })
+            .collect();
+    }
+    let root = payload
+        .root_source
+        .as_ref()
+        .expect("colliding oracle source content requires an explicit root");
+    assert!(
+        payload.units.contains_key(root),
+        "oracle root must name a compiled unit"
     );
+    let mut edges: BTreeMap<&SourceKey, Vec<(u32, &SourceKey)>> = BTreeMap::new();
+    for binding in &payload.imports {
+        assert!(
+            payload.units.contains_key(&binding.importer)
+                && payload.units.contains_key(&binding.target),
+            "oracle binding references a missing unit"
+        );
+        edges
+            .entry(&binding.importer)
+            .or_default()
+            .push((binding.import.0, &binding.target));
+    }
+    for edges in edges.values_mut() {
+        edges.sort_by_key(|(slot, _)| *slot);
+        assert!(
+            edges.windows(2).all(|pair| pair[0].0 != pair[1].0),
+            "oracle import slots must be unique"
+        );
+    }
+    let mut ordinals = BTreeMap::from([(root.clone(), 0usize)]);
+    let mut queue = VecDeque::from([root]);
+    while let Some(node) = queue.pop_front() {
+        for (_, target) in edges.get(node).into_iter().flatten() {
+            let next_ordinal = ordinals.len();
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                ordinals.entry((*target).clone())
+            {
+                entry.insert(next_ordinal);
+                queue.push_back(*target);
+            }
+        }
+    }
+    assert_eq!(
+        ordinals.len(),
+        payload.units.len(),
+        "colliding oracle sources require every unit to be root-reachable"
+    );
+    assert_eq!(
+        ordinals.len(),
+        digests.len(),
+        "colliding non-unit diagnostic sources are not canonically anchored"
+    );
+    digests
+        .into_iter()
+        .map(|(key, digest)| {
+            let ordinal = ordinals[&key];
+            (
+                key,
+                SourceKey::AdHoc {
+                    uri: format!("file:///xmlsquish-oracle/{digest}-{ordinal:016x}.xml"),
+                },
+            )
+        })
+        .collect()
 }
 fn emit(workload: &str, dimensions: &[(&str, u64)], checksums: serde_json::Value) {
     let dimensions: BTreeMap<_, _> = dimensions.iter().copied().collect();

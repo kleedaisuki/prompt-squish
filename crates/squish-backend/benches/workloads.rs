@@ -478,6 +478,63 @@ fn uniform_seed_ring_case(mode: Mode, units: usize) {
         ("import_edges", units as u64),
         ("source_bytes", (units * 64) as u64),
     ];
+    let semantic = archive_oracle::sopack_semantic_digest(&payload);
+    let restored_owned = read_sopack(&encoded, limits).unwrap();
+    assert_eq!(
+        semantic,
+        archive_oracle::sopack_semantic_digest(&restored_owned)
+    );
+    let mut permuted = payload.clone();
+    let renamed: BTreeMap<_, _> = keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| {
+            let mut renamed = key.clone();
+            if let SourceKey::Project { package, .. } = &mut renamed {
+                package.canonical_source =
+                    format!("different-device/reversed-{:04}", units - index);
+            }
+            (key.clone(), renamed)
+        })
+        .collect();
+    permuted.units = permuted
+        .units
+        .into_iter()
+        .map(|(key, mut unit)| {
+            unit.header_mut().source = renamed[&key].clone();
+            unit.attachment_mut().source = renamed[&key].clone();
+            for source in &mut unit.sources_mut().records {
+                source.key = renamed[&source.key].clone();
+            }
+            (renamed[&key].clone(), unit)
+        })
+        .collect();
+    permuted.sources = permuted
+        .sources
+        .into_iter()
+        .map(|(key, bytes)| (renamed[&key].clone(), bytes))
+        .collect();
+    for binding in &mut permuted.imports {
+        binding.importer = renamed[&binding.importer].clone();
+        binding.target = renamed[&binding.target].clone();
+    }
+    permuted.root_source = permuted.root_source.map(|key| renamed[&key].clone());
+    permuted.exports = permuted
+        .exports
+        .into_iter()
+        .map(|(name, key)| (name, renamed[&key].clone()))
+        .collect();
+    assert_eq!(semantic, archive_oracle::sopack_semantic_digest(&permuted));
+    let mut changed = payload.clone();
+    // All nodes remain root-reachable, but the last edge now closes a non-root cycle.
+    // Content-only IDs would silently erase this topology change.
+    changed.imports.last_mut().unwrap().target = keys[1].clone();
+    assert_ne!(semantic, archive_oracle::sopack_semantic_digest(&changed));
+    archive_oracle::sopack(
+        "provider_uniform_seed_root_ring",
+        &dimensions,
+        &restored_owned,
+    );
     mode.measure(
         "provider_uniform_seed_root_ring",
         "sopack_write_borrowed_producer_graph",
