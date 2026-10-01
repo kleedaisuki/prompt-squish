@@ -241,6 +241,8 @@ pub enum RuntimeFault {
     LookupWrongKey,
     /// A verified adapter omits a companion output handle from an otherwise valid manifest.
     LookupWrongOutputCount,
+    /// An adapter claims the correct published descriptor while returning changed bytes.
+    ReadPublishedWrongBytes,
     /// Blob 写入。 / Blob writes.
     WriteBlob,
     /// 前端编译。 / Frontend compilation.
@@ -255,12 +257,21 @@ pub enum RuntimeFault {
     ReadCatalogStorage,
 }
 
+type PublishedMemberKey = (u8, String, [u8; 32], String);
+
 #[derive(Default)]
 struct MemoryState {
     blobs: BTreeMap<Vec<u8>, Vec<u8>>,
     actions: BTreeMap<String, ActionRecord>,
     current: BTreeMap<(u8, String), CommittedGeneration>,
     generations: BTreeMap<(u8, String, [u8; 32]), CommittedGeneration>,
+    /// Counts deliberately invalid cache results, proving tests actually reach a warm lookup.
+    injected_cache_results: usize,
+    /// Independent committed file snapshots, separate from disposable CAS.
+    published: BTreeMap<PublishedMemberKey, Vec<u8>>,
+    cas_reads: usize,
+    cas_writes: usize,
+    published_reads: usize,
 }
 
 /// 不接触文件系统且按能力注入失败的构建运行时。 /
@@ -273,6 +284,31 @@ pub struct MemoryBuildRuntime {
 }
 
 impl MemoryBuildRuntime {
+    /// Number of valid stored cache results deliberately damaged by the test adapter.
+    pub fn injected_cache_results(&self) -> usize {
+        self.state.lock().unwrap().injected_cache_results
+    }
+    /// Drops disposable CAS while retaining independently committed generation files.
+    pub fn clear_cas(&self) {
+        self.state.lock().unwrap().blobs.clear();
+    }
+
+    /// Counts CAS boundary calls, allowing inspection to prove it is read-only.
+    pub fn cas_io_counts(&self) -> (usize, usize) {
+        let state = self.state.lock().unwrap();
+        (state.cas_reads, state.cas_writes)
+    }
+
+    /// Counts actual generation-member reads, excluding descriptor-only lookup.
+    pub fn published_read_count(&self) -> usize {
+        self.state.lock().unwrap().published_reads
+    }
+
+    /// Number of disposable content snapshots available after repair.
+    pub fn cas_blob_count(&self) -> usize {
+        self.state.lock().unwrap().blobs.len()
+    }
+
     /// 创建无故障运行时。 / Creates a fault-free runtime.
     pub fn new() -> Self {
         Self {
@@ -325,23 +361,20 @@ impl BuildRuntime for MemoryBuildRuntime {
     }
 
     fn read_blob(&self, digest: &Digest) -> Result<Option<Vec<u8>>, BuildRuntimeError> {
-        Ok(self
-            .state
-            .lock()
-            .unwrap()
-            .blobs
-            .get(digest.bytes())
-            .cloned())
+        let mut state = self.state.lock().unwrap();
+        state.cas_reads += 1;
+        Ok(state.blobs.get(digest.bytes()).cloned())
     }
 
     fn write_blob(&self, bytes: &[u8]) -> Result<Digest, BuildRuntimeError> {
         self.fail(RuntimeFault::WriteBlob, "memory_blob_write")?;
         let digest = blake3::hash(bytes);
-        self.state
-            .lock()
-            .unwrap()
+        let mut state = self.state.lock().unwrap();
+        state.cas_writes += 1;
+        state
             .blobs
             .insert(digest.as_bytes().to_vec(), bytes.to_vec());
+        drop(state);
         Digest::new(DigestAlgorithm::Blake3, digest.as_bytes().to_vec())
             .map_err(|error| runtime_error("memory_blob_digest", error))
     }
@@ -357,6 +390,7 @@ impl BuildRuntime for MemoryBuildRuntime {
         if self.faults.contains(&RuntimeFault::LookupWrongKey) {
             if let Some(record) = &mut record {
                 record.key = ActionKey::new("different-action-key").unwrap();
+                self.state.lock().unwrap().injected_cache_results += 1;
             }
         }
         Ok(record)
@@ -378,6 +412,7 @@ impl BuildRuntime for MemoryBuildRuntime {
         }
         if self.faults.contains(&RuntimeFault::LookupWrongOutputCount) {
             blobs.pop();
+            self.state.lock().unwrap().injected_cache_results += 1;
         }
         Ok(Some(VerifiedAction { record, blobs }))
     }
@@ -425,7 +460,8 @@ impl BuildRuntime for MemoryBuildRuntime {
         generation: &GenerationRef,
         destination: &PublicationPath,
     ) -> Result<(ArtifactRead, Vec<u8>), BuildRuntimeError> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        state.published_reads += 1;
         let key = (
             space_key(space),
             generation.target.as_str().into(),
@@ -441,13 +477,25 @@ impl BuildRuntime for MemoryBuildRuntime {
         else {
             return Ok((ArtifactRead::NotFound, Vec::new()));
         };
-        let bytes = state
-            .blobs
-            .get(member.descriptor.digest.bytes())
+        let mut bytes = state
+            .published
+            .get(&(
+                space_key(space),
+                generation.target.as_str().into(),
+                *generation.generation.as_bytes(),
+                destination.as_str().into(),
+            ))
             .cloned()
             .ok_or_else(|| {
-                BuildRuntimeError::new("memory_generation_read", "generation blob is absent")
+                BuildRuntimeError::new("memory_generation_read", "published member is absent")
             })?;
+        if self.faults.contains(&RuntimeFault::ReadPublishedWrongBytes) {
+            if let Some(byte) = bytes.first_mut() {
+                *byte ^= 1;
+            } else {
+                bytes.push(0);
+            }
+        }
         Ok((ArtifactRead::Verified(member.descriptor.clone()), bytes))
     }
 
@@ -475,6 +523,7 @@ impl BuildRuntime for MemoryBuildRuntime {
         hash.update(target.as_str().as_bytes());
         let state = self.state.lock().unwrap();
         let mut artifacts = Vec::with_capacity(publications.len());
+        let mut published = Vec::with_capacity(publications.len());
         for publication in &publications {
             let bytes = state
                 .blobs
@@ -491,6 +540,7 @@ impl BuildRuntime for MemoryBuildRuntime {
                     "publication size differs from blob",
                 ));
             }
+            published.push((publication.destination.as_str().to_owned(), bytes.clone()));
             hash.update(publication.destination.as_str().as_bytes());
             hash.update(publication.output.digest.bytes());
             artifacts.push(GenerationArtifact {
@@ -515,6 +565,17 @@ impl BuildRuntime for MemoryBuildRuntime {
             artifacts,
         };
         let mut state = self.state.lock().unwrap();
+        for (path, bytes) in published {
+            state.published.insert(
+                (
+                    space_key(space),
+                    target.as_str().into(),
+                    *generation.as_bytes(),
+                    path,
+                ),
+                bytes,
+            );
+        }
         state.generations.insert(
             (
                 space_key(space),

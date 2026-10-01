@@ -313,12 +313,21 @@ fn run_memory_build(
     runtime: MemoryBuildRuntime,
     invocation: &str,
 ) -> squish_kernel::DispatchOutcome {
+    run_memory_build_with_sink(request, runtime, invocation, Arc::new(IgnoreEvents))
+}
+
+fn run_memory_build_with_sink(
+    request: BuildRequest,
+    runtime: MemoryBuildRuntime,
+    invocation: &str,
+    sink: Arc<dyn EventSink>,
+) -> squish_kernel::DispatchOutcome {
     let manager = ManagerCapability::new(MemoryServices { runtime }, InvocationSettings::default());
     let capabilities: [&dyn squish_kernel::Capability; 1] = [&manager];
     let context = InvocationContext::new(
         InvocationId::new(invocation).unwrap(),
         CancellationToken::default(),
-        Arc::new(IgnoreEvents),
+        sink,
     );
     Kernel::new(&capabilities)
         .unwrap()
@@ -377,6 +386,88 @@ fn catalog_runtime_preserves_corruption_vs_storage_classification() {
 }
 
 #[test]
+fn catalog_inspection_uses_published_authority_and_recovery_repairs_disposable_cas() {
+    let (_temp, request) = fixture();
+    let runtime = MemoryBuildRuntime::new();
+    let initial = run_memory_build(request.clone(), runtime.clone(), "catalog-cas-original");
+    assert_eq!(initial.summary.totals.failed, 0);
+    let original = build::read_current_build_catalog(&runtime)
+        .unwrap()
+        .unwrap();
+    runtime.clear_cas();
+    let before = runtime.cas_io_counts();
+    let inspected = build::read_current_build_catalog(&runtime)
+        .unwrap()
+        .unwrap();
+    assert_eq!(inspected, original);
+    assert_eq!(
+        runtime.cas_io_counts(),
+        before,
+        "inspection must neither read nor repair CAS"
+    );
+    assert_eq!(runtime.cas_blob_count(), 0);
+    let reads_before = runtime.published_read_count();
+    build::prepare(
+        &request,
+        &MemoryServices {
+            runtime: runtime.clone(),
+        },
+    )
+    .unwrap();
+    let member_count = 1 + original
+        .record
+        .targets
+        .iter()
+        .map(|t| t.artifacts.len())
+        .sum::<usize>();
+    assert_eq!(
+        runtime.published_read_count() - reads_before,
+        member_count,
+        "same-generation recovery must consume receipts, not reread/hash each member"
+    );
+    let rebuilt = run_memory_build(request, runtime.clone(), "catalog-cas-recovery");
+    assert_eq!(rebuilt.summary.totals.failed, 0, "{rebuilt:?}");
+    assert!(
+        runtime.cas_blob_count() > 0,
+        "recovery must restore verified content"
+    );
+    let repaired = build::read_current_build_catalog(&runtime)
+        .unwrap()
+        .unwrap();
+    assert_eq!(repaired.record.targets, original.record.targets);
+}
+
+#[test]
+fn catalog_rejects_adapter_verified_descriptor_with_changed_published_bytes() {
+    let (_temp, request) = fixture();
+    let runtime = MemoryBuildRuntime::new();
+    let initial = run_memory_build(request.clone(), runtime.clone(), "catalog-content-original");
+    assert_eq!(initial.summary.totals.failed, 0);
+    let original = build::read_current_build_catalog(&runtime)
+        .unwrap()
+        .unwrap();
+    let faulty = runtime
+        .clone()
+        .with_fault(RuntimeFault::ReadPublishedWrongBytes);
+    let before = runtime.cas_io_counts();
+    assert!(matches!(build::read_current_build_catalog(&faulty),
+        Err(build::BuildCatalogError::Corrupt(message)) if message.contains("bytes differ")));
+    assert_eq!(runtime.cas_io_counts(), before);
+    let rejected = run_memory_build(request, faulty, "catalog-content-rejected");
+    assert!(matches!(
+        rejected.result,
+        OperationResult::Unavailable { .. }
+    ));
+    assert_eq!(
+        build::read_current_build_catalog(&runtime)
+            .unwrap()
+            .unwrap(),
+        original,
+        "invalid published evidence must not replace the good generation"
+    );
+}
+
+#[test]
 fn cached_adapter_identity_and_handle_count_fail_before_hydration() {
     for fault in [
         RuntimeFault::LookupWrongKey,
@@ -386,21 +477,43 @@ fn cached_adapter_identity_and_handle_count_fail_before_hydration() {
         let runtime = MemoryBuildRuntime::new();
         let cold = run_memory_build(request.clone(), runtime.clone(), "cache-authority-cold");
         assert_eq!(cold.summary.totals.failed, 0);
-        let faulty = runtime.clone().with_fault(fault);
-        let warm = run_memory_build(request, faulty, "cache-authority-invalid");
+        let healthy = run_memory_build(request.clone(), runtime.clone(), "cache-authority-warm");
         assert!(
-            warm.summary.totals.failed > 0,
-            "wrong verified authority must fail: {warm:?}"
+            healthy.summary.cache_hits > 0,
+            "fixture must prove actual warm reuse: {healthy:?}"
+        );
+        let faulty = runtime.clone().with_fault(fault);
+        let events = Arc::new(RecordingEvents(Mutex::new(Vec::new())));
+        let warm =
+            run_memory_build_with_sink(request, faulty, "cache-authority-invalid", events.clone());
+        assert!(
+            runtime.injected_cache_results() > 0,
+            "fixture never injected a stored cache result"
+        );
+        assert_eq!(
+            warm.summary.totals.failed, 0,
+            "invalid disposable cache must safely rebuild: {warm:?}"
+        );
+        assert_eq!(
+            warm.summary.cache_hits, 0,
+            "wrong authority was accepted as a cache hit"
+        );
+        assert!(
+            events
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(&event.payload,
+            EventPayload::Diagnostic(diagnostic) if diagnostic.code == "MGB110"))
         );
         let record = build::read_current_build_record(&runtime).unwrap().unwrap();
-        assert!(record.actions.iter().any(|fact| matches!(&fact.state,
-            build::BuildTerminalState::Failed { code, .. } if code == "MGB110")));
         assert!(
             record
                 .actions
                 .iter()
                 .filter(|fact| fact.kind == squish_protocol::ActionKind::Compile)
-                .all(|fact| !matches!(fact.state, build::BuildTerminalState::Succeeded))
+                .all(|fact| fact.source == Some(build::BuildResultSource::Worker))
         );
     }
 }
