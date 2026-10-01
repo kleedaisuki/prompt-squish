@@ -44,8 +44,18 @@ def check_topology(document: str) -> None:
     if jobs is None:
         raise ValueError("missing top-level jobs mapping")
     names = re.findall(r"^  ([a-z][a-z-]*):$", jobs.group(1), re.MULTILINE)
-    if names != ["rust-quality", "rust-test", "performance", "profile", "site"]:
+    if names != ["rust-quality", "rust-test", "performance", "profile", "mechanisms", "site"]:
         raise ValueError("CI jobs must remain unique and below the jobs mapping")
+    mechanisms_input = re.search(r"^      mechanisms:\n(.*?)(?=^      \S|\Z)",
+                                 dispatch.group(1), re.MULTILINE | re.DOTALL)
+    if mechanisms_input is None or "        default: false" not in mechanisms_input.group(1):
+        raise ValueError("mechanism evidence must remain explicitly opt-in")
+    mechanisms = re.search(r"^  mechanisms:\n(.*?)(?=^  \S|\Z)",
+                           jobs.group(1), re.MULTILINE | re.DOTALL)
+    if mechanisms is None or "    needs: rust-quality" not in mechanisms.group(1) or (
+        "if: github.event_name == 'workflow_dispatch' && inputs.mechanisms" not in mechanisms.group(1)
+    ):
+        raise ValueError("mechanism evidence must require manual input and successful quality")
     profile_input = re.search(r"^      profile:\n(.*?)(?=^      \S|\Z)",
                               dispatch.group(1), re.MULTILINE | re.DOTALL)
     if profile_input is None or "        default: false" not in profile_input.group(1):
