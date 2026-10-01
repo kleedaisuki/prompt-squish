@@ -907,3 +907,278 @@ fn instantiated_documents_advertise_authoritative_portable_abi() {
         output.document
     );
 }
+
+/// Mutates only debug provenance while retaining real linked units and qualified object identities.
+fn reconstruct_with_origins(
+    mut mutate: impl FnMut(u32, &mut RelocatableUnitIr),
+) -> Result<LinkedProgram, LinkError> {
+    let fixture = linked();
+    let mut units = BTreeMap::new();
+    let mut objects = BTreeMap::new();
+    for (slot, linked) in fixture.image.units.iter().enumerate() {
+        let mut unit = fixture.program.unit(slot as u32).unwrap().clone();
+        mutate(slot as u32, &mut unit);
+        units.insert(linked.source.clone(), unit);
+        objects.insert(
+            linked.source.clone(),
+            fixture.program.object(slot as u32).unwrap(),
+        );
+    }
+    LinkedProgram::reconstruct(fixture.image, units, objects)
+}
+
+/// Accesses test provenance without changing the production unit representation.
+fn test_origins_mut(unit: &mut RelocatableUnitIr) -> &mut OriginTable {
+    match unit {
+        RelocatableUnitIr::Entry(unit) | RelocatableUnitIr::Pack(unit) => &mut unit.origins,
+        RelocatableUnitIr::Module(unit) => &mut unit.origins,
+        RelocatableUnitIr::Sopack(unit) => &mut unit.module.origins,
+    }
+}
+
+/// Differential oracle for the exact previous successful, object-qualified lookup contract.
+fn linear_origin_oracle(
+    program: &LinkedProgram,
+    slot: u32,
+    kind: EntityKind,
+    local: u32,
+) -> Option<QualifiedOriginRef> {
+    let position = program
+        .unit(slot)?
+        .origins()
+        .entries
+        .iter()
+        .position(|entry| entry.entity_kind == kind && entry.local_id == local)?;
+    Some(QualifiedOriginRef {
+        object: program.object(slot)?,
+        local: OriginId(position as u32),
+    })
+}
+
+#[test]
+fn origin_index_matches_linear_first_position_for_duplicates_gaps_and_each_kind() {
+    let program = reconstruct_with_origins(|_, unit| {
+        let origins = test_origins_mut(unit);
+        origins.entries.reverse();
+        let mut extra = origins.entries[0].clone();
+        extra.entity_kind = EntityKind::Parameter;
+        extra.local_id = u32::MAX;
+        origins.entries.insert(0, extra.clone());
+        extra.entity_kind = EntityKind::Region;
+        origins.entries.insert(1, extra.clone());
+        extra.entity_kind = EntityKind::Definition;
+        origins.entries.insert(2, extra);
+        let duplicates = origins
+            .entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.entity_kind,
+                    EntityKind::Operation | EntityKind::Region | EntityKind::Definition
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for mut duplicate in duplicates {
+            // A conflicting span makes accidental last-match selection observable.
+            duplicate.origin.span = Span { start: 1, end: 2 };
+            origins.entries.push(duplicate);
+        }
+    })
+    .unwrap();
+    for slot in 0..program.image().units.len() as u32 {
+        let unit = program.unit(slot).unwrap();
+        for (kind, count) in [
+            (EntityKind::Operation, unit.ops().len()),
+            (EntityKind::Region, unit.regions().len()),
+            (EntityKind::Definition, unit.definitions().len()),
+        ] {
+            for local in 0..count as u32 {
+                assert_eq!(
+                    program.origin(slot, kind, local),
+                    linear_origin_oracle(&program, slot, kind, local),
+                    "{slot}/{kind:?}/{local}"
+                );
+            }
+            assert_eq!(program.origin(slot, kind, u32::MAX), None);
+        }
+    }
+    assert_eq!(program.origin(u32::MAX, EntityKind::Operation, 0), None);
+    let output = Instantiator
+        .instantiate(&program, BTreeMap::new(), Budgets::default())
+        .unwrap();
+    output
+        .trace
+        .validate_against_document(&output.document)
+        .unwrap();
+}
+
+#[test]
+fn explicit_region_origin_wins_over_earlier_operation_origin() {
+    let program =
+        reconstruct_with_origins(|_, unit| test_origins_mut(unit).entries.reverse()).unwrap();
+    let root = program.image().entry.root_region;
+    let first = program.unit(root.unit_slot).unwrap().regions()[root.region.0 as usize].ops[0];
+    let region = program
+        .origin(root.unit_slot, EntityKind::Region, root.region.0)
+        .unwrap();
+    let operation = program
+        .origin(root.unit_slot, EntityKind::Operation, first.0)
+        .unwrap();
+    assert!(
+        operation.local.0 < region.local.0,
+        "fixture puts operation first in the table"
+    );
+    let result = Instantiator
+        .instantiate(&program, BTreeMap::new(), Budgets::default())
+        .unwrap();
+    assert_eq!(result.trace.frames[0].definition_origin, region);
+}
+
+#[test]
+fn absent_region_origin_falls_back_to_the_first_region_operation() {
+    let program = reconstruct_with_origins(|_, unit| {
+        if let Some(root) = unit.root_region() {
+            test_origins_mut(unit).entries.retain(|entry| {
+                !(entry.entity_kind == EntityKind::Region && entry.local_id == root.0)
+            });
+        }
+    })
+    .unwrap();
+    let root = program.image().entry.root_region;
+    assert!(
+        program
+            .origin(root.unit_slot, EntityKind::Region, root.region.0)
+            .is_none()
+    );
+    let first = program.unit(root.unit_slot).unwrap().regions()[root.region.0 as usize].ops[0];
+    let result = Instantiator
+        .instantiate(&program, BTreeMap::new(), Budgets::default())
+        .unwrap();
+    assert_eq!(
+        result.trace.frames[0].definition_origin,
+        linear_origin_oracle(&program, root.unit_slot, EntityKind::Operation, first.0).unwrap()
+    );
+}
+
+#[test]
+fn fresh_cached_and_duplicate_attachment_programs_preserve_complete_results() {
+    let fixture = linked();
+    let expected = Instantiator
+        .instantiate(&fixture.program, BTreeMap::new(), Budgets::default())
+        .unwrap();
+    let cached = reconstruct_with_origins(|_, _| {}).unwrap();
+    assert_eq!(
+        Instantiator
+            .instantiate(&cached, BTreeMap::new(), Budgets::default())
+            .unwrap(),
+        expected
+    );
+    let duplicated = reconstruct_with_origins(|_, unit| {
+        let table = test_origins_mut(unit);
+        table.entries.extend(table.entries.clone());
+    })
+    .unwrap();
+    assert_eq!(
+        Instantiator
+            .instantiate(&duplicated, BTreeMap::new(), Budgets::default())
+            .unwrap(),
+        expected
+    );
+    let first = cached.origin(0, EntityKind::Operation, 0).unwrap();
+    let second = cached.origin(1, EntityKind::Operation, 0).unwrap();
+    assert_ne!(first.object, second.object);
+    assert_eq!(
+        first,
+        linear_origin_oracle(&cached, 0, EntityKind::Operation, 0).unwrap()
+    );
+    assert_eq!(
+        second,
+        linear_origin_oracle(&cached, 1, EntityKind::Operation, 0).unwrap()
+    );
+}
+
+#[test]
+fn missing_definition_origin_and_invalid_operation_origin_keep_failure_semantics() {
+    let missing = reconstruct_with_origins(|_, unit| {
+        test_origins_mut(unit)
+            .entries
+            .retain(|entry| entry.entity_kind != EntityKind::Definition)
+    })
+    .unwrap();
+    let error = Instantiator
+        .instantiate(&missing, BTreeMap::new(), Budgets::default())
+        .unwrap_err();
+    assert_eq!(error.code, "RUN014");
+    assert_eq!(error.frame_chain, vec![FrameId(0)]);
+    assert!(error.origin.is_some());
+    let invalid = reconstruct_with_origins(|_, unit| {
+        let table = test_origins_mut(unit);
+        let mut extra = table.entries[0].clone();
+        extra.entity_kind = EntityKind::Operation;
+        extra.local_id = u32::MAX;
+        table.entries.push(extra);
+    })
+    .unwrap_err();
+    assert_eq!(
+        invalid.code, "LNK030",
+        "the unchanged verifier rejects invalid operation metadata before indexing"
+    );
+}
+
+#[test]
+fn empty_root_without_region_origin_still_reports_run003() {
+    let fixture = linked();
+    let root_slot = fixture.image.entry.root_region.unit_slot;
+    let RelocatableUnitIr::Entry(original) = fixture.program.unit(root_slot).unwrap() else {
+        panic!()
+    };
+    let mut entry = original.clone();
+    entry.header.imports.clear();
+    entry.external_symbols.clear();
+    entry.required_params.clear();
+    entry.regions = vec![Region {
+        id: RegionId(0),
+        ops: Vec::new(),
+    }];
+    entry.ops.clear();
+    entry.root_region = RegionId(0);
+    entry.origins.entries.clear();
+    entry.origins.decoded_values.clear();
+    let source = entry.header.source.clone();
+    let semantic = SemanticUnitDigest::of(b"empty");
+    let image = LinkedImage {
+        schema: entry.header.ir_schema,
+        language_abi: entry.header.language_abi.clone(),
+        entry: LinkedEntry {
+            source: source.clone(),
+            semantic_digest: semantic,
+            required_params: Vec::new(),
+            root_region: LinkedRegionRef {
+                unit_slot: 0,
+                region: RegionId(0),
+            },
+        },
+        units: vec![LinkedUnit {
+            kind: UnitKind::Entry,
+            source: source.clone(),
+            semantic_digest: semantic,
+        }],
+        definitions: Vec::new(),
+        link_map: StaticLinkMap::default(),
+        feature_bits: FeatureBits(0),
+    };
+    let program = LinkedProgram::reconstruct(
+        image,
+        BTreeMap::from([(source.clone(), RelocatableUnitIr::Entry(entry))]),
+        BTreeMap::from([(source, ObjectDigest::of(b"empty"))]),
+    )
+    .unwrap();
+    assert_eq!(
+        Instantiator
+            .instantiate(&program, BTreeMap::new(), Budgets::default())
+            .unwrap_err()
+            .code,
+        "RUN003"
+    );
+}

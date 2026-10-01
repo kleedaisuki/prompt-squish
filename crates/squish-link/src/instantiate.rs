@@ -5,9 +5,9 @@ use regex::Regex;
 use squish_ir::{
     BindingRef, DefAddr, DocumentItem, DocumentItemId, DocumentRegion, DocumentRegionId,
     EntityKind, ExpansionTrace, FileBinding, FrameId, FrameIdentity, FrameRecord, LinkedDocumentIr,
-    LinkedOpRef, LocalName, Op, OriginId, OriginNode, QualifiedOriginRef, RelocatableUnitIr,
-    ScalarExpr, ScalarValueId, SequenceValueId, StringId, SubstitutionKind, SubstitutionStep,
-    TraceRef, Validate,
+    LinkedOpRef, LocalName, Op, OriginNode, QualifiedOriginRef, RelocatableUnitIr, ScalarExpr,
+    ScalarValueId, SequenceValueId, StringId, SubstitutionKind, SubstitutionStep, TraceRef,
+    Validate,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -1075,16 +1075,7 @@ fn origin(
     kind: EntityKind,
     local: u32,
 ) -> Option<QualifiedOriginRef> {
-    let unit = program.unit(slot)?;
-    let index = unit
-        .origins()
-        .entries
-        .iter()
-        .position(|x| x.entity_kind == kind && x.local_id == local)?;
-    Some(QualifiedOriginRef {
-        object: program.object(slot)?,
-        local: OriginId(index as u32),
-    })
+    program.origin(slot, kind, local)
 }
 fn origin_for_op(program: &LinkedProgram, at: LinkedOpRef) -> Option<QualifiedOriginRef> {
     origin(program, at.unit_slot, EntityKind::Operation, at.op.0)
