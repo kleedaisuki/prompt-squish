@@ -293,6 +293,15 @@ impl MemoryBuildRuntime {
         self.state.lock().unwrap().blobs.clear();
     }
 
+    /// Removes target current pointers while preserving immutable committed member snapshots.
+    pub fn clear_target_currents(&self) {
+        self.state
+            .lock()
+            .unwrap()
+            .current
+            .retain(|(space, _), _| *space != space_key(GenerationSpace::TargetArtifacts));
+    }
+
     /// Counts CAS boundary calls, allowing inspection to prove it is read-only.
     pub fn cas_io_counts(&self) -> (usize, usize) {
         let state = self.state.lock().unwrap();

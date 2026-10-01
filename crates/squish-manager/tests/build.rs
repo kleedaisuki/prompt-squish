@@ -407,6 +407,7 @@ fn catalog_inspection_uses_published_authority_and_recovery_repairs_disposable_c
     );
     assert_eq!(runtime.cas_blob_count(), 0);
     let reads_before = runtime.published_read_count();
+    let cas_before_prepare = runtime.cas_io_counts();
     build::prepare(
         &request,
         &MemoryServices {
@@ -425,16 +426,69 @@ fn catalog_inspection_uses_published_authority_and_recovery_repairs_disposable_c
         member_count,
         "same-generation recovery must consume receipts, not reread/hash each member"
     );
+    assert_eq!(
+        runtime.cas_io_counts(),
+        cas_before_prepare,
+        "normal prepare must not eagerly acquire or repair disposable CAS"
+    );
+    assert_eq!(
+        runtime.cas_blob_count(),
+        0,
+        "verified publication authority does not require eager CAS retention"
+    );
     let rebuilt = run_memory_build(request, runtime.clone(), "catalog-cas-recovery");
     assert_eq!(rebuilt.summary.totals.failed, 0, "{rebuilt:?}");
     assert!(
         runtime.cas_blob_count() > 0,
-        "recovery must restore verified content"
+        "actual work must rebuild consumed content after verified cache misses"
     );
     let repaired = build::read_current_build_catalog(&runtime)
         .unwrap()
         .unwrap();
     assert_eq!(repaired.record.targets, original.record.targets);
+}
+
+#[test]
+fn missing_current_restores_from_verified_published_handles_without_existing_cas() {
+    let (_temp, request) = fixture();
+    let runtime = MemoryBuildRuntime::new();
+    let initial = run_memory_build(request.clone(), runtime.clone(), "catalog-pointer-original");
+    assert_eq!(initial.summary.totals.failed, 0);
+    let original = build::read_current_build_catalog(&runtime)
+        .unwrap()
+        .unwrap();
+    runtime.clear_cas();
+    runtime.clear_target_currents();
+    assert!(matches!(
+        build::read_current_build_catalog(&runtime),
+        Err(build::BuildCatalogError::MissingCurrent { .. })
+    ));
+    let reads_before = runtime.published_read_count();
+    build::prepare(
+        &request,
+        &MemoryServices {
+            runtime: runtime.clone(),
+        },
+    )
+    .unwrap();
+    let member_count = 1 + original
+        .record
+        .targets
+        .iter()
+        .map(|t| t.artifacts.len())
+        .sum::<usize>();
+    assert_eq!(
+        runtime.published_read_count() - reads_before,
+        member_count,
+        "restoration must consume verified buffers, not reread the missing-current generation"
+    );
+    assert_eq!(
+        build::read_current_build_catalog(&runtime)
+            .unwrap()
+            .unwrap(),
+        original,
+        "verified legacy publication must restore the exact original generation"
+    );
 }
 
 #[test]

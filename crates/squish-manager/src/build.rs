@@ -419,13 +419,6 @@ fn runtime_catalog_error(error: BuildRuntimeError) -> BuildCatalogError {
     }
 }
 
-/// Inspection validates published authority without mutating disposable cache storage.
-#[derive(Clone, Copy)]
-enum CatalogReadMode {
-    Inspect,
-    Repair,
-}
-
 /// Invocation-owned published snapshots; never a global or bounded-session cache.
 struct VerifiedGeneration {
     /// Canonical generation metadata verified against all actual committed members.
@@ -436,7 +429,6 @@ struct VerifiedGeneration {
 
 fn read_base_build_catalog(
     runtime: &dyn BuildRuntime,
-    mode: CatalogReadMode,
 ) -> Result<Option<BuildCatalogSnapshot>, BuildCatalogError> {
     let target = publication_target(BUILD_CATALOG_TARGET)?;
     let Some(generation) = runtime
@@ -466,7 +458,6 @@ fn read_base_build_catalog(
     )?;
     let record = decode_build_record(bytes.bytes())
         .map_err(|error| BuildCatalogError::Corrupt(error.to_string()))?;
-    repair_catalog_blob(runtime, &bytes, mode)?;
     // Action outputs are disposable derived cache, not committed catalog authority.
     // Their own verified lookup boundary decides reuse or recomputation.
     Ok(Some(BuildCatalogSnapshot {
@@ -549,48 +540,16 @@ fn validate_target_artifact_schema(
     }
 }
 
-/// Heals disposable CAS only from independently verified committed generation bytes.
-/// Missing/quarantined content is recoverable; actual storage failures remain fatal.
-fn repair_catalog_blob(
-    runtime: &dyn BuildRuntime,
-    published: &VerifiedBlob,
-    mode: CatalogReadMode,
-) -> Result<(), BuildCatalogError> {
-    if matches!(mode, CatalogReadMode::Inspect) {
-        return Ok(());
-    }
-    if let Some(stored) = runtime
-        .read_verified(published.digest())
-        .map_err(runtime_catalog_error)?
-    {
-        if stored.digest() != published.digest() || stored.bytes() != published.bytes() {
-            return Err(BuildCatalogError::Corrupt(
-                "CAS content differs from its independently verified published identity".into(),
-            ));
-        }
-        return Ok(());
-    }
-    let digest = runtime
-        .write_verified_blob(published)
-        .map_err(runtime_catalog_error)?;
-    if &digest != published.digest() {
-        return Err(BuildCatalogError::Corrupt(
-            "CAS repair returned a different committed content identity".into(),
-        ));
-    }
-    Ok(())
-}
-
 /// 通过注入运行时读取并严格验证当前 BuildRecord v3。 / Reads and strictly validates the current BuildRecord v3 through an injected runtime.
 pub fn read_current_build_catalog(
     runtime: &dyn BuildRuntime,
 ) -> Result<Option<BuildCatalogSnapshot>, BuildCatalogError> {
-    let Some(snapshot) = read_base_build_catalog(runtime, CatalogReadMode::Inspect)? else {
+    let Some(snapshot) = read_base_build_catalog(runtime)? else {
         return Ok(None);
     };
     for target in &snapshot.record.targets {
         // Read-only verification drops this generation's buffers before the next target.
-        verify_published_generation(runtime, target, CatalogReadMode::Inspect)?;
+        verify_published_generation(runtime, target)?;
         let Some(current) = runtime
             .current_generation(GenerationSpace::TargetArtifacts, &target.target_id)
             .map_err(runtime_catalog_error)?
@@ -627,13 +586,13 @@ pub fn read_current_build_record(
 fn recover_build_catalog(
     runtime: &dyn BuildRuntime,
 ) -> Result<Option<BuildRecordV3>, BuildCatalogError> {
-    let Some(snapshot) = read_base_build_catalog(runtime, CatalogReadMode::Repair)? else {
+    let Some(snapshot) = read_base_build_catalog(runtime)? else {
         return Ok(None);
     };
     let mut recovered = Vec::with_capacity(snapshot.record.targets.len());
     for target in &snapshot.record.targets {
         // Retain at most one target's committed buffers, not the sum across targets.
-        let verified = verify_published_generation(runtime, target, CatalogReadMode::Repair)?;
+        let verified = verify_published_generation(runtime, target)?;
         let recorded = &verified.record;
         match runtime
             .current_generation(GenerationSpace::TargetArtifacts, &recorded.target_id)
@@ -643,14 +602,8 @@ fn recover_build_catalog(
                 // This exact generation's bytes/schema were verified above. Reuse the receipt.
                 recovered.push(verified.record);
             }
-            Some(current) => recovered.push(
-                verify_published_generation(
-                    runtime,
-                    &recorded_generation(&current),
-                    CatalogReadMode::Repair,
-                )?
-                .record,
-            ),
+            Some(current) => recovered
+                .push(verify_published_generation(runtime, &recorded_generation(&current))?.record),
             None => recovered.push(restore_recorded_generation(runtime, &verified)?),
         }
     }
@@ -666,7 +619,6 @@ fn recover_build_catalog(
 fn verify_published_generation(
     runtime: &dyn BuildRuntime,
     recorded: &RecordedGeneration,
-    mode: CatalogReadMode,
 ) -> Result<VerifiedGeneration, BuildCatalogError> {
     validate_recorded_generation(recorded)?;
     let reference = GenerationRef {
@@ -688,9 +640,6 @@ fn verify_published_generation(
         blobs.push(published);
     }
     validate_generation_target_record(recorded, &blobs)?;
-    for blob in &blobs {
-        repair_catalog_blob(runtime, blob, mode)?;
-    }
     Ok(VerifiedGeneration {
         record: recorded.clone(),
         blobs,
