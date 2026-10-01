@@ -3,12 +3,13 @@
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts/perf"))
 try:
-    from full_repair_compare import compare
+    from full_repair_compare import compare, prepare_reference
 finally:
     sys.path.pop(0)
 
@@ -27,6 +28,34 @@ class FullRepairComparisonTests(unittest.TestCase):
         oracle = dict(suite="core", workload="same-input", dimensions=dimensions,
                       document_sha256="a" * 64, trace_sha256="b" * 64, directives_sha256="c" * 64)
         return {"pass": 0, "version": version, "rows": [row], "oracles": [oracle]}
+
+    def test_reference_patch_is_sole_helper_creation_authority(self) -> None:
+        """A mocked worktree applies the patch before reading the created helper."""
+        applied = False
+        helper = b"identical old-public-API oracle"
+
+        def git(arguments, **kwargs):
+            """Model git application without creating files or launching processes."""
+            nonlocal applied
+            if arguments[:2] == ["git", "apply"] and "--check" not in arguments:
+                applied = True
+
+        def read_bytes(path):
+            """A reference helper does not exist until git apply has created it."""
+            if "full-repair-reference" in path.parts:
+                self.assertTrue(applied)
+            return helper
+
+        report = {}
+        with patch("full_repair_compare.subprocess.run", side_effect=git), \
+             patch.object(Path, "exists", return_value=False), \
+             patch.object(Path, "read_bytes", read_bytes), \
+             patch.object(Path, "read_text", return_value="[profile.release]\nlto='thin'\n"), \
+             patch.object(Path, "write_bytes", side_effect=AssertionError("helper must not be pre-copied")), \
+             patch.object(Path, "mkdir", side_effect=AssertionError("patch owns helper creation")):
+            prepare_reference(ROOT / ".temp/mock", report)
+        self.assertTrue(applied)
+        self.assertIn("helper_sha256", report["baseline_benchmark_only_oracle_patch"])
 
     def test_equivalent_production_mapping_is_explicit(self) -> None:
         """Owned/shared production paths pair by a reviewed map, not by best-case search."""

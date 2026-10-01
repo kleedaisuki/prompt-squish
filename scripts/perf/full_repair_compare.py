@@ -152,11 +152,12 @@ def prepare_reference(directory: Path, report: dict) -> Path:
     subprocess.run(["git", "worktree", "add", "--detach", str(reference), BASELINE], cwd=ROOT, check=True)
     helper = ROOT / "scripts/perf/archive_oracle.rs"
     destination = reference / "scripts/perf/archive_oracle.rs"
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(helper.read_bytes())
     patch = ROOT / "scripts/perf/baseline_archive_oracle.patch"
     subprocess.run(["git", "apply", "--check", str(patch)], cwd=reference, check=True)
     subprocess.run(["git", "apply", str(patch)], cwd=reference, check=True)
+    # The patch owns helper creation; copying first would make git apply reject it.
+    if destination.read_bytes() != helper.read_bytes():
+        raise ValueError("baseline oracle patch produced a helper different from the candidate oracle")
     report["baseline_benchmark_only_oracle_patch"] = {
         "helper_sha256": hashlib.sha256(helper.read_bytes()).hexdigest(),
         "patch_sha256": hashlib.sha256(patch.read_bytes()).hexdigest()}

@@ -26,7 +26,9 @@ pub fn sopack(workload: &str, dimensions: &[(&str, u64)], payload: &SopackPayloa
             (
                 key.clone(),
                 SourceKey::AdHoc {
-                    uri: format!("oracle:{}", content_digest(bytes)),
+                    // A canonical virtual file URI satisfies the original IR trust boundary.
+                    // This content-addressed diagnostic identity never accesses the filesystem.
+                    uri: format!("file:///xmlsquish-oracle/{}.xml", content_digest(bytes)),
                 },
             )
         })

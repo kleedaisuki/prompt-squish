@@ -26,7 +26,7 @@
          "sopack_write_normalize_and_transport",
 --- /dev/null
 +++ b/scripts/perf/archive_oracle.rs
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,111 @@
 +//! Untimed archive compatibility oracles using only pre-repair public owned APIs.
 +use squish_backend::archive::{ArchiveEntry, SopackPayload, content_digest};
 +use squish_ir::*;
@@ -55,7 +55,9 @@
 +            (
 +                key.clone(),
 +                SourceKey::AdHoc {
-+                    uri: format!("oracle:{}", content_digest(bytes)),
++                    // A canonical virtual file URI satisfies the original IR trust boundary.
++                    // This content-addressed diagnostic identity never accesses the filesystem.
++                    uri: format!("file:///xmlsquish-oracle/{}.xml", content_digest(bytes)),
 +                },
 +            )
 +        })
