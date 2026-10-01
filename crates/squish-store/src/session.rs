@@ -333,10 +333,10 @@ struct Flight {
 impl Flight {
     /// Publishes one complete immutable result, waking every waiter without a session lock.
     fn publish(&self, result: &Result<Option<VerifiedBlob>, CasError>) {
-        let shared = result
-            .as_ref()
-            .map(|blob| blob.clone())
-            .map_err(SharedFailure::capture);
+        let shared = match result {
+            Ok(blob) => Ok(blob.clone()),
+            Err(error) => Err(SharedFailure::capture(error)),
+        };
         *self
             .result
             .lock()
@@ -365,9 +365,8 @@ impl Flight {
         result
             .as_ref()
             .expect("completed flight has a result")
-            .as_ref()
-            .map(|blob| blob.clone())
-            .map_err(SharedFailure::restore)
+            .clone()
+            .map_err(|error| error.restore())
     }
 }
 
@@ -655,13 +654,11 @@ mod tests {
             CasError::UnsupportedAlgorithm,
             CasError::Io(io::Error::from_raw_os_error(2)),
         ] {
+            let expected = original.to_string();
             let result = Err(original);
             let flight = Flight::default();
             flight.publish(&result);
-            assert_eq!(
-                flight.wait().unwrap_err().to_string(),
-                result.unwrap_err().to_string()
-            );
+            assert_eq!(flight.wait().unwrap_err().to_string(), expected);
         }
     }
     #[test]

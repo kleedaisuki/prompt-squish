@@ -2,12 +2,18 @@
 use super::{ArchiveError, fail, hash_field};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+/// One frozen import edge; its label identifies a unique slot within its provider.
 pub(super) struct ProviderEdge {
+    /// Canonical importer-path, import-slot and target-path bytes, excluding host identity.
     pub label: Vec<u8>,
+    /// Valid index into the invocation's node slice; never serialized as stable identity.
     pub target: usize,
 }
+/// A provider's immutable content seed and canonically ordered frozen import edges.
 pub(super) struct ProviderNode {
+    /// Content-derived seed including root role, never input order or physical checkout identity.
     pub seed: String,
+    /// Strictly label-sorted, unique edges whose targets all index the same node slice.
     pub edges: Vec<ProviderEdge>,
 }
 /// Computes graph identities without depending on input indices or checkout order.

@@ -1283,9 +1283,12 @@ fn program_clone_and_shared_link_retain_exact_immutable_payloads() {
     }
 }
 
+/// Named mutation that keeps an image structurally valid while forging cross-object evidence.
+type ImageForgeryCase = (&'static str, fn(&mut LinkedImage));
+
 #[test]
 fn public_reconstruction_rejects_cross_object_root_definition_and_relocation_forgery() {
-    let cases: &[(&str, fn(&mut LinkedImage))] = &[
+    let cases: &[ImageForgeryCase] = &[
         ("root out of bounds", |image| {
             image.entry.root_region.region = RegionId(u32::MAX)
         }),

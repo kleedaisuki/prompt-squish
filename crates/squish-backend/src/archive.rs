@@ -352,7 +352,7 @@ pub fn write_sopack_ref(
         .map(|(key, path)| {
             (
                 key.clone(),
-                source_key("internal", path, &payload.package_name),
+                source_key("internal", path, payload.package_name),
             )
         })
         .collect();
@@ -558,7 +558,7 @@ pub fn read_sopack_shared(
         return Err(fail("SOPack manifest byte limit exceeded"));
     }
     let manifest: Manifest =
-        serde_json::from_slice(&manifest_bytes).map_err(|e| fail(e.to_string()))?;
+        serde_json::from_slice(manifest_bytes).map_err(|e| fail(e.to_string()))?;
     validate_manifest(&manifest)?;
     if serde_json::to_vec(&manifest).map_err(|e| fail(e.to_string()))? != manifest_bytes {
         return Err(fail("noncanonical SOPack manifest"));
@@ -580,7 +580,7 @@ pub fn read_sopack_shared(
         let source = files
             .remove(&format!("sources/{path}"))
             .ok_or_else(|| fail("SOPack source missing"))?;
-        if content_digest(&source) != *expected {
+        if content_digest(source) != *expected {
             return Err(fail("SOPack source digest mismatch"));
         }
         let key = source_key(&digest, path, &payload.package_name);
@@ -594,7 +594,7 @@ pub fn read_sopack_shared(
         let bytes = files
             .remove(&format!("units/{path}.xsir"))
             .ok_or_else(|| fail("SOPack compiled module missing"))?;
-        let mut unit = decode_unit_container(&bytes).map_err(|e| fail(e.to_string()))?;
+        let mut unit = decode_unit_container(bytes).map_err(|e| fail(e.to_string()))?;
         if !matches!(
             unit.kind(),
             squish_ir::UnitKind::Module | squish_ir::UnitKind::Sopack
