@@ -899,6 +899,11 @@ pub fn run(mode: Mode) {
     for patterns in [0, 64, 256] {
         stages(mode, &unused_regexes(patterns));
     }
+    // Candidate-only crossover controls preserve constant output while varying distinct
+    // long arguments around the bounded small-domain interner's promotion threshold.
+    for expansions in [1, 8, 9, 16] {
+        stages(mode, &scalar_values(expansions, true, 4096));
+    }
     for expansions in [128, 512, 2048] {
         for unique in [false, true] {
             stages(mode, &scalar_values(expansions, unique, 8));

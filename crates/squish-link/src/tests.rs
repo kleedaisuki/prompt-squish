@@ -1385,6 +1385,52 @@ fn scalar_index_preserves_duplicate_entry_values_and_sorted_final_trace_ids() {
 }
 
 #[test]
+fn scalar_index_entry_setup_crosses_threshold_without_changing_canonical_ids() {
+    let fixture = linked();
+    let (mut units, objects) = shared_reconstruction_parts(&fixture);
+    let mut image = fixture.image;
+    image.entry.required_params = (0..12).map(|id| format!("arg{id:02}")).collect();
+    let unit = Arc::make_mut(units.get_mut(&image.entry.source).unwrap());
+    let RelocatableUnitIr::Entry(entry) = unit else {
+        panic!("entry fixture")
+    };
+    entry.required_params = image.entry.required_params.clone();
+    let program = LinkedProgram::reconstruct_shared(image, units, objects).unwrap();
+    let arguments: BTreeMap<_, _> = (0..12)
+        .map(|id| {
+            let text = match id {
+                0 | 11 => String::new(),
+                1 | 10 => "猫".repeat(4096),
+                _ => format!("unique{id:02}"),
+            };
+            (format!("arg{id:02}"), text)
+        })
+        .collect();
+    let mut expected: Vec<_> = arguments.values().cloned().collect();
+    expected.push("ab".into());
+    expected.sort();
+    expected.dedup();
+    let result = Instantiator
+        .instantiate(&program, arguments.clone(), Budgets::default())
+        .unwrap();
+    assert_eq!(result.trace.scalar_values, expected);
+    let frame_args: Vec<_> = arguments
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.clone(),
+                ScalarValueId(expected.binary_search(value).unwrap() as u32),
+            )
+        })
+        .collect();
+    assert_eq!(result.trace.frames[0].args, frame_args);
+    result
+        .trace
+        .validate_against_document(&result.document)
+        .unwrap();
+}
+
+#[test]
 fn borrowed_static_scalar_matches_task_evaluation_with_exact_budget_errors() {
     let fixture = linked();
     let (mut units, objects) = shared_reconstruction_parts(&fixture);

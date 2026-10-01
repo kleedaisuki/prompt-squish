@@ -183,6 +183,55 @@ enum Task<'a> {
     },
 }
 
+/// Maximum scalar arena size scanned directly before indexing the immutable prefix.
+///
+/// Small invocations commonly reuse one long argument. Hashing and duplicating that entire
+/// key on every lookup costs more than a bounded equality check. The cap is independent of
+/// workload size: large distinct-value workloads still enter the indexed path once, rather
+/// than restoring an unbounded quadratic scan. Eight is a conservative fixed small-domain
+/// cutoff, not a claimed universal hardware-optimal crossover.
+const LINEAR_SCALAR_LIMIT: usize = 8;
+
+/// Preserves first-insertion scalar IDs without paying for an index in tiny value domains.
+#[derive(Default)]
+struct ScalarIndex {
+    /// Created once after the bounded prefix; keys are session state, never trace ordering.
+    large: Option<HashMap<String, u32>>,
+}
+
+impl ScalarIndex {
+    /// Finds the first arena occurrence, promoting the complete prefix at most once.
+    fn find(&mut self, values: &[String], value: &str) -> Option<u32> {
+        if values.len() <= LINEAR_SCALAR_LIMIT && self.large.is_none() {
+            return values
+                .iter()
+                .position(|old| old == value)
+                .map(|id| id as u32);
+        }
+        let index = self.large.get_or_insert_with(|| {
+            let mut index = HashMap::with_capacity(values.len());
+            for (id, text) in values.iter().enumerate() {
+                index.entry(text.clone()).or_insert(id as u32);
+            }
+            index
+        });
+        index.get(value).copied()
+    }
+
+    /// Appends a new value once; indexed mode never derives an ID from map iteration.
+    fn intern(&mut self, values: &mut Vec<String>, value: &str) -> u32 {
+        if let Some(id) = self.find(values, value) {
+            return id;
+        }
+        let id = values.len() as u32;
+        values.push(value.into());
+        if let Some(index) = &mut self.large {
+            index.insert(value.into(), id);
+        }
+        id
+    }
+}
+
 struct Machine<'a> {
     program: &'a LinkedProgram,
     budgets: Budgets,
@@ -192,8 +241,8 @@ struct Machine<'a> {
     frames: Vec<FrameRecord>,
     frame_origins: Vec<QualifiedOriginRef>,
     scalar_values: Vec<String>,
-    /// Session-only value lookup preserving first-insertion arena IDs; never serialized.
-    scalar_index: HashMap<String, u32>,
+    /// Session-only bounded small-pool lookup and lazy index; never serialized.
+    scalar_index: ScalarIndex,
     sequences: Vec<Vec<DocumentItemId>>,
     origins: Vec<OriginNode>,
     directives: Vec<ArchiveDirective>,
@@ -230,13 +279,20 @@ impl<'a> Machine<'a> {
         let definition_origin = origin_for_region(program, root)
             .ok_or_else(|| InstantiateError::new("RUN003", "entry root has no source origin"))?;
         let mut scalar_values = Vec::new();
-        let mut scalar_index = HashMap::new();
+        let mut scalar_index = ScalarIndex::default();
+        let mut frame_args = Vec::with_capacity(args.len());
         let values: BTreeMap<_, _> = args
             .into_iter()
             .map(|(name, text)| {
-                scalar_index
-                    .entry(text.clone())
-                    .or_insert(scalar_values.len() as u32);
+                // Entry arguments retain their original arena positions, including duplicate
+                // values. Frame IDs always name the first equal value, as in macro interning.
+                let id = scalar_index
+                    .find(&scalar_values, &text)
+                    .unwrap_or(scalar_values.len() as u32);
+                frame_args.push((name.clone(), ScalarValueId(id)));
+                if let Some(index) = &mut scalar_index.large {
+                    index.entry(text.clone()).or_insert(id);
+                }
                 scalar_values.push(text.clone());
                 (
                     name,
@@ -246,10 +302,6 @@ impl<'a> Machine<'a> {
                     },
                 )
             })
-            .collect();
-        let frame_args: Vec<(LocalName, ScalarValueId)> = values
-            .iter()
-            .map(|(n, v)| (n.clone(), ScalarValueId(scalar_index[&v.text])))
             .collect();
         let env = Env {
             frame: FrameId(0),
@@ -968,13 +1020,7 @@ impl<'a> Machine<'a> {
         self.buffers.len() - 1
     }
     fn intern_scalar(&mut self, value: &str) -> u32 {
-        if let Some(id) = self.scalar_index.get(value) {
-            return *id;
-        }
-        let id = self.scalar_values.len() as u32;
-        self.scalar_values.push(value.into());
-        self.scalar_index.insert(value.into(), id);
-        id
+        self.scalar_index.intern(&mut self.scalar_values, value)
     }
     fn string(&self, slot: u32, id: StringId) -> Result<String, InstantiateError> {
         let unit = self.unit(slot)?;
@@ -1528,5 +1574,66 @@ mod archive_fragment_tests {
                 .code,
             "RUN028"
         );
+    }
+}
+
+#[cfg(test)]
+mod scalar_index_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_large_single_value_never_hashes_or_duplicates_an_index_key() {
+        let text = "猫".repeat(65536 / 3);
+        let mut values = Vec::new();
+        let mut index = ScalarIndex::default();
+        for _ in 0..1024 {
+            assert_eq!(index.intern(&mut values, &text), 0);
+        }
+        assert_eq!(values, [text]);
+        assert!(index.large.is_none());
+    }
+
+    #[test]
+    fn promotion_preserves_duplicate_prefix_first_ids_and_indexes_new_values() {
+        // Entry setup may retain duplicates. Promotion must not select the last equal ID.
+        let mut values = vec![String::new(), "same".into(), "same".into()];
+        values.extend((0..LINEAR_SCALAR_LIMIT).map(|id| format!("prefix{id}")));
+        let mut index = ScalarIndex::default();
+        assert_eq!(index.intern(&mut values, "same"), 1);
+        assert_eq!(index.intern(&mut values, ""), 0);
+        assert!(index.large.is_some());
+        for id in 0..2048 {
+            let text = format!("different-{id:08}");
+            let first = values.len() as u32;
+            assert_eq!(index.intern(&mut values, &text), first);
+            assert_eq!(index.intern(&mut values, &text), first);
+        }
+        for (id, text) in values.iter().enumerate() {
+            let expected = values.iter().position(|old| old == text).unwrap() as u32;
+            assert_eq!(index.find(&values, text), Some(expected), "arena slot {id}");
+        }
+    }
+
+    #[test]
+    fn bounded_prefix_promotes_only_after_the_crossover_and_keeps_empty_unicode_ids() {
+        let mut values = Vec::new();
+        let mut index = ScalarIndex::default();
+        let text: Vec<_> = (0..=LINEAR_SCALAR_LIMIT)
+            .map(|id| {
+                if id == 0 {
+                    String::new()
+                } else {
+                    format!("猫{id}")
+                }
+            })
+            .collect();
+        for (id, value) in text.iter().enumerate() {
+            assert_eq!(index.intern(&mut values, value), id as u32);
+            assert!(index.large.is_none());
+        }
+        assert_eq!(index.intern(&mut values, &text[1]), 1);
+        assert!(index.large.is_some());
+        assert_eq!(index.intern(&mut values, "after"), text.len() as u32);
+        assert_eq!(index.intern(&mut values, "after"), text.len() as u32);
     }
 }
