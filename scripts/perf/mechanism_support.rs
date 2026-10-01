@@ -49,9 +49,13 @@ impl Config {
     }
 }
 
-/// Cargo's all-target test run should exercise tiny fixtures, not a full benchmark.
+/// Debug-profile executions always exercise tiny fixtures, never the full suite.
+///
+/// Cargo does not reliably pass `--test` to harness-free bench executables during
+/// all-target testing. Debug assertions identify those ordinary test-profile runs;
+/// shipping-profile bench builds have debug assertions disabled and collect samples.
 pub fn smoke_requested() -> bool {
-    std::env::args().any(|argument| argument == "--test")
+    cfg!(debug_assertions) || std::env::args().any(|argument| argument == "--test")
 }
 
 /// Parse a single positive environment setting before timing begins.
@@ -178,6 +182,17 @@ pub struct TrackingAllocator;
 /// This small fixture uses explicit calls to the wrapper, works in both binaries,
 /// and never makes huge allocations merely to force an OS failure path.
 pub fn verify_allocation_accounting() {
+    // Harness-free main functions execute this debug smoke-selection check even
+    // when Cargo does not generate/run a conventional Rust test harness.
+    #[cfg(debug_assertions)]
+    {
+        assert!(smoke_requested());
+        let config = Config::from_env();
+        assert_eq!(config.samples, 1);
+        assert_eq!(config.warmup, 1);
+        assert_eq!(config.max_iterations, 1);
+        assert_eq!(config.allocation_iterations, 1);
+    }
     let original = Layout::from_size_align(32, 8).unwrap();
     let grown = Layout::from_size_align(64, 8).unwrap();
     let shrunk = Layout::from_size_align(24, 8).unwrap();
@@ -470,4 +485,22 @@ fn quoted(value: &str) -> String {
     }
     result.push('"');
     result
+}
+
+#[cfg(test)]
+mod smoke_tests {
+    use super::{Config, smoke_requested};
+
+    /// Ordinary debug tests cannot accidentally select expensive adaptive sampling.
+    #[test]
+    fn debug_execution_selects_bounded_smoke() {
+        if cfg!(debug_assertions) {
+            assert!(smoke_requested());
+            let config = Config::from_env();
+            assert_eq!(config.samples, 1);
+            assert_eq!(config.warmup, 1);
+            assert_eq!(config.max_iterations, 1);
+            assert_eq!(config.allocation_iterations, 1);
+        }
+    }
 }
