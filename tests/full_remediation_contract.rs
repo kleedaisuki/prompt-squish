@@ -90,12 +90,27 @@ fn events(output: &Output) -> Vec<Value> {
         .collect()
 }
 
+/// Extracts structured diagnostics from both action failures and diagnostic events.
+fn diagnostics(output: &Output) -> Vec<Value> {
+    events(output)
+        .into_iter()
+        .filter_map(|event| {
+            let payload = &event["payload"];
+            if payload["type"] == "diagnostic" {
+                Some(payload["data"].clone())
+            } else {
+                payload["data"].get("diagnostic").cloned()
+            }
+        })
+        .collect()
+}
+
 /// Returns concrete compile actions advertised by the real process protocol.
 fn compile_actions(output: &Output) -> usize {
     events(output)
         .iter()
         .filter(|event| {
-            event["payload"]["type"] == "action_queued"
+            event["payload"]["type"] == "action_declared"
                 && event["payload"]["data"]["kind"] == "compile"
         })
         .count()
@@ -257,7 +272,7 @@ fn fresh_invocation_rejects_corrupt_product_blob_and_repairs_without_changing_zi
 }
 
 #[test]
-fn invalid_action_index_is_diagnosed_preserves_product_and_clean_recovers() {
+fn invalid_action_index_warns_rebuilds_without_cache_authority_and_clean_recovers() {
     let root = project(
         "invalid-index-",
         "consumer",
@@ -269,23 +284,43 @@ fn invalid_action_index_is_diagnosed_preserves_product_and_clean_recovers() {
     let expected = product(root.path(), "pack");
     let index = root.path().join("target/xmlsquish/cache/actions.sqlite3");
     assert!(index.is_file());
-    fs::write(index, b"invalid derived cache; not a SQLite database").unwrap();
+    // Every CLI child has exited. Remove the isolated fixture's recovery files:
+    // otherwise SQLite may legitimately reconstruct the old database from WAL.
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = index.with_file_name(format!("actions.sqlite3{suffix}"));
+        if sidecar.exists() {
+            fs::remove_file(sidecar).unwrap();
+        }
+    }
+    let invalid = b"invalid derived cache; not a SQLite database";
+    fs::write(&index, invalid).unwrap();
+    assert_eq!(
+        fs::read(&index).unwrap(),
+        invalid,
+        "fixture failed to corrupt the complete persisted index"
+    );
     let rebuilt = cli(
         root.path(),
         &["build", "--trace=events", "--message-format=json"],
     );
+    // Cache lookup/record errors are advisory in run_dispatch: execute verified
+    // work and report a warning, never turn invalid index rows into cache hits.
+    success(&rebuilt);
+    let recorded = events(&rebuilt);
     assert!(
-        !rebuilt.status.success(),
-        "corrupt SQLite authority was silently accepted"
-    );
-    let diagnostics = format!(
-        "{}{}",
-        String::from_utf8_lossy(&rebuilt.stdout),
-        String::from_utf8_lossy(&rebuilt.stderr)
+        recorded
+            .iter()
+            .any(|event| event["payload"]["type"] == "diagnostic"
+                && event["payload"]["data"]["severity"] == "warning"
+                && event["payload"]["data"]["code"] == "host_action_index_open"),
+        "invalid index lost its actual storage warning: {}",
+        String::from_utf8_lossy(&rebuilt.stdout)
     );
     assert!(
-        diagnostics.contains("diagnostic"),
-        "storage failure lost its structured diagnostic: {diagnostics}"
+        !recorded
+            .iter()
+            .any(|event| event["payload"]["type"] == "cache_hit"),
+        "corrupt index supplied successful cache authority"
     );
     assert_eq!(
         product(root.path(), "pack"),
@@ -515,6 +550,122 @@ fn reachable_archive_planning_does_not_hide_malformed_local_source_units() {
             .path()
             .join("target/xmlsquish/artifacts/main.pack")
             .exists()
+    );
+    let failures = diagnostics(&failed);
+    let primary = failures
+        .iter()
+        .find_map(|diagnostic| {
+            let primary = &diagnostic["primary"];
+            primary["source"]
+                .as_str()
+                .filter(|source| source.contains("uncalled.xml"))
+                .map(|_| primary)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "frontend failure lost its actual local source span: {}",
+                String::from_utf8_lossy(&failed.stdout)
+            )
+        });
+    let start = primary["start"]
+        .as_u64()
+        .expect("frontend primary span start");
+    let end = primary["end"].as_u64().expect("frontend primary span end");
+    let source_len = fs::read(root.path().join("src/uncalled.xml"))
+        .unwrap()
+        .len() as u64;
+    assert!(
+        start < end && end <= source_len,
+        "frontend primary span is not a real byte range in the malformed source"
+    );
+}
+
+#[test]
+fn conflicting_sopack_symbols_report_relocated_provider_primary_and_preserve_old_pack() {
+    let mut archives = Vec::new();
+    for package in ["first-library", "second-library"] {
+        let provider = project(
+            "collision-provider-",
+            package,
+            "sopack",
+            "<xs:sopack xmlns:xs='https://xmlsquish.moesegfault.dev/ns'><xs:import src='lib.xml'/></xs:sopack>",
+        );
+        let manifest = provider.path().join("xmlsquish.toml");
+        let mut text = fs::read_to_string(&manifest).unwrap();
+        text.push_str("\n[exports]\nmain = \"src/lib.xml\"\n");
+        fs::write(manifest, text).unwrap();
+        fs::write(provider.path().join("src/lib.xml"), format!("<xs:module xmlns:xs='https://xmlsquish.moesegfault.dev/ns' xmlns:m='urn:test:collision'><xs:macro name='m:shared'><xs:asset path='owned.bin' name='{package}.bin'/></xs:macro></xs:module>")).unwrap();
+        fs::write(provider.path().join("src/owned.bin"), package.as_bytes()).unwrap();
+        success(&cli(provider.path(), &["build", "--plain"]));
+        archives.push((
+            package,
+            product(provider.path(), "sopack"),
+            provider.path().to_string_lossy().into_owned(),
+        ));
+        provider.close().unwrap();
+    }
+    let consumer = project(
+        "collision-consumer-",
+        "consumer",
+        "pack",
+        "<xs:pack xmlns:xs='https://xmlsquish.moesegfault.dev/ns'><xs:asset path='baseline.bin'/></xs:pack>",
+    );
+    fs::write(consumer.path().join("src/baseline.bin"), b"OLD PRODUCT").unwrap();
+    success(&cli(consumer.path(), &["build", "--plain"]));
+    let old = product(consumer.path(), "pack");
+    for (package, archive, _) in &archives {
+        let file = format!("{package}.sopack");
+        fs::write(consumer.path().join(&file), archive).unwrap();
+        success(&cli(
+            consumer.path(),
+            &["add", package, "--path", &file, "--plain"],
+        ));
+    }
+    fs::write(consumer.path().join("src/main.xml"), "<xs:pack xmlns:xs='https://xmlsquish.moesegfault.dev/ns' xmlns:m='urn:test:collision'><xs:import src='pkg:first-library/main'/><xs:import src='pkg:second-library/main'/><xs:expand ref='m:shared'/></xs:pack>").unwrap();
+    let failed = cli(
+        consumer.path(),
+        &["build", "--trace=events", "--message-format=json"],
+    );
+    assert!(
+        !failed.status.success(),
+        "two providers silently overwrote the same macro symbol"
+    );
+    let failures = diagnostics(&failed);
+    let duplicate = failures
+        .iter()
+        .find(|diagnostic| {
+            diagnostic["code"] == "MGB070"
+                && format!("{} {}", diagnostic["message"], diagnostic["help"]).contains("LNK023")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "duplicate symbol failure lost stable MGB070 code or compiler LNK023 cause: {}",
+                String::from_utf8_lossy(&failed.stdout)
+            )
+        });
+    let source = duplicate["primary"]["source"]
+        .as_str()
+        .expect("duplicate provider primary source identity");
+    assert!(
+        source.contains("sopack") && source.contains("lib.xml"),
+        "duplicate provider identity was not relocated: {source}"
+    );
+    let description = format!("{} {}", duplicate["message"], duplicate["help"]);
+    assert!(
+        description.contains("urn:test:collision") && description.contains("shared"),
+        "duplicate macro QName is not helpful to the caller: {duplicate}"
+    );
+    let transcript = String::from_utf8_lossy(&failed.stdout);
+    assert!(
+        archives
+            .iter()
+            .all(|(_, _, root)| !transcript.contains(root)),
+        "diagnostic captured a deleted producer checkout"
+    );
+    assert_eq!(
+        product(consumer.path(), "pack"),
+        old,
+        "failed duplicate-symbol link replaced the old public pack"
     );
 }
 
