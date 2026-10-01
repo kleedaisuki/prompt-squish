@@ -9,12 +9,12 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 
 ## [1.2.1] — 2026-10-01
 
-发布说明 / Release notes: [1.2.1](docs/releases/1.2.1.md). 集成验证与发布待完成 / Integrated verification and publication pending.
+发布说明 / Release notes: [1.2.1](docs/releases/1.2.1.md). 精确源码托管检查点已通过；合并主分支门禁与发布待完成 / Exact-source hosted checkpoint passed; post-merge main gate and publication pending.
 
 ### 身份、验证与可复用执行 / Identity, validation and reusable execution
 
-- 重复文本传递与捕获共享已有内容；必要的拼接仅复制可见文本，同时保留每次选择的来源、逻辑字节预算和诊断顺序。公共字符串接口与 XML 用法不变。新文本共享实现仍待精确候选托管验证，不预先宣称加速。
-  Share repeated text content during passing and capture; necessary concatenation copies only visible text while preserving per-selection provenance, logical byte budgets and diagnostic ordering. Public string interfaces and XML usage remain unchanged; exact-candidate hosted verification is pending, with no premature speedup claim.
+- 重复文本传递与捕获共享已有内容；必要的拼接仅复制可见文本，同时保留每次选择的来源、逻辑字节预算和诊断顺序。公共字符串接口与 XML 用法不变。精确源码已通过托管验证，测量不代表普遍加速。
+  Share repeated text content during passing and capture; necessary concatenation copies only visible text while preserving per-selection provenance, logical byte budgets and diagnostic ordering. Public string interfaces and XML usage remain unchanged; exact source passed hosted verification, without a universal speedup claim.
 
 - pack 共享结果比较完整文档、来源跟踪和资源指令，防止空文档下资源错误复用；预编译 SOPack 先验证整个归档再选择引用单元，本地源码仍保持严格检查。
   Match complete document, provenance and resource-directive identity for pack reuse; validate whole SOPacks before selecting referenced units, while retaining strict local-source checks.
@@ -22,8 +22,8 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
   Preserve source, invocation-frame and budget semantics through optimization; share verified immutable snapshots without weakening identity, corruption or durability checks.
 - ZIP 读取直接验证规范记录；SOPack 提供者身份基于内容和引用拓扑。输入归档与锁定摘要仍不可变，不承诺跨生产者版本重新生成的 bytes 相同。
   Validate canonical ZIP records directly and derive SOPack provider identities from content and reference topology. Existing archive bytes and pins remain immutable; re-encoding across producer versions is not byte-identity guaranteed.
-- 更新用户手册、自带 Agent Skill 与双语发布目录；保留 v1.2.0 历史。性能与兼容结论以最终 GitHub Actions 证据为准，不预先宣称加速或验证通过。
-  Update the manual, bundled Agent Skill and bilingual release catalog, preserving v1.2.0 history. Final GitHub Actions evidence determines performance and compatibility conclusions.
+- 更新用户手册、自带 Agent Skill 与双语发布目录；保留 v1.2.0 历史。性能与兼容结论见精确源码 GitHub Actions 证据，不宣称所有场景加速；主分支门禁与实际发布仍待完成。
+  Update the manual, bundled Agent Skill and bilingual release catalog, preserving v1.2.0 history. Exact-source GitHub Actions evidence establishes scoped results, not universal speedups; the post-merge gate and publication remain pending.
 
 ## [1.2.0] — 2026-10-01
 

@@ -14,10 +14,10 @@ xmlsquish is a project-oriented prompt builder. It discovers packages, workspace
 
 当前版本的具体资产、平台要求与升级说明见 [v1.2.1 发布说明](docs/releases/1.2.1.md)。
 
-1.2.1 当前是待最终托管验证与发布的候选；本链接不表示新二进制已可下载。发布后请只使用同一标签的归档和校验和。
+1.2.1 当前是精确源码已通过托管验证的候选，合并主分支门禁与实际发布仍待完成；本链接不表示新二进制已可下载。发布后请只使用同一标签的归档和校验和。
 
-Version 1.2.1 is currently a candidate pending final hosted verification and
-publication; this link does not claim new binaries are already downloadable.
+Version 1.2.1 has passed exact-source hosted verification; the post-merge main
+gate and publication remain pending. This link does not claim new binaries are already downloadable.
 After publication, use archives and checksums from the same tag.
 
 Download the archive for your OS and CPU from GitHub Releases, verify it against the checksums from the same release, extract it, and put `xmlsquish` (`xmlsquish.exe` on Windows) on `PATH`. Check the release notes for the Linux glibc requirement.
@@ -173,11 +173,11 @@ Do not edit internal hashes, SQLite tables or cache paths to force migration.
 If cleanup is required, use `xmlsquish clean`; it removes the entire project build root,
 so ensure dependency inputs are available before an offline rebuild.
 
-重复文本可以共享内容而不合并来源或预算，现有 XML 和字符串参数无需改写；最新实现仍待精确候选的托管验证。
+重复文本共享内容而不合并来源或预算；多片段拼接仍按需物化文本，现有 XML 和字符串参数无需改写。精确源码已通过托管验证。
 
-Repeated text can share content without merging provenance or budgets; existing
-XML and string arguments need no rewrite. The latest implementation still
-requires exact-candidate hosted verification.
+Repeated text shares content without merging provenance or budgets; concatenating
+multiple fragments materializes text when needed. Existing XML and string arguments
+need no rewrite. Exact source has passed hosted verification.
 
 既有 SOPack 与锁定 SHA-256 摘要保持不可变；升级不会为了优化而改写依赖文件或锁。
 新生产者内部提供者身份可能变化，因此不要要求不同版本重新生产的库具有相同 bytes；
@@ -195,12 +195,12 @@ The canonical schema-1 reader accepts existing v1.2.0 SOPacks; rewriting a singl
 already-relocated archive retains its provider paths and normalized bytes. Public
 IR wire/digest semantics remain distinct from private cache identities.
 
-集成测试、站点验证与性能对比仍以 GitHub Actions 的最终证据为准；本说明不宣称
-尚未完成的 CI 已通过，也不提供未经测量的加速百分比。
+精确源码的集成测试、站点和机制比较已通过；主分支与发布门禁仍须针对实际提交完成。
+[检查点报告](docs/performance/v1.2-text-owner-checkpoint.md)给出有限场景的测量及混合结果，不宣称普遍加速。
 
-Integrated tests, website validation and performance comparisons require final
-GitHub Actions evidence; this text does not claim uncompleted CI passes or
-unmeasured percentage gains.
+Exact-source integration, Site and mechanism comparisons passed; main/release gates
+still apply to the actual merged commit. The [checkpoint report](docs/performance/v1.2-text-owner-checkpoint.md)
+records scoped measurements and mixed results, not a universal speedup.
 
 ## 项目清单 / Project manifest
 

@@ -12,7 +12,7 @@
     "version": "1.2.1",
     "tag": "v1.2.1",
     "date": "2026-10-01",
-    "releaseStatus": "draft",
+    "releaseStatus": "candidate",
     "pages": {
       "zh-CN": "https://xmlsquish.moesegfault.dev/releases/1.2.1/",
       "en": "https://xmlsquish.moesegfault.dev/en/releases/1.2.1/"
@@ -99,9 +99,9 @@
     "Full document/provenance/resource-directive identity for pack reuse.",
     "Whole SOPack validation before referenced-unit compilation; strict local-source validation retained.",
     "Verified immutable snapshots and borrowed/shared mechanisms retain integrity and durability checks.",
-    "Canonical ZIP direct validation and content/topology-based portable provider identity; hosted verification and performance conclusions pending.",
+    "Canonical ZIP direct validation and content/topology-based portable provider identity; exact-source hosted checkpoint passed, with main/publication gates pending.",
     "Structured failures preserve exact relocated source records and actual invocation chains; cache-result rejection does not conflate derived CAS corruption with published-product corruption.",
-    "Repeated text content sharing preserves public string interfaces, per-selection provenance, logical byte budgets and diagnostic ordering; exact-source validation pending."
+    "Repeated text content sharing preserves public string interfaces, per-selection provenance, logical byte budgets and diagnostic ordering; multi-fragment concatenation materializes visible bytes when needed; source checkpoint verified."
   ],
   "storageLayout": {
     "defaultRoot": "target/xmlsquish",
@@ -157,11 +157,18 @@
     }
   },
   "verification": {
-    "status": "pending",
+    "status": "verified-source-checkpoint",
     "environment": "GitHub Actions",
-    "performanceClaims": "Earlier scalar regressions and the passing 6b2a31b repair checkpoint are historical; subsequent text-sharing source requires exact hosted gates and measurements. No universal gain claimed.",
+    "performanceClaims": "Same-run comparisons against post-origin-index 1bbf6cd, not raw shipped v1.2.0 or v1.1.0. Selected long-text, asset-pack and SOPack fixtures improved; startup/tiny-warm and some owned/validation/short-key controls are mixed or negative. No universal speedup.",
     "preliminaryReport": "https://github.com/kleedaisuki/prompt-squish/blob/main/docs/performance/v1.2-full-repair-preliminary.md",
     "scope": "Catalog preparation avoids derived CAS-output hydration but still verifies committed publications. Warm SOPack proof reuse is bound to exact frozen encoding digest and size, not arbitrary valid IR.",
-    "historicalCandidateReport": "https://github.com/kleedaisuki/prompt-squish/blob/main/docs/performance/v1.2-full-repair-candidate.md"
+    "historicalCandidateReport": "https://github.com/kleedaisuki/prompt-squish/blob/main/docs/performance/v1.2-full-repair-candidate.md",
+    "sourceCommit": "388f3640252d71fa1d40514a4775beff6598bb24",
+    "hostedRun": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36842734101",
+    "pendingGates": [
+      "Exact post-merge main gate",
+      "Native release publication"
+    ],
+    "finalReport": "https://github.com/kleedaisuki/prompt-squish/blob/main/docs/performance/v1.2-text-owner-checkpoint.md"
   }
 }
