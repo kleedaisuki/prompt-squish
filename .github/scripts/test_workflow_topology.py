@@ -54,10 +54,14 @@ def check_topology(document: str) -> None:
                             dispatch.group(1), re.MULTILINE | re.DOTALL)
     if origin_input is None or "        default: false" not in origin_input.group(1):
         raise ValueError("same-runner origin comparison must remain explicitly opt-in")
+    full_input = re.search(r"^      full_repair_compare:\n(.*?)(?=^      \S|\Z)",
+                           dispatch.group(1), re.MULTILINE | re.DOTALL)
+    if full_input is None or "        default: false" not in full_input.group(1) or "        type: boolean" not in full_input.group(1):
+        raise ValueError("full-repair comparison must remain explicitly opt-in")
     mechanisms = re.search(r"^  mechanisms:\n(.*?)(?=^  \S|\Z)",
                            jobs.group(1), re.MULTILINE | re.DOTALL)
     if mechanisms is None or "    needs: rust-quality" not in mechanisms.group(1) or (
-        "if: github.event_name == 'workflow_dispatch' && (inputs.mechanisms || inputs.origin_compare)"
+        "if: github.event_name == 'workflow_dispatch' && (inputs.mechanisms || inputs.origin_compare || inputs.full_repair_compare)"
         not in mechanisms.group(1)
     ):
         raise ValueError("mechanism evidence must require manual input and successful quality")
@@ -102,6 +106,14 @@ class WorkflowTopologyTests(unittest.TestCase):
     def test_checked_in_workflow_has_expected_boundaries(self) -> None:
         """The lightweight CI suite checks the document that GitHub will dispatch."""
         check_topology(WORKFLOW.read_text(encoding="utf-8"))
+
+    def test_release_contracts_do_not_run_full_timing_benchmarks(self) -> None:
+        """Complete native contracts remain, while only shipping binaries use release."""
+        release = (WORKFLOW.parent / "release.yml").read_text(encoding="utf-8")
+        self.assertIn("build --release --locked --target", release)
+        self.assertIn("test --workspace --all-targets --all-features --locked --target", release)
+        self.assertNotIn("test --release", release)
+        self.assertIn("Smoke test and package", release)
 
     def test_job_step_inserted_before_input_is_rejected(self) -> None:
         """An unanchored performance replacement must fail before another dispatch."""

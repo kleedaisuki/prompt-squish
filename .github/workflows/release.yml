@@ -125,16 +125,18 @@ jobs:
             ~/.cargo/git
             source/target
           key: release-v1-${{ matrix.target }}-1.88-static-${{ hashFiles('source/Cargo.lock') }}-${{ needs.resolve.outputs.sha }}
-          restore-keys: release-v1-${{ matrix.target }}-1.88-static-${{ hashFiles('source/Cargo.lock') }}-
+          restore-keys: |
+            release-v1-${{ matrix.target }}-1.88-static-${{ hashFiles('source/Cargo.lock') }}-
+            release-v1-${{ matrix.target }}-1.88-static-
       - name: Build locked release binary
         working-directory: source
         run: cargo +1.88.0 build --release --locked --target ${{ matrix.target }}
       # CI covers x86 Linux/Windows and ARM macOS. Retain native release regressions
       # for ARM targets and both macOS architectures, then smoke all binaries.
-      - name: Run native release tests
+      - name: Run native contract tests with bounded bench smoke
         if: runner.os != 'macOS' && startsWith(matrix.target, 'aarch64')
         working-directory: source
-        run: cargo +1.88.0 test --release --workspace --all-targets --all-features --locked --target ${{ matrix.target }}
+        run: cargo +1.88.0 test --workspace --all-targets --all-features --locked --target ${{ matrix.target }}
       - name: Run native macOS tests with case-sensitive temporary files
         if: runner.os == 'macOS'
         working-directory: source
@@ -153,7 +155,7 @@ jobs:
           mkdir "$mount/tmp"
           touch "$mount/tmp/case-probe"
           test ! -e "$mount/tmp/CASE-PROBE"
-          TMPDIR="$mount/tmp" cargo +1.88.0 test --release --workspace --all-targets --all-features --locked --target ${{ matrix.target }}
+          TMPDIR="$mount/tmp" cargo +1.88.0 test --workspace --all-targets --all-features --locked --target ${{ matrix.target }}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.13'

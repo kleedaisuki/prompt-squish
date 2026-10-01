@@ -31,6 +31,10 @@ on:
         description: 'Preparation only: generate a verified shipped-v1.2 fixture, NOT current-source verification'
         type: boolean
         default: false
+      full_repair_compare:
+        description: 'Compare version-specific pre-repair and candidate core/archive APIs plus separate IO counts'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -64,7 +68,9 @@ jobs:
             ~/.cargo/git
             target
           key: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
-          restore-keys: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+          restore-keys: |
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-
 
       - name: Verify minimum supported Rust toolchain
         run: |
@@ -142,7 +148,9 @@ jobs:
             ~/.cargo/git
             target
           key: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
-          restore-keys: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+          restore-keys: |
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-
 
       - name: Verify minimum supported Rust toolchain
         run: |
@@ -236,7 +244,9 @@ jobs:
             ~/.cargo/git
             target
           key: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
-          restore-keys: rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+          restore-keys: |
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ github.job }}-
 
       - name: Build measured release binary
         run: cargo +1.88.0 build --release --bin xmlsquish --locked
@@ -342,11 +352,11 @@ jobs:
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
   mechanisms:
-    if: github.event_name == 'workflow_dispatch' && (inputs.mechanisms || inputs.origin_compare)
+    if: github.event_name == 'workflow_dispatch' && (inputs.mechanisms || inputs.origin_compare || inputs.full_repair_compare)
     needs: rust-quality
     name: In-process mechanism evidence
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -364,6 +374,7 @@ jobs:
           key: mechanism-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             mechanism-v1-${{ runner.os }}-${{ runner.arch }}-1.88-${{ hashFiles('Cargo.lock') }}-
+            mechanism-v1-${{ runner.os }}-${{ runner.arch }}-1.88-
             rust-v1-Linux-X64-1.88-performance-${{ hashFiles('Cargo.lock') }}-
             rust-v1-Linux-X64-1.88-performance-
       - name: Measure four selected in-process targets without rebuilding all tests
@@ -375,6 +386,44 @@ jobs:
           MECHANISM_MAX_ITERATIONS: '256'
           MECHANISM_ALLOCATION_ITERATIONS: '1'
         run: python scripts/perf/mechanisms.py --directory .temp/mechanisms
+      - name: Restore isolated version-specific pre-repair compilation
+        if: inputs.full_repair_compare
+        id: full-repair-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .cache/full-repair-reference-target
+          key: full-repair-reference-v1-1bbf6cd-linux-x64-1.88-${{ hashFiles('scripts/perf/archive_oracle.rs', 'scripts/perf/baseline_archive_oracle.patch') }}
+          restore-keys: full-repair-reference-v1-1bbf6cd-linux-x64-1.88-
+      - name: Ensure Linux syscall counter tool is available
+        if: inputs.full_repair_compare
+        run: command -v strace >/dev/null || (sudo apt-get update && sudo apt-get install -y strace)
+      - name: Compare all version-specific mechanisms and separate end-to-end IO
+        if: inputs.full_repair_compare
+        env:
+          MECHANISM_SAMPLES: '5'
+          MECHANISM_WARMUP: '2'
+          MECHANISM_TARGET_US: '3000'
+          MECHANISM_MAX_ITERATIONS: '256'
+          MECHANISM_ALLOCATION_ITERATIONS: '1'
+        run: python scripts/perf/full_repair_compare.py --passes 3 --io --directory .temp/full-repair-comparison
+      - name: Retain small full-repair evidence only
+        if: always() && inputs.full_repair_compare
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: full-repair-${{ github.sha }}
+          path: |
+            .temp/full-repair-comparison/report.json
+            .temp/full-repair-comparison/*.jsonl
+            .temp/full-repair-comparison/*/cargo-stderr.txt
+            .temp/full-repair-comparison/*-io/*-strace.txt
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Preserve pre-repair compilation after non-cancelled failure
+        if: always() && !cancelled() && inputs.full_repair_compare && steps.full-repair-cache.outputs.cache-hit != 'true' && steps.full-repair-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .cache/full-repair-reference-target
+          key: ${{ steps.full-repair-cache.outputs.cache-primary-key }}
       - name: Restore isolated pinned-reference core compilation
         if: inputs.origin_compare
         id: origin-cache

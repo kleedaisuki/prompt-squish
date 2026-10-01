@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 TARGETS = {"core_latency", "core_allocations", "archive_latency", "archive_allocations"}
 SCHEMA = "xmlsquish.mechanism.v1"
 ORACLE_SCHEMA = "xmlsquish.mechanism.oracle.v1"
+ARCHIVE_ORACLE_SCHEMA = "xmlsquish.archive.oracle.v1"
 
 
 def command(*arguments: str) -> str:
@@ -59,16 +60,22 @@ def validate(row: dict) -> None:
 
 
 def validate_oracle(row: dict) -> None:
-    """Require three untimed canonical output digests and stable fixture dimensions."""
-    if row.get("schema") != ORACLE_SCHEMA:
+    """Require schema-specific untimed canonical output digests and fixture dimensions."""
+    if row.get("schema") not in (ORACLE_SCHEMA, ARCHIVE_ORACLE_SCHEMA):
         raise ValueError("unknown mechanism oracle schema")
     if not all(isinstance(row.get(name), str) and row[name] for name in ("suite", "workload")):
         raise ValueError("oracle requires suite and workload labels")
     if not isinstance(row.get("dimensions"), dict) or any(type(value) is not int or value < 0
                                                          for value in row["dimensions"].values()):
         raise ValueError("oracle dimensions must be nonnegative integers")
-    for name in ("document_sha256", "trace_sha256", "directives_sha256"):
-        if not isinstance(row.get(name), str) or not re.fullmatch(r"[0-9a-f]{64}", row[name]):
+    digests = ({name: row.get(name) for name in ("document_sha256", "trace_sha256", "directives_sha256")}
+               if row["schema"] == ORACLE_SCHEMA else row.get("checksums"))
+    allowed = ({"document_sha256", "trace_sha256", "directives_sha256"},) if row["schema"] == ORACLE_SCHEMA else (
+        {"zip_archive_blake3", "zip_members_blake3"}, {"sopack_semantic_blake3"})
+    if not isinstance(digests, dict) or set(digests) not in allowed:
+        raise ValueError("unknown or incomplete canonical output checksum set")
+    for name, digest in digests.items():
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ValueError(f"invalid canonical output digest {name}")
 
 
@@ -76,7 +83,7 @@ def split_records(records: list[dict]) -> tuple[list[dict], list[dict]]:
     """Keep untimed oracle metadata out of latency and allocation sample aggregation."""
     samples, oracles = [], []
     for record in records:
-        if record.get("schema") == ORACLE_SCHEMA:
+        if record.get("schema") in (ORACLE_SCHEMA, ARCHIVE_ORACLE_SCHEMA):
             validate_oracle(record)
             oracles.append(record)
         else:
@@ -117,7 +124,8 @@ def aggregate(rows: list[dict]) -> list[dict]:
     return result
 
 
-def build(directory: Path, report: dict) -> dict[str, Path]:
+def build(directory: Path, report: dict, source: Path = ROOT,
+          target: Path | None = None) -> dict[str, Path]:
     """Compile only the four opt-in targets and resolve their actual Cargo artifact paths."""
     arguments = ["cargo", "+1.88.0", "bench", "--locked", "--no-run", "--message-format=json",
                  "-p", "squish-link", "-p", "squish-backend", "--features",
@@ -125,8 +133,11 @@ def build(directory: Path, report: dict) -> dict[str, Path]:
     for name in sorted(TARGETS):
         arguments += ["--bench", name]
     artifacts = {}
+    environment = dict(os.environ)
+    if target is not None:
+        environment["CARGO_TARGET_DIR"] = str(target)
     with (directory / "cargo-stderr.txt").open("w", encoding="utf-8") as errors:
-        process = subprocess.Popen(arguments, cwd=ROOT, stdout=subprocess.PIPE, stderr=errors,
+        process = subprocess.Popen(arguments, cwd=source, env=environment, stdout=subprocess.PIPE, stderr=errors,
                                    text=True, encoding="utf-8")
         assert process.stdout is not None
         for line in process.stdout:
