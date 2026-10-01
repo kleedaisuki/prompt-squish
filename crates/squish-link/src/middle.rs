@@ -6,12 +6,24 @@
 
 use regex::Regex;
 use squish_ir::{MatchInput, Op, OpId, Region, RegionId, RelocatableUnitIr, Validate};
-use std::{collections::BTreeMap, error::Error, fmt, ops::Range};
+use std::{collections::BTreeMap, error::Error, fmt, ops::Range, sync::Arc};
 
 /// Maximum materialized bytes for one scalar fact; larger regions remain executable IR.
 const MAX_SCALAR_BYTES: usize = 1024 * 1024;
 /// Maximum materialized scalar bytes per unit, independent of the runtime output budget.
 const MAX_UNIT_SCALAR_BYTES: usize = 8 * MAX_SCALAR_BYTES;
+
+#[cfg(test)]
+thread_local! {
+    /// Per-test-thread attempts count actual pattern compilation, not reused analysis records.
+    static REGEX_COMPILATION_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Reads this test thread's compilation attempts; callers compare deltas without resetting peers.
+#[cfg(test)]
+pub(crate) fn regex_compilation_attempts() -> usize {
+    REGEX_COMPILATION_ATTEMPTS.with(std::cell::Cell::get)
+}
 
 /// Work performed while specializing a unit, suitable for opt-in pipeline telemetry.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -63,8 +75,8 @@ pub struct StaticScalar {
 /// Regex engine state is deliberately not serialized across devices or library versions.
 #[derive(Clone, Debug)]
 pub struct OptimizedUnit {
-    /// Original validated relocatable IR, preserving every source identity and arena ID.
-    pub unit: RelocatableUnitIr,
+    /// Shared immutable validated IR, preserving source identities without copying payloads.
+    pub unit: Arc<RelocatableUnitIr>,
     /// Proven literal regex outcomes keyed by their original operation IDs.
     pub static_matches: BTreeMap<OpId, StaticMatch>,
     /// Conservative literal-only region facts keyed by their original region IDs.
@@ -108,40 +120,50 @@ impl MiddleEnd {
     /// // Persist optimized.unit; retain optimized facts for this execution session.
     /// ```
     pub fn optimize(&self, unit: RelocatableUnitIr) -> Result<OptimizedUnit, MiddleError> {
+        self.optimize_shared(Arc::new(unit))
+    }
+
+    /// Validates and specializes shared immutable IR without cloning its arenas or source data.
+    ///
+    /// Validation borrows the exact shared payload subsequently retained by the result.
+    /// The reference count is session state and is never part of portable IR serialization.
+    pub fn optimize_shared(
+        &self,
+        unit: Arc<RelocatableUnitIr>,
+    ) -> Result<OptimizedUnit, MiddleError> {
         unit.validate().map_err(|error| MiddleError {
             path: error.path,
             message: error.message.into(),
         })?;
+        self.optimize_shared_validated(unit)
+    }
+
+    /// Specializes the exact previously validated shared payload, without copying it.
+    ///
+    /// The caller must have validated this unchanged unit. Shared ownership is immutable;
+    /// no arena mutation may occur between validation and specialization.
+    pub(crate) fn optimize_shared_validated(
+        &self,
+        unit: Arc<RelocatableUnitIr>,
+    ) -> Result<OptimizedUnit, MiddleError> {
         let regexes = compile_regexes(&unit)?;
         let static_matches = literal_matches(&unit, &regexes);
         // Only scalar argument bodies consume these facts. Avoid duplicating every
         // literal prompt/module body during ordinary small-batch startup.
-        let scalar_regions: std::collections::BTreeSet<_> = unit
-            .ops()
-            .iter()
-            .flat_map(|record| {
-                let Op::Call { args, .. } = &record.op else {
-                    return Vec::new();
-                };
-                args.iter()
-                    .filter_map(|arg| match arg.value {
-                        squish_ir::ScalarExpr::RenderText(region) => Some(region),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        let selected_regions: Vec<_> = unit
-            .regions()
-            .iter()
-            .filter(|region| scalar_regions.contains(&region.id))
-            .cloned()
-            .collect();
-        let static_scalars = literal_scalars(
-            &selected_regions,
-            unit.ops(),
-            &unit.header().semantic_strings,
-        );
+        let scalar_regions = selected_scalar_regions(unit.ops(), unit.regions().len());
+        let static_scalars = if scalar_regions.is_empty() {
+            BTreeMap::new()
+        } else {
+            let selected_regions = unit
+                .regions()
+                .iter()
+                .filter(|region| scalar_regions[region.id.0 as usize]);
+            literal_scalars(
+                selected_regions,
+                unit.ops(),
+                &unit.header().semantic_strings,
+            )
+        };
         let stats = OptimizationStats {
             operations: unit.ops().len(),
             compiled_regexes: regexes.len(),
@@ -160,6 +182,31 @@ impl MiddleEnd {
     }
 }
 
+/// Selects validated scalar arguments without per-call allocation or region arena copies.
+///
+/// The dense flag vector is allocated only if a RenderText argument exists. Duplicate and
+/// unordered references merely set the same flag; materialization follows canonical arena order.
+fn selected_scalar_regions(ops: &[squish_ir::OpRecord], region_count: usize) -> Vec<bool> {
+    let mut selected = Vec::new();
+    let args = ops
+        .iter()
+        .filter_map(|record| match &record.op {
+            Op::Call { args, .. } => Some(args),
+            _ => None,
+        })
+        .flatten();
+    for arg in args {
+        let squish_ir::ScalarExpr::RenderText(region) = &arg.value else {
+            continue;
+        };
+        if selected.is_empty() {
+            selected.resize(region_count, false);
+        }
+        selected[region.0 as usize] = true;
+    }
+    selected
+}
+
 /// Compiles the validated pool in ID order, without introducing process-specific persistent data.
 fn compile_regexes(unit: &RelocatableUnitIr) -> Result<Vec<Regex>, MiddleError> {
     let header = unit.header();
@@ -168,6 +215,8 @@ fn compile_regexes(unit: &RelocatableUnitIr) -> Result<Vec<Regex>, MiddleError> 
         .iter()
         .enumerate()
         .map(|(index, pattern)| {
+            #[cfg(test)]
+            REGEX_COMPILATION_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
             Regex::new(&header.semantic_strings[pattern.pattern.0 as usize]).map_err(|error| {
                 MiddleError {
                     path: format!("header.regexes[{index}]"),
@@ -231,8 +280,8 @@ fn match_literal(regex: &Regex, text: &str, names: &[String]) -> StaticMatch {
 ///
 /// Control flow is intentionally excluded even when static: retaining its provenance and capture
 /// scope requires the evaluator. Bounds avoid multiplying giant shared literals into every region.
-fn literal_scalars(
-    regions: &[Region],
+fn literal_scalars<'a>(
+    regions: impl IntoIterator<Item = &'a Region>,
     ops: &[squish_ir::OpRecord],
     strings: &[String],
 ) -> BTreeMap<RegionId, StaticScalar> {
@@ -366,5 +415,153 @@ mod tests {
         assert_eq!(facts.len(), 8);
         assert!(!facts.contains_key(&RegionId(8)));
         assert_eq!(facts[&RegionId(3)].segments[0].op, OpId(0));
+    }
+
+    #[test]
+    fn scalar_selection_deduplicates_unordered_arguments_without_changing_caps_or_facts() {
+        let strings = vec!["x".repeat(MAX_SCALAR_BYTES)];
+        let mut ops = vec![OpRecord {
+            id: OpId(0),
+            op: Op::EmitText { value: StringId(0) },
+        }];
+        let regions: Vec<_> = (0..11)
+            .map(|id| Region {
+                id: RegionId(id),
+                ops: if id == 9 { vec![] } else { vec![OpId(0)] },
+            })
+            .collect();
+        ops.push(OpRecord {
+            id: OpId(1),
+            op: Op::Call {
+                target: squish_ir::ExpandedName {
+                    namespace_uri: "urn:test".into(),
+                    local_name: "scalar".into(),
+                },
+                args: [8, 3, 0, 8, 9, 7, 6, 5, 4, 2, 1]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, id)| squish_ir::Argument {
+                        name: format!("arg{index}"),
+                        value: squish_ir::ScalarExpr::RenderText(RegionId(id)),
+                    })
+                    .collect(),
+                fills: vec![],
+            },
+        });
+        let selected = selected_scalar_regions(&ops, regions.len());
+        assert_eq!(selected.len(), regions.len());
+        assert!(!selected[10]);
+        let actual = literal_scalars(
+            regions
+                .iter()
+                .filter(|region| selected[region.id.0 as usize]),
+            &ops,
+            &strings,
+        );
+        let expected = literal_scalars(regions.iter().take(10), &ops, &strings);
+        assert_eq!(actual, expected);
+        assert_eq!(actual.len(), 9);
+        assert!(!actual.contains_key(&RegionId(8)));
+        assert_eq!(
+            actual[&RegionId(9)],
+            StaticScalar {
+                text: String::new(),
+                segments: vec![]
+            }
+        );
+        assert_eq!(actual[&RegionId(3)].segments[0].op, OpId(0));
+    }
+
+    #[test]
+    fn scalar_selection_needs_no_flag_allocation_without_render_text_arguments() {
+        let ops = vec![OpRecord {
+            id: OpId(0),
+            op: Op::EmitText { value: StringId(0) },
+        }];
+        assert!(selected_scalar_regions(&ops, 100).is_empty());
+    }
+
+    #[test]
+    fn public_optimization_rejects_invalid_ir_before_trusted_indexing() {
+        let mut unit = empty_unit();
+        unit.header_mut().ir_schema.major = 99;
+        // This dangling ID must not reach direct pool indexing.
+        unit.header_mut().regexes.push(squish_ir::RegexPattern {
+            pattern: StringId(99),
+            named_captures: vec![],
+        });
+        let shared = Arc::new(unit);
+        let error = MiddleEnd.optimize_shared(Arc::clone(&shared)).unwrap_err();
+        assert_eq!(error.path, "header");
+        assert_eq!(error.message, "unsupported schema major");
+        let owned_error = MiddleEnd
+            .optimize(Arc::unwrap_or_clone(shared))
+            .unwrap_err();
+        assert_eq!(owned_error, error);
+    }
+
+    #[test]
+    fn shared_optimization_retains_the_exact_payload_and_owned_facts() {
+        let shared = Arc::new(empty_unit());
+        let optimized = MiddleEnd.optimize_shared(Arc::clone(&shared)).unwrap();
+        assert!(Arc::ptr_eq(&shared, &optimized.unit));
+        let trusted = MiddleEnd
+            .optimize_shared_validated(Arc::clone(&shared))
+            .unwrap();
+        assert!(Arc::ptr_eq(&shared, &trusted.unit));
+        let owned = MiddleEnd.optimize(empty_unit()).unwrap();
+        assert_eq!(optimized.stats, trusted.stats);
+        assert_eq!(optimized.static_scalars, owned.static_scalars);
+        assert_eq!(optimized.static_matches, owned.static_matches);
+        assert_eq!(optimized.unit.as_ref(), owned.unit.as_ref());
+    }
+
+    /// Constructs an empty valid module for public/shared ownership boundary tests.
+    fn empty_unit() -> RelocatableUnitIr {
+        let source = squish_ir::SourceKey::AdHoc {
+            uri: "file:///empty.xml".into(),
+        };
+        let digest = squish_ir::SourceDigest::of(b"");
+        RelocatableUnitIr::Module(squish_ir::ModuleObject {
+            header: squish_ir::UnitHeader {
+                ir_schema: squish_ir::Version { major: 1, minor: 0 },
+                language_abi: squish_ir::AbiId("test".into()),
+                frontend_abi: squish_ir::AbiId("test".into()),
+                regex_abi: squish_ir::AbiId("test".into()),
+                source: source.clone(),
+                imports: vec![],
+                semantic_strings: vec![],
+                qnames: vec![],
+                regexes: vec![],
+                feature_bits: squish_ir::FeatureBits(0),
+            },
+            definitions: vec![],
+            external_symbols: vec![],
+            interface: squish_ir::InterfaceSummary::default(),
+            regions: vec![],
+            ops: vec![],
+            origins: squish_ir::OriginTable::default(),
+            sources: squish_ir::SourceArchive {
+                records: vec![squish_ir::SourceRecord {
+                    key: source.clone(),
+                    digest,
+                    bom_len: 0,
+                    exact_bytes: squish_ir::BlobRef {
+                        digest: squish_ir::Digest::sha256("blob", b""),
+                        byte_len: 0,
+                    },
+                    line_start_offsets: vec![0],
+                }],
+            },
+            attachment: squish_ir::UnitSourceAttachment {
+                source,
+                source_digest: digest,
+                source_record: squish_ir::SourceRef(0),
+            },
+            producer: squish_ir::Producer {
+                tool_version: "test".into(),
+                build_fingerprint: "test".into(),
+            },
+        })
     }
 }

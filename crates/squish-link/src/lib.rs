@@ -21,12 +21,12 @@ pub use directives::{ArchiveDirective, decode_archive_directives, encode_archive
 pub use error::{InstantiateError, LinkError};
 pub use instantiate::{Budgets, InstantiateOutput, Instantiator};
 pub use key::{InstantiateKeyProjection, LinkKeyProjection};
-pub use linker::{LinkOutput, StaticLinker, UnitClosure};
+pub use linker::{LinkOutput, PreparedUnitClosure, SharedUnitClosure, StaticLinker, UnitClosure};
 pub use middle::{
     MiddleEnd, MiddleError, OptimizationStats, OptimizedUnit, StaticMatch, StaticScalar,
     StaticScalarSegment,
 };
-pub use program::LinkedProgram;
+pub use program::{LinkedProgram, PreparedUnit};
 
 #[cfg(test)]
 mod tests;

@@ -10,7 +10,8 @@ use squish_ir::{
     Validate,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet, HashMap},
     rc::Rc,
 };
 
@@ -104,19 +105,19 @@ enum OccurrenceKind {
 }
 
 #[derive(Clone, Debug)]
-struct CallState {
+struct CallState<'a> {
     target: DefAddr,
     op_ref: LinkedOpRef,
     caller: Env,
-    args: Vec<squish_ir::Argument>,
-    fills: Vec<squish_ir::Fill>,
+    args: &'a [squish_ir::Argument],
+    fills: &'a [squish_ir::Fill],
     values: BTreeMap<String, Value>,
     slots: BTreeMap<String, SlotValue>,
     output: usize,
 }
 
 #[derive(Clone, Debug)]
-enum Task {
+enum Task<'a> {
     Region {
         at: squish_ir::LinkedRegionRef,
         env: Env,
@@ -136,20 +137,20 @@ enum Task {
         output: usize,
     },
     Arg {
-        call: CallState,
+        call: CallState<'a>,
         index: usize,
     },
     ArgDone {
-        call: CallState,
+        call: CallState<'a>,
         index: usize,
         buffer: usize,
     },
     Fill {
-        call: CallState,
+        call: CallState<'a>,
         index: usize,
     },
     FillDone {
-        call: CallState,
+        call: CallState<'a>,
         index: usize,
         buffer: usize,
     },
@@ -158,12 +159,14 @@ enum Task {
 struct Machine<'a> {
     program: &'a LinkedProgram,
     budgets: Budgets,
-    tasks: Vec<Task>,
+    tasks: Vec<Task<'a>>,
     buffers: Vec<Vec<Occurrence>>,
     buffer_bytes: Vec<u64>,
     frames: Vec<FrameRecord>,
     frame_origins: Vec<QualifiedOriginRef>,
     scalar_values: Vec<String>,
+    /// Session-only value lookup preserving first-insertion arena IDs; never serialized.
+    scalar_index: HashMap<String, u32>,
     sequences: Vec<Vec<DocumentItemId>>,
     origins: Vec<OriginNode>,
     directives: Vec<ArchiveDirective>,
@@ -200,9 +203,13 @@ impl<'a> Machine<'a> {
         let definition_origin = origin_for_region(program, root)
             .ok_or_else(|| InstantiateError::new("RUN003", "entry root has no source origin"))?;
         let mut scalar_values = Vec::new();
+        let mut scalar_index = HashMap::new();
         let values: BTreeMap<_, _> = args
             .into_iter()
             .map(|(name, text)| {
+                scalar_index
+                    .entry(text.clone())
+                    .or_insert(scalar_values.len() as u32);
                 scalar_values.push(text.clone());
                 (
                     name,
@@ -215,12 +222,7 @@ impl<'a> Machine<'a> {
             .collect();
         let frame_args: Vec<(LocalName, ScalarValueId)> = values
             .iter()
-            .map(|(n, v)| {
-                (
-                    n.clone(),
-                    ScalarValueId(scalar_values.iter().position(|x| x == &v.text).unwrap() as u32),
-                )
-            })
+            .map(|(n, v)| (n.clone(), ScalarValueId(scalar_index[&v.text])))
             .collect();
         let env = Env {
             frame: FrameId(0),
@@ -255,6 +257,7 @@ impl<'a> Machine<'a> {
             frames,
             frame_origins: vec![definition_origin],
             scalar_values,
+            scalar_index,
             sequences: Vec::new(),
             origins,
             directives: Vec::new(),
@@ -303,7 +306,8 @@ impl<'a> Machine<'a> {
                     )?;
                 }
                 Task::Arg { mut call, index } => {
-                    let Some(arg) = call.args.get(index).cloned() else {
+                    let arguments = call.args;
+                    let Some(arg) = arguments.get(index) else {
                         self.tasks.push(Task::Fill { call, index: 0 });
                         continue;
                     };
@@ -315,8 +319,9 @@ impl<'a> Machine<'a> {
                             Some(call.op_ref),
                         ));
                     }
-                    match arg.value {
+                    match &arg.value {
                         ScalarExpr::RenderText(region) => {
+                            let region = *region;
                             let buffer = self.buffer();
                             let caller = call.caller.clone();
                             let unit_slot = call.op_ref.unit_slot;
@@ -325,15 +330,16 @@ impl<'a> Machine<'a> {
                                 index,
                                 buffer,
                             });
-                            let literal = self
-                                .program
+                            // Borrow the immutable fact through the external program lifetime,
+                            // not through the mutable machine being used to emit occurrences.
+                            let program = self.program;
+                            let literal = program
                                 .optimized(unit_slot)
-                                .and_then(|unit| unit.static_scalars.get(&region))
-                                .cloned();
+                                .and_then(|unit| unit.static_scalars.get(&region));
                             if let Some(literal) = literal {
                                 // Preserve each operation occurrence, trace and semantic budget
                                 // while skipping task dispatch for compile-time literal bodies.
-                                for segment in literal.segments {
+                                for segment in &literal.segments {
                                     let at = LinkedOpRef {
                                         unit_slot,
                                         op: segment.op,
@@ -343,7 +349,7 @@ impl<'a> Machine<'a> {
                                         &caller,
                                         buffer,
                                         OccurrenceKind::Text(
-                                            literal.text[segment.bytes].to_owned(),
+                                            literal.text[segment.bytes.clone()].to_owned(),
                                         ),
                                     )?;
                                 }
@@ -356,8 +362,8 @@ impl<'a> Machine<'a> {
                             }
                         }
                         value => {
-                            let value = self.scalar(call.op_ref.unit_slot, &value, &call.caller)?;
-                            call.values.insert(arg.name, value);
+                            let value = self.scalar(call.op_ref.unit_slot, value, &call.caller)?;
+                            call.values.insert(arg.name.clone(), value);
                             self.tasks.push(Task::Arg {
                                 call,
                                 index: index + 1,
@@ -402,7 +408,8 @@ impl<'a> Machine<'a> {
                     });
                 }
                 Task::Fill { call, index } => {
-                    let Some(fill) = call.fills.get(index).cloned() else {
+                    let fills = call.fills;
+                    let Some(fill) = fills.get(index) else {
                         self.enter(call)?;
                         continue;
                     };
@@ -494,27 +501,28 @@ impl<'a> Machine<'a> {
         env: Env,
         output: usize,
     ) -> Result<(), InstantiateError> {
-        let op = operation(self.program, at)?.clone();
+        let program = self.program;
+        let op = operation(program, at)?;
         match op {
             Op::EmitText { value } => self.emit_simple(
                 at,
                 &env,
                 output,
-                OccurrenceKind::Text(self.string(at.unit_slot, value)?),
+                OccurrenceKind::Text(self.string(at.unit_slot, *value)?),
             )?,
             Op::EmitComment { value } => self.emit_simple(
                 at,
                 &env,
                 output,
-                OccurrenceKind::Comment(self.string(at.unit_slot, value)?),
+                OccurrenceKind::Comment(self.string(at.unit_slot, *value)?),
             )?,
             Op::EmitPi { target, data } => self.emit_simple(
                 at,
                 &env,
                 output,
                 OccurrenceKind::Pi(
-                    self.string(at.unit_slot, target)?,
-                    self.string(at.unit_slot, data)?,
+                    self.string(at.unit_slot, *target)?,
+                    self.string(at.unit_slot, *data)?,
                 ),
             )?,
             Op::EmitElement {
@@ -522,9 +530,9 @@ impl<'a> Machine<'a> {
                 attributes,
                 children,
             } => {
-                let name = self.qname(at.unit_slot, name)?;
+                let name = self.qname(at.unit_slot, *name)?;
                 let attrs = attributes
-                    .into_iter()
+                    .iter()
                     .map(|a| {
                         Ok((
                             self.qname(at.unit_slot, a.name)?,
@@ -544,14 +552,14 @@ impl<'a> Machine<'a> {
                 self.tasks.push(Task::Region {
                     at: squish_ir::LinkedRegionRef {
                         unit_slot: at.unit_slot,
-                        region: children,
+                        region: *children,
                     },
                     env,
                     output: buffer,
                 });
             }
             Op::InsertScalar { value } => {
-                let value = self.binding(at.unit_slot, &value, &env)?;
+                let value = self.binding(at.unit_slot, value, &env)?;
                 if !valid_xml_chars(&value.text) {
                     return Err(self.failure(
                         "RUN027",
@@ -583,39 +591,39 @@ impl<'a> Machine<'a> {
             } => {
                 let input = match input {
                     squish_ir::MatchInput::Literal(id) => Value {
-                        text: self.string(at.unit_slot, id)?,
+                        text: self.string(at.unit_slot, *id)?,
                         substitutions: Vec::new(),
                     },
-                    squish_ir::MatchInput::ReadBinding(b) => {
-                        self.binding(at.unit_slot, &b, &env)?
-                    }
+                    squish_ir::MatchInput::ReadBinding(b) => self.binding(at.unit_slot, b, &env)?,
                 };
-                let static_match = self
-                    .program
+                let static_match = program
                     .optimized(at.unit_slot)
                     .and_then(|unit| unit.static_matches.get(&at.op));
                 let found = match static_match {
-                    Some(fact) if fact.matched => Some(fact.captures.clone()),
+                    Some(fact) if fact.matched => Some(Cow::Borrowed(&fact.captures)),
                     Some(_) => None,
                     None => {
-                        let regex = self.regex(at.unit_slot, pattern)?;
-                        regex.captures(&input.text).map(|found| {
-                            captures
-                                .iter()
-                                .filter_map(|name| {
-                                    found
-                                        .name(name)
-                                        .map(|value| (name.clone(), value.start()..value.end()))
-                                })
-                                .collect::<BTreeMap<_, _>>()
-                        })
+                        let regex = self.regex(at.unit_slot, *pattern)?;
+                        regex
+                            .captures(&input.text)
+                            .map(|found| {
+                                captures
+                                    .iter()
+                                    .filter_map(|name| {
+                                        found
+                                            .name(name)
+                                            .map(|value| (name.clone(), value.start()..value.end()))
+                                    })
+                                    .collect::<BTreeMap<_, _>>()
+                            })
+                            .map(Cow::Owned)
                     }
                 };
                 if let Some(found) = found {
                     let mut map = (*env.captures).clone();
                     let mut capture_records = Vec::new();
                     for name in captures {
-                        if let Some(value) = found.get(&name) {
+                        if let Some(value) = found.get(name) {
                             let mut substitutions = input.substitutions.clone();
                             substitutions.push(SubstitutionStep {
                                 kind: SubstitutionKind::ScalarBody,
@@ -652,7 +660,7 @@ impl<'a> Machine<'a> {
                     self.tasks.push(Task::Region {
                         at: squish_ir::LinkedRegionRef {
                             unit_slot: at.unit_slot,
-                            region: matched,
+                            region: *matched,
                         },
                         env: branch,
                         output,
@@ -661,8 +669,8 @@ impl<'a> Machine<'a> {
             }
             Op::Asset { path, name } => {
                 let source = self.source(at.unit_slot)?;
-                let path = self.string(at.unit_slot, path)?;
-                let name = self.string(at.unit_slot, name)?;
+                let path = self.string(at.unit_slot, *path)?;
+                let name = self.string(at.unit_slot, *name)?;
                 let trace = self.trace_ref(at, &env, Vec::new())?;
                 self.directive_bytes = self
                     .directive_bytes
@@ -684,8 +692,8 @@ impl<'a> Machine<'a> {
             }
             Op::Include { import, path, name } => {
                 let source = self.source(at.unit_slot)?;
-                let path = self.string(at.unit_slot, path)?;
-                let name = self.string(at.unit_slot, name)?;
+                let path = self.string(at.unit_slot, *path)?;
+                let name = self.string(at.unit_slot, *name)?;
                 let trace = self.trace_ref(at, &env, Vec::new())?;
                 self.directive_bytes = self
                     .directive_bytes
@@ -700,14 +708,14 @@ impl<'a> Machine<'a> {
                 }
                 self.directives.push(ArchiveDirective::Include {
                     source,
-                    import,
+                    import: *import,
                     path,
                     name,
                     trace,
                 });
             }
             Op::ReadSlot { name } => {
-                let Some(items) = env.slots.get(&name) else {
+                let Some(items) = env.slots.get(name) else {
                     return Ok(());
                 };
                 let origin = self.op_origin(at)?;
@@ -761,19 +769,16 @@ impl<'a> Machine<'a> {
         Ok(())
     }
 
-    fn enter(&mut self, call: CallState) -> Result<(), InstantiateError> {
-        let def = self
-            .program
-            .definition(call.target)
-            .ok_or_else(|| {
-                self.failure(
-                    "RUN011",
-                    "relocation target is missing",
-                    call.caller.frame,
-                    Some(call.op_ref),
-                )
-            })?
-            .clone();
+    fn enter(&mut self, call: CallState<'a>) -> Result<(), InstantiateError> {
+        let program = self.program;
+        let def = program.definition(call.target).ok_or_else(|| {
+            self.failure(
+                "RUN011",
+                "relocation target is missing",
+                call.caller.frame,
+                Some(call.op_ref),
+            )
+        })?;
         let depth = self.frames[call.caller.frame.0 as usize].depth + 1;
         if depth > self.budgets.max_depth {
             return Err(self.failure(
@@ -936,12 +941,13 @@ impl<'a> Machine<'a> {
         self.buffers.len() - 1
     }
     fn intern_scalar(&mut self, value: &str) -> u32 {
-        if let Some(i) = self.scalar_values.iter().position(|x| x == value) {
-            i as u32
-        } else {
-            self.scalar_values.push(value.into());
-            (self.scalar_values.len() - 1) as u32
+        if let Some(id) = self.scalar_index.get(value) {
+            return *id;
         }
+        let id = self.scalar_values.len() as u32;
+        self.scalar_values.push(value.into());
+        self.scalar_index.insert(value.into(), id);
+        id
     }
     fn string(&self, slot: u32, id: StringId) -> Result<String, InstantiateError> {
         let unit = self.unit(slot)?;
@@ -1393,11 +1399,22 @@ fn canonicalize_scalars(
     frames: &mut [FrameRecord],
     origins: &mut [OriginNode],
 ) {
-    let old = values.clone();
-    values.sort();
-    values.dedup();
+    // Sort indices, then move each owned string once. Retain an explicit old-ID mapping
+    // rather than cloning all text or performing a binary search for every frame reference.
+    let mut order: Vec<_> = (0..values.len()).collect();
+    order.sort_unstable_by(|a, b| values[*a].cmp(&values[*b]));
+    let mut old = std::mem::take(values);
+    values.reserve(old.len());
+    let mut ids = vec![ScalarValueId(0); old.len()];
+    for index in order {
+        let value = std::mem::take(&mut old[index]);
+        if values.last() != Some(&value) {
+            values.push(value);
+        }
+        ids[index] = ScalarValueId((values.len() - 1) as u32);
+    }
     let remap = |id: &mut ScalarValueId| {
-        *id = ScalarValueId(values.binary_search(&old[id.0 as usize]).unwrap() as u32);
+        *id = ids[id.0 as usize];
     };
     for frame in frames {
         for (_, id) in &mut frame.args {

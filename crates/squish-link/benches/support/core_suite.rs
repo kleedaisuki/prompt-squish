@@ -3,12 +3,13 @@
 use crate::support;
 use squish_ir::{
     DocumentItem, ImportBinding, PackageInstanceId, RelocatableUnitIr, ResolutionSnapshot,
-    SourceKey, UnitRevision, Validate, decode_container, decode_unit_container,
-    encode_expansion_trace, encode_linked_document, encode_unit_container,
+    SourceKey, UnitEncodingOverrides, UnitRevision, Validate, decode_container,
+    decode_unit_container, encode_expansion_trace, encode_linked_document, encode_unit_container,
+    semantic_unit_digest_with,
 };
 use squish_link::{
-    Budgets, InstantiateOutput, Instantiator, LinkOutput, MiddleEnd, StaticLinker, UnitClosure,
-    encode_archive_directives,
+    Budgets, InstantiateOutput, Instantiator, LinkOutput, MiddleEnd, PreparedUnit,
+    PreparedUnitClosure, SharedUnitClosure, StaticLinker, UnitClosure, encode_archive_directives,
 };
 use squish_source::{
     LogicalPath, PackageId, SnapshotBuilder, SourceBlob, SourceId, SourceLocator, SourceProvider,
@@ -508,9 +509,95 @@ fn stages(mode: Mode, fixture: &Fixture) {
     oracle(fixture);
     let entry = &fixture.linked.image.entry.source;
     let unit = &fixture.closure.units[&fixture.sample_unit];
-    // Public middle-end facts expose the exact Clone performed by the scalar shortcut.
-    // Keep this setup out of observations and compare identical fact ownership explicitly.
+    // Keep raw owned Clone controls as historical counterfactuals, not production work.
+    // The evaluator now borrows immutable facts; the explicit controls quantify avoided copies.
     let optimized = MiddleEnd.optimize(unit.clone()).unwrap();
+    let shared_closure = SharedUnitClosure {
+        snapshot: Arc::new(fixture.closure.snapshot.clone()),
+        units: fixture
+            .closure
+            .units
+            .iter()
+            .map(|(key, unit)| (key.clone(), Arc::new(unit.clone())))
+            .collect(),
+    };
+    let shared_unit = &shared_closure.units[&fixture.sample_unit];
+    let shared_middle = MiddleEnd.optimize_shared(shared_unit.clone()).unwrap();
+    assert!(Arc::ptr_eq(&shared_middle.unit, shared_unit));
+    assert_eq!(shared_middle.static_scalars, optimized.static_scalars);
+    assert_eq!(shared_middle.static_matches, optimized.static_matches);
+    assert_eq!(shared_middle.stats, optimized.stats);
+    let shared_linked = StaticLinker
+        .link_shared(entry, shared_closure.clone())
+        .unwrap();
+    assert_eq!(shared_linked.image, fixture.linked.image);
+    assert_eq!(shared_linked.map, fixture.linked.map);
+    assert_eq!(
+        Instantiator
+            .instantiate(
+                &shared_linked.program,
+                fixture.args.clone(),
+                Budgets::default()
+            )
+            .unwrap(),
+        fixture.result
+    );
+    assert_eq!(
+        semantic_unit_digest_with(unit, UnitEncodingOverrides::default()).unwrap(),
+        decode_container(&fixture.encoded_unit)
+            .unwrap()
+            .semantic_digest()
+    );
+    let prepared_closure = PreparedUnitClosure {
+        snapshot: shared_closure.snapshot.clone(),
+        units: shared_closure
+            .units
+            .iter()
+            .map(|(key, unit)| {
+                let prepared = PreparedUnit::new(unit.clone()).unwrap();
+                let expected = &shared_closure
+                    .snapshot
+                    .units
+                    .iter()
+                    .find(|(source, _)| source == key)
+                    .unwrap()
+                    .1;
+                assert_eq!(prepared.revision(), expected);
+                (key.clone(), prepared)
+            })
+            .collect(),
+    };
+    let prepared_linked = StaticLinker
+        .link_prepared(entry, prepared_closure.clone())
+        .unwrap();
+    assert_eq!(prepared_linked.image, fixture.linked.image);
+    assert_eq!(prepared_linked.map, fixture.linked.map);
+    assert_eq!(
+        Instantiator
+            .instantiate(
+                &prepared_linked.program,
+                fixture.args.clone(),
+                Budgets::default()
+            )
+            .unwrap(),
+        fixture.result
+    );
+    let prepared_cached = squish_link::LinkedProgram::reconstruct_prepared(
+        prepared_linked.image.clone(),
+        prepared_closure.units.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        Instantiator
+            .instantiate(&prepared_cached, fixture.args.clone(), Budgets::default())
+            .unwrap(),
+        fixture.result
+    );
+    let program_clone = fixture.linked.program.clone();
+    assert!(std::ptr::eq(
+        program_clone.image(),
+        fixture.linked.program.image()
+    ));
     if let Some(fact) = optimized.static_scalars.values().next() {
         measure(
             mode,
@@ -541,6 +628,8 @@ fn stages(mode: Mode, fixture: &Fixture) {
         || (),
         |()| black_box(&fixture.closure).clone(),
     );
+    // Stable historical label: this measures the real public Clone in each version.
+    // It is a deep clone only in the pinned baseline; the candidate shares Arc storage.
     measure(
         mode,
         fixture,
@@ -586,6 +675,105 @@ fn stages(mode: Mode, fixture: &Fixture) {
                 .link(black_box(entry), black_box(&fixture.closure).clone())
                 .unwrap()
         },
+    );
+    measure(
+        mode,
+        fixture,
+        "clone_shared_closure",
+        || (),
+        |()| black_box(&shared_closure).clone(),
+    );
+    measure(
+        mode,
+        fixture,
+        "middle_shared_prepared_input",
+        || shared_unit.clone(),
+        |input| MiddleEnd.optimize_shared(input).unwrap(),
+    );
+    measure(
+        mode,
+        fixture,
+        "link_shared_prepared_input",
+        || shared_closure.clone(),
+        |input| StaticLinker.link_shared(black_box(entry), input).unwrap(),
+    );
+    measure(
+        mode,
+        fixture,
+        "link_shared_clone_plus_call",
+        || (),
+        |()| {
+            StaticLinker
+                .link_shared(black_box(entry), black_box(&shared_closure).clone())
+                .unwrap()
+        },
+    );
+    measure(
+        mode,
+        fixture,
+        "prepare_unit_shared",
+        || shared_unit.clone(),
+        |input| PreparedUnit::new(input).unwrap(),
+    );
+    measure(
+        mode,
+        fixture,
+        "prepare_and_specialize_unit_shared",
+        || shared_unit.clone(),
+        |input| {
+            let prepared = PreparedUnit::new(input).unwrap();
+            prepared.specialize().unwrap();
+            prepared
+        },
+    );
+    measure(
+        mode,
+        fixture,
+        "specialize_prepared_unit_cold",
+        || PreparedUnit::new(shared_unit.clone()).unwrap(),
+        |prepared| {
+            prepared.specialize().unwrap();
+            // Return the populated handle: owned fact/regex destruction is outside timing,
+            // matching the prepared-input middle-end API boundary used by the baseline.
+            prepared
+        },
+    );
+    measure(
+        mode,
+        fixture,
+        "link_prepared_facts",
+        || prepared_closure.clone(),
+        |input| StaticLinker.link_prepared(black_box(entry), input).unwrap(),
+    );
+    measure(
+        mode,
+        fixture,
+        "link_prepared_clone_plus_call",
+        || (),
+        |()| {
+            StaticLinker
+                .link_prepared(black_box(entry), black_box(&prepared_closure).clone())
+                .unwrap()
+        },
+    );
+    measure(
+        mode,
+        fixture,
+        "reconstruct_prepared_image",
+        || {
+            (
+                prepared_linked.image.clone(),
+                prepared_closure.units.clone(),
+            )
+        },
+        |(image, units)| squish_link::LinkedProgram::reconstruct_prepared(image, units).unwrap(),
+    );
+    measure(
+        mode,
+        fixture,
+        "semantic_unit_digest_projection",
+        || (),
+        |()| semantic_unit_digest_with(black_box(unit), UnitEncodingOverrides::default()).unwrap(),
     );
     measure(
         mode,
@@ -654,8 +842,8 @@ pub fn run(mode: Mode) {
         stages(mode, &scalars(2, 1, 8));
         return;
     }
-    // Identical harness overlays permit a pinned-baseline/candidate origin-only comparison.
-    // This changes benchmark selection, never any production API or validation behavior.
+    // Origin-only selection remains bounded. Full-repair comparisons use each version's
+    // own harness because shared public APIs do not exist in the pinned baseline.
     if std::env::var_os("MECHANISM_ORIGIN_ONLY").is_some() {
         let tiny = fixture(
             "tiny-document".into(),
