@@ -70,7 +70,7 @@ impl<'a> SopackAcquisition<'a> {
                 "SOPack archive exceeds its byte limit or is not a regular file".into(),
             ));
         }
-        let bytes = read_bounded_archive(file, limits.max_archive_bytes).map_err(&fail)?;
+        let bytes = read_bounded_archive(file, limits.max_archive_bytes).map_err(fail)?;
         #[cfg(test)]
         {
             let (reads, count, decodes) = self.reads.get();
