@@ -92,9 +92,9 @@ const en: ReleaseUiCopy = {
   versions: {
     "1.2.1": {
       "title": "Identity-safe reuse and verified runtime repair",
-      "description": "xmlsquish 1.2.1 repairs pack identity, reusable compilation, SOPack archive handling and verified storage. Exact-source hosted verification passed; the main gate and publication are pending.",
+      "description": "xmlsquish 1.2.1 repairs pack identity, reusable compilation, SOPack archive handling and verified storage. The exact main and six-platform release gates passed; version 1.2.1 is published.",
       "date": "October 1, 2026",
-      "summary": "Repair sharing and identity boundaries without changing the public CLI or rewriting existing SOPack inputs. The exact source passed hosted contracts and scoped measurements. Main-branch/release gates remain pending; results are not a universal speedup claim.",
+      "summary": "Repair sharing and identity boundaries without changing the public CLI or rewriting existing SOPack inputs. The measured checkpoint passed hosted contracts and scoped comparisons; the separately identified release commit passed main and six-platform publication gates. Version 1.2.1 is published, not a universal speedup claim.",
       "changes": [
         {
           "id": "identity",
@@ -120,7 +120,7 @@ const en: ReleaseUiCopy = {
           "items": [
             "Canonical schema-1 readers accept v1.2.0 SOPacks. Rewriting a single relocated archive preserves provider paths and normalized bytes; existing inputs and SHA-256 pins stay immutable.",
             "Private derived caches may rebuild after upgrades; do not edit internal hashes or SQLite records to migrate them.",
-            "Fresh archive bytes can differ between producer versions. The v1.2.0 release history remains unchanged. Exact text-sharing source passed quality, three native platforms, Site and mechanism comparison; earlier checkpoints remain historical, and main/release gates are pending."
+            "Fresh archive bytes can differ between producer versions. The v1.2.0 release history remains unchanged. The measured checkpoint passed quality, three native platforms, Site and mechanisms. The exact release commit passed main and publication gates; earlier checkpoints remain historical."
           ]
         }
       ],
@@ -299,9 +299,9 @@ const zh: ReleaseUiCopy = {
   versions: {
     "1.2.1": {
       "title": "身份安全的复用与已验证运行期修复",
-      "description": "xmlsquish 1.2.1 修复 pack 身份、可复用编译、SOPack 归档处理与已验证存储；精确源码托管验证已通过；主分支门禁与发布待完成。",
+      "description": "xmlsquish 1.2.1 修复 pack 身份、可复用编译、SOPack 归档处理与已验证存储；精确主分支与六平台发布门禁已通过；1.2.1 已发布。",
       "date": "2026 年 10 月 1 日",
-      "summary": "修复共享与身份边界，不改公共 CLI，也不重写既有 SOPack 输入。精确源码契约与有限场景测量已通过。主分支/发布门禁仍待完成，不宣称普遍加速。",
+      "summary": "修复共享与身份边界，不改公共 CLI，也不重写既有 SOPack 输入。测量检查点已通过契约与有限场景比较；另行记录的发布提交已通过主分支与六平台发布门禁。1.2.1 已发布，不宣称普遍加速。",
       "changes": [
         {
           "id": "identity",
@@ -327,7 +327,7 @@ const zh: ReleaseUiCopy = {
           "items": [
             "schema-1 读取契约接受 v1.2.0 SOPack；重写单一已重定位归档保留提供者路径与规范 bytes。既有输入和 SHA-256 摘要不变。",
             "升级可以重建私有派生缓存；不要手改内部 hash 或 SQLite 记录进行迁移。",
-            "不同生产者版本新生成的归档 bytes 可以变化。v1.2.0 发布历史不变。精确文本共享源码已通过质量、三个原生平台、站点与机制比较；较早检查点属历史，主分支/发布门禁仍待完成。"
+            "不同生产者版本新生成的归档 bytes 可以变化。v1.2.0 发布历史不变。测量检查点已通过质量、三个原生平台、站点与机制比较；精确发布提交通过主分支和发布门禁，较早检查点仍属历史。"
           ]
         }
       ],

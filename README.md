@@ -14,11 +14,11 @@ xmlsquish is a project-oriented prompt builder. It discovers packages, workspace
 
 当前版本的具体资产、平台要求与升级说明见 [v1.2.1 发布说明](docs/releases/1.2.1.md)。
 
-1.2.1 当前是精确源码已通过托管验证的候选，合并主分支门禁与实际发布仍待完成；本链接不表示新二进制已可下载。发布后请只使用同一标签的归档和校验和。
+1.2.1 已稳定发布，精确主分支和六个平台发布门禁均已通过；请只使用同一标签的归档与校验和。测量提交与发布标签提交分别记录在发布说明中。
 
-Version 1.2.1 has passed exact-source hosted verification; the post-merge main
-gate and publication remain pending. This link does not claim new binaries are already downloadable.
-After publication, use archives and checksums from the same tag.
+Version 1.2.1 is a stable published release after exact-main and six-platform
+release gates passed. Use archives and checksums from the same tag; release
+notes distinguish the measured checkpoint from the released source.
 
 Download the archive for your OS and CPU from GitHub Releases, verify it against the checksums from the same release, extract it, and put `xmlsquish` (`xmlsquish.exe` on Windows) on `PATH`. Check the release notes for the Linux glibc requirement.
 
@@ -195,11 +195,11 @@ The canonical schema-1 reader accepts existing v1.2.0 SOPacks; rewriting a singl
 already-relocated archive retains its provider paths and normalized bytes. Public
 IR wire/digest semantics remain distinct from private cache identities.
 
-精确源码的集成测试、站点和机制比较已通过；主分支与发布门禁仍须针对实际提交完成。
+源码检查点的集成测试、站点和机制比较已通过；精确发布提交随后通过主分支与六平台发布门禁。
 [检查点报告](docs/performance/v1.2-text-owner-checkpoint.md)给出有限场景的测量及混合结果，不宣称普遍加速。
 
-Exact-source integration, Site and mechanism comparisons passed; main/release gates
-still apply to the actual merged commit. The [checkpoint report](docs/performance/v1.2-text-owner-checkpoint.md)
+The source checkpoint passed integration, Site and mechanism comparisons; the
+exact release commit subsequently passed main and six-platform release gates. The [checkpoint report](docs/performance/v1.2-text-owner-checkpoint.md)
 records scoped measurements and mixed results, not a universal speedup.
 
 ## 项目清单 / Project manifest

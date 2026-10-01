@@ -1,0 +1,418 @@
+{
+  "schema": "xmlsquish.publication-evidence.v1",
+  "observed_at_utc": "2026-10-01T10:50:04.863132+00:00",
+  "version": "1.2.1",
+  "publication_status": "published stable; native matrix and publish completed successfully",
+  "source_commit": "fbf60f71d6ef32a80f8f0ff2cccd7182e4a9fc84",
+  "tag": {
+    "ref": {
+      "ref": "refs/tags/v1.2.1",
+      "node_id": "REF_kwDOUOcPc7ByZWZzL3RhZ3MvdjEuMi4x",
+      "url": "https://api.github.com/repos/kleedaisuki/prompt-squish/git/refs/tags/v1.2.1",
+      "object": {
+        "sha": "5f8eef80bee04cb206ab9d172228fcc1ed32d975",
+        "type": "tag",
+        "url": "https://api.github.com/repos/kleedaisuki/prompt-squish/git/tags/5f8eef80bee04cb206ab9d172228fcc1ed32d975"
+      }
+    },
+    "annotated_tag_chain": [
+      {
+        "node_id": "TA_kwDOUOcPc9oAKDVmOGVlZjgwYmVlMDRjYjIwNmFiOWQxNzIyMjhmY2MxZWQzMmQ5NzU",
+        "sha": "5f8eef80bee04cb206ab9d172228fcc1ed32d975",
+        "url": "https://api.github.com/repos/kleedaisuki/prompt-squish/git/tags/5f8eef80bee04cb206ab9d172228fcc1ed32d975",
+        "tagger": {
+          "name": "moeSegFault",
+          "email": "guojiarui@mail.nankai.edu.cn",
+          "date": "2026-10-01T10:28:28Z"
+        },
+        "object": {
+          "sha": "fbf60f71d6ef32a80f8f0ff2cccd7182e4a9fc84",
+          "type": "commit",
+          "url": "https://api.github.com/repos/kleedaisuki/prompt-squish/git/commits/fbf60f71d6ef32a80f8f0ff2cccd7182e4a9fc84"
+        },
+        "tag": "v1.2.1",
+        "message": "xmlsquish 1.2.1: verified compiler archive and storage remediation\n\nExact main quality, Site and Linux/Windows/macOS contracts passed in Actions36848135353. Production ownership and full mechanism evidence passed at388f364 in Actions36842734101; later changes are documentation/evidence only. Preserve v1.2.0 tag/assets; six-target packaging and matching SKILL/SHA256SUMS must complete before publication.\n",
+        "verification": {
+          "verified": false,
+          "reason": "unsigned",
+          "signature": null,
+          "payload": null,
+          "verified_at": null
+        }
+      }
+    ],
+    "peeled_commit": {
+      "sha": "fbf60f71d6ef32a80f8f0ff2cccd7182e4a9fc84",
+      "type": "commit",
+      "url": "https://api.github.com/repos/kleedaisuki/prompt-squish/git/commits/fbf60f71d6ef32a80f8f0ff2cccd7182e4a9fc84"
+    }
+  },
+  "pull_request": {
+    "baseRefName": "main",
+    "headRefName": "codex/v1.2-mechanism-benchmarks",
+    "mergeCommit": {
+      "oid": "fbf60f71d6ef32a80f8f0ff2cccd7182e4a9fc84"
+    },
+    "mergedAt": "2026-10-01T10:16:48Z",
+    "state": "MERGED",
+    "url": "https://github.com/kleedaisuki/prompt-squish/pull/9"
+  },
+  "release": {
+    "id": 400871209,
+    "tag_name": "v1.2.1",
+    "target_commitish": "main",
+    "draft": false,
+    "prerelease": false,
+    "published_at": "2026-10-01T10:44:09Z",
+    "html_url": "https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.2.1",
+    "immutable": false,
+    "asset_policy": "No existing tag or asset was replaced. GitHub-enforced immutable releases are not enabled for this observed release; source/tag/asset identity was verified explicitly."
+  },
+  "exact_main_ci": {
+    "run_id": 36848135353,
+    "url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36848135353",
+    "head_sha": "fbf60f71d6ef32a80f8f0ff2cccd7182e4a9fc84",
+    "conclusion": "success",
+    "required_job_outcomes": [
+      {
+        "name": "Rust quality (Ubuntu, MSRV 1.88)",
+        "conclusion": "success",
+        "url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36848135353/job/110323110156"
+      },
+      {
+        "name": "Site",
+        "conclusion": "success",
+        "url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36848135353/job/110323110563"
+      },
+      {
+        "name": "Rust test (Windows, MSRV 1.88)",
+        "conclusion": "success",
+        "url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36848135353/job/110323916741"
+      },
+      {
+        "name": "Rust test (macOS, MSRV 1.88)",
+        "conclusion": "success",
+        "url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36848135353/job/110323916775"
+      },
+      {
+        "name": "Rust test (Linux, MSRV 1.88)",
+        "conclusion": "success",
+        "url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36848135353/job/110323916934"
+      }
+    ]
+  },
+  "release_workflow": {
+    "run_id": 36849362211,
+    "url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36849362211",
+    "head_sha": "fbf60f71d6ef32a80f8f0ff2cccd7182e4a9fc84",
+    "event": "push",
+    "conclusion": "success",
+    "jobs": [
+      {
+        "id": 110327094292,
+        "name": "resolve",
+        "conclusion": "success",
+        "url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36849362211/job/110327094292"
+      },
+      {
+        "id": 110327184089,
+        "name": "Build x86_64-pc-windows-msvc",
+        "conclusion": "success",
+        "url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36849362211/job/110327184089"
+      },
+      {
+        "id": 110327184117,
+        "name": "Build x86_64-unknown-linux-gnu",
+        "conclusion": "success",
+        "url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36849362211/job/110327184117"
+      },
+      {
+        "id": 110327184133,
+        "name": "Build aarch64-apple-darwin",
+        "conclusion": "success",
+        "url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36849362211/job/110327184133"
+      },
+      {
+        "id": 110327184145,
+        "name": "Build x86_64-apple-darwin",
+        "conclusion": "success",
+        "url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36849362211/job/110327184145"
+      },
+      {
+        "id": 110327184197,
+        "name": "Build aarch64-pc-windows-msvc",
+        "conclusion": "success",
+        "url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36849362211/job/110327184197"
+      },
+      {
+        "id": 110327184393,
+        "name": "Build aarch64-unknown-linux-gnu",
+        "conclusion": "success",
+        "url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36849362211/job/110327184393"
+      },
+      {
+        "id": 110332140980,
+        "name": "publish",
+        "conclusion": "success",
+        "url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36849362211/job/110332140980"
+      }
+    ]
+  },
+  "native_targets": [
+    {
+      "target": "aarch64-apple-darwin",
+      "job_id": 110327184133,
+      "job_url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36849362211/job/110327184133",
+      "conclusion": "success",
+      "native_smoke_and_package_step": {
+        "completedAt": "2026-10-01T10:36:28Z",
+        "conclusion": "success",
+        "name": "Smoke test and package",
+        "number": 10,
+        "startedAt": "2026-10-01T10:36:24Z",
+        "status": "completed"
+      },
+      "packaged_sha256_log": "9d9d1a8dc0cafd168751f0ed77d90c0ae8e99001157844d4a399c47a695c54f7",
+      "log_sha256": "bcda5d11af54d17ddbe9d8bd9440fc342b1892812fe849c0ef6514b6d490bc11"
+    },
+    {
+      "target": "aarch64-pc-windows-msvc",
+      "job_id": 110327184197,
+      "job_url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36849362211/job/110327184197",
+      "conclusion": "success",
+      "native_smoke_and_package_step": {
+        "completedAt": "2026-10-01T10:37:58Z",
+        "conclusion": "success",
+        "name": "Smoke test and package",
+        "number": 10,
+        "startedAt": "2026-10-01T10:37:49Z",
+        "status": "completed"
+      },
+      "packaged_sha256_log": "eaf2027de811e1c98d1075c9b91e1a576544c1b8a976318d5879d2f44d24b566",
+      "log_sha256": "4b9ebe1d732d899c060eab4c1604d14fa64add551bb5ee0a566c9d48430671cd"
+    },
+    {
+      "target": "aarch64-unknown-linux-gnu",
+      "job_id": 110327184393,
+      "job_url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36849362211/job/110327184393",
+      "conclusion": "success",
+      "native_smoke_and_package_step": {
+        "completedAt": "2026-10-01T10:33:49Z",
+        "conclusion": "success",
+        "name": "Smoke test and package",
+        "number": 10,
+        "startedAt": "2026-10-01T10:33:44Z",
+        "status": "completed"
+      },
+      "packaged_sha256_log": "69fd9168c91618911ac925ac5ca4bffc1c80cacbbb3eaa8ec43326dc8a66f0e2",
+      "log_sha256": "a55a40694a044f20814653510f4d23f02bf9158698445fd460a44c5c5a30105d"
+    },
+    {
+      "target": "x86_64-apple-darwin",
+      "job_id": 110327184145,
+      "job_url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36849362211/job/110327184145",
+      "conclusion": "success",
+      "native_smoke_and_package_step": {
+        "completedAt": "2026-10-01T10:43:01Z",
+        "conclusion": "success",
+        "name": "Smoke test and package",
+        "number": 10,
+        "startedAt": "2026-10-01T10:42:53Z",
+        "status": "completed"
+      },
+      "packaged_sha256_log": "5dfcaa30999a1dae30673434ab3eeea069e5322590f7b40bdd0a4b0900341111",
+      "log_sha256": "c2bcabc3d7d67a601f66519d39a229b7f4656e35c26dec70b74744629cf7a412"
+    },
+    {
+      "target": "x86_64-pc-windows-msvc",
+      "job_id": 110327184089,
+      "job_url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36849362211/job/110327184089",
+      "conclusion": "success",
+      "native_smoke_and_package_step": {
+        "completedAt": "2026-10-01T10:34:18Z",
+        "conclusion": "success",
+        "name": "Smoke test and package",
+        "number": 10,
+        "startedAt": "2026-10-01T10:34:11Z",
+        "status": "completed"
+      },
+      "packaged_sha256_log": "2bb985942efc9e79cc75cd19e4c58b6f4f032c1a0586c8a944b44dcad93dbea8",
+      "log_sha256": "4cd720d6b8bed44b40306279d60301de0fb5f2c1a35dffb049246ee3903757a3"
+    },
+    {
+      "target": "x86_64-unknown-linux-gnu",
+      "job_id": 110327184117,
+      "job_url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36849362211/job/110327184117",
+      "conclusion": "success",
+      "native_smoke_and_package_step": {
+        "completedAt": "2026-10-01T10:32:02Z",
+        "conclusion": "success",
+        "name": "Smoke test and package",
+        "number": 10,
+        "startedAt": "2026-10-01T10:31:57Z",
+        "status": "completed"
+      },
+      "packaged_sha256_log": "d8d4ad6f3cc55e0ac89cb7f068cbf9c1dda1586397686aec355ba8a8a5d64184",
+      "log_sha256": "71f3ad041718469475b4d673ec6d227262617c2f61b81e2b0fc6c10f0c8abe39"
+    }
+  ],
+  "assets": [
+    {
+      "id": 603028741,
+      "name": "SHA256SUMS",
+      "size": 742,
+      "digest": "sha256:b4fed50d477f889ad70715b363b8ab0cd19197e2d3370ab370b0df78468e518a",
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.1/SHA256SUMS",
+      "sha256": "b4fed50d477f889ad70715b363b8ab0cd19197e2d3370ab370b0df78468e518a",
+      "verification": "downloaded bytes rehashed locally"
+    },
+    {
+      "id": 603028370,
+      "name": "SKILL.md",
+      "size": 15608,
+      "digest": "sha256:12a2eaf9fa7e29c06e014b17a6cae3d3c02cec36d3e039fdac4827d7f8ea4259",
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.1/SKILL.md",
+      "sha256": "12a2eaf9fa7e29c06e014b17a6cae3d3c02cec36d3e039fdac4827d7f8ea4259",
+      "verification": "downloaded bytes rehashed locally"
+    },
+    {
+      "id": 603028417,
+      "name": "xmlsquish-1.2.1-aarch64-apple-darwin.tar.gz",
+      "size": 7591852,
+      "digest": "sha256:9d9d1a8dc0cafd168751f0ed77d90c0ae8e99001157844d4a399c47a695c54f7",
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.1/xmlsquish-1.2.1-aarch64-apple-darwin.tar.gz",
+      "sha256": "9d9d1a8dc0cafd168751f0ed77d90c0ae8e99001157844d4a399c47a695c54f7",
+      "verification": "runner Packaged SHA256 log equals checksum manifest and GitHub-reported asset digest; archive bytes not downloaded locally"
+    },
+    {
+      "id": 603028457,
+      "name": "xmlsquish-1.2.1-aarch64-pc-windows-msvc.zip",
+      "size": 8078303,
+      "digest": "sha256:eaf2027de811e1c98d1075c9b91e1a576544c1b8a976318d5879d2f44d24b566",
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.1/xmlsquish-1.2.1-aarch64-pc-windows-msvc.zip",
+      "sha256": "eaf2027de811e1c98d1075c9b91e1a576544c1b8a976318d5879d2f44d24b566",
+      "verification": "runner Packaged SHA256 log equals checksum manifest and GitHub-reported asset digest; archive bytes not downloaded locally"
+    },
+    {
+      "id": 603028516,
+      "name": "xmlsquish-1.2.1-aarch64-unknown-linux-gnu.tar.gz",
+      "size": 7900555,
+      "digest": "sha256:69fd9168c91618911ac925ac5ca4bffc1c80cacbbb3eaa8ec43326dc8a66f0e2",
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.1/xmlsquish-1.2.1-aarch64-unknown-linux-gnu.tar.gz",
+      "sha256": "69fd9168c91618911ac925ac5ca4bffc1c80cacbbb3eaa8ec43326dc8a66f0e2",
+      "verification": "runner Packaged SHA256 log equals checksum manifest and GitHub-reported asset digest; archive bytes not downloaded locally"
+    },
+    {
+      "id": 603028575,
+      "name": "xmlsquish-1.2.1-x86_64-apple-darwin.tar.gz",
+      "size": 8207028,
+      "digest": "sha256:5dfcaa30999a1dae30673434ab3eeea069e5322590f7b40bdd0a4b0900341111",
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.1/xmlsquish-1.2.1-x86_64-apple-darwin.tar.gz",
+      "sha256": "5dfcaa30999a1dae30673434ab3eeea069e5322590f7b40bdd0a4b0900341111",
+      "verification": "runner Packaged SHA256 log equals checksum manifest and GitHub-reported asset digest; archive bytes not downloaded locally"
+    },
+    {
+      "id": 603028632,
+      "name": "xmlsquish-1.2.1-x86_64-pc-windows-msvc.zip",
+      "size": 8770420,
+      "digest": "sha256:2bb985942efc9e79cc75cd19e4c58b6f4f032c1a0586c8a944b44dcad93dbea8",
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.1/xmlsquish-1.2.1-x86_64-pc-windows-msvc.zip",
+      "sha256": "2bb985942efc9e79cc75cd19e4c58b6f4f032c1a0586c8a944b44dcad93dbea8",
+      "verification": "runner Packaged SHA256 log equals checksum manifest and GitHub-reported asset digest; archive bytes not downloaded locally"
+    },
+    {
+      "id": 603028674,
+      "name": "xmlsquish-1.2.1-x86_64-unknown-linux-gnu.tar.gz",
+      "size": 8437878,
+      "digest": "sha256:d8d4ad6f3cc55e0ac89cb7f068cbf9c1dda1586397686aec355ba8a8a5d64184",
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.1/xmlsquish-1.2.1-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "d8d4ad6f3cc55e0ac89cb7f068cbf9c1dda1586397686aec355ba8a8a5d64184",
+      "verification": "runner Packaged SHA256 log equals checksum manifest and GitHub-reported asset digest; archive bytes not downloaded locally"
+    }
+  ],
+  "checksum_manifest": {
+    "entries": {
+      "SKILL.md": "12a2eaf9fa7e29c06e014b17a6cae3d3c02cec36d3e039fdac4827d7f8ea4259",
+      "xmlsquish-1.2.1-aarch64-apple-darwin.tar.gz": "9d9d1a8dc0cafd168751f0ed77d90c0ae8e99001157844d4a399c47a695c54f7",
+      "xmlsquish-1.2.1-aarch64-pc-windows-msvc.zip": "eaf2027de811e1c98d1075c9b91e1a576544c1b8a976318d5879d2f44d24b566",
+      "xmlsquish-1.2.1-aarch64-unknown-linux-gnu.tar.gz": "69fd9168c91618911ac925ac5ca4bffc1c80cacbbb3eaa8ec43326dc8a66f0e2",
+      "xmlsquish-1.2.1-x86_64-apple-darwin.tar.gz": "5dfcaa30999a1dae30673434ab3eeea069e5322590f7b40bdd0a4b0900341111",
+      "xmlsquish-1.2.1-x86_64-pc-windows-msvc.zip": "2bb985942efc9e79cc75cd19e4c58b6f4f032c1a0586c8a944b44dcad93dbea8",
+      "xmlsquish-1.2.1-x86_64-unknown-linux-gnu.tar.gz": "d8d4ad6f3cc55e0ac89cb7f068cbf9c1dda1586397686aec355ba8a8a5d64184"
+    },
+    "entry_count": 7,
+    "downloaded_sha256": "b4fed50d477f889ad70715b363b8ab0cd19197e2d3370ab370b0df78468e518a",
+    "all_entries_equal_github_asset_digests": true,
+    "all_six_native_archive_hashes_equal_hosted_packaging_log": true,
+    "manifest_does_not_self_list": true
+  },
+  "standalone_guide": {
+    "raw_source_sha256": "12a2eaf9fa7e29c06e014b17a6cae3d3c02cec36d3e039fdac4827d7f8ea4259",
+    "downloaded_asset_sha256": "12a2eaf9fa7e29c06e014b17a6cae3d3c02cec36d3e039fdac4827d7f8ea4259",
+    "raw_bytes_equal": true,
+    "normalization_performed": false,
+    "git_blob_oid": "d15c0665e183900409dd1059f75f16f38c2f68d5",
+    "source_crlf_sequences": 0,
+    "asset_crlf_sequences": 0,
+    "source_path": "SKILL.md",
+    "source_url": "https://github.com/kleedaisuki/prompt-squish/blob/fbf60f71d6ef32a80f8f0ff2cccd7182e4a9fc84/SKILL.md",
+    "asset_url": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.1/SKILL.md",
+    "comparison_policy": "Exact raw bytes against git show <peeled-tag-commit>:SKILL.md; no LF/CRLF normalization performed. Both observed sources contain zero CRLF sequences."
+  },
+  "guide_and_native_smoke_scope": {
+    "executed_six_target_release_contract": {
+      "workflow_step": "Smoke test and package",
+      "source_url": "https://github.com/kleedaisuki/prompt-squish/blob/fbf60f71d6ef32a80f8f0ff2cccd7182e4a9fc84/.github/scripts/release.py",
+      "checks": [
+        "native binary reports xmlsquish 1.2.1",
+        "native archive_smoke verifies reproducible pack/SOPack and moved consumer dependency operations",
+        "native direct command help and project/build/IR/inspect/clean/rebuild workflow",
+        "add-skill/sync-skills/install-skill/remove-skill lifecycle; installed prompt-squish/SKILL.md exists"
+      ],
+      "installed_guide_raw_bytes_compared_to_tagged_source_on_all_six_targets": false
+    },
+    "source_derived_embedded_guide_provenance": {
+      "source_url": "https://github.com/kleedaisuki/prompt-squish/blob/fbf60f71d6ef32a80f8f0ff2cccd7182e4a9fc84/crates/squish-manager/src/skill.rs",
+      "include_contract": "BUNDLED_SKILL = include_str!(\"../../../SKILL.md\")",
+      "installation_contract": "publish_bundle writes BUNDLED_SKILL.as_bytes(); existing installation is compared to BUNDLED_SKILL.as_bytes() before idempotent success",
+      "claim_scope": "Same tagged source drives each native build. This is source-derived provenance, not an executed cross-platform raw-byte comparison."
+    },
+    "existing_process_test_contract": {
+      "source_url": "https://github.com/kleedaisuki/prompt-squish/blob/fbf60f71d6ef32a80f8f0ff2cccd7182e4a9fc84/tests/skills_process.rs",
+      "test_names": [
+        "bundled_project_install_is_independent_idempotent_and_refuses_manual_collision",
+        "bundled_global_install_needs_no_project_and_protects_user_content"
+      ],
+      "assertions": [
+        "installed guide contains prompt-squish frontmatter",
+        "repeated install preserves installed bytes",
+        "manual or edited managed content is protected"
+      ],
+      "compares_installed_guide_to_raw_tag_git_blob": false
+    },
+    "native_archive_layout": "binary, LICENSE, README.txt, THIRD_PARTY_LICENSES; no separate SKILL.md archive member. The CLI embeds the guide; SKILL.md is also a standalone release asset."
+  },
+  "measured_owner_checkpoint": {
+    "source_commit": "388f3640252d71fa1d40514a4775beff6598bb24",
+    "run_id": 36842734101,
+    "run_url": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36842734101",
+    "report": "../performance/v1.2-text-owner-checkpoint.md",
+    "raw_evidence": "../performance/v1.2-text-owner-checkpoint.json",
+    "scope": "Performance measurements belong to the explicit owner checkpoint, not the later publication-closure commit. No new performance run or blanket every-path speedup is claimed for the tag."
+  },
+  "scope_and_limits": [
+    "Only GitHub JSON metadata, native job text logs, standalone SKILL.md and SHA256SUMS were downloaded locally; no executables or native archives were downloaded or run.",
+    "Native execution and archive smoke evidence comes from successful hosted packaging steps, not local native verification.",
+    "Six runner-generated archive hashes were compared to published manifest and GitHub-reported asset digests; no local rehash of downloaded native archive bytes was performed.",
+    "Guide standalone raw equality is directly verified; six installed embedded-guide byte equality is not directly tested by release smoke.",
+    "Checksums verify content integrity, not binary signing, notarization or independent author identity. No added signing claim."
+  ]
+}

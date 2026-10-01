@@ -9,7 +9,7 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 
 ## [1.2.1] — 2026-10-01
 
-发布说明 / Release notes: [1.2.1](docs/releases/1.2.1.md). 精确源码托管检查点已通过；合并主分支门禁与发布待完成 / Exact-source hosted checkpoint passed; post-merge main gate and publication pending.
+发布说明 / Release notes: [1.2.1](docs/releases/1.2.1.md). 精确主分支与六平台发布门禁已通过；稳定版本已发布 / Exact main and six-platform release gates passed; stable release published.
 
 ### 身份、验证与可复用执行 / Identity, validation and reusable execution
 
@@ -22,8 +22,8 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
   Preserve source, invocation-frame and budget semantics through optimization; share verified immutable snapshots without weakening identity, corruption or durability checks.
 - ZIP 读取直接验证规范记录；SOPack 提供者身份基于内容和引用拓扑。输入归档与锁定摘要仍不可变，不承诺跨生产者版本重新生成的 bytes 相同。
   Validate canonical ZIP records directly and derive SOPack provider identities from content and reference topology. Existing archive bytes and pins remain immutable; re-encoding across producer versions is not byte-identity guaranteed.
-- 更新用户手册、自带 Agent Skill 与双语发布目录；保留 v1.2.0 历史。性能与兼容结论见精确源码 GitHub Actions 证据，不宣称所有场景加速；主分支门禁与实际发布仍待完成。
-  Update the manual, bundled Agent Skill and bilingual release catalog, preserving v1.2.0 history. Exact-source GitHub Actions evidence establishes scoped results, not universal speedups; the post-merge gate and publication remain pending.
+- 更新用户手册、自带 Agent Skill 与双语发布目录；保留 v1.2.0 历史。性能与兼容结论见精确源码 GitHub Actions 证据，不宣称所有场景加速；精确发布源码已通过主分支与六平台发布门禁。
+  Update the manual, bundled Agent Skill and bilingual release catalog, preserving v1.2.0 history. Exact-source GitHub Actions evidence establishes scoped results, not universal speedups; the exact released source passed main and six-platform publication gates.
 
 ## [1.2.0] — 2026-10-01
 

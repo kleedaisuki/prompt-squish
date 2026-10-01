@@ -12,13 +12,19 @@
     "version": "1.2.1",
     "tag": "v1.2.1",
     "date": "2026-10-01",
-    "releaseStatus": "candidate",
+    "releaseStatus": "published",
     "pages": {
       "zh-CN": "https://xmlsquish.moesegfault.dev/releases/1.2.1/",
       "en": "https://xmlsquish.moesegfault.dev/en/releases/1.2.1/"
     },
     "githubRelease": "https://github.com/kleedaisuki/prompt-squish/releases/tag/v1.2.1",
-    "checksums": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.1/SHA256SUMS"
+    "checksums": "https://github.com/kleedaisuki/prompt-squish/releases/download/v1.2.1/SHA256SUMS",
+    "publishedAt": "2026-10-01T10:44:09Z",
+    "sourceTag": "v1.2.1",
+    "sourceCommit": "fbf60f71d6ef32a80f8f0ff2cccd7182e4a9fc84",
+    "draft": false,
+    "prerelease": false,
+    "assetCount": 8
   },
   "cli": {
     "commands": [
@@ -93,13 +99,20 @@
     "algorithm": "SHA-256",
     "signed": false,
     "notarized": false,
-    "note": "SHA256SUMS verifies downloaded bytes, not publisher identity. Binaries are unsigned and not Apple-notarized."
+    "note": "SHA256SUMS verifies downloaded bytes, not publisher identity. Binaries are unsigned and not Apple-notarized.",
+    "standaloneSkill": {
+      "asset": "SKILL.md",
+      "sha256": "12a2eaf9fa7e29c06e014b17a6cae3d3c02cec36d3e039fdac4827d7f8ea4259",
+      "sourceCommit": "fbf60f71d6ef32a80f8f0ff2cccd7182e4a9fc84",
+      "verification": "Raw downloaded asset bytes equal tagged source bytes; no normalization."
+    },
+    "embeddedGuideVerification": "Native installed-guide smoke checks cover presence and lifecycle using the same-tag embedded source; no per-target raw-byte equality claim."
   },
   "highlights": [
     "Full document/provenance/resource-directive identity for pack reuse.",
     "Whole SOPack validation before referenced-unit compilation; strict local-source validation retained.",
     "Verified immutable snapshots and borrowed/shared mechanisms retain integrity and durability checks.",
-    "Canonical ZIP direct validation and content/topology-based portable provider identity; exact-source hosted checkpoint passed, with main/publication gates pending.",
+    "Canonical ZIP direct validation and content/topology-based portable provider identity; exact source, main and six-platform release gates passed; stable publication complete.",
     "Structured failures preserve exact relocated source records and actual invocation chains; cache-result rejection does not conflate derived CAS corruption with published-product corruption.",
     "Repeated text content sharing preserves public string interfaces, per-selection provenance, logical byte budgets and diagnostic ordering; multi-fragment concatenation materializes visible bytes when needed; source checkpoint verified."
   ],
@@ -157,7 +170,7 @@
     }
   },
   "verification": {
-    "status": "verified-source-checkpoint",
+    "status": "published",
     "environment": "GitHub Actions",
     "performanceClaims": "Same-run comparisons against post-origin-index 1bbf6cd, not raw shipped v1.2.0 or v1.1.0. Selected long-text, asset-pack and SOPack fixtures improved; startup/tiny-warm and some owned/validation/short-key controls are mixed or negative. No universal speedup.",
     "preliminaryReport": "https://github.com/kleedaisuki/prompt-squish/blob/main/docs/performance/v1.2-full-repair-preliminary.md",
@@ -165,10 +178,12 @@
     "historicalCandidateReport": "https://github.com/kleedaisuki/prompt-squish/blob/main/docs/performance/v1.2-full-repair-candidate.md",
     "sourceCommit": "388f3640252d71fa1d40514a4775beff6598bb24",
     "hostedRun": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36842734101",
-    "pendingGates": [
-      "Exact post-merge main gate",
-      "Native release publication"
-    ],
-    "finalReport": "https://github.com/kleedaisuki/prompt-squish/blob/main/docs/performance/v1.2-text-owner-checkpoint.md"
+    "pendingGates": [],
+    "finalReport": "https://github.com/kleedaisuki/prompt-squish/blob/main/docs/performance/v1.2-text-owner-checkpoint.md",
+    "releasedSourceCommit": "fbf60f71d6ef32a80f8f0ff2cccd7182e4a9fc84",
+    "measuredSourceCommit": "388f3640252d71fa1d40514a4775beff6598bb24",
+    "mainCI": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36848135353",
+    "releaseRun": "https://github.com/kleedaisuki/prompt-squish/actions/runs/36849362211",
+    "publicationEvidence": "https://github.com/kleedaisuki/prompt-squish/blob/main/docs/releases/1.2.1-publication-evidence.json"
   }
 }
