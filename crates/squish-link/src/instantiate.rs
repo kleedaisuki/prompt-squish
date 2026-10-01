@@ -2118,7 +2118,8 @@ mod shared_text_tests {
         assert_eq!(view.into_owned(), "猫");
         let owned = Text::from("transfer this buffer");
         let pointer = owned.backing.as_str().as_ptr();
-        assert_eq!(owned.into_owned().as_ptr(), pointer);
+        let transferred = owned.into_owned();
+        assert_eq!(transferred.as_ptr(), pointer);
         assert_eq!(ScalarText::default().finish().as_str(), "");
     }
 
