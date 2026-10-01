@@ -371,8 +371,7 @@ pub fn allocations<T>(
             config.allocation_iterations,
         );
         record.push_str(&format!(
-            ",\"allocation_calls\":{},\"allocated_bytes\":{},\"deallocation_calls\":{},\"reallocation_calls\":{},\"peak_live_delta_bytes\":{peak},\"retained_live_delta_bytes\":{retained}}}",
-            calls, bytes, deallocations, reallocations,
+            ",\"allocation_calls\":{calls},\"allocated_bytes\":{bytes},\"deallocation_calls\":{deallocations},\"reallocation_calls\":{reallocations},\"peak_live_delta_bytes\":{peak},\"retained_live_delta_bytes\":{retained}}}",
         ));
         println!("{record}");
     }
