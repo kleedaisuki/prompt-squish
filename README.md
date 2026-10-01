@@ -12,7 +12,13 @@ xmlsquish is a project-oriented prompt builder. It discovers packages, workspace
 
 从 [GitHub Releases](https://github.com/kleedaisuki/prompt-squish/releases) 下载与操作系统和处理器匹配的归档，按同次发布的校验和验证后解压，并把 `xmlsquish`（Windows 为 `xmlsquish.exe`）加入 `PATH`。Linux 发布包需要其发布说明所列的 glibc 版本；它不是 Alpine/musl 二进制。
 
-当前版本的具体资产、平台要求与升级说明见 [v1.2.0 发布说明](docs/releases/1.2.0.md)。
+当前版本的具体资产、平台要求与升级说明见 [v1.2.1 发布说明](docs/releases/1.2.1.md)。
+
+1.2.1 当前是待最终托管验证与发布的候选；本链接不表示新二进制已可下载。发布后请只使用同一标签的归档和校验和。
+
+Version 1.2.1 is currently a candidate pending final hosted verification and
+publication; this link does not claim new binaries are already downloadable.
+After publication, use archives and checksums from the same tag.
 
 Download the archive for your OS and CPU from GitHub Releases, verify it against the checksums from the same release, extract it, and put `xmlsquish` (`xmlsquish.exe` on Windows) on `PATH`. Check the release notes for the Linux glibc requirement.
 
@@ -151,6 +157,44 @@ also records lifecycle events and diagnostics. JSONL records use
 `<target-dir>/metadata/traces/<invocation>.jsonl`. There is no outbound
 transmission. Trace write failures emit `TRACE001` warnings without changing
 the command result; review paths and diagnostic payloads before sharing.
+
+
+## 升级到 1.2.1 / Upgrading to 1.2.1
+
+1.2.1 修复资源、来源跟踪与缓存结果的身份边界，并减少运行期重复取得已验证数据。
+内部缓存与动作配方身份（Action Recipe Identity）是项目私有实现，不是公共文件格式；
+升级可以重建失效的派生状态。不要编辑内部 hash、SQLite 表或缓存路径来手动迁移。
+需要清理时使用 `xmlsquish clean`；该命令删除整个项目构建根，离线重建前须重新具备依赖输入。
+
+Version 1.2.1 repairs identity boundaries for assets, provenance and cached results,
+and avoids reacquiring already verified immutable data. Private cache and action-recipe
+identities are not public file formats; an upgrade may rebuild invalid derived state.
+Do not edit internal hashes, SQLite tables or cache paths to force migration.
+If cleanup is required, use `xmlsquish clean`; it removes the entire project build root,
+so ensure dependency inputs are available before an offline rebuild.
+
+既有 SOPack 与锁定 SHA-256 摘要保持不可变；升级不会为了优化而改写依赖文件或锁。
+新生产者内部提供者身份可能变化，因此不要要求不同版本重新生产的库具有相同 bytes；
+可复现性要求同一生产者契约和相同有效输入下保持一致，不等于所有版本的编码永远不变。
+
+Existing SOPack files and SHA-256 lock pins remain immutable. Upgrading does not
+rewrite dependency archives or lockfiles for optimization. Newly produced provider
+identities may change across producer versions: reproducibility under the same
+producer contract and effective inputs is not a promise of byte identity across
+all compiler versions.
+
+schema-1 读取契约接受既有 v1.2.0 SOPack；单一已重定位归档的读取后重写保留原有 `_providers` 名称及规范 bytes。公共 IR 线格式与摘要语义不随私有缓存身份变化。
+
+The canonical schema-1 reader accepts existing v1.2.0 SOPacks; rewriting a single
+already-relocated archive retains its provider paths and normalized bytes. Public
+IR wire/digest semantics remain distinct from private cache identities.
+
+集成测试、站点验证与性能对比仍以 GitHub Actions 的最终证据为准；本说明不宣称
+尚未完成的 CI 已通过，也不提供未经测量的加速百分比。
+
+Integrated tests, website validation and performance comparisons require final
+GitHub Actions evidence; this text does not claim uncompleted CI passes or
+unmeasured percentage gains.
 
 ## 项目清单 / Project manifest
 

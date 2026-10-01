@@ -12,6 +12,23 @@
   govern the additional unit/operation kinds and archive backend inputs;
   prompt-specific document contracts below remain scoped to prompt products.
 
+## v1.2.1 compatibility clarification
+
+Private action/cache identities may evolve without changing public manifests or
+archive input ownership. Cache reuse must match the full document, trace and
+archive-directive identity, not prompt-document identity alone. SOPack validation
+precedes referenced-unit pruning; strict local-source validation remains global.
+Existing SOPack bytes and lock pins are immutable and are never rewritten during
+lookup. Fresh production across compiler versions need not be byte-identical:
+public archive compatibility is distinct from private cache encoding and identity.
+Canonical schema-1 SOPack readers retain old archive compatibility; rewriting a
+single relocated archive preserves existing provider paths and normalized bytes.
+Public persistent IR wire/digest semantics are unchanged by private cache versioning.
+Shared verified runtime snapshots preserve digest/size, corruption and durability
+checks. Optimizations retain invocation frames, source positions and budget costs.
+Integrated verification and performance evidence remain required; this clarification
+is not a claim of completed CI or measured gains.
+
 ## 1. Decision summary
 
 xmlsquish uses a small family of explicit representations rather than treating one XML-shaped tree as source syntax, executable program, debug record, and product at the same time.

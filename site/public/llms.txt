@@ -14,9 +14,9 @@ This experimental `llms.txt` file is an additive navigation aid for language-mod
 
 - [English release index](https://xmlsquish.moesegfault.dev/en/releases/): Reverse-chronological catalog of every product release.
 - [中文发布记录目录](https://xmlsquish.moesegfault.dev/releases/): 按时间倒序排列的全部产品版本目录。
-- [English v1.2.0 release detail](https://xmlsquish.moesegfault.dev/en/releases/1.2.0/): Reproducible packs, relocatable SOPack libraries, byte-preserving assets and opt-in tracing.
-- [中文 v1.2.0 发布详情](https://xmlsquish.moesegfault.dev/releases/1.2.0/): 可复现 pack、可重定位 SOPack 编译库、字节保真资源与可选跟踪。
-- [Machine-readable v1.2.0 metadata](https://xmlsquish.moesegfault.dev/releases/1.2.0.json): Stable JSON metadata for six published native archives.
+- [English v1.2.1 release detail](https://xmlsquish.moesegfault.dev/en/releases/1.2.1/): Patch candidate: identity-safe pack reuse, verified snapshots and archive repair; final hosted verification pending.
+- [中文 v1.2.1 发布详情](https://xmlsquish.moesegfault.dev/releases/1.2.1/): 补丁候选：pack 身份安全复用、已验证快照与归档修复；最终托管验证待完成。
+- [Machine-readable v1.2.1 metadata](https://xmlsquish.moesegfault.dev/releases/1.2.1.json): Candidate JSON metadata for six planned native archives; publication pending.
 - [Historical v1.0.1 metadata](https://xmlsquish.moesegfault.dev/releases/1.0.1.json): Immutable metadata retained for the previous patch release.
 - [Historical v1.0.0 metadata](https://xmlsquish.moesegfault.dev/releases/1.0.0.json): Immutable metadata retained for the previous stable release.
 
@@ -42,5 +42,5 @@ This experimental `llms.txt` file is an additive navigation aid for language-mod
 - The stable namespace identity is exactly `https://xmlsquish.moesegfault.dev/ns`; it is unversioned and never localized.
 - CLI commands are `new`, `fmt`, `build`, `clean`, `add`, `remove`, `add-skill`, `remove-skill`, `sync-skills`, `install-skill`, and `inspect`.
 - Source installation requires Rust 1.88 or newer and a locked Cargo workspace. xmlsquish is not published on crates.io.
-- v1.2.0 is published from immutable tag `v1.2.0`; its six native archives and `SHA256SUMS` are available from GitHub Releases.
+- v1.2.1 is the current source/release candidate; publication and final hosted verification are pending. The planned tag is `v1.2.1`; native assets must be verified after publication.
 - Machine protocol is 3.2. The default target layout is `target/xmlsquish/{artifacts,cache,metadata,work}` and public prompt locators use `target/xmlsquish/artifacts/*.prompt`.

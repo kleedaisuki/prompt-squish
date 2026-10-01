@@ -6,6 +6,22 @@ Notable user-facing changes are recorded here. Versions follow Semantic Versioni
 
 ## [Unreleased]
 
+
+## [1.2.1] — 2026-10-01
+
+发布说明 / Release notes: [1.2.1](docs/releases/1.2.1.md). 集成验证与发布待完成 / Integrated verification and publication pending.
+
+### 身份、验证与可复用执行 / Identity, validation and reusable execution
+
+- pack 共享结果比较完整文档、来源跟踪和资源指令，防止空文档下资源错误复用；预编译 SOPack 先验证整个归档再选择引用单元，本地源码仍保持严格检查。
+  Match complete document, provenance and resource-directive identity for pack reuse; validate whole SOPacks before selecting referenced units, while retaining strict local-source checks.
+- 中端保留源码、展开帧与资源预算；不可变已验证快照及借用/共享数据边界减少重复取得，但不放宽摘要、大小、损坏检测或持久化契约。
+  Preserve source, invocation-frame and budget semantics through optimization; share verified immutable snapshots without weakening identity, corruption or durability checks.
+- ZIP 读取直接验证规范记录；SOPack 提供者身份基于内容和引用拓扑。输入归档与锁定摘要仍不可变，不承诺跨生产者版本重新生成的 bytes 相同。
+  Validate canonical ZIP records directly and derive SOPack provider identities from content and reference topology. Existing archive bytes and pins remain immutable; re-encoding across producer versions is not byte-identity guaranteed.
+- 更新用户手册、自带 Agent Skill 与双语发布目录；保留 v1.2.0 历史。性能与兼容结论以最终 GitHub Actions 证据为准，不预先宣称加速或验证通过。
+  Update the manual, bundled Agent Skill and bilingual release catalog, preserving v1.2.0 history. Final GitHub Actions evidence determines performance and compatibility conclusions.
+
 ## [1.2.0] — 2026-10-01
 
 完整发布说明与安装方法 / Full release notes and installation: [1.2.0](docs/releases/1.2.0.md).
