@@ -264,7 +264,13 @@ pub trait BuildRuntime: Send + Sync {
             ));
         }
         for blob in supplied.values() {
-            self.write_verified_blob(blob)?;
+            let written = self.write_verified_blob(blob)?;
+            if &written != blob.digest() {
+                return Err(BuildRuntimeError::corrupt(
+                    "runtime_blob_digest",
+                    "runtime returned an incorrect verified publication blob identity",
+                ));
+            }
         }
         self.publish_generation(space, target, publications)
     }
@@ -375,6 +381,7 @@ mod tests {
     struct LegacyRuntime {
         bytes: Option<Vec<u8>>,
         written_digest: Digest,
+        verified_write_override: Option<Digest>,
         record: Option<ActionRecord>,
         writes: std::sync::Mutex<Vec<Vec<u8>>>,
     }
@@ -395,6 +402,19 @@ mod tests {
         fn write_blob(&self, bytes: &[u8]) -> Result<Digest, BuildRuntimeError> {
             self.writes.lock().unwrap().push(bytes.to_vec());
             Ok(self.written_digest.clone())
+        }
+        fn write_verified_blob(&self, blob: &VerifiedBlob) -> Result<Digest, BuildRuntimeError> {
+            if let Some(digest) = &self.verified_write_override {
+                return Ok(digest.clone());
+            }
+            let digest = self.write_blob(blob.bytes())?;
+            if &digest != blob.digest() {
+                return Err(BuildRuntimeError::corrupt(
+                    "runtime_blob_digest",
+                    "runtime returned an incorrect written blob identity",
+                ));
+            }
+            Ok(digest)
         }
         fn lookup_action(&self, _: &ActionKey) -> Result<Option<ActionRecord>, BuildRuntimeError> {
             Ok(self.record.clone())
@@ -467,6 +487,7 @@ mod tests {
             LegacyRuntime {
                 bytes: Some(blob.bytes().to_vec()),
                 written_digest: blob.digest().clone(),
+                verified_write_override: None,
                 record: None,
                 writes: std::sync::Mutex::new(Vec::new()),
             },
@@ -502,6 +523,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(*runtime.writes.lock().unwrap(), vec![blob.bytes().to_vec()]);
+    }
+
+    #[test]
+    fn verified_publication_rejects_injected_verified_writer_identity() {
+        let (mut runtime, blob) = fixture();
+        runtime.verified_write_override = Some(
+            VerifiedBlob::from_owned(b"wrong override identity".to_vec())
+                .digest()
+                .clone(),
+        );
+        let target = PublicationTargetId::new("restore").unwrap();
+        let error = runtime
+            .publish_generation_verified(
+                GenerationSpace::BuildCatalog,
+                &target,
+                &[publication(&blob, "result")],
+                std::slice::from_ref(&blob),
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "runtime_blob_digest");
+        assert!(runtime.writes.lock().unwrap().is_empty());
     }
 
     #[test]
