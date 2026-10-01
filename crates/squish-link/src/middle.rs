@@ -120,7 +120,14 @@ impl MiddleEnd {
     /// // Persist optimized.unit; retain optimized facts for this execution session.
     /// ```
     pub fn optimize(&self, unit: RelocatableUnitIr) -> Result<OptimizedUnit, MiddleError> {
-        self.optimize_shared(Arc::new(unit))
+        unit.validate().map_err(|error| MiddleError {
+            path: error.path,
+            message: error.message.into(),
+        })?;
+        // Finish borrowed analysis before allocating ownership metadata. Large literal
+        // materialization must not depend on an extra allocation preceding the analysis.
+        let facts = MiddleFacts::analyze_validated(&unit)?;
+        Ok(facts.with_unit(Arc::new(unit)))
     }
 
     /// Validates and specializes shared immutable IR without cloning its arenas or source data.
@@ -146,8 +153,28 @@ impl MiddleEnd {
         &self,
         unit: Arc<RelocatableUnitIr>,
     ) -> Result<OptimizedUnit, MiddleError> {
-        let regexes = compile_regexes(&unit)?;
-        let static_matches = literal_matches(&unit, &regexes);
+        let facts = MiddleFacts::analyze_validated(&unit)?;
+        Ok(facts.with_unit(unit))
+    }
+}
+
+/// Borrowed-analysis result independent of when the unchanged input acquires shared ownership.
+struct MiddleFacts {
+    /// Literal regex outcomes retaining original operation IDs and capture offsets.
+    static_matches: BTreeMap<OpId, StaticMatch>,
+    /// Materialized scalar facts retaining operation-level provenance and original region IDs.
+    static_scalars: BTreeMap<RegionId, StaticScalar>,
+    /// Compiled session patterns in portable regex-pool order.
+    regexes: Vec<Regex>,
+    /// Deterministic counters for the exact borrowed analysis.
+    stats: OptimizationStats,
+}
+
+impl MiddleFacts {
+    /// Analyzes fully validated borrowed IR without copying or changing its ownership.
+    fn analyze_validated(unit: &RelocatableUnitIr) -> Result<Self, MiddleError> {
+        let regexes = compile_regexes(unit)?;
+        let static_matches = literal_matches(unit, &regexes);
         // Only scalar argument bodies consume these facts. Avoid duplicating every
         // literal prompt/module body during ordinary small-batch startup.
         let scalar_regions = selected_scalar_regions(unit.ops(), unit.regions().len());
@@ -172,13 +199,23 @@ impl MiddleEnd {
             static_scalars: static_scalars.len(),
             scalar_bytes: static_scalars.values().map(|fact| fact.text.len()).sum(),
         };
-        Ok(OptimizedUnit {
-            unit,
+        Ok(Self {
             static_matches,
             static_scalars,
             regexes,
             stats,
         })
+    }
+
+    /// Publishes facts with their unchanged owning payload, moving all fields without cloning.
+    fn with_unit(self, unit: Arc<RelocatableUnitIr>) -> OptimizedUnit {
+        OptimizedUnit {
+            unit,
+            static_matches: self.static_matches,
+            static_scalars: self.static_scalars,
+            regexes: self.regexes,
+            stats: self.stats,
+        }
     }
 }
 
@@ -514,6 +551,120 @@ mod tests {
         assert_eq!(optimized.static_scalars, owned.static_scalars);
         assert_eq!(optimized.static_matches, owned.static_matches);
         assert_eq!(optimized.unit.as_ref(), owned.unit.as_ref());
+    }
+
+    #[test]
+    fn owned_publication_after_analysis_preserves_large_scalar_and_regex_facts() {
+        let original = literal_unit();
+        let shared = Arc::new(original.clone());
+        let owned = MiddleEnd.optimize(original.clone()).unwrap();
+        let borrowed = MiddleEnd.optimize_shared(Arc::clone(&shared)).unwrap();
+        assert!(Arc::ptr_eq(&shared, &borrowed.unit));
+        assert_eq!(owned.unit.as_ref(), &original);
+        assert_eq!(borrowed.unit.as_ref(), &original);
+        assert_eq!(owned.static_scalars, borrowed.static_scalars);
+        assert_eq!(owned.static_matches, borrowed.static_matches);
+        assert_eq!(owned.stats, borrowed.stats);
+        assert_eq!(owned.stats.scalar_bytes, 65536);
+        assert_eq!(owned.static_scalars[&RegionId(1)].segments[0].op, OpId(2));
+        assert!(owned.static_matches[&OpId(1)].matched);
+        assert_eq!(owned.regexes[0].as_str(), borrowed.regexes[0].as_str());
+    }
+
+    /// Adds one large scalar and literal regex decision to a structurally valid module.
+    fn literal_unit() -> RelocatableUnitIr {
+        let RelocatableUnitIr::Module(mut unit) = empty_unit() else {
+            unreachable!()
+        };
+        let symbol = squish_ir::ExpandedName {
+            namespace_uri: "urn:test".into(),
+            local_name: "macro".into(),
+        };
+        let external = squish_ir::ExpandedName {
+            namespace_uri: "urn:external".into(),
+            local_name: "echo".into(),
+        };
+        unit.header.semantic_strings = vec!["^x+$".into(), "x".repeat(65536)];
+        let source_digest = squish_ir::SourceDigest::of(b"x");
+        unit.sources.records[0].digest = source_digest;
+        unit.sources.records[0].exact_bytes = squish_ir::BlobRef {
+            digest: squish_ir::Digest::sha256("blob", b"x"),
+            byte_len: 1,
+        };
+        unit.attachment.source_digest = source_digest;
+        unit.header.regexes = vec![squish_ir::RegexPattern {
+            pattern: StringId(0),
+            named_captures: vec![],
+        }];
+        unit.definitions = vec![squish_ir::MacroDef {
+            id: squish_ir::LocalDefId(0),
+            symbol: symbol.clone(),
+            signature: squish_ir::Signature::default(),
+            body: RegionId(0),
+        }];
+        unit.interface.definitions = vec![squish_ir::InterfaceDef {
+            id: squish_ir::LocalDefId(0),
+            symbol,
+            signature: squish_ir::Signature::default(),
+        }];
+        unit.external_symbols = vec![external.clone()];
+        unit.regions = vec![
+            Region {
+                id: RegionId(0),
+                ops: vec![OpId(0), OpId(1)],
+            },
+            Region {
+                id: RegionId(1),
+                ops: vec![OpId(2)],
+            },
+            Region {
+                id: RegionId(2),
+                ops: vec![OpId(3)],
+            },
+        ];
+        unit.ops = vec![
+            OpRecord {
+                id: OpId(0),
+                op: Op::Call {
+                    target: external,
+                    args: vec![squish_ir::Argument {
+                        name: "text".into(),
+                        value: squish_ir::ScalarExpr::RenderText(RegionId(1)),
+                    }],
+                    fills: vec![],
+                },
+            },
+            OpRecord {
+                id: OpId(1),
+                op: Op::MatchRegex {
+                    input: MatchInput::Literal(StringId(1)),
+                    pattern: squish_ir::RegexId(0),
+                    captures: vec![],
+                    matched: RegionId(2),
+                },
+            },
+            OpRecord {
+                id: OpId(2),
+                op: Op::EmitText { value: StringId(1) },
+            },
+            OpRecord {
+                id: OpId(3),
+                op: Op::EmitText { value: StringId(1) },
+            },
+        ];
+        unit.origins.entries = (0..4)
+            .map(|local_id| squish_ir::OriginEntry {
+                entity_kind: squish_ir::EntityKind::Operation,
+                local_id,
+                origin: squish_ir::Origin {
+                    source: squish_ir::SourceRef(0),
+                    span: squish_ir::Span { start: 0, end: 1 },
+                    lexical_qname: None,
+                    syntax_kind: squish_ir::SyntaxKind(1),
+                },
+            })
+            .collect();
+        RelocatableUnitIr::Module(unit)
     }
 
     /// Constructs an empty valid module for public/shared ownership boundary tests.
